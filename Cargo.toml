@@ -7,3 +7,8 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
+log = "0.4"
+env_logger = "0.11"
