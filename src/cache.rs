@@ -34,7 +34,7 @@ impl DnsCache {
         self.query_count += 1;
 
         // Periodic eviction every 1000 queries
-        if self.query_count % 1000 == 0 {
+        if self.query_count.is_multiple_of(1000) {
             self.evict_expired();
         }
 
@@ -72,15 +72,19 @@ impl DnsCache {
             .clamp(self.min_ttl, self.max_ttl);
 
         let key = (domain.to_string(), qtype);
-        self.entries.insert(key, CacheEntry {
-            packet: packet.clone(),
-            inserted_at: Instant::now(),
-            ttl: Duration::from_secs(min_ttl as u64),
-        });
+        self.entries.insert(
+            key,
+            CacheEntry {
+                packet: packet.clone(),
+                inserted_at: Instant::now(),
+                ttl: Duration::from_secs(min_ttl as u64),
+            },
+        );
     }
 
     fn evict_expired(&mut self) {
-        self.entries.retain(|_, entry| entry.inserted_at.elapsed() < entry.ttl);
+        self.entries
+            .retain(|_, entry| entry.inserted_at.elapsed() < entry.ttl);
     }
 }
 

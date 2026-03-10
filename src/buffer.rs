@@ -1,8 +1,14 @@
-use crate::{Result};
+use crate::Result;
 
 pub struct BytePacketBuffer {
     pub buf: [u8; 512],
     pub pos: usize,
+}
+
+impl Default for BytePacketBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl BytePacketBuffer {
@@ -63,7 +69,7 @@ impl BytePacketBuffer {
         let res = ((self.read()? as u32) << 24)
             | ((self.read()? as u32) << 16)
             | ((self.read()? as u32) << 8)
-            | ((self.read()? as u32) << 0);
+            | (self.read()? as u32);
         Ok(res)
     }
 
@@ -144,7 +150,7 @@ impl BytePacketBuffer {
         self.write(((val >> 24) & 0xFF) as u8)?;
         self.write(((val >> 16) & 0xFF) as u8)?;
         self.write(((val >> 8) & 0xFF) as u8)?;
-        self.write(((val >> 0) & 0xFF) as u8)?;
+        self.write((val & 0xFF) as u8)?;
         Ok(())
     }
 

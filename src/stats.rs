@@ -30,6 +30,12 @@ impl QueryPath {
     }
 }
 
+impl Default for ServerStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ServerStats {
     pub fn new() -> Self {
         ServerStats {

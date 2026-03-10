@@ -31,10 +31,13 @@ async fn main() -> dns_fun::Result<()> {
         .format_timestamp_millis()
         .init();
 
-    let config_path = std::env::args().nth(1).unwrap_or_else(|| "dns_fun.toml".to_string());
+    let config_path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "dns_fun.toml".to_string());
     let config = load_config(&config_path)?;
 
-    let upstream: SocketAddr = format!("{}:{}", config.upstream.address, config.upstream.port).parse()?;
+    let upstream: SocketAddr =
+        format!("{}:{}", config.upstream.address, config.upstream.port).parse()?;
     let socket = Arc::new(UdpSocket::bind(&config.server.bind_addr).await?);
 
     let ctx = Arc::new(ServerCtx {
@@ -110,8 +113,14 @@ async fn handle_query(
                     (resp, QueryPath::Forwarded)
                 }
                 Err(e) => {
-                    error!("{} | {:?} {} | UPSTREAM ERROR | {}", src_addr, qtype, qname, e);
-                    (DnsPacket::response_from(&query, ResultCode::SERVFAIL), QueryPath::UpstreamError)
+                    error!(
+                        "{} | {:?} {} | UPSTREAM ERROR | {}",
+                        src_addr, qtype, qname, e
+                    );
+                    (
+                        DnsPacket::response_from(&query, ResultCode::SERVFAIL),
+                        QueryPath::UpstreamError,
+                    )
                 }
             }
         }
@@ -121,13 +130,19 @@ async fn handle_query(
 
     info!(
         "{} | {:?} {} | {} | {} | {}ms",
-        src_addr, qtype, qname, path.as_str(),
-        response.header.rescode.as_str(), elapsed.as_millis(),
+        src_addr,
+        qtype,
+        qname,
+        path.as_str(),
+        response.header.rescode.as_str(),
+        elapsed.as_millis(),
     );
 
     debug!(
         "response: {} answers, {} authorities, {} resources",
-        response.answers.len(), response.authorities.len(), response.resources.len(),
+        response.answers.len(),
+        response.authorities.len(),
+        response.resources.len(),
     );
 
     let mut resp_buffer = BytePacketBuffer::new();
@@ -137,7 +152,7 @@ async fn handle_query(
     // Record stats and log summary every 1000 queries (single lock acquisition)
     let mut s = ctx.stats.lock().unwrap();
     let total = s.record(path);
-    if total % 1000 == 0 {
+    if total.is_multiple_of(1000) {
         s.log_summary();
     }
 

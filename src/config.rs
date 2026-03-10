@@ -126,36 +126,77 @@ pub fn load_config(path: &str) -> Result<Config> {
     Ok(config)
 }
 
-pub fn build_zone_map(zones: &[ZoneRecord]) -> Result<HashMap<(String, QueryType), Vec<DnsRecord>>> {
+pub fn build_zone_map(
+    zones: &[ZoneRecord],
+) -> Result<HashMap<(String, QueryType), Vec<DnsRecord>>> {
     let mut map: HashMap<(String, QueryType), Vec<DnsRecord>> = HashMap::new();
 
     for zone in zones {
         let domain = zone.domain.to_lowercase();
         let (qtype, record) = match zone.record_type.to_uppercase().as_str() {
             "A" => {
-                let addr: Ipv4Addr = zone.value.parse()
+                let addr: Ipv4Addr = zone
+                    .value
+                    .parse()
                     .map_err(|e| format!("invalid A record value '{}': {}", zone.value, e))?;
-                (QueryType::A, DnsRecord::A { domain: domain.clone(), addr, ttl: zone.ttl })
+                (
+                    QueryType::A,
+                    DnsRecord::A {
+                        domain: domain.clone(),
+                        addr,
+                        ttl: zone.ttl,
+                    },
+                )
             }
             "AAAA" => {
-                let addr: Ipv6Addr = zone.value.parse()
+                let addr: Ipv6Addr = zone
+                    .value
+                    .parse()
                     .map_err(|e| format!("invalid AAAA record value '{}': {}", zone.value, e))?;
-                (QueryType::AAAA, DnsRecord::AAAA { domain: domain.clone(), addr, ttl: zone.ttl })
+                (
+                    QueryType::AAAA,
+                    DnsRecord::AAAA {
+                        domain: domain.clone(),
+                        addr,
+                        ttl: zone.ttl,
+                    },
+                )
             }
-            "CNAME" => {
-                (QueryType::CNAME, DnsRecord::CNAME { domain: domain.clone(), host: zone.value.clone(), ttl: zone.ttl })
-            }
-            "NS" => {
-                (QueryType::NS, DnsRecord::NS { domain: domain.clone(), host: zone.value.clone(), ttl: zone.ttl })
-            }
+            "CNAME" => (
+                QueryType::CNAME,
+                DnsRecord::CNAME {
+                    domain: domain.clone(),
+                    host: zone.value.clone(),
+                    ttl: zone.ttl,
+                },
+            ),
+            "NS" => (
+                QueryType::NS,
+                DnsRecord::NS {
+                    domain: domain.clone(),
+                    host: zone.value.clone(),
+                    ttl: zone.ttl,
+                },
+            ),
             "MX" => {
                 let parts: Vec<&str> = zone.value.splitn(2, ' ').collect();
                 if parts.len() != 2 {
-                    return Err(format!("MX value must be 'priority host', got '{}'", zone.value).into());
+                    return Err(
+                        format!("MX value must be 'priority host', got '{}'", zone.value).into(),
+                    );
                 }
-                let priority: u16 = parts[0].parse()
+                let priority: u16 = parts[0]
+                    .parse()
                     .map_err(|e| format!("invalid MX priority '{}': {}", parts[0], e))?;
-                (QueryType::MX, DnsRecord::MX { domain: domain.clone(), priority, host: parts[1].to_string(), ttl: zone.ttl })
+                (
+                    QueryType::MX,
+                    DnsRecord::MX {
+                        domain: domain.clone(),
+                        priority,
+                        host: parts[1].to_string(),
+                        ttl: zone.ttl,
+                    },
+                )
             }
             other => {
                 return Err(format!("unsupported record type '{}'", other).into());
