@@ -1,0 +1,25 @@
+[server]
+bind_addr = "0.0.0.0:53"
+
+[upstream]
+address = "8.8.8.8"
+port = 53
+timeout_ms = 3000
+
+[cache]
+max_entries = 10000
+min_ttl = 60
+max_ttl = 86400
+
+# Example zone records:
+# [[zones]]
+# domain = "dimescu.ro"
+# record_type = "A"
+# value = "3.120.139.105"
+# ttl = 30
+
+# [[zones]]
+# domain = "test.local"
+# record_type = "A"
+# value = "127.0.0.1"
+# ttl = 60
