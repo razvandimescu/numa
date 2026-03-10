@@ -2,7 +2,7 @@
 
 A DNS forwarding/caching proxy written from scratch in Rust. Parses and serializes DNS wire protocol (RFC 1035), serves local zone records from TOML config, caches upstream responses with TTL-aware expiration, and logs every query with structured output.
 
-No async runtime, no DNS libraries — just `std::net::UdpSocket` and manual packet parsing.
+No DNS libraries — just `tokio::net::UdpSocket` and manual packet parsing. Each query is handled concurrently via `tokio::spawn`.
 
 ## Record Types
 
@@ -99,7 +99,7 @@ Stats summary (total, forwarded, cached, local, blocked, errors) logged every 10
 
 ```
 src/
-  main.rs       # startup, config load, UDP listen loop, request pipeline
+  main.rs       # async startup, tokio event loop, ServerCtx, per-query task spawn
   lib.rs        # module declarations, Error/Result type aliases
   buffer.rs     # BytePacketBuffer — 512-byte DNS wire format read/write
   header.rs     # DnsHeader, ResultCode
@@ -108,13 +108,14 @@ src/
   packet.rs     # DnsPacket — full DNS message parse/serialize
   config.rs     # TOML config loading, zone map builder
   cache.rs      # TTL-aware DNS response cache with lazy eviction
-  forward.rs    # upstream forwarding, SERVFAIL builder
+  forward.rs    # async upstream forwarding
   stats.rs      # query counters and periodic summary
 ```
 
 ## Dependencies
 
 ```toml
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
 toml = "0.8"
 serde = { version = "1", features = ["derive"] }
 log = "0.4"
