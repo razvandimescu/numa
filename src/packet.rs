@@ -13,6 +13,12 @@ pub struct DnsPacket {
     pub resources: Vec<DnsRecord>,
 }
 
+impl Default for DnsPacket {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DnsPacket {
     pub fn new() -> DnsPacket {
         DnsPacket {

@@ -19,7 +19,7 @@ impl ResultCode {
             3 => ResultCode::NXDOMAIN,
             4 => ResultCode::NOTIMP,
             5 => ResultCode::REFUSED,
-            0 | _ => ResultCode::NOERROR,
+            _ => ResultCode::NOERROR,
         }
     }
 
@@ -55,6 +55,12 @@ pub struct DnsHeader {
     pub answers: u16,
     pub authoritative_entries: u16,
     pub resource_entries: u16,
+}
+
+impl Default for DnsHeader {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DnsHeader {
@@ -112,7 +118,7 @@ impl DnsHeader {
                 | ((self.truncated_message as u8) << 1)
                 | ((self.authoritative_answer as u8) << 2)
                 | (self.opcode << 3)
-                | ((self.response as u8) << 7) as u8,
+                | ((self.response as u8) << 7),
         )?;
 
         buffer.write_u8(
