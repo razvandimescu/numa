@@ -416,6 +416,37 @@ pub fn uninstall_service() -> Result<(), String> {
     }
 }
 
+/// Restart the service (kill process, launchd/systemd auto-restarts with new binary).
+pub fn restart_service() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let output = std::process::Command::new("launchctl")
+            .args(["list", PLIST_LABEL])
+            .output();
+        match output {
+            Ok(o) if o.status.success() => {
+                // Service is loaded — kill the process, launchd restarts it
+                let _ = std::process::Command::new("pkill")
+                    .args(["-f", "/usr/local/bin/numa"])
+                    .status();
+                eprintln!("  Service restarting (launchd will respawn).\n");
+                Ok(())
+            }
+            _ => Err("Service is not installed. Run 'sudo numa service start' first.".to_string()),
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        run_systemctl(&["restart", "numa"])?;
+        eprintln!("  Service restarted.\n");
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        Err("service restart not supported on this OS".to_string())
+    }
+}
+
 /// Show the service status.
 pub fn service_status() -> Result<(), String> {
     #[cfg(target_os = "macos")]
