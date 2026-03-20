@@ -161,6 +161,10 @@ impl BlocklistStore {
         self.paused_until = Some(Instant::now() + std::time::Duration::from_secs(seconds));
     }
 
+    pub fn unpause(&mut self) {
+        self.paused_until = None;
+    }
+
     pub fn is_paused(&self) -> bool {
         self.paused_until
             .map(|until| Instant::now() < until)
@@ -233,6 +237,7 @@ pub fn parse_blocklist(text: &str) -> HashSet<String> {
 pub async fn download_blocklists(lists: &[String]) -> Vec<(String, String)> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
+        .gzip(true)
         .build()
         .unwrap_or_default();
 

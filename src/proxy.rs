@@ -11,7 +11,9 @@ use hyper::StatusCode;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use log::{debug, error, info, warn};
+use rustls::ServerConfig;
 use tokio::io::copy_bidirectional;
+use tokio_rustls::TlsAcceptor;
 
 use crate::ctx::ServerCtx;
 
@@ -21,10 +23,9 @@ type HttpClient = Client<hyper_util::client::legacy::connect::HttpConnector, Bod
 struct ProxyState {
     ctx: Arc<ServerCtx>,
     client: HttpClient,
-    tld_suffix: String, // pre-computed ".{tld}"
 }
 
-pub async fn start_proxy(ctx: Arc<ServerCtx>, port: u16, tld: &str) {
+pub async fn start_proxy(ctx: Arc<ServerCtx>, port: u16) {
     let addr: SocketAddr = ([0, 0, 0, 0], port).into();
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
@@ -45,12 +46,73 @@ pub async fn start_proxy(ctx: Arc<ServerCtx>, port: u16, tld: &str) {
     let state = ProxyState {
         ctx,
         client,
-        tld_suffix: format!(".{}", tld),
     };
 
     let app = Router::new().fallback(any(proxy_handler)).with_state(state);
 
     axum::serve(listener, app).await.unwrap();
+}
+
+pub async fn start_proxy_tls(ctx: Arc<ServerCtx>, port: u16, tls_config: Arc<ServerConfig>) {
+    let addr: SocketAddr = ([0, 0, 0, 0], port).into();
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            warn!(
+                "proxy: could not bind TLS port {} ({}) — HTTPS proxy disabled",
+                port, e
+            );
+            return;
+        }
+    };
+    info!("HTTPS proxy listening on {}", addr);
+
+    let acceptor = TlsAcceptor::from(tls_config);
+    let client: HttpClient = Client::builder(TokioExecutor::new())
+        .http1_preserve_header_case(true)
+        .build_http();
+
+    let state = ProxyState {
+        ctx,
+        client,
+    };
+
+    let app = Router::new().fallback(any(proxy_handler)).with_state(state);
+
+    loop {
+        let (tcp_stream, remote_addr) = match listener.accept().await {
+            Ok(conn) => conn,
+            Err(e) => {
+                error!("TLS accept error: {}", e);
+                continue;
+            }
+        };
+
+        let acceptor = acceptor.clone();
+        let app = app.clone();
+
+        tokio::spawn(async move {
+            let tls_stream = match acceptor.accept(tcp_stream).await {
+                Ok(s) => s,
+                Err(e) => {
+                    debug!("TLS handshake failed from {}: {}", remote_addr, e);
+                    return;
+                }
+            };
+
+            let io = hyper_util::rt::TokioIo::new(tls_stream);
+            let svc = hyper_util::service::TowerToHyperService::new(app.into_service());
+
+            if let Err(e) = hyper::server::conn::http1::Builder::new()
+                .preserve_header_case(true)
+                .serve_connection(io, svc)
+                .with_upgrades()
+                .await
+            {
+                debug!("TLS connection error from {}: {}", remote_addr, e);
+            }
+        });
+    }
 }
 
 fn extract_host(req: &Request) -> Option<String> {
@@ -68,12 +130,12 @@ async fn proxy_handler(State(state): State<ProxyState>, req: Request) -> axum::r
         }
     };
 
-    let service_name = match hostname.strip_suffix(state.tld_suffix.as_str()) {
+    let service_name = match hostname.strip_suffix(state.ctx.proxy_tld_suffix.as_str()) {
         Some(name) => name.to_string(),
         None => {
             return (
                 StatusCode::BAD_GATEWAY,
-                format!("not a {} domain: {}", state.tld_suffix, hostname),
+                format!("not a {} domain: {}", state.ctx.proxy_tld_suffix, hostname),
             )
                 .into_response()
         }
@@ -86,7 +148,7 @@ async fn proxy_handler(State(state): State<ProxyState>, req: Request) -> axum::r
             None => {
                 return (
                     StatusCode::BAD_GATEWAY,
-                    format!("unknown service: {}{}", service_name, state.tld_suffix),
+                    format!("unknown service: {}{}", service_name, state.ctx.proxy_tld_suffix),
                 )
                     .into_response()
             }
@@ -98,7 +160,7 @@ async fn proxy_handler(State(state): State<ProxyState>, req: Request) -> axum::r
         .path_and_query()
         .map(|pq| pq.as_str())
         .unwrap_or("/");
-    let target_uri: hyper::Uri = format!("http://127.0.0.1:{}{}", target_port, path_and_query)
+    let target_uri: hyper::Uri = format!("http://localhost:{}{}", target_port, path_and_query)
         .parse()
         .unwrap();
 

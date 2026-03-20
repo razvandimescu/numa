@@ -141,7 +141,7 @@ impl DnsRecord {
                     ttl,
                 })
             }
-            QueryType::UNKNOWN(_) => {
+            _ => {
                 buffer.step(data_len as usize)?;
 
                 Ok(DnsRecord::UNKNOWN {

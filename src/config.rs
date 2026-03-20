@@ -166,6 +166,8 @@ pub struct ProxyConfig {
     pub enabled: bool,
     #[serde(default = "default_proxy_port")]
     pub port: u16,
+    #[serde(default = "default_proxy_tls_port")]
+    pub tls_port: u16,
     #[serde(default = "default_proxy_tld")]
     pub tld: String,
 }
@@ -175,6 +177,7 @@ impl Default for ProxyConfig {
         ProxyConfig {
             enabled: default_proxy_enabled(),
             port: default_proxy_port(),
+            tls_port: default_proxy_tls_port(),
             tld: default_proxy_tld(),
         }
     }
@@ -185,6 +188,9 @@ fn default_proxy_enabled() -> bool {
 }
 fn default_proxy_port() -> u16 {
     80
+}
+fn default_proxy_tls_port() -> u16 {
+    443
 }
 fn default_proxy_tld() -> String {
     "numa".to_string()

@@ -211,21 +211,25 @@ pub fn match_forwarding_rule(domain: &str, rules: &[ForwardingRule]) -> Option<S
 /// Saves the original DNS settings for later restoration.
 pub fn install_system_dns() -> Result<(), String> {
     #[cfg(target_os = "macos")]
-    {
-        install_macos()
-    }
+    let result = install_macos();
     #[cfg(target_os = "linux")]
-    {
-        install_linux()
-    }
+    let result = install_linux();
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        Err("system DNS configuration not supported on this OS".to_string())
+    let result = Err("system DNS configuration not supported on this OS".to_string());
+
+    if result.is_ok() {
+        if let Err(e) = trust_ca() {
+            eprintln!("  warning: could not trust CA: {}", e);
+            eprintln!("  HTTPS proxy will work but browsers will show certificate warnings.\n");
+        }
     }
+    result
 }
 
 /// Restore the original system DNS settings saved during install.
 pub fn uninstall_system_dns() -> Result<(), String> {
+    let _ = untrust_ca();
+
     #[cfg(target_os = "macos")]
     {
         uninstall_macos()
@@ -760,4 +764,83 @@ fn run_systemctl(args: &[&str]) -> Result<(), String> {
             status
         ))
     }
+}
+
+// --- CA trust management ---
+
+fn trust_ca() -> Result<(), String> {
+    let ca_path = std::path::PathBuf::from("/usr/local/var/numa/ca.pem");
+    if !ca_path.exists() {
+        return Err("CA not generated yet — start numa first to create certificates".into());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let status = std::process::Command::new("security")
+            .args([
+                "add-trusted-cert",
+                "-d",
+                "-r",
+                "trustRoot",
+                "-k",
+                "/Library/Keychains/System.keychain",
+            ])
+            .arg(&ca_path)
+            .status()
+            .map_err(|e| format!("security: {}", e))?;
+        if !status.success() {
+            return Err("security add-trusted-cert failed".into());
+        }
+        eprintln!("  Trusted Numa CA in system keychain");
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let dest = std::path::Path::new("/usr/local/share/ca-certificates/numa-local-ca.crt");
+        std::fs::copy(&ca_path, dest).map_err(|e| format!("copy CA: {}", e))?;
+        let status = std::process::Command::new("update-ca-certificates")
+            .status()
+            .map_err(|e| format!("update-ca-certificates: {}", e))?;
+        if !status.success() {
+            return Err("update-ca-certificates failed".into());
+        }
+        eprintln!("  Trusted Numa CA system-wide");
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        return Err("CA trust not supported on this OS".into());
+    }
+
+    Ok(())
+}
+
+fn untrust_ca() -> Result<(), String> {
+    let ca_path = std::path::PathBuf::from("/usr/local/var/numa/ca.pem");
+
+    #[cfg(target_os = "macos")]
+    {
+        if ca_path.exists() {
+            let _ = std::process::Command::new("security")
+                .args(["remove-trusted-cert", "-d"])
+                .arg(&ca_path)
+                .status();
+            eprintln!("  Removed Numa CA from system keychain");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let dest = std::path::Path::new("/usr/local/share/ca-certificates/numa-local-ca.crt");
+        if dest.exists() {
+            let _ = std::fs::remove_file(dest);
+            let _ = std::process::Command::new("update-ca-certificates")
+                .arg("--fresh")
+                .status();
+            eprintln!("  Removed Numa CA from system trust store");
+        }
+    }
+
+    let _ = ca_path; // suppress unused warning on other platforms
+    Ok(())
 }

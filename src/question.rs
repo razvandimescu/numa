@@ -7,8 +7,13 @@ pub enum QueryType {
     A,     // 1
     NS,    // 2
     CNAME, // 5
+    SOA,   // 6
+    PTR,   // 12
     MX,    // 15
+    TXT,   // 16
     AAAA,  // 28
+    SRV,   // 33
+    HTTPS, // 65
 }
 
 impl QueryType {
@@ -18,8 +23,13 @@ impl QueryType {
             QueryType::A => 1,
             QueryType::NS => 2,
             QueryType::CNAME => 5,
+            QueryType::SOA => 6,
+            QueryType::PTR => 12,
             QueryType::MX => 15,
+            QueryType::TXT => 16,
             QueryType::AAAA => 28,
+            QueryType::SRV => 33,
+            QueryType::HTTPS => 65,
         }
     }
 
@@ -28,8 +38,13 @@ impl QueryType {
             1 => QueryType::A,
             2 => QueryType::NS,
             5 => QueryType::CNAME,
+            6 => QueryType::SOA,
+            12 => QueryType::PTR,
             15 => QueryType::MX,
+            16 => QueryType::TXT,
             28 => QueryType::AAAA,
+            33 => QueryType::SRV,
+            65 => QueryType::HTTPS,
             _ => QueryType::UNKNOWN(num),
         }
     }
@@ -39,25 +54,30 @@ impl QueryType {
             QueryType::A => "A",
             QueryType::NS => "NS",
             QueryType::CNAME => "CNAME",
+            QueryType::SOA => "SOA",
+            QueryType::PTR => "PTR",
             QueryType::MX => "MX",
+            QueryType::TXT => "TXT",
             QueryType::AAAA => "AAAA",
+            QueryType::SRV => "SRV",
+            QueryType::HTTPS => "HTTPS",
             QueryType::UNKNOWN(_) => "UNKNOWN",
         }
     }
 
     pub fn parse_str(s: &str) -> Option<QueryType> {
-        if s.eq_ignore_ascii_case("A") {
-            Some(QueryType::A)
-        } else if s.eq_ignore_ascii_case("NS") {
-            Some(QueryType::NS)
-        } else if s.eq_ignore_ascii_case("CNAME") {
-            Some(QueryType::CNAME)
-        } else if s.eq_ignore_ascii_case("MX") {
-            Some(QueryType::MX)
-        } else if s.eq_ignore_ascii_case("AAAA") {
-            Some(QueryType::AAAA)
-        } else {
-            None
+        match s.to_ascii_uppercase().as_str() {
+            "A" => Some(QueryType::A),
+            "NS" => Some(QueryType::NS),
+            "CNAME" => Some(QueryType::CNAME),
+            "SOA" => Some(QueryType::SOA),
+            "PTR" => Some(QueryType::PTR),
+            "MX" => Some(QueryType::MX),
+            "TXT" => Some(QueryType::TXT),
+            "AAAA" => Some(QueryType::AAAA),
+            "SRV" => Some(QueryType::SRV),
+            "HTTPS" => Some(QueryType::HTTPS),
+            _ => None,
         }
     }
 }

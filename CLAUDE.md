@@ -47,7 +47,8 @@ UDP :53 ──▶ handle_query()
               └─ 6. Upstream Forward (auto-detected from OS, conditional forwarding)
 
 HTTP :80   ──▶ Reverse proxy for .numa domains (WebSocket support)
-HTTP :5380 ──▶ Axum REST API (22 endpoints) + Dashboard
+HTTPS :443 ──▶ TLS reverse proxy (auto-generated local CA + wildcard *.numa cert)
+HTTP :5380 ──▶ Axum REST API (22+ endpoints) + Dashboard
 ```
 
 ### Source Files
@@ -59,8 +60,9 @@ src/
   ctx.rs            # ServerCtx shared state + handle_query() pipeline
   api.rs            # Axum REST server (22 endpoints, port 5380) + embedded dashboard
   config.rs         # TOML config loading with defaults (server, upstream, cache, blocking, proxy, zones)
-  proxy.rs          # HTTP reverse proxy for .numa domains (port 80, WebSocket upgrade support)
-  service_store.rs  # ServiceStore — name-to-port mappings for local service proxy
+  proxy.rs          # HTTP/HTTPS reverse proxy for .numa domains (port 80 + 443, WebSocket upgrade)
+  tls.rs            # Local CA + wildcard cert generation (rcgen), rustls ServerConfig builder
+  service_store.rs  # ServiceStore — name-to-port mappings, persisted to ~/.config/numa/services.json
   blocklist.rs      # BlocklistStore — HashSet<String>, download, parse, subdomain matching, check
   override_store.rs # OverrideStore — ephemeral domain overrides with auto-expiry
   query_log.rs      # ring buffer (VecDeque, 1000 entries) for recent queries
@@ -70,7 +72,7 @@ src/
   system_dns.rs     # OS DNS discovery (scutil/resolv.conf), install/uninstall, service management
   buffer.rs         # BytePacketBuffer — 4096-byte DNS wire format I/O
   header.rs         # DnsHeader — 12-byte bitfield parsing/serialization
-  question.rs       # DnsQuestion + QueryType enum (A, NS, CNAME, MX, AAAA)
+  question.rs       # DnsQuestion + QueryType enum (A, NS, CNAME, SOA, PTR, MX, TXT, AAAA, SRV, HTTPS)
   record.rs         # DnsRecord enum — wire format read/write per record type (filters UNKNOWN on write)
   packet.rs         # DnsPacket — header + questions + answers + authorities + resources
 site/
@@ -87,14 +89,18 @@ site/
 Dashboard: GET `/` (embedded HTML)
 Override management: POST/GET/DELETE `/overrides`, POST `/overrides/environment`
 Services: GET/POST `/services`, DELETE `/services/{name}`
-Blocking: GET `/blocking/stats`, PUT `/blocking/toggle`, POST `/blocking/pause`, GET/POST `/blocking/allowlist`, GET `/blocking/check/{domain}`
+Blocking: GET `/blocking/stats`, PUT `/blocking/toggle`, POST `/blocking/pause`, POST `/blocking/unpause`, GET/POST `/blocking/allowlist`, GET `/blocking/check/{domain}`
 Diagnostics: GET `/diagnose/{domain}`, `/query-log`, `/stats`, `/cache`, `/health`
 Cache: DELETE `/cache`, `/cache/{domain}`
 
 ## Key Details
 
 - Rust 2021 edition, async via `tokio` (rt-multi-thread)
-- Deps: tokio, axum, hyper, hyper-util, serde, serde_json, toml, log, env_logger, reqwest, futures (zero DNS libraries)
+- Deps: tokio, axum, hyper, hyper-util, serde, serde_json, toml, log, env_logger, reqwest, futures, rcgen, rustls, tokio-rustls, time (zero DNS libraries)
+- Shared config dir: `~/.config/numa/` via `config_dir()` in `lib.rs` (handles sudo correctly)
+- TLS: auto-generated local CA + wildcard `*.numa` cert at `~/.config/numa/`. `numa install` trusts CA in OS keychain.
+- Service persistence: user-added services saved to `~/.config/numa/services.json`, survives restarts
+- Deploy workflow: `make deploy` (build release → copy → codesign → kill → launchd respawns)
 - DNS buffer size: 4096 bytes (EDNS-compatible). UNKNOWN record types (e.g. OPT) filtered on serialization.
 - `BytePacketBuffer::read_qname` handles label compression (pointer jumps)
 - `type Error = Box<dyn std::error::Error + Send + Sync>` / `type Result<T>` aliased in `lib.rs`
