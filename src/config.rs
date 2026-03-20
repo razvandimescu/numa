@@ -9,7 +9,7 @@ use crate::question::QueryType;
 use crate::record::DnsRecord;
 use crate::Result;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 pub struct Config {
     #[serde(default)]
     pub server: ServerConfig,
@@ -21,6 +21,10 @@ pub struct Config {
     pub blocking: BlockingConfig,
     #[serde(default)]
     pub zones: Vec<ZoneRecord>,
+    #[serde(default)]
+    pub proxy: ProxyConfig,
+    #[serde(default)]
+    pub services: Vec<ServiceConfig>,
 }
 
 #[derive(Deserialize)]
@@ -69,7 +73,7 @@ impl Default for UpstreamConfig {
 }
 
 fn default_upstream_addr() -> String {
-    "8.8.8.8".to_string()
+    String::new() // empty = auto-detect from system resolver
 }
 fn default_upstream_port() -> u16 {
     53
@@ -156,15 +160,51 @@ fn default_zone_ttl() -> u32 {
     300
 }
 
+#[derive(Deserialize, Clone)]
+pub struct ProxyConfig {
+    #[serde(default = "default_proxy_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_proxy_port")]
+    pub port: u16,
+    #[serde(default = "default_proxy_tls_port")]
+    pub tls_port: u16,
+    #[serde(default = "default_proxy_tld")]
+    pub tld: String,
+}
+
+impl Default for ProxyConfig {
+    fn default() -> Self {
+        ProxyConfig {
+            enabled: default_proxy_enabled(),
+            port: default_proxy_port(),
+            tls_port: default_proxy_tls_port(),
+            tld: default_proxy_tld(),
+        }
+    }
+}
+
+fn default_proxy_enabled() -> bool {
+    true
+}
+fn default_proxy_port() -> u16 {
+    80
+}
+fn default_proxy_tls_port() -> u16 {
+    443
+}
+fn default_proxy_tld() -> String {
+    "numa".to_string()
+}
+
+#[derive(Deserialize, Clone)]
+pub struct ServiceConfig {
+    pub name: String,
+    pub target_port: u16,
+}
+
 pub fn load_config(path: &str) -> Result<Config> {
     if !Path::new(path).exists() {
-        return Ok(Config {
-            server: ServerConfig::default(),
-            upstream: UpstreamConfig::default(),
-            cache: CacheConfig::default(),
-            blocking: BlockingConfig::default(),
-            zones: Vec::new(),
-        });
+        return Ok(Config::default());
     }
     let contents = std::fs::read_to_string(path)?;
     let config: Config = toml::from_str(&contents)?;

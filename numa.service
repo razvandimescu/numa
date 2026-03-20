@@ -1,0 +1,16 @@
+[Unit]
+Description=Numa DNS — DNS you own, everywhere you go
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/numa
+Restart=always
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=numa
+
+[Install]
+WantedBy=multi-user.target

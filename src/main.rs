@@ -12,8 +12,12 @@ use numa::config::{build_zone_map, load_config};
 use numa::ctx::{handle_query, ServerCtx};
 use numa::override_store::OverrideStore;
 use numa::query_log::QueryLog;
+use numa::service_store::ServiceStore;
 use numa::stats::ServerStats;
-use numa::system_dns::{discover_forwarding_rules, install_system_dns, uninstall_system_dns};
+use numa::system_dns::{
+    discover_system_dns, install_service, install_system_dns, restart_service, service_status,
+    uninstall_service, uninstall_system_dns,
+};
 
 #[tokio::main]
 async fn main() -> numa::Result<()> {
@@ -32,14 +36,36 @@ async fn main() -> numa::Result<()> {
             eprintln!("\x1b[1;38;2;192;98;58mNuma\x1b[0m — restoring system DNS\n");
             return uninstall_system_dns().map_err(|e| e.into());
         }
+        "service" => {
+            let sub = std::env::args().nth(2).unwrap_or_default();
+            eprintln!("\x1b[1;38;2;192;98;58mNuma\x1b[0m — service management\n");
+            return match sub.as_str() {
+                "start" => install_service().map_err(|e| e.into()),
+                "stop" => uninstall_service().map_err(|e| e.into()),
+                "restart" => restart_service().map_err(|e| e.into()),
+                "status" => service_status().map_err(|e| e.into()),
+                _ => {
+                    eprintln!("Usage: numa service <start|stop|restart|status>");
+                    Ok(())
+                }
+            };
+        }
+        "version" | "--version" | "-V" => {
+            eprintln!("numa {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
         "help" | "--help" | "-h" => {
             eprintln!("Usage: numa [command] [config-path]");
             eprintln!();
             eprintln!("Commands:");
-            eprintln!("  (none)       Start the DNS server (default)");
-            eprintln!("  install      Set system DNS to 127.0.0.1 (requires sudo)");
-            eprintln!("  uninstall    Restore original system DNS settings");
-            eprintln!("  help         Show this help");
+            eprintln!("  (none)          Start the DNS server (default)");
+            eprintln!("  install         Set system DNS to 127.0.0.1 (requires sudo)");
+            eprintln!("  uninstall       Restore original system DNS settings");
+            eprintln!("  service start   Install as system service (auto-start on boot)");
+            eprintln!("  service stop    Uninstall the system service");
+            eprintln!("  service restart Restart the service with updated binary");
+            eprintln!("  service status  Check if the service is running");
+            eprintln!("  help            Show this help");
             eprintln!();
             eprintln!("Config path defaults to numa.toml");
             return Ok(());
@@ -56,8 +82,18 @@ async fn main() -> numa::Result<()> {
     };
     let config = load_config(&config_path)?;
 
-    let upstream: SocketAddr =
-        format!("{}:{}", config.upstream.address, config.upstream.port).parse()?;
+    // Discover system DNS in a single pass (upstream + forwarding rules)
+    let system_dns = discover_system_dns();
+
+    let upstream_addr = if config.upstream.address.is_empty() {
+        system_dns.default_upstream.unwrap_or_else(|| {
+            info!("could not detect system DNS, falling back to 9.9.9.9 (Quad9)");
+            "9.9.9.9".to_string()
+        })
+    } else {
+        config.upstream.address.clone()
+    };
+    let upstream: SocketAddr = format!("{}:{}", upstream_addr, config.upstream.port).parse()?;
     let api_port = config.server.api_port;
 
     let mut blocklist = BlocklistStore::new();
@@ -68,8 +104,15 @@ async fn main() -> numa::Result<()> {
         blocklist.set_enabled(false);
     }
 
-    // Auto-discover conditional forwarding rules from OS (Tailscale, VPN, etc.)
-    let forwarding_rules = discover_forwarding_rules();
+    // Build service store: config services + persisted user services
+    let mut service_store = ServiceStore::new();
+    service_store.insert_from_config("numa", config.server.api_port);
+    for svc in &config.services {
+        service_store.insert_from_config(&svc.name, svc.target_port);
+    }
+    service_store.load_persisted();
+
+    let forwarding_rules = system_dns.forwarding_rules;
 
     let ctx = Arc::new(ServerCtx {
         socket: UdpSocket::bind(&config.server.bind_addr).await?,
@@ -83,14 +126,21 @@ async fn main() -> numa::Result<()> {
         overrides: Mutex::new(OverrideStore::new()),
         blocklist: Mutex::new(blocklist),
         query_log: Mutex::new(QueryLog::new(1000)),
+        services: Mutex::new(service_store),
         forwarding_rules,
         upstream,
         timeout: Duration::from_millis(config.upstream.timeout_ms),
+        proxy_tld_suffix: if config.proxy.tld.is_empty() {
+            String::new()
+        } else {
+            format!(".{}", config.proxy.tld)
+        },
+        proxy_tld: config.proxy.tld.clone(),
     });
 
     let zone_count: usize = ctx.zone_map.values().map(|m| m.len()).sum();
     eprintln!("\n\x1b[38;2;192;98;58m  ╔══════════════════════════════════════════╗\x1b[0m");
-    eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[1;38;2;192;98;58mNUMA\x1b[0m  \x1b[3;38;2;163;152;136mDNS that governs itself\x1b[0m       \x1b[38;2;192;98;58m║\x1b[0m");
+    eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[1;38;2;192;98;58mNUMA\x1b[0m  \x1b[3;38;2;163;152;136mDNS that governs itself\x1b[0m  \x1b[38;2;163;152;136mv{}\x1b[0m \x1b[38;2;192;98;58m║\x1b[0m", env!("CARGO_PKG_VERSION"));
     eprintln!("\x1b[38;2;192;98;58m  ╠══════════════════════════════════════════╣\x1b[0m");
     eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;107;124;78mDNS\x1b[0m       {:<30}\x1b[38;2;192;98;58m║\x1b[0m", config.server.bind_addr);
     eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;107;124;78mAPI\x1b[0m       http://localhost:{:<16}\x1b[38;2;192;98;58m║\x1b[0m", api_port);
@@ -100,6 +150,17 @@ async fn main() -> numa::Result<()> {
     eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;107;124;78mCache\x1b[0m     {:<30}\x1b[38;2;192;98;58m║\x1b[0m", format!("max {} entries", config.cache.max_entries));
     eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;107;124;78mBlocking\x1b[0m  {:<30}\x1b[38;2;192;98;58m║\x1b[0m",
         if config.blocking.enabled { format!("{} lists", config.blocking.lists.len()) } else { "disabled".to_string() });
+    if config.proxy.enabled {
+        let schemes = if config.proxy.tls_port > 0 {
+            format!(
+                "http://:{} https://:{}",
+                config.proxy.port, config.proxy.tls_port
+            )
+        } else {
+            format!("http://*.{} on :{}", config.proxy.tld, config.proxy.port)
+        };
+        eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;107;124;78mProxy\x1b[0m     {:<30}\x1b[38;2;192;98;58m║\x1b[0m", schemes);
+    }
     if !ctx.forwarding_rules.is_empty() {
         eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;107;124;78mRouting\x1b[0m   {:<30}\x1b[38;2;192;98;58m║\x1b[0m",
             format!("{} conditional rules", ctx.forwarding_rules.len()));
@@ -140,6 +201,39 @@ async fn main() -> numa::Result<()> {
         info!("HTTP API listening on {}", api_addr);
         axum::serve(listener, app).await.unwrap();
     });
+
+    // Spawn HTTP reverse proxy for .numa domains
+    if config.proxy.enabled {
+        let proxy_ctx = Arc::clone(&ctx);
+        let proxy_port = config.proxy.port;
+        tokio::spawn(async move {
+            numa::proxy::start_proxy(proxy_ctx, proxy_port).await;
+        });
+    }
+
+    // Spawn HTTPS reverse proxy with TLS termination
+    if config.proxy.enabled && config.proxy.tls_port > 0 {
+        let service_names: Vec<String> = ctx
+            .services
+            .lock()
+            .unwrap()
+            .list()
+            .iter()
+            .map(|e| e.name.clone())
+            .collect();
+        match numa::tls::build_tls_config(&config.proxy.tld, &service_names) {
+            Ok(tls_config) => {
+                let proxy_ctx = Arc::clone(&ctx);
+                let tls_port = config.proxy.tls_port;
+                tokio::spawn(async move {
+                    numa::proxy::start_proxy_tls(proxy_ctx, tls_port, tls_config).await;
+                });
+            }
+            Err(e) => {
+                log::warn!("TLS setup failed, HTTPS proxy disabled: {}", e);
+            }
+        }
+    }
 
     // UDP DNS listener
     #[allow(clippy::infinite_loop)]

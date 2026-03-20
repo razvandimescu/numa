@@ -14,7 +14,9 @@ use crate::header::ResultCode;
 use crate::override_store::OverrideStore;
 use crate::packet::DnsPacket;
 use crate::query_log::{QueryLog, QueryLogEntry};
+use crate::question::QueryType;
 use crate::record::DnsRecord;
+use crate::service_store::ServiceStore;
 use crate::stats::{QueryPath, ServerStats};
 use crate::system_dns::ForwardingRule;
 
@@ -26,9 +28,12 @@ pub struct ServerCtx {
     pub overrides: Mutex<OverrideStore>,
     pub blocklist: Mutex<BlocklistStore>,
     pub query_log: Mutex<QueryLog>,
+    pub services: Mutex<ServiceStore>,
     pub forwarding_rules: Vec<ForwardingRule>,
     pub upstream: SocketAddr,
     pub timeout: Duration,
+    pub proxy_tld: String,
+    pub proxy_tld_suffix: String, // pre-computed ".{tld}" to avoid per-query allocation
 }
 
 pub async fn handle_query(
@@ -51,7 +56,7 @@ pub async fn handle_query(
         None => return Ok(()),
     };
 
-    // Pipeline: overrides -> blocklist -> local zones -> cache -> upstream
+    // Pipeline: overrides -> .tld interception -> blocklist -> local zones -> cache -> upstream
     // Each lock is scoped to avoid holding MutexGuard across await points.
     let (response, path) = {
         let override_record = ctx.overrides.lock().unwrap().lookup(&qname);
@@ -59,8 +64,24 @@ pub async fn handle_query(
             let mut resp = DnsPacket::response_from(&query, ResultCode::NOERROR);
             resp.answers.push(record);
             (resp, QueryPath::Overridden)
+        } else if !ctx.proxy_tld_suffix.is_empty()
+            && (qname.ends_with(&ctx.proxy_tld_suffix) || qname == ctx.proxy_tld)
+        {
+            let mut resp = DnsPacket::response_from(&query, ResultCode::NOERROR);
+            match qtype {
+                QueryType::AAAA => resp.answers.push(DnsRecord::AAAA {
+                    domain: qname.clone(),
+                    addr: std::net::Ipv6Addr::LOCALHOST,
+                    ttl: 300,
+                }),
+                _ => resp.answers.push(DnsRecord::A {
+                    domain: qname.clone(),
+                    addr: std::net::Ipv4Addr::LOCALHOST,
+                    ttl: 300,
+                }),
+            }
+            (resp, QueryPath::Local)
         } else if ctx.blocklist.lock().unwrap().is_blocked(&qname) {
-            use crate::question::QueryType;
             let mut resp = DnsPacket::response_from(&query, ResultCode::NOERROR);
             match qtype {
                 QueryType::AAAA => resp.answers.push(DnsRecord::AAAA {

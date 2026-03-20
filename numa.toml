@@ -2,15 +2,31 @@
 bind_addr = "0.0.0.0:53"
 api_port = 5380
 
-[upstream]
-address = "8.8.8.8"
-port = 53
-timeout_ms = 3000
+# [upstream]
+# address = ""       # auto-detect from system resolver (default)
+# address = "9.9.9.9"  # or set explicitly
+# port = 53
+# timeout_ms = 3000
 
 [cache]
 max_entries = 10000
 min_ttl = 60
 max_ttl = 86400
+
+[proxy]
+enabled = true
+port = 80
+tls_port = 443
+tld = "numa"
+
+# Pre-configured services (numa.numa is always added automatically)
+# [[services]]
+# name = "frontend"
+# target_port = 5173
+#
+# [[services]]
+# name = "api"
+# target_port = 8000
 
 # Example zone records:
 # [[zones]]

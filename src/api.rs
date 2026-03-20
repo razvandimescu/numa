@@ -35,12 +35,17 @@ pub fn router(ctx: Arc<ServerCtx>) -> Router {
         .route("/blocking/stats", get(blocking_stats))
         .route("/blocking/toggle", put(blocking_toggle))
         .route("/blocking/pause", post(blocking_pause))
+        .route("/blocking/unpause", post(blocking_unpause))
         .route("/blocking/allowlist", get(blocking_allowlist))
         .route("/blocking/allowlist", post(blocking_allowlist_add))
+        .route("/blocking/check/{domain}", get(blocking_check))
         .route(
             "/blocking/allowlist/{domain}",
             delete(blocking_allowlist_remove),
         )
+        .route("/services", get(list_services))
+        .route("/services", post(create_service))
+        .route("/services/{name}", delete(remove_service))
         .with_state(ctx)
 }
 
@@ -532,6 +537,19 @@ async fn blocking_pause(
     Json(serde_json::json!({ "paused_minutes": req.minutes }))
 }
 
+async fn blocking_unpause(State(ctx): State<Arc<ServerCtx>>) -> Json<serde_json::Value> {
+    ctx.blocklist.lock().unwrap().unpause();
+    Json(serde_json::json!({ "paused": false }))
+}
+
+async fn blocking_check(
+    State(ctx): State<Arc<ServerCtx>>,
+    Path(domain): Path<String>,
+) -> Json<crate::blocklist::BlockCheckResult> {
+    let result = ctx.blocklist.lock().unwrap().check(&domain);
+    Json(result)
+}
+
 async fn blocking_allowlist(State(ctx): State<Arc<ServerCtx>>) -> Json<Vec<String>> {
     let list = ctx.blocklist.lock().unwrap().allowlist();
     Json(list)
@@ -562,4 +580,111 @@ async fn blocking_allowlist_remove(
     } else {
         StatusCode::NOT_FOUND
     }
+}
+
+// --- Service proxy handlers ---
+
+#[derive(Serialize)]
+struct ServiceResponse {
+    name: String,
+    target_port: u16,
+    url: String,
+    healthy: bool,
+}
+
+#[derive(Deserialize)]
+struct CreateServiceRequest {
+    name: String,
+    target_port: u16,
+}
+
+async fn list_services(State(ctx): State<Arc<ServerCtx>>) -> Json<Vec<ServiceResponse>> {
+    let entries: Vec<_> = {
+        let store = ctx.services.lock().unwrap();
+        store
+            .list()
+            .into_iter()
+            .map(|e| (e.name.clone(), e.target_port))
+            .collect()
+    };
+    let tld = &ctx.proxy_tld;
+
+    // Run all health checks concurrently
+    let health_futures: Vec<_> = entries
+        .iter()
+        .map(|(_, port)| check_health(*port))
+        .collect();
+    let health_results = futures::future::join_all(health_futures).await;
+
+    let results: Vec<_> = entries
+        .into_iter()
+        .zip(health_results)
+        .map(|((name, port), healthy)| ServiceResponse {
+            url: format!("http://{}.{}", name, tld),
+            name,
+            target_port: port,
+            healthy,
+        })
+        .collect();
+    Json(results)
+}
+
+async fn create_service(
+    State(ctx): State<Arc<ServerCtx>>,
+    Json(req): Json<CreateServiceRequest>,
+) -> Result<(StatusCode, Json<ServiceResponse>), (StatusCode, String)> {
+    let name = req.name.to_lowercase();
+
+    // Validate name: alphanumeric + hyphens only, 1-63 chars
+    if name.is_empty() || name.len() > 63 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "name must be 1-63 characters".into(),
+        ));
+    }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "name must contain only alphanumeric characters and hyphens".into(),
+        ));
+    }
+    if req.target_port == 0 {
+        return Err((StatusCode::BAD_REQUEST, "target_port must be > 0".into()));
+    }
+
+    let tld = &ctx.proxy_tld;
+    ctx.services.lock().unwrap().insert(&name, req.target_port);
+
+    let healthy = check_health(req.target_port).await;
+    Ok((
+        StatusCode::CREATED,
+        Json(ServiceResponse {
+            url: format!("http://{}.{}", name, tld),
+            name,
+            target_port: req.target_port,
+            healthy,
+        }),
+    ))
+}
+
+async fn remove_service(State(ctx): State<Arc<ServerCtx>>, Path(name): Path<String>) -> StatusCode {
+    if name.eq_ignore_ascii_case("numa") {
+        return StatusCode::FORBIDDEN;
+    }
+    let mut store = ctx.services.lock().unwrap();
+    if store.remove(&name) {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::NOT_FOUND
+    }
+}
+
+async fn check_health(port: u16) -> bool {
+    tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port)),
+    )
+    .await
+    .map(|r| r.is_ok())
+    .unwrap_or(false)
 }

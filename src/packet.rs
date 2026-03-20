@@ -68,24 +68,33 @@ impl DnsPacket {
     }
 
     pub fn write(&self, buffer: &mut BytePacketBuffer) -> Result<()> {
+        // Filter out UNKNOWN records (e.g. EDNS OPT) that we can't re-serialize
+        let answers: Vec<_> = self.answers.iter().filter(|r| !r.is_unknown()).collect();
+        let authorities: Vec<_> = self
+            .authorities
+            .iter()
+            .filter(|r| !r.is_unknown())
+            .collect();
+        let resources: Vec<_> = self.resources.iter().filter(|r| !r.is_unknown()).collect();
+
         let mut header = self.header.clone();
         header.questions = self.questions.len() as u16;
-        header.answers = self.answers.len() as u16;
-        header.authoritative_entries = self.authorities.len() as u16;
-        header.resource_entries = self.resources.len() as u16;
+        header.answers = answers.len() as u16;
+        header.authoritative_entries = authorities.len() as u16;
+        header.resource_entries = resources.len() as u16;
 
         header.write(buffer)?;
 
         for question in &self.questions {
             question.write(buffer)?;
         }
-        for rec in &self.answers {
+        for rec in answers {
             rec.write(buffer)?;
         }
-        for rec in &self.authorities {
+        for rec in authorities {
             rec.write(buffer)?;
         }
-        for rec in &self.resources {
+        for rec in resources {
             rec.write(buffer)?;
         }
 

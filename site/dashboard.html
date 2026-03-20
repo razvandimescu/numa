@@ -232,7 +232,7 @@ body {
 
 /* Query log table */
 .query-log {
-  max-height: 380px;
+  max-height: 600px;
   overflow-y: auto;
   scrollbar-width: thin;
   scrollbar-color: var(--bg-elevated) transparent;
@@ -348,6 +348,41 @@ body {
   flex-shrink: 0;
 }
 
+/* Service items */
+.service-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--border);
+}
+.service-item:last-child { border-bottom: none; }
+.service-info { flex: 1; min-width: 0; }
+.service-name {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--cyan);
+}
+.service-name a {
+  color: inherit;
+  text-decoration: none;
+}
+.service-name a:hover { text-decoration: underline; }
+.service-port {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--text-dim);
+}
+.health-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.health-dot.up { background: var(--emerald); }
+.health-dot.down { background: var(--rose); }
+
 /* Override form */
 .override-form {
   display: flex;
@@ -442,7 +477,7 @@ body {
     <div class="tagline">DNS that governs itself</div>
   </div>
   <div style="display:flex;align-items:center;gap:1.2rem;">
-    <button class="btn" id="pauseBtn" onclick="pauseBlocking()" style="background:var(--amber);color:white;font-family:var(--font-mono);font-size:0.7rem;display:none;">Pause 5m</button>
+    <button class="btn" id="pauseBtn" style="background:var(--amber);color:white;font-family:var(--font-mono);font-size:0.7rem;display:none;">Pause 5m</button>
     <button class="btn" id="toggleBtn" onclick="toggleBlocking()" style="background:var(--rose);color:white;font-family:var(--font-mono);font-size:0.7rem;display:none;"></button>
     <div class="status-badge">
       <span class="status-dot" id="statusDot"></span>
@@ -497,7 +532,21 @@ body {
     <div class="panel">
       <div class="panel-header">
         <span class="panel-title">Recent Queries</span>
-        <span class="panel-title" id="queryCount" style="color: var(--text-dim)"></span>
+        <div style="display:flex;align-items:center;gap:0.5rem;">
+          <input type="text" id="logFilterDomain" placeholder="filter domain..." oninput="applyLogFilter()"
+            style="font-family:var(--font-mono);font-size:0.7rem;padding:0.25rem 0.5rem;border:1px solid var(--border);border-radius:4px;background:var(--bg-surface);color:var(--text-primary);outline:none;width:150px;">
+          <select id="logFilterPath" onchange="applyLogFilter()"
+            style="font-family:var(--font-mono);font-size:0.7rem;padding:0.25rem 0.4rem;border:1px solid var(--border);border-radius:4px;background:var(--bg-surface);color:var(--text-secondary);outline:none;">
+            <option value="">all paths</option>
+            <option value="FORWARD">forward</option>
+            <option value="CACHED">cached</option>
+            <option value="BLOCKED">blocked</option>
+            <option value="OVERRIDE">override</option>
+            <option value="LOCAL">local</option>
+            <option value="SERVFAIL">error</option>
+          </select>
+          <span class="panel-title" id="queryCount" style="color: var(--text-dim)"></span>
+        </div>
       </div>
       <div class="query-log" id="queryLog">
         <table>
@@ -519,24 +568,69 @@ body {
 
     <!-- Sidebar -->
     <div class="sidebar">
+      <!-- Blocking -->
+      <div class="panel" id="blockingPanel">
+        <div class="panel-header">
+          <span class="panel-title">Blocking</span>
+          <span class="panel-title" id="blockingRefresh" style="color:var(--text-dim);font-weight:400;"></span>
+        </div>
+        <div class="panel-body">
+          <form class="override-form" onsubmit="return checkDomain(event)" style="margin-bottom:0;border-bottom:none;padding-bottom:0;">
+            <div class="override-form-row">
+              <input type="text" id="checkDomainInput" placeholder="Is this domain blocked?" required style="flex:3">
+              <button type="submit" class="btn" style="background:var(--violet);color:white;flex-shrink:0;">Check</button>
+            </div>
+          </form>
+          <div id="checkResult" style="display:none;margin-top:0.6rem;padding:0.5rem 0.6rem;border-radius:5px;font-family:var(--font-mono);font-size:0.72rem;"></div>
+          <div id="blockingSources" style="margin-top:0.8rem;padding-top:0.6rem;border-top:1px solid var(--border);"></div>
+          <div id="blockingAllowlist" style="margin-top:0.8rem;padding-top:0.6rem;border-top:1px solid var(--border);"></div>
+        </div>
+      </div>
+
       <!-- Active overrides -->
       <div class="panel">
         <div class="panel-header">
-          <span class="panel-title">Active Overrides</span>
+          <div>
+            <span class="panel-title">Active Overrides</span>
+            <div style="font-size:0.68rem;color:var(--text-dim);margin-top:0.15rem;">Redirect any domain to any IP. Temporary, DNS-only.</div>
+          </div>
         </div>
         <div class="panel-body">
           <form class="override-form" id="overrideForm" onsubmit="return addOverride(event)">
-            <input type="text" id="ovDomain" placeholder="domain (e.g. api.dev)" required>
-            <input type="text" id="ovTarget" placeholder="target IP (e.g. 127.0.0.1)" required>
+            <input type="text" id="ovDomain" placeholder="domain (e.g. api.stripe.com)" required>
+            <input type="text" id="ovTarget" placeholder="target (e.g. 10.0.0.5 or 127.0.0.1)" required>
             <div class="override-form-row">
-              <input type="number" id="ovTTL" placeholder="TTL" value="60" min="1">
-              <input type="number" id="ovDuration" placeholder="Duration (s)" value="300" min="1">
+              <input type="number" id="ovTTL" placeholder="DNS TTL" value="60" min="1" title="How long clients may cache this DNS response">
+              <input type="number" id="ovDuration" placeholder="Expires in (s)" value="300" min="1">
             </div>
             <button type="submit" class="btn btn-add">Add Override</button>
             <div class="override-error" id="overrideError"></div>
           </form>
           <div id="overridesList">
             <div class="empty-state">No active overrides</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Local services -->
+      <div class="panel">
+        <div class="panel-header">
+          <div>
+            <span class="panel-title">Local Services</span>
+            <div style="font-size:0.68rem;color:var(--text-dim);margin-top:0.15rem;">Give localhost apps clean .numa URLs. Persistent, with HTTP proxy.</div>
+          </div>
+        </div>
+        <div class="panel-body">
+          <form class="override-form" id="serviceForm" onsubmit="return addService(event)">
+            <div class="override-form-row">
+              <input type="text" id="svcName" placeholder="name (becomes name.numa)" required style="flex:2">
+              <input type="number" id="svcPort" placeholder="port (e.g. 3000)" required min="1" max="65535" style="flex:1">
+            </div>
+            <button type="submit" class="btn btn-add">Add Service</button>
+            <div class="override-error" id="serviceError"></div>
+          </form>
+          <div id="servicesList">
+            <div class="empty-state">No services configured</div>
           </div>
         </div>
       </div>
@@ -558,6 +652,7 @@ body {
 <script>
 const API = '';
 let prevTotal = null;
+let lastLogEntries = [];
 let prevTime = null;
 
 async function fetchJSON(path) {
@@ -630,9 +725,29 @@ function renderPaths(queries) {
 }
 
 function renderQueryLog(entries) {
+  lastLogEntries = entries;
+  applyLogFilter();
+}
+
+function applyLogFilter() {
+  const domainFilter = document.getElementById('logFilterDomain').value.trim().toLowerCase();
+  const pathFilter = document.getElementById('logFilterPath').value;
+
+  let filtered = lastLogEntries;
+  if (domainFilter) {
+    filtered = filtered.filter(e => e.domain.toLowerCase().includes(domainFilter));
+  }
+  if (pathFilter) {
+    filtered = filtered.filter(e => e.path === pathFilter);
+  }
+
   const tbody = document.getElementById('queryLogBody');
-  document.getElementById('queryCount').textContent = `last ${entries.length}`;
-  tbody.innerHTML = entries.map(e => {
+  document.getElementById('queryCount').textContent =
+    filtered.length < lastLogEntries.length
+      ? `${filtered.length} / ${lastLogEntries.length}`
+      : `last ${filtered.length}`;
+
+  tbody.innerHTML = filtered.map(e => {
     const allowBtn = e.path === 'BLOCKED'
       ? ` <button class="btn-delete" onclick="allowDomain('${e.domain}')" title="Allow this domain" style="color:var(--emerald);font-size:0.65rem;">allow</button>`
       : '';
@@ -730,11 +845,14 @@ function renderCache(entries) {
 
 async function refresh() {
   try {
-    const [stats, logs, overrides, cache] = await Promise.all([
+    const [stats, logs, overrides, cache, services, blockingInfo, allowlist] = await Promise.all([
       fetchJSON('/stats'),
-      fetchJSON('/query-log?limit=100'),
+      fetchJSON('/query-log?limit=200'),
       fetchJSON('/overrides'),
       fetchJSON('/cache'),
+      fetchJSON('/services'),
+      fetchJSON('/blocking/stats'),
+      fetchJSON('/blocking/allowlist'),
     ]);
 
     // Connection status
@@ -750,16 +868,22 @@ async function refresh() {
     document.getElementById('blockedCount').textContent = formatNumber(q.blocked);
     const bl = stats.blocking;
     document.getElementById('blockedSub').textContent =
+      bl.paused ? 'paused' :
+      !bl.enabled ? 'disabled' :
       bl.domains_loaded > 0 ? `${formatNumber(bl.domains_loaded)} in blocklist` : 'loading...';
 
-    // Blocking controls
+    // Blocking controls — single primary button + secondary toggle
     const toggleBtn = document.getElementById('toggleBtn');
     const pauseBtn = document.getElementById('pauseBtn');
     toggleBtn.style.display = 'inline-block';
-    pauseBtn.style.display = bl.enabled && !bl.paused ? 'inline-block' : 'none';
     if (bl.paused) {
+      // Primary action: unpause. Hide toggle to prevent accidental disable.
+      pauseBtn.style.display = 'inline-block';
+      pauseBtn.textContent = 'Unpause';
+      pauseBtn.onclick = unpauseBlocking;
       toggleBtn.textContent = 'Paused';
       toggleBtn.style.background = 'var(--amber)';
+      toggleBtn.onclick = unpauseBlocking; // clicking "Paused" unpauses, not disables
     } else if (bl.enabled) {
       toggleBtn.textContent = 'Blocking On';
       toggleBtn.style.background = 'var(--emerald)';
@@ -792,6 +916,9 @@ async function refresh() {
     renderQueryLog(logs);
     renderOverrides(overrides);
     renderCache(cache);
+    renderServices(services);
+    renderBlockingInfo(blockingInfo);
+    renderAllowlist(allowlist);
 
   } catch (err) {
     document.getElementById('statusDot').className = 'status-dot error';
@@ -823,6 +950,13 @@ async function pauseBlocking() {
   } catch (err) {}
 }
 
+async function unpauseBlocking() {
+  try {
+    await fetch(API + '/blocking/unpause', { method: 'POST' });
+    refresh();
+  } catch (err) {}
+}
+
 async function allowDomain(domain) {
   try {
     await fetch(API + '/blocking/allowlist', {
@@ -834,9 +968,176 @@ async function allowDomain(domain) {
   } catch (err) {}
 }
 
+async function checkDomain(event) {
+  event.preventDefault();
+  const domain = document.getElementById('checkDomainInput').value.trim();
+  const el = document.getElementById('checkResult');
+  if (!domain) return false;
+  try {
+    const result = await fetchJSON('/blocking/check/' + encodeURIComponent(domain));
+    el.style.display = 'block';
+    if (result.blocked) {
+      el.style.background = 'rgba(181, 68, 58, 0.1)';
+      el.style.color = 'var(--rose)';
+      el.innerHTML = `<strong>Blocked</strong> — ${result.reason}` +
+        (result.matched_rule ? `<br>Rule: <code>${result.matched_rule}</code>` : '') +
+        ` <button class="btn-delete" onclick="allowDomain('${domain}')" style="color:var(--emerald);font-size:0.7rem;margin-left:0.4rem;">allow</button>`;
+    } else {
+      el.style.background = 'rgba(82, 122, 82, 0.1)';
+      el.style.color = 'var(--emerald)';
+      el.innerHTML = `<strong>Allowed</strong> — ${result.reason}` +
+        (result.matched_rule ? `<br>Rule: <code>${result.matched_rule}</code>` : '');
+    }
+  } catch (err) {
+    el.style.display = 'block';
+    el.style.background = 'rgba(181, 68, 58, 0.1)';
+    el.style.color = 'var(--rose)';
+    el.textContent = 'Error: ' + err.message;
+  }
+  return false;
+}
+
+function shortenUrl(url) {
+  try {
+    const u = new URL(url);
+    const parts = u.pathname.split('/').filter(Boolean);
+    // For GitHub CDN URLs, show "owner/repo/.../filename"
+    if (u.hostname.includes('jsdelivr') || u.hostname.includes('github')) {
+      const owner = parts[1] || '';
+      const file = parts[parts.length - 1] || '';
+      return owner ? `${owner} / ${file}` : file;
+    }
+    // For other URLs, show hostname + filename
+    const file = parts[parts.length - 1] || '';
+    return `${u.hostname} / ${file}`;
+  } catch { return url; }
+}
+
+function renderBlockingInfo(info) {
+  const el = document.getElementById('blockingSources');
+  const refreshEl = document.getElementById('blockingRefresh');
+  if (info.last_refresh_secs_ago != null) {
+    refreshEl.textContent = `refreshed ${formatUptime(info.last_refresh_secs_ago)} ago`;
+  }
+  const sources = info.list_sources || [];
+  if (!sources.length) {
+    el.innerHTML = '';
+    return;
+  }
+  el.innerHTML = `
+    <div style="font-size:0.65rem;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-dim);margin-bottom:0.4rem;">Sources &middot; ${formatNumber(info.domains_loaded)} domains</div>
+    ${sources.map(s => `
+      <div style="padding:0.3rem 0;font-family:var(--font-mono);font-size:0.72rem;">
+        <a href="${s}" target="_blank" rel="noopener" style="color:var(--text-secondary);text-decoration:none;" title="${s}">${shortenUrl(s)}</a>
+      </div>
+    `).join('')}
+  `;
+}
+
+function renderAllowlist(entries) {
+  const el = document.getElementById('blockingAllowlist');
+  const count = entries.length;
+  el.innerHTML = `
+    <div style="font-size:0.65rem;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-dim);margin-bottom:0.4rem;">Allowlist${count ? ` (${count})` : ''}</div>
+    ${count ? entries.map(d => `
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:0.25rem 0;border-bottom:1px solid var(--border);">
+        <span style="font-family:var(--font-mono);font-size:0.75rem;color:var(--emerald);">${d}</span>
+        <button class="btn-delete" onclick="removeAllowlistDomain('${d}')">&times;</button>
+      </div>
+    `).join('') : '<div class="empty-state">No exceptions</div>'}
+    <form onsubmit="return addAllowlistDomain(event)" style="display:flex;gap:0.4rem;margin-top:0.4rem;">
+      <input type="text" id="allowDomainInput" placeholder="domain to allow" required style="flex:1;font-family:var(--font-mono);font-size:0.75rem;padding:0.35rem 0.5rem;border:1px solid var(--border);border-radius:4px;background:var(--bg-surface);color:var(--text-primary);outline:none;">
+      <button type="submit" class="btn" style="background:var(--emerald);color:white;flex-shrink:0;">Allow</button>
+    </form>
+  `;
+}
+
+async function addAllowlistDomain(event) {
+  event.preventDefault();
+  const input = document.getElementById('allowDomainInput');
+  const domain = input.value.trim();
+  if (!domain) return false;
+  try {
+    await fetch(API + '/blocking/allowlist', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ domain }),
+    });
+    input.value = '';
+    refresh();
+  } catch (err) {}
+  return false;
+}
+
+async function removeAllowlistDomain(domain) {
+  try {
+    await fetch(API + '/blocking/allowlist/' + encodeURIComponent(domain), { method: 'DELETE' });
+    refresh();
+  } catch (err) {}
+}
+
+function renderServices(entries) {
+  const el = document.getElementById('servicesList');
+  if (!entries.length) {
+    el.innerHTML = '<div class="empty-state">No services configured</div>';
+    return;
+  }
+  el.innerHTML = entries.map(e => `
+    <div class="service-item">
+      <span class="health-dot ${e.healthy ? 'up' : 'down'}" title="${e.healthy ? 'running' : 'not reachable'}"></span>
+      <div class="service-info">
+        <div class="service-name"><a href="${e.url}" target="_blank">${e.name}.numa</a></div>
+        <div class="service-port">localhost:${e.target_port} &rarr; proxied</div>
+      </div>
+      ${e.name === 'numa' ? '' : `<button class="btn-delete" onclick="deleteService('${e.name}')" title="Remove service">&times;</button>`}
+    </div>
+  `).join('');
+}
+
+async function addService(event) {
+  event.preventDefault();
+  const errEl = document.getElementById('serviceError');
+  errEl.style.display = 'none';
+  try {
+    const body = {
+      name: document.getElementById('svcName').value.trim(),
+      target_port: parseInt(document.getElementById('svcPort').value) || 0,
+    };
+    const res = await fetch(API + '/services', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(text);
+    }
+    document.getElementById('svcName').value = '';
+    document.getElementById('svcPort').value = '';
+    refresh();
+  } catch (err) {
+    errEl.textContent = err.message;
+    errEl.style.display = 'block';
+  }
+  return false;
+}
+
+async function deleteService(name) {
+  try {
+    await fetch(API + '/services/' + encodeURIComponent(name), { method: 'DELETE' });
+    refresh();
+  } catch (err) { /* next refresh will update */ }
+}
+
 // Initial load + polling
 refresh();
 setInterval(refresh, 2000);
 </script>
+
+<div style="text-align:center;padding:0.8rem;font-family:var(--font-mono);font-size:0.68rem;color:var(--text-dim);">
+  Logs: <span id="logPath" style="user-select:all;">macOS: /usr/local/var/log/numa.log · Linux: journalctl -u numa -f</span>
+  · <a href="https://github.com/razvandimescu/numa" target="_blank" rel="noopener" style="color:var(--amber);text-decoration:none;">GitHub</a>
+</div>
+
 </body>
 </html>
