@@ -14,17 +14,38 @@ Block ads and trackers. Override DNS for development. Cache for speed. A single 
 
 ## Quick Start
 
+### From source
+
 ```bash
+git clone https://github.com/razvandimescu/numa.git
+cd numa
 cargo build
-sudo cargo run                      # binds to port 53
+sudo cargo run                      # binds to port 53, downloads blocklists on first run
 ```
+
+### Docker
+
+```bash
+docker build -t numa .
+docker run -p 53:53/udp -p 5380:5380 numa
+```
+
+### Try it
 
 Open the dashboard: **http://localhost:5380**
 
-Test it:
 ```bash
-dig @127.0.0.1 google.com           # normal resolution
-dig @127.0.0.1 ads.google.com       # blocked → 0.0.0.0
+dig @127.0.0.1 google.com           # ✓ resolves normally
+dig @127.0.0.1 ads.google.com       # ✗ blocked → 0.0.0.0
+```
+
+Create an override:
+```bash
+curl -X POST http://localhost:5380/overrides \
+  -H 'Content-Type: application/json' \
+  -d '{"domain":"api.dev","target":"127.0.0.1","ttl":60,"duration_secs":300}'
+
+dig @127.0.0.1 api.dev              # → 127.0.0.1 (auto-reverts in 5 min)
 ```
 
 ## Resolution Pipeline
@@ -133,20 +154,19 @@ REST API on port 5380 (18 endpoints):
 
 **Debug DNS** — `/diagnose/example.com` traces the full resolution path
 
-## Docker
+## Built From Scratch
 
-```bash
-docker build -t numa .
-docker run -p 53:53/udp -p 5380:5380 numa
-```
+Zero external DNS libraries. RFC 1035 wire protocol parsed by hand. Dependencies: `tokio`, `axum`, `serde`, `toml`, `reqwest` (for blocklist downloads).
 
-## Dependencies
+## Roadmap
 
-```
-tokio, axum, serde, serde_json, toml, log, env_logger, reqwest
-```
-
-Zero external DNS libraries. Wire protocol (RFC 1035) parsed from scratch.
+- [x] DNS proxy core — forwarding, caching, local zones
+- [x] Developer overrides — REST API with auto-expiry
+- [x] Ad blocking — 385K+ domains, dashboard, allowlist
+- [x] System DNS auto-discovery — Tailscale, VPN split-DNS
+- [ ] System DNS auto-configuration — `numa install` / `numa uninstall`
+- [ ] pkarr integration — self-sovereign DNS via Mainline DHT
+- [ ] Decentralized resolver network — staking, auditing, token economics
 
 ## License
 
