@@ -12,6 +12,44 @@ pub struct BlocklistStore {
     last_refresh: Option<Instant>,
 }
 
+#[derive(serde::Serialize)]
+pub struct BlockCheckResult {
+    pub blocked: bool,
+    pub reason: String,
+    pub matched_rule: Option<String>,
+}
+
+impl BlockCheckResult {
+    fn blocked(rule: &str, reason: &str) -> Self {
+        Self {
+            blocked: true,
+            reason: reason.to_string(),
+            matched_rule: Some(rule.to_string()),
+        }
+    }
+    fn allowed(rule: &str, reason: &str) -> Self {
+        Self {
+            blocked: false,
+            reason: reason.to_string(),
+            matched_rule: Some(rule.to_string()),
+        }
+    }
+    fn not_blocked() -> Self {
+        Self {
+            blocked: false,
+            reason: "not in blocklist".to_string(),
+            matched_rule: None,
+        }
+    }
+    fn disabled() -> Self {
+        Self {
+            blocked: false,
+            reason: "blocking is disabled".to_string(),
+            matched_rule: None,
+        }
+    }
+}
+
 pub struct BlocklistStats {
     pub enabled: bool,
     pub paused: bool,
@@ -71,6 +109,36 @@ impl BlocklistStore {
         }
 
         false
+    }
+
+    /// Check if a domain is blocked and return the reason.
+    pub fn check(&self, domain: &str) -> BlockCheckResult {
+        let domain = domain.to_lowercase();
+
+        if !self.enabled {
+            return BlockCheckResult::disabled();
+        }
+
+        if self.allowlist.contains(&domain) {
+            return BlockCheckResult::allowed(&domain, "exact match in allowlist");
+        }
+
+        if self.domains.contains(&domain) {
+            return BlockCheckResult::blocked(&domain, "exact match in blocklist");
+        }
+
+        let mut d = domain.as_str();
+        while let Some(dot) = d.find('.') {
+            d = &d[dot + 1..];
+            if self.allowlist.contains(d) {
+                return BlockCheckResult::allowed(d, "parent domain in allowlist");
+            }
+            if self.domains.contains(d) {
+                return BlockCheckResult::blocked(d, "parent domain in blocklist");
+            }
+        }
+
+        BlockCheckResult::not_blocked()
     }
 
     /// Atomically swap in a new domain set. Build the set outside the lock,
