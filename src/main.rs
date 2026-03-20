@@ -152,7 +152,10 @@ async fn main() -> numa::Result<()> {
         if config.blocking.enabled { format!("{} lists", config.blocking.lists.len()) } else { "disabled".to_string() });
     if config.proxy.enabled {
         let schemes = if config.proxy.tls_port > 0 {
-            format!("http://:{} https://:{}", config.proxy.port, config.proxy.tls_port)
+            format!(
+                "http://:{} https://:{}",
+                config.proxy.port, config.proxy.tls_port
+            )
         } else {
             format!("http://*.{} on :{}", config.proxy.tld, config.proxy.port)
         };

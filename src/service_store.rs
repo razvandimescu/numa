@@ -95,7 +95,10 @@ impl ServiceStore {
                         }
                     }
                     if count > 0 {
-                        info!("loaded {} persisted services from {:?}", count, self.persist_path);
+                        info!(
+                            "loaded {} persisted services from {:?}",
+                            count, self.persist_path
+                        );
                     }
                 }
                 Err(e) => warn!("failed to parse {:?}: {}", self.persist_path, e),

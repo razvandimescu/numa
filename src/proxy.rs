@@ -43,10 +43,7 @@ pub async fn start_proxy(ctx: Arc<ServerCtx>, port: u16) {
         .http1_preserve_header_case(true)
         .build_http();
 
-    let state = ProxyState {
-        ctx,
-        client,
-    };
+    let state = ProxyState { ctx, client };
 
     let app = Router::new().fallback(any(proxy_handler)).with_state(state);
 
@@ -72,10 +69,7 @@ pub async fn start_proxy_tls(ctx: Arc<ServerCtx>, port: u16, tls_config: Arc<Ser
         .http1_preserve_header_case(true)
         .build_http();
 
-    let state = ProxyState {
-        ctx,
-        client,
-    };
+    let state = ProxyState { ctx, client };
 
     let app = Router::new().fallback(any(proxy_handler)).with_state(state);
 
@@ -148,7 +142,10 @@ async fn proxy_handler(State(state): State<ProxyState>, req: Request) -> axum::r
             None => {
                 return (
                     StatusCode::BAD_GATEWAY,
-                    format!("unknown service: {}{}", service_name, state.ctx.proxy_tld_suffix),
+                    format!(
+                        "unknown service: {}{}",
+                        service_name, state.ctx.proxy_tld_suffix
+                    ),
                 )
                     .into_response()
             }
