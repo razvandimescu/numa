@@ -604,7 +604,10 @@ async fn list_services(State(ctx): State<Arc<ServerCtx>>) -> Json<Vec<ServiceRes
     let tld = &ctx.proxy_tld;
 
     // Run all health checks concurrently
-    let health_futures: Vec<_> = entries.iter().map(|(_, port)| check_health(*port)).collect();
+    let health_futures: Vec<_> = entries
+        .iter()
+        .map(|(_, port)| check_health(*port))
+        .collect();
     let health_results = futures::future::join_all(health_futures).await;
 
     let results: Vec<_> = entries
@@ -628,7 +631,10 @@ async fn create_service(
 
     // Validate name: alphanumeric + hyphens only, 1-63 chars
     if name.is_empty() || name.len() > 63 {
-        return Err((StatusCode::BAD_REQUEST, "name must be 1-63 characters".into()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "name must be 1-63 characters".into(),
+        ));
     }
     if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         return Err((
@@ -655,10 +661,7 @@ async fn create_service(
     ))
 }
 
-async fn remove_service(
-    State(ctx): State<Arc<ServerCtx>>,
-    Path(name): Path<String>,
-) -> StatusCode {
+async fn remove_service(State(ctx): State<Arc<ServerCtx>>, Path(name): Path<String>) -> StatusCode {
     if name.eq_ignore_ascii_case("numa") {
         return StatusCode::FORBIDDEN;
     }

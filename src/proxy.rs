@@ -48,9 +48,7 @@ pub async fn start_proxy(ctx: Arc<ServerCtx>, port: u16, tld: &str) {
         tld_suffix: format!(".{}", tld),
     };
 
-    let app = Router::new()
-        .fallback(any(proxy_handler))
-        .with_state(state);
+    let app = Router::new().fallback(any(proxy_handler)).with_state(state);
 
     axum::serve(listener, app).await.unwrap();
 }
@@ -62,10 +60,7 @@ fn extract_host(req: &Request) -> Option<String> {
         .map(|h| h.split(':').next().unwrap_or(h).to_lowercase())
 }
 
-async fn proxy_handler(
-    State(state): State<ProxyState>,
-    req: Request,
-) -> axum::response::Response {
+async fn proxy_handler(State(state): State<ProxyState>, req: Request) -> axum::response::Response {
     let hostname = match extract_host(&req) {
         Some(h) => h,
         None => {
@@ -179,8 +174,7 @@ async fn handle_upgrade(
     });
 
     // Return 101 to client with the backend's upgrade headers
-    let mut resp = axum::response::Response::builder()
-        .status(StatusCode::SWITCHING_PROTOCOLS);
+    let mut resp = axum::response::Response::builder().status(StatusCode::SWITCHING_PROTOCOLS);
     for (key, value) in &resp_headers {
         resp = resp.header(key, value);
     }
