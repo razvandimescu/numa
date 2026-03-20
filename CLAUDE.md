@@ -32,7 +32,7 @@ numa service stop                   # uninstall service + restore DNS
 numa service status                 # check service status
 ```
 
-Dashboard: http://localhost:5380
+Dashboard: http://numa.numa (or http://localhost:5380)
 
 ## Architecture
 
@@ -40,23 +40,27 @@ Dashboard: http://localhost:5380
 UDP :53 ──▶ handle_query()
               │
               ├─ 1. Override Store (ephemeral, auto-expiry)
-              ├─ 2. Blocklist (385K+ domains, subdomain matching)
-              ├─ 3. Local Zones (TOML config)
-              ├─ 4. Cache (TTL-aware, lazy eviction)
-              └─ 5. Upstream Forward (auto-detected from OS, conditional forwarding)
+              ├─ 2. .numa TLD (local service domains → 127.0.0.1)
+              ├─ 3. Blocklist (385K+ domains, subdomain matching)
+              ├─ 4. Local Zones (TOML config)
+              ├─ 5. Cache (TTL-aware, lazy eviction)
+              └─ 6. Upstream Forward (auto-detected from OS, conditional forwarding)
 
-HTTP :5380 ──▶ Axum REST API (19 endpoints) + Dashboard
+HTTP :80   ──▶ Reverse proxy for .numa domains (WebSocket support)
+HTTP :5380 ──▶ Axum REST API (22 endpoints) + Dashboard
 ```
 
 ### Source Files
 
 ```
 src/
-  main.rs           # startup: load config, bind UDP, spawn API, blocklist download, per-query task loop
+  main.rs           # startup: load config, bind UDP, spawn API + proxy, blocklist download, per-query task loop
   lib.rs            # module declarations, Error/Result type aliases
   ctx.rs            # ServerCtx shared state + handle_query() pipeline
-  api.rs            # Axum REST server (19 endpoints, port 5380) + embedded dashboard
-  config.rs         # TOML config loading with defaults (server, upstream, cache, blocking, zones)
+  api.rs            # Axum REST server (22 endpoints, port 5380) + embedded dashboard
+  config.rs         # TOML config loading with defaults (server, upstream, cache, blocking, proxy, zones)
+  proxy.rs          # HTTP reverse proxy for .numa domains (port 80, WebSocket upgrade support)
+  service_store.rs  # ServiceStore — name-to-port mappings for local service proxy
   blocklist.rs      # BlocklistStore — HashSet<String>, download, parse, subdomain matching, check
   override_store.rs # OverrideStore — ephemeral domain overrides with auto-expiry
   query_log.rs      # ring buffer (VecDeque, 1000 entries) for recent queries
@@ -76,12 +80,13 @@ site/
 
 ## Config
 
-`numa.toml` at project root. Sections: `[server]`, `[upstream]`, `[cache]`, `[blocking]`, `[[zones]]`. Falls back to sensible defaults if file is missing. Upstream auto-detected from system resolver if not set.
+`numa.toml` at project root. Sections: `[server]`, `[upstream]`, `[cache]`, `[blocking]`, `[proxy]`, `[[services]]`, `[[zones]]`. Falls back to sensible defaults if file is missing. Upstream auto-detected from system resolver if not set.
 
 ## REST API
 
 Dashboard: GET `/` (embedded HTML)
 Override management: POST/GET/DELETE `/overrides`, POST `/overrides/environment`
+Services: GET/POST `/services`, DELETE `/services/{name}`
 Blocking: GET `/blocking/stats`, PUT `/blocking/toggle`, POST `/blocking/pause`, GET/POST `/blocking/allowlist`, GET `/blocking/check/{domain}`
 Diagnostics: GET `/diagnose/{domain}`, `/query-log`, `/stats`, `/cache`, `/health`
 Cache: DELETE `/cache`, `/cache/{domain}`
@@ -89,7 +94,7 @@ Cache: DELETE `/cache`, `/cache/{domain}`
 ## Key Details
 
 - Rust 2021 edition, async via `tokio` (rt-multi-thread)
-- Deps: tokio, axum, serde, serde_json, toml, log, env_logger, reqwest (zero DNS libraries)
+- Deps: tokio, axum, hyper, hyper-util, serde, serde_json, toml, log, env_logger, reqwest, futures (zero DNS libraries)
 - DNS buffer size: 4096 bytes (EDNS-compatible). UNKNOWN record types (e.g. OPT) filtered on serialization.
 - `BytePacketBuffer::read_qname` handles label compression (pointer jumps)
 - `type Error = Box<dyn std::error::Error + Send + Sync>` / `type Result<T>` aliased in `lib.rs`

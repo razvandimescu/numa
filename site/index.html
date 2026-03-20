@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Numa — DNS that governs itself</title>
-<meta name="description" content="DNS you own. Block ads, override DNS for development, cache for speed. A single portable binary built from scratch in Rust. No Raspberry Pi, no cloud, no account.">
+<meta name="description" content="DNS you own. Block ads, override DNS for development, name your local services with .numa domains, cache for speed. A single portable binary built from scratch in Rust.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -612,6 +612,12 @@ p.lead {
   color: var(--emerald);
 }
 .pipeline-box.hl-emerald:hover { border-color: var(--emerald); color: var(--emerald); }
+.pipeline-box.hl-cyan {
+  border-color: rgba(74, 124, 138, 0.35);
+  background: rgba(74, 124, 138, 0.06);
+  color: var(--cyan);
+}
+.pipeline-box.hl-cyan:hover { border-color: var(--cyan); color: var(--cyan); }
 
 .pipeline-arrow {
   font-family: var(--font-mono);
@@ -1004,7 +1010,7 @@ footer .closing {
     <div class="tagline">DNS you own. Everywhere you go.</div>
     <p class="epigraph">After Numa Pompilius, who built institutions that outlasted kings.</p>
     <p class="description">
-      Block ads and trackers. Override DNS for development. Cache for speed. A single portable binary built from scratch in Rust &mdash; no Raspberry Pi, no cloud, no account. Your DNS travels with you.
+      Block ads and trackers. Override DNS for development. Name your local services with <code style="font-size:0.9em;color:var(--cyan)">.numa</code> domains. A single portable binary built from scratch in Rust &mdash; no Raspberry Pi, no cloud, no account.
     </p>
     <div class="hero-actions">
       <a href="#technical" class="btn btn-primary">Get Started</a>
@@ -1066,8 +1072,9 @@ footer .closing {
         <ul>
           <li>Ad &amp; tracker blocking &mdash; 385K+ domains, zero config</li>
           <li>Ephemeral DNS overrides with auto-revert</li>
+          <li>Local service proxy &mdash; <code>frontend.numa</code> instead of <code>localhost:5173</code></li>
           <li>Live dashboard with real-time stats and controls</li>
-          <li>REST API &mdash; 18 endpoints for programmatic control</li>
+          <li>REST API &mdash; 22 endpoints for programmatic control</li>
           <li>TTL-aware caching (sub-ms lookups)</li>
           <li>Single binary, portable &mdash; your ad blocker travels with you</li>
         </ul>
@@ -1115,6 +1122,10 @@ footer .closing {
         <div class="pipeline-node"><div class="pipeline-box hl-teal">Query</div></div>
         <span class="pipeline-arrow">&rarr;</span>
         <div class="pipeline-node"><div class="pipeline-box highlight">Overrides</div></div>
+        <span class="pipeline-arrow">&rarr;</span>
+        <div class="pipeline-node"><div class="pipeline-box hl-cyan">.numa TLD</div></div>
+        <span class="pipeline-arrow">&rarr;</span>
+        <div class="pipeline-node"><div class="pipeline-box">Blocklist</div></div>
         <span class="pipeline-arrow">&rarr;</span>
         <div class="pipeline-node"><div class="pipeline-box">Local Zones</div></div>
         <span class="pipeline-arrow">&rarr;</span>
@@ -1231,6 +1242,14 @@ footer .closing {
             <td class="check">REST API + auto-expiry</td>
           </tr>
           <tr>
+            <td>Local service proxy</td>
+            <td class="cross">No</td>
+            <td class="cross">No</td>
+            <td class="cross">No</td>
+            <td class="cross">No</td>
+            <td class="check">.numa domains + WebSocket</td>
+          </tr>
+          <tr>
             <td>Data stays local</td>
             <td class="check">Yes</td>
             <td class="cross">Cloud</td>
@@ -1286,10 +1305,10 @@ footer .closing {
         <dd>Zero &mdash; wire protocol parsed from scratch</dd>
 
         <dt>Dependencies</dt>
-        <dd>6 runtime crates (tokio, axum, serde, serde_json, toml, log)</dd>
+        <dd>8 runtime crates (tokio, axum, hyper, serde, serde_json, toml, log, futures)</dd>
 
         <dt>Packet Format</dt>
-        <dd>RFC 1035 compliant, 512-byte UDP</dd>
+        <dd>RFC 1035 compliant, 4096-byte UDP (EDNS)</dd>
 
         <dt>Concurrency</dt>
         <dd>Arc&lt;ServerCtx&gt; + std::sync::Mutex (sub-&micro;s holds, never across .await)</dd>
@@ -1299,13 +1318,12 @@ footer .closing {
       </dl>
       <div class="code-block reveal reveal-delay-2">
 <span class="prompt">$</span> <span class="cmd">cargo install</span> numa
-<span class="prompt">$</span> <span class="cmd">sudo numa</span>                          <span class="comment"># bind to :53</span>
+<span class="prompt">$</span> <span class="cmd">sudo numa</span>                          <span class="comment"># bind to :53, :80, :5380</span>
 <span class="prompt">$</span> <span class="cmd">dig</span> <span class="flag">@127.0.0.1</span> google.com         <span class="comment"># test resolution</span>
-<span class="prompt">$</span> <span class="cmd">curl</span> localhost:5380/overrides      <span class="comment"># REST API</span>
-<span class="prompt">$</span> <span class="cmd">curl</span> <span class="flag">-X POST</span> localhost:5380/overrides \
-    <span class="flag">-d</span> <span class="str">'{"domain":"api.stripe.com",
-         "target":"127.0.0.1",
-         "duration_secs":1800}'</span>        <span class="comment"># 30-min override</span>
+<span class="prompt">$</span> <span class="cmd">open</span> http://numa.numa              <span class="comment"># dashboard</span>
+<span class="prompt">$</span> <span class="cmd">curl</span> <span class="flag">-X POST</span> localhost:5380/services \
+    <span class="flag">-d</span> <span class="str">'{"name":"frontend",
+         "target_port":5173}'</span>          <span class="comment"># http://frontend.numa</span>
       </div>
     </div>
   </div>
@@ -1333,28 +1351,32 @@ footer .closing {
         <span class="phase">Phase 2</span>
         <span class="phase-desc">Ad &amp; tracker blocking &mdash; 385K+ domains, live dashboard, one-click allowlist</span>
       </div>
-      <div class="roadmap-item phase-teal">
+      <div class="roadmap-item done">
         <span class="phase">Phase 3</span>
         <span class="phase-desc">System integration &mdash; auto-discovery of OS DNS routing, one-command install</span>
       </div>
-      <div class="roadmap-item phase-teal">
+      <div class="roadmap-item done">
         <span class="phase">Phase 4</span>
+        <span class="phase-desc">Local service proxy &mdash; .numa domains, HTTP reverse proxy, WebSocket support</span>
+      </div>
+      <div class="roadmap-item phase-teal">
+        <span class="phase">Phase 5</span>
         <span class="phase-desc">pkarr spike &mdash; DHT resolution and publish endpoint</span>
       </div>
       <div class="roadmap-item phase-teal">
-        <span class="phase">Phase 5</span>
+        <span class="phase">Phase 6</span>
         <span class="phase-desc">pkarr product &mdash; human-readable aliases, re-publish daemon, key management</span>
       </div>
       <div class="roadmap-item phase-amber">
-        <span class="phase">Phase 4</span>
+        <span class="phase">Phase 7</span>
         <span class="phase-desc">Challenge and audit protocol for verifiable resolver behavior</span>
       </div>
       <div class="roadmap-item phase-violet">
-        <span class="phase">Phase 5</span>
+        <span class="phase">Phase 8</span>
         <span class="phase-desc">Token economics, staking, and slashing mechanism</span>
       </div>
       <div class="roadmap-item phase-violet">
-        <span class="phase">Phase 6</span>
+        <span class="phase">Phase 9</span>
         <span class="phase-desc">Decentralized resolver marketplace</span>
       </div>
     </div>
