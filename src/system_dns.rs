@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 use log::info;
 
@@ -144,4 +146,185 @@ pub fn match_forwarding_rule(domain: &str, rules: &[ForwardingRule]) -> Option<S
         }
     }
     None
+}
+
+// --- System DNS configuration (install/uninstall) ---
+
+fn numa_data_dir() -> PathBuf {
+    dirs_or_home().join(".numa")
+}
+
+fn dirs_or_home() -> PathBuf {
+    std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/tmp"))
+}
+
+fn backup_path() -> PathBuf {
+    numa_data_dir().join("original-dns.json")
+}
+
+/// Set the system DNS to 127.0.0.1 so all queries go through Numa.
+/// Saves the original DNS settings for later restoration.
+pub fn install_system_dns() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        install_macos()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        install_linux()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        Err("system DNS configuration not supported on this OS".to_string())
+    }
+}
+
+/// Restore the original system DNS settings saved during install.
+pub fn uninstall_system_dns() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        uninstall_macos()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        uninstall_linux()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        Err("system DNS configuration not supported on this OS".to_string())
+    }
+}
+
+// --- macOS implementation ---
+
+#[cfg(target_os = "macos")]
+fn get_network_services() -> Result<Vec<String>, String> {
+    let output = std::process::Command::new("networksetup")
+        .arg("-listallnetworkservices")
+        .output()
+        .map_err(|e| format!("failed to run networksetup: {}", e))?;
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let services: Vec<String> = text
+        .lines()
+        .skip(1) // first line is "An asterisk (*) denotes..."
+        .map(|l| l.trim_start_matches('*').trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    Ok(services)
+}
+
+#[cfg(target_os = "macos")]
+fn get_dns_servers(service: &str) -> Result<Vec<String>, String> {
+    let output = std::process::Command::new("networksetup")
+        .args(["-getdnsservers", service])
+        .output()
+        .map_err(|e| format!("failed to get DNS for {}: {}", service, e))?;
+
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if text.contains("aren't any DNS Servers") {
+        Ok(vec![]) // using DHCP defaults
+    } else {
+        Ok(text.lines().map(|l| l.trim().to_string()).collect())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn install_macos() -> Result<(), String> {
+    let services = get_network_services()?;
+    let mut original: HashMap<String, Vec<String>> = HashMap::new();
+
+    // Save current DNS for each service
+    for service in &services {
+        let servers = get_dns_servers(service)?;
+        original.insert(service.clone(), servers);
+    }
+
+    // Save backup
+    let dir = numa_data_dir();
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("failed to create {}: {}", dir.display(), e))?;
+
+    let json = serde_json::to_string_pretty(&original)
+        .map_err(|e| format!("failed to serialize backup: {}", e))?;
+    std::fs::write(backup_path(), json).map_err(|e| format!("failed to write backup: {}", e))?;
+
+    // Set DNS to 127.0.0.1 for each service
+    for service in &services {
+        let status = std::process::Command::new("networksetup")
+            .args(["-setdnsservers", service, "127.0.0.1"])
+            .status()
+            .map_err(|e| format!("failed to set DNS for {}: {}", service, e))?;
+
+        if status.success() {
+            eprintln!("  set DNS for \"{}\" -> 127.0.0.1", service);
+        } else {
+            eprintln!("  warning: failed to set DNS for \"{}\"", service);
+        }
+    }
+
+    eprintln!("\n  Original DNS saved to {}", backup_path().display());
+    eprintln!("  Run 'sudo numa uninstall' to restore.\n");
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn uninstall_macos() -> Result<(), String> {
+    let path = backup_path();
+    let json = std::fs::read_to_string(&path)
+        .map_err(|e| format!("no backup found at {}: {}", path.display(), e))?;
+
+    let original: HashMap<String, Vec<String>> =
+        serde_json::from_str(&json).map_err(|e| format!("invalid backup file: {}", e))?;
+
+    for (service, servers) in &original {
+        let args = if servers.is_empty() {
+            // Restore to "empty" (DHCP default) by setting to "Empty"
+            vec!["-setdnsservers", service, "Empty"]
+        } else {
+            let mut a = vec!["-setdnsservers", service];
+            a.extend(servers.iter().map(|s| s.as_str()));
+            a
+        };
+
+        let status = std::process::Command::new("networksetup")
+            .args(&args)
+            .status()
+            .map_err(|e| format!("failed to restore DNS for {}: {}", service, e))?;
+
+        if status.success() {
+            let display = if servers.is_empty() {
+                "DHCP default".to_string()
+            } else {
+                servers.join(", ")
+            };
+            eprintln!("  restored DNS for \"{}\" -> {}", service, display);
+        } else {
+            eprintln!("  warning: failed to restore DNS for \"{}\"", service);
+        }
+    }
+
+    std::fs::remove_file(&path).ok();
+    eprintln!("\n  System DNS restored. Backup removed.\n");
+
+    Ok(())
+}
+
+// --- Linux stubs ---
+
+#[cfg(target_os = "linux")]
+fn install_linux() -> Result<(), String> {
+    Err(
+        "Linux auto-configuration not yet implemented. Manually set your DNS to 127.0.0.1"
+            .to_string(),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn uninstall_linux() -> Result<(), String> {
+    Err("Linux auto-configuration not yet implemented.".to_string())
 }
