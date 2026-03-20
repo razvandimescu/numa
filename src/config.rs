@@ -69,7 +69,7 @@ impl Default for UpstreamConfig {
 }
 
 fn default_upstream_addr() -> String {
-    "8.8.8.8".to_string()
+    String::new() // empty = auto-detect from system resolver
 }
 fn default_upstream_port() -> u16 {
     53

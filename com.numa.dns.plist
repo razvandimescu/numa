@@ -16,5 +16,10 @@
     <string>/usr/local/var/log/numa.log</string>
     <key>StandardErrorPath</key>
     <string>/usr/local/var/log/numa.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>RUST_LOG</key>
+        <string>info</string>
+    </dict>
 </dict>
 </plist>

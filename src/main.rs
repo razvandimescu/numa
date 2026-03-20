@@ -14,8 +14,8 @@ use numa::override_store::OverrideStore;
 use numa::query_log::QueryLog;
 use numa::stats::ServerStats;
 use numa::system_dns::{
-    discover_forwarding_rules, install_service, install_system_dns, service_status,
-    uninstall_service, uninstall_system_dns,
+    discover_system_dns, install_service, install_system_dns, service_status, uninstall_service,
+    uninstall_system_dns,
 };
 
 #[tokio::main]
@@ -75,8 +75,18 @@ async fn main() -> numa::Result<()> {
     };
     let config = load_config(&config_path)?;
 
-    let upstream: SocketAddr =
-        format!("{}:{}", config.upstream.address, config.upstream.port).parse()?;
+    // Discover system DNS in a single pass (upstream + forwarding rules)
+    let system_dns = discover_system_dns();
+
+    let upstream_addr = if config.upstream.address.is_empty() {
+        system_dns.default_upstream.unwrap_or_else(|| {
+            info!("could not detect system DNS, falling back to 9.9.9.9 (Quad9)");
+            "9.9.9.9".to_string()
+        })
+    } else {
+        config.upstream.address.clone()
+    };
+    let upstream: SocketAddr = format!("{}:{}", upstream_addr, config.upstream.port).parse()?;
     let api_port = config.server.api_port;
 
     let mut blocklist = BlocklistStore::new();
@@ -87,8 +97,7 @@ async fn main() -> numa::Result<()> {
         blocklist.set_enabled(false);
     }
 
-    // Auto-discover conditional forwarding rules from OS (Tailscale, VPN, etc.)
-    let forwarding_rules = discover_forwarding_rules();
+    let forwarding_rules = system_dns.forwarding_rules;
 
     let ctx = Arc::new(ServerCtx {
         socket: UdpSocket::bind(&config.server.bind_addr).await?,

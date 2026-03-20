@@ -70,7 +70,11 @@ impl DnsPacket {
     pub fn write(&self, buffer: &mut BytePacketBuffer) -> Result<()> {
         // Filter out UNKNOWN records (e.g. EDNS OPT) that we can't re-serialize
         let answers: Vec<_> = self.answers.iter().filter(|r| !r.is_unknown()).collect();
-        let authorities: Vec<_> = self.authorities.iter().filter(|r| !r.is_unknown()).collect();
+        let authorities: Vec<_> = self
+            .authorities
+            .iter()
+            .filter(|r| !r.is_unknown())
+            .collect();
         let resources: Vec<_> = self.resources.iter().filter(|r| !r.is_unknown()).collect();
 
         let mut header = self.header.clone();

@@ -10,38 +10,48 @@ pub struct ForwardingRule {
     pub upstream: SocketAddr,
 }
 
-/// Discover system DNS forwarding rules from the OS.
-/// On macOS, parses `scutil --dns`. Returns rules sorted longest-suffix-first
-/// so more specific matches take priority.
-pub fn discover_forwarding_rules() -> Vec<ForwardingRule> {
+/// Result of system DNS discovery — default upstream + conditional forwarding rules.
+pub struct SystemDnsInfo {
+    pub default_upstream: Option<String>,
+    pub forwarding_rules: Vec<ForwardingRule>,
+}
+
+/// Discover system DNS configuration in a single pass.
+/// On macOS: parses `scutil --dns` once for both the default upstream and forwarding rules.
+/// On Linux: reads `/etc/resolv.conf` for upstream, no forwarding rules yet.
+pub fn discover_system_dns() -> SystemDnsInfo {
     #[cfg(target_os = "macos")]
     {
         discover_macos()
     }
     #[cfg(not(target_os = "macos"))]
     {
-        info!("system DNS auto-discovery not implemented for this OS");
-        Vec::new()
+        SystemDnsInfo {
+            default_upstream: detect_upstream_linux_or_backup(),
+            forwarding_rules: Vec::new(),
+        }
     }
 }
 
 #[cfg(target_os = "macos")]
-fn discover_macos() -> Vec<ForwardingRule> {
+fn discover_macos() -> SystemDnsInfo {
     use log::{debug, warn};
 
     let output = match std::process::Command::new("scutil").arg("--dns").output() {
         Ok(o) => o,
         Err(e) => {
             warn!("failed to run scutil --dns: {}", e);
-            return Vec::new();
+            return SystemDnsInfo {
+                default_upstream: None,
+                forwarding_rules: Vec::new(),
+            };
         }
     };
 
     let text = String::from_utf8_lossy(&output.stdout);
     let mut rules = Vec::new();
+    let mut default_upstream: Option<String> = None;
 
-    // Parse resolver blocks: look for blocks with both `domain` and `nameserver[0]`
-    // that have the `Supplemental` flag (conditional forwarding, not default)
     let mut current_domain: Option<String> = None;
     let mut current_nameserver: Option<String> = None;
     let mut is_supplemental = false;
@@ -50,7 +60,7 @@ fn discover_macos() -> Vec<ForwardingRule> {
         let line = line.trim();
 
         if line.starts_with("resolver #") {
-            // Emit previous block if valid
+            // Emit previous supplemental block as forwarding rule
             if let (Some(domain), Some(ns), true) = (
                 current_domain.take(),
                 current_nameserver.take(),
@@ -64,7 +74,6 @@ fn discover_macos() -> Vec<ForwardingRule> {
             current_nameserver = None;
             is_supplemental = false;
         } else if line.starts_with("domain") && line.contains(':') {
-            // "domain   : tailcee7cc.ts.net."
             if let Some(val) = line.split(':').nth(1) {
                 let domain = val.trim().trim_end_matches('.').to_lowercase();
                 if !domain.is_empty()
@@ -78,15 +87,21 @@ fn discover_macos() -> Vec<ForwardingRule> {
         } else if line.starts_with("nameserver[0]") && line.contains(':') {
             if let Some(val) = line.split(':').nth(1) {
                 let ns = val.trim().to_string();
-                // Only use IPv4 nameservers for now
                 if ns.parse::<std::net::Ipv4Addr>().is_ok() {
-                    current_nameserver = Some(ns);
+                    current_nameserver = Some(ns.clone());
+                    // Capture first non-supplemental, non-loopback nameserver as default upstream
+                    if !is_supplemental
+                        && default_upstream.is_none()
+                        && ns != "127.0.0.1"
+                        && ns != "0.0.0.0"
+                    {
+                        default_upstream = Some(ns);
+                    }
                 }
             }
         } else if line.starts_with("flags") && line.contains("Supplemental") {
             is_supplemental = true;
         } else if line.starts_with("DNS configuration (for scoped") {
-            // Stop at scoped section — those are interface-specific, not conditional
             if let (Some(domain), Some(ns), true) = (
                 current_domain.take(),
                 current_nameserver.take(),
@@ -116,12 +131,17 @@ fn discover_macos() -> Vec<ForwardingRule> {
             rule.suffix, rule.upstream
         );
     }
-
     if rules.is_empty() {
-        debug!("no conditional forwarding rules discovered from scutil --dns");
+        debug!("no conditional forwarding rules discovered");
+    }
+    if let Some(ref ns) = default_upstream {
+        info!("detected system upstream: {}", ns);
     }
 
-    rules
+    SystemDnsInfo {
+        default_upstream,
+        forwarding_rules: rules,
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -132,6 +152,45 @@ fn make_rule(domain: &str, nameserver: &str) -> Option<ForwardingRule> {
         suffix: domain.to_string(),
         upstream: addr,
     })
+}
+
+/// Detect upstream from /etc/resolv.conf, falling back to backup file if resolv.conf
+/// only has loopback (meaning numa install already ran).
+#[cfg(not(target_os = "macos"))]
+fn detect_upstream_linux_or_backup() -> Option<String> {
+    // Try /etc/resolv.conf first
+    if let Some(ns) = read_upstream_from_file("/etc/resolv.conf") {
+        info!("detected system upstream: {}", ns);
+        return Some(ns);
+    }
+    // If resolv.conf only has loopback, check the backup from `numa install`
+    let backup = {
+        let home = std::env::var("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from("/root"));
+        home.join(".numa").join("original-resolv.conf")
+    };
+    if let Some(ns) = read_upstream_from_file(backup.to_str().unwrap_or("")) {
+        info!("detected original upstream from backup: {}", ns);
+        return Some(ns);
+    }
+    None
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_upstream_from_file(path: &str) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with("nameserver") {
+            if let Some(ns) = line.split_whitespace().nth(1) {
+                if ns != "127.0.0.1" && ns != "0.0.0.0" && ns != "::1" {
+                    return Some(ns.to_string());
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Find the upstream for a domain by checking forwarding rules.
@@ -395,19 +454,28 @@ fn install_service_macos() -> Result<(), String> {
         .status()
         .map_err(|e| format!("failed to run launchctl: {}", e))?;
 
-    if status.success() {
-        eprintln!("  Service installed and started.");
-        eprintln!("  Numa will auto-start on boot and restart if killed.");
-        eprintln!("  Logs: /usr/local/var/log/numa.log");
-        eprintln!("  Run 'sudo numa service stop' to uninstall.\n");
-        Ok(())
-    } else {
-        Err("launchctl load failed".to_string())
+    if !status.success() {
+        return Err("launchctl load failed".to_string());
     }
+
+    // Set system DNS to 127.0.0.1 now that the service is running
+    eprintln!("  Service installed and started.");
+    if let Err(e) = install_macos() {
+        eprintln!("  warning: failed to configure system DNS: {}", e);
+    }
+    eprintln!("  Numa will auto-start on boot and restart if killed.");
+    eprintln!("  Logs: /usr/local/var/log/numa.log");
+    eprintln!("  Run 'sudo numa service stop' to fully uninstall.\n");
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
 fn uninstall_service_macos() -> Result<(), String> {
+    // Restore DNS first, while numa is still running to handle any final queries
+    if let Err(e) = uninstall_macos() {
+        eprintln!("  warning: failed to restore system DNS: {}", e);
+    }
+
     // Remove plist first so service won't restart on boot even if unload fails
     if let Err(e) = std::fs::remove_file(PLIST_DEST) {
         if e.kind() != std::io::ErrorKind::NotFound {
@@ -576,14 +644,24 @@ fn install_service_linux() -> Result<(), String> {
     run_systemctl(&["start", "numa"])?;
 
     eprintln!("  Service installed and started.");
+
+    // Set system DNS now that the service is running
+    if let Err(e) = install_linux() {
+        eprintln!("  warning: failed to configure system DNS: {}", e);
+    }
     eprintln!("  Numa will auto-start on boot and restart if killed.");
     eprintln!("  Logs: journalctl -u numa -f");
-    eprintln!("  Run 'sudo numa service stop' to uninstall.\n");
+    eprintln!("  Run 'sudo numa service stop' to fully uninstall.\n");
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
 fn uninstall_service_linux() -> Result<(), String> {
+    // Restore DNS first, while numa is still running
+    if let Err(e) = uninstall_linux() {
+        eprintln!("  warning: failed to restore system DNS: {}", e);
+    }
+
     if let Err(e) = run_systemctl(&["stop", "numa"]) {
         eprintln!("  warning: {}", e);
     }

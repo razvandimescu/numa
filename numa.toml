@@ -2,10 +2,11 @@
 bind_addr = "0.0.0.0:53"
 api_port = 5380
 
-[upstream]
-address = "8.8.8.8"
-port = 53
-timeout_ms = 3000
+# [upstream]
+# address = ""       # auto-detect from system resolver (default)
+# address = "9.9.9.9"  # or set explicitly
+# port = 53
+# timeout_ms = 3000
 
 [cache]
 max_entries = 10000
