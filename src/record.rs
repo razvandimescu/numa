@@ -240,7 +240,7 @@ impl DnsRecord {
                 }
             }
             DnsRecord::UNKNOWN { .. } => {
-                println!("Skipping record: {:?}", self);
+                log::debug!("Skipping record: {:?}", self);
             }
         }
 

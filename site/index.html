@@ -1,0 +1,1395 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Numa — DNS that governs itself</title>
+<meta name="description" content="DNS you own. Block ads, override DNS for development, cache for speed. A single portable binary built from scratch in Rust. No Raspberry Pi, no cloud, no account.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  /* Roman Stone */
+  --bg-deep: #f5f0e8;
+  --bg-surface: #ece5da;
+  --bg-elevated: #e3dbce;
+  --bg-card: #faf7f2;
+  --amber: #c0623a;
+  --amber-dim: #9e4e2d;
+  --amber-glow: rgba(192, 98, 58, 0.07);
+  --amber-glow-strong: rgba(192, 98, 58, 0.14);
+  --teal: #6b7c4e;
+  --teal-dim: #566540;
+  --teal-glow: rgba(107, 124, 78, 0.06);
+  --violet: #64748b;
+  --violet-dim: #4a5568;
+  --violet-glow: rgba(100, 116, 139, 0.06);
+  --emerald: #527a52;
+  --emerald-dim: #3f6340;
+  --rose: #b5443a;
+  --rose-dim: #943832;
+  --rose-glow: rgba(181, 68, 58, 0.05);
+  --cyan: #4a7c8a;
+  --text-primary: #2c2418;
+  --text-secondary: #6b5e4f;
+  --text-dim: #a39888;
+  --border: rgba(0, 0, 0, 0.08);
+  --border-amber: rgba(192, 98, 58, 0.22);
+  --border-teal: rgba(107, 124, 78, 0.20);
+  --border-violet: rgba(100, 116, 139, 0.18);
+  --font-display: 'Instrument Serif', Georgia, serif;
+  --font-body: 'DM Sans', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+}
+
+html { scroll-behavior: smooth; }
+
+body {
+  background: var(--bg-deep);
+  color: var(--text-primary);
+  font-family: var(--font-body);
+  font-weight: 400;
+  line-height: 1.7;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+
+/* --- Grain overlay --- */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.025'/%3E%3C/svg%3E");
+  pointer-events: none;
+  z-index: 9999;
+}
+
+/* --- Layout --- */
+.container {
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 0 2rem;
+}
+
+section {
+  padding: 7rem 0;
+  position: relative;
+}
+
+/* --- Reveal animations --- */
+.reveal {
+  opacity: 0;
+  transform: translateY(28px);
+  transition: opacity 0.7s cubic-bezier(0.22, 1, 0.36, 1), transform 0.7s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.reveal.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+.reveal-delay-1 { transition-delay: 0.1s; }
+.reveal-delay-2 { transition-delay: 0.2s; }
+.reveal-delay-3 { transition-delay: 0.3s; }
+.reveal-delay-4 { transition-delay: 0.4s; }
+
+@media (prefers-reduced-motion: reduce) {
+  .reveal { opacity: 1; transform: none; transition: none; }
+  .hero .wordmark, .hero .tagline, .hero .description, .hero-actions { opacity: 1; animation: none; }
+}
+
+/* --- Accessibility --- */
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); border: 0; }
+.btn:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+.btn-ghost:focus-visible { outline: 2px solid var(--amber-dim); outline-offset: 2px; }
+
+/* --- Roman road brick pattern --- */
+.roman-bricks {
+  position: absolute;
+  inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg width='120' height='60' xmlns='http://www.w3.org/2000/svg'%3E%3Crect x='1' y='1' width='56' height='27' rx='1' fill='none' stroke='%23a39888' stroke-width='0.5' opacity='0.18'/%3E%3Crect x='61' y='1' width='56' height='27' rx='1' fill='none' stroke='%23a39888' stroke-width='0.5' opacity='0.18'/%3E%3Crect x='31' y='31' width='56' height='27' rx='1' fill='none' stroke='%23a39888' stroke-width='0.5' opacity='0.18'/%3E%3Crect x='-29' y='31' width='56' height='27' rx='1' fill='none' stroke='%23a39888' stroke-width='0.5' opacity='0.18'/%3E%3Crect x='91' y='31' width='56' height='27' rx='1' fill='none' stroke='%23a39888' stroke-width='0.5' opacity='0.18'/%3E%3C/svg%3E");
+  background-size: 120px 60px;
+  pointer-events: none;
+}
+
+/* Hero bricks: fade from right/bottom, invisible where text sits */
+.hero .roman-bricks {
+  -webkit-mask-image: linear-gradient(135deg, transparent 25%, rgba(0,0,0,0.25) 55%, rgba(0,0,0,0.5) 100%);
+  mask-image: linear-gradient(135deg, transparent 25%, rgba(0,0,0,0.25) 55%, rgba(0,0,0,0.5) 100%);
+}
+
+/* Section divider road band */
+.section-road {
+  height: 28px;
+  position: relative;
+  overflow: hidden;
+}
+.section-road .roman-bricks {
+  opacity: 0.5;
+}
+.section-road::before,
+.section-road::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 140px;
+  z-index: 1;
+}
+.section-road::before { left: 0; background: linear-gradient(to right, var(--bg-deep), transparent); }
+.section-road::after { right: 0; background: linear-gradient(to left, var(--bg-deep), transparent); }
+.section-road.on-surface::before { background: linear-gradient(to right, var(--bg-surface), transparent); }
+.section-road.on-surface::after { background: linear-gradient(to left, var(--bg-surface), transparent); }
+
+/* --- Section labels --- */
+.section-label {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: var(--amber);
+  margin-bottom: 1.5rem;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+.section-label::before {
+  content: '';
+  width: 1.5rem;
+  height: 1px;
+  background: var(--amber-dim);
+}
+
+h2 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: clamp(2rem, 4vw, 3rem);
+  line-height: 1.2;
+  margin-bottom: 1.5rem;
+  color: var(--text-primary);
+}
+
+h3 {
+  font-family: var(--font-body);
+  font-weight: 500;
+  font-size: 1.15rem;
+  margin-bottom: 0.75rem;
+  color: var(--text-primary);
+}
+
+p.lead {
+  font-size: 1.1rem;
+  color: var(--text-secondary);
+  max-width: 640px;
+  line-height: 1.8;
+}
+
+/* ===========================
+   HERO
+   =========================== */
+.hero {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  position: relative;
+  padding: 6rem 0;
+  overflow: hidden;
+}
+
+/* Radial glows behind hero */
+.hero::before {
+  content: '';
+  position: absolute;
+  top: -20%;
+  right: -10%;
+  width: 700px;
+  height: 700px;
+  background: radial-gradient(circle, rgba(192, 98, 58, 0.06) 0%, transparent 70%);
+  pointer-events: none;
+}
+.hero::after {
+  content: '';
+  position: absolute;
+  bottom: -30%;
+  left: -15%;
+  width: 600px;
+  height: 600px;
+  background: radial-gradient(circle, rgba(107, 124, 78, 0.05) 0%, transparent 70%);
+  pointer-events: none;
+}
+
+.hero-content {
+  position: relative;
+  z-index: 1;
+}
+
+.hero .wordmark {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: clamp(4.5rem, 12vw, 9rem);
+  line-height: 0.9;
+  letter-spacing: -0.03em;
+  background: linear-gradient(135deg, #2c2418 0%, var(--amber) 55%, var(--teal) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  margin-bottom: 1rem;
+  opacity: 0;
+  animation: wordmark-in 1s cubic-bezier(0.22, 1, 0.36, 1) 0.2s forwards;
+}
+
+@keyframes wordmark-in {
+  from { opacity: 0; transform: translateY(40px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.hero .tagline {
+  font-family: var(--font-display);
+  font-style: italic;
+  font-size: clamp(1.3rem, 3vw, 1.8rem);
+  color: var(--amber);
+  margin-bottom: 2rem;
+  opacity: 0;
+  animation: fade-up 0.8s cubic-bezier(0.22, 1, 0.36, 1) 0.5s forwards;
+}
+
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.hero .epigraph {
+  font-family: var(--font-display);
+  font-style: italic;
+  font-size: 0.92rem;
+  color: var(--text-dim);
+  margin-bottom: 1.5rem;
+  opacity: 0;
+  animation: fade-up 0.8s cubic-bezier(0.22, 1, 0.36, 1) 0.6s forwards;
+}
+
+.hero .description {
+  font-size: 1.1rem;
+  color: var(--text-secondary);
+  max-width: 560px;
+  line-height: 1.8;
+  margin-bottom: 3rem;
+  opacity: 0;
+  animation: fade-up 0.8s cubic-bezier(0.22, 1, 0.36, 1) 0.7s forwards;
+}
+
+.hero-actions {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+  opacity: 0;
+  animation: fade-up 0.8s cubic-bezier(0.22, 1, 0.36, 1) 0.9s forwards;
+}
+
+.btn {
+  font-family: var(--font-body);
+  font-weight: 500;
+  font-size: 0.9rem;
+  padding: 0.75rem 1.75rem;
+  border-radius: 2px;
+  text-decoration: none;
+  transition: all 0.25s ease;
+  cursor: pointer;
+  border: none;
+}
+
+.btn-primary {
+  background: var(--amber);
+  color: #faf7f2;
+}
+.btn-primary:hover {
+  background: #a85230;
+  box-shadow: 0 4px 20px rgba(192, 98, 58, 0.25);
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+}
+.btn-ghost:hover {
+  border-color: var(--amber-dim);
+  color: var(--amber);
+}
+
+/* Side decoration — vertical line */
+.hero-line {
+  position: absolute;
+  right: 12%;
+  top: 15%;
+  bottom: 15%;
+  width: 1px;
+  background: linear-gradient(to bottom, transparent, var(--teal), var(--amber), var(--violet), transparent);
+  opacity: 0;
+  animation: line-in 1.5s ease 1.2s forwards;
+}
+@keyframes line-in {
+  to { opacity: 0.35; }
+}
+.hero-line .dot {
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  left: -2.5px;
+}
+.hero-line .dot:nth-child(1) { top: 20%; background: var(--teal); animation: pulse-dot-teal 3s ease-in-out infinite 0s; }
+.hero-line .dot:nth-child(2) { top: 50%; background: var(--amber); animation: pulse-dot-amber 3s ease-in-out infinite 1s; }
+.hero-line .dot:nth-child(3) { top: 80%; background: var(--violet); animation: pulse-dot-violet 3s ease-in-out infinite 2s; }
+
+@keyframes pulse-dot-teal {
+  0%, 100% { opacity: 0.5; box-shadow: none; }
+  50% { opacity: 1; box-shadow: 0 0 10px rgba(107, 124, 78, 0.5); }
+}
+@keyframes pulse-dot-amber {
+  0%, 100% { opacity: 0.5; box-shadow: none; }
+  50% { opacity: 1; box-shadow: 0 0 10px rgba(192, 98, 58, 0.5); }
+}
+@keyframes pulse-dot-violet {
+  0%, 100% { opacity: 0.5; box-shadow: none; }
+  50% { opacity: 1; box-shadow: 0 0 10px rgba(100, 116, 139, 0.5); }
+}
+
+/* ===========================
+   THE PROBLEM
+   =========================== */
+.problem {
+  background: var(--bg-surface);
+  position: relative;
+}
+.problem::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 50%;
+  height: 100%;
+  background: radial-gradient(ellipse at 80% 30%, var(--rose-glow), transparent 70%);
+  pointer-events: none;
+}
+
+.problem-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4rem;
+  align-items: center;
+  margin-top: 3rem;
+}
+
+.problem-text p {
+  color: var(--text-secondary);
+  margin-bottom: 1rem;
+  font-size: 1rem;
+}
+
+/* Centralized DNS diagram */
+.dns-diagram {
+  position: relative;
+  padding: 2rem;
+}
+
+.dns-node {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.6rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  background: var(--bg-elevated);
+  margin-bottom: 0.5rem;
+  position: relative;
+}
+
+.dns-node.central {
+  border-color: var(--rose);
+  background: rgba(181, 68, 58, 0.06);
+  color: var(--rose);
+}
+
+.dns-node .node-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.dns-node .node-dot.red { background: var(--rose); }
+.dns-node .node-dot.dim { background: var(--text-dim); }
+
+.bottleneck-label {
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--rose);
+  margin: 1.5rem 0 0.75rem;
+}
+
+.dns-arrows {
+  display: flex;
+  justify-content: center;
+  gap: 0.5rem;
+  margin: 0.75rem 0;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+}
+
+/* ===========================
+   HOW IT WORKS — 3 LAYERS
+   =========================== */
+.layers-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1.5rem;
+  margin-top: 3rem;
+}
+
+.layer-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  padding: 2rem 1.75rem;
+  position: relative;
+  overflow: hidden;
+  transition: border-color 0.3s ease, box-shadow 0.3s ease;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.04), 0 4px 14px rgba(44,36,24,0.04);
+}
+.layer-card:hover {
+  box-shadow: 0 2px 8px rgba(0,0,0,0.06), 0 8px 24px rgba(44,36,24,0.06);
+}
+
+.layer-card:nth-child(1):hover { border-color: var(--border-teal); }
+.layer-card:nth-child(2):hover { border-color: var(--border-amber); }
+.layer-card:nth-child(3):hover { border-color: var(--border-violet); }
+
+.layer-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+}
+
+.layer-card:nth-child(1)::before { background: var(--teal); }
+.layer-card:nth-child(2)::before { background: var(--amber); }
+.layer-card:nth-child(3)::before { background: var(--violet); }
+
+/* Subtle glow per card */
+.layer-card:nth-child(1)::after { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 80px; background: linear-gradient(to bottom, var(--teal-glow), transparent); pointer-events: none; }
+.layer-card:nth-child(2)::after { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 80px; background: linear-gradient(to bottom, var(--amber-glow), transparent); pointer-events: none; }
+.layer-card:nth-child(3)::after { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 80px; background: linear-gradient(to bottom, var(--violet-glow), transparent); pointer-events: none; }
+
+.layer-badge {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  margin-bottom: 1rem;
+  display: inline-block;
+  padding: 0.2rem 0.5rem;
+  position: relative;
+  z-index: 1;
+}
+
+.layer-card:nth-child(1) .layer-badge { color: var(--teal); border: 1px solid var(--border-teal); }
+.layer-card:nth-child(2) .layer-badge { color: var(--amber); border: 1px solid var(--border-amber); }
+.layer-card:nth-child(3) .layer-badge { color: var(--violet); border: 1px solid var(--border-violet); }
+
+.layer-card h3 {
+  font-family: var(--font-display);
+  font-size: 1.4rem;
+  font-weight: 600;
+  margin-bottom: 1.25rem;
+}
+
+.layer-card ul {
+  list-style: none;
+  padding: 0;
+}
+
+.layer-card li {
+  font-size: 0.88rem;
+  color: var(--text-secondary);
+  padding: 0.35rem 0;
+  padding-left: 1.2rem;
+  position: relative;
+}
+
+.layer-card li::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0.75rem;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+}
+.layer-card:nth-child(1) li::before { background: var(--teal-dim); }
+.layer-card:nth-child(2) li::before { background: var(--amber-dim); }
+.layer-card:nth-child(3) li::before { background: var(--violet-dim); }
+
+/* ===========================
+   ARCHITECTURE
+   =========================== */
+.architecture {
+  background: var(--bg-surface);
+}
+
+.arch-subsection {
+  margin-top: 4rem;
+}
+
+.arch-subsection h3 {
+  font-family: var(--font-display);
+  font-size: 1.5rem;
+  font-weight: 600;
+  margin-bottom: 2rem;
+}
+
+/* Pipeline diagram */
+.pipeline {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  overflow-x: auto;
+  padding: 2rem 0;
+}
+
+.pipeline-node {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 100px;
+  flex-shrink: 0;
+}
+
+.pipeline-box {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  padding: 0.6rem 0.9rem;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  white-space: nowrap;
+  position: relative;
+  transition: all 0.3s ease;
+}
+.pipeline-box:hover {
+  border-color: var(--amber-dim);
+  color: var(--amber);
+}
+
+.pipeline-box.highlight {
+  border-color: var(--amber-dim);
+  background: rgba(192, 98, 58, 0.06);
+  color: var(--amber);
+}
+.pipeline-box.hl-teal {
+  border-color: var(--teal-dim);
+  background: rgba(107, 124, 78, 0.06);
+  color: var(--teal);
+}
+.pipeline-box.hl-teal:hover { border-color: var(--teal); color: var(--teal); }
+.pipeline-box.hl-violet {
+  border-color: var(--violet-dim);
+  background: rgba(100, 116, 139, 0.06);
+  color: var(--violet);
+}
+.pipeline-box.hl-violet:hover { border-color: var(--violet); color: var(--violet); }
+.pipeline-box.hl-emerald {
+  border-color: var(--emerald-dim);
+  background: rgba(82, 122, 82, 0.06);
+  color: var(--emerald);
+}
+.pipeline-box.hl-emerald:hover { border-color: var(--emerald); color: var(--emerald); }
+
+.pipeline-arrow {
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+  font-size: 0.9rem;
+  padding: 0 0.4rem;
+  flex-shrink: 0;
+}
+
+/* Layer stack */
+.layer-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  max-width: 700px;
+  margin: 2rem 0;
+}
+
+.stack-row {
+  display: grid;
+  grid-template-columns: 180px 1fr;
+  border: 1px solid var(--border);
+  border-bottom: none;
+  transition: background 0.3s ease;
+}
+.stack-row:last-child { border-bottom: 1px solid var(--border); }
+.stack-row:hover { background: var(--bg-elevated); }
+
+.stack-label {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.05em;
+  color: var(--amber);
+  padding: 0.9rem 1.2rem;
+  border-right: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+}
+
+.stack-value {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  padding: 0.9rem 1.2rem;
+  display: flex;
+  align-items: center;
+}
+
+/* Network diagram */
+.network-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1rem;
+  margin: 2rem 0;
+}
+
+.network-actor {
+  text-align: center;
+  padding: 1.5rem 1rem;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  position: relative;
+}
+
+.network-actor .actor-icon {
+  font-size: 1.5rem;
+  margin-bottom: 0.75rem;
+  display: block;
+}
+
+.network-actor h4 {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--amber);
+  margin-bottom: 0.5rem;
+}
+
+.network-actor p {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+/* Connecting lines between network actors */
+.network-connections {
+  display: flex;
+  justify-content: center;
+  gap: 2rem;
+  margin: -0.5rem 0 0;
+  padding: 0 3rem;
+}
+.network-conn-line {
+  flex: 1;
+  height: 1px;
+  background: var(--border-amber);
+  position: relative;
+  top: 0;
+}
+
+/* ===========================
+   COMPARISON TABLE
+   =========================== */
+.comparison-wrapper {
+  overflow-x: auto;
+  margin-top: 3rem;
+  border: 1px solid var(--border);
+}
+
+.comparison-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+  min-width: 700px;
+}
+
+.comparison-table thead th {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  padding: 1rem 1.2rem;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elevated);
+  font-weight: 500;
+}
+
+.comparison-table thead th:last-child {
+  color: var(--emerald);
+}
+
+.comparison-table tbody td {
+  padding: 0.8rem 1.2rem;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-secondary);
+}
+
+.comparison-table tbody tr:hover {
+  background: var(--bg-elevated);
+}
+
+.comparison-table tbody td:first-child {
+  font-weight: 400;
+  color: var(--text-primary);
+}
+
+.comparison-table tbody td:last-child {
+  color: var(--emerald);
+  font-weight: 400;
+}
+
+.check { color: var(--emerald); }
+.check::before { content: '\2713\00a0'; }
+.cross { color: var(--text-dim); }
+.cross::before { content: '\2014\00a0'; }
+.muted { color: var(--text-dim); font-style: italic; }
+
+.comparison-table thead th:last-child {
+  background: rgba(82, 122, 82, 0.07);
+}
+.comparison-table tbody td:last-child {
+  background: rgba(82, 122, 82, 0.04);
+}
+
+/* ===========================
+   TECHNICAL
+   =========================== */
+.tech-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3rem;
+  margin-top: 3rem;
+  align-items: start;
+}
+
+.tech-specs dt {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--teal-dim);
+  margin-top: 1.25rem;
+}
+.tech-specs dt:first-child { margin-top: 0; }
+
+.tech-specs dd {
+  font-size: 0.92rem;
+  color: var(--text-secondary);
+  margin-top: 0.25rem;
+}
+
+.code-block {
+  background: #1a1612;
+  color: #d6d0c6;
+  border: 1px solid rgba(44,36,24,0.15);
+  border-radius: 4px;
+  padding: 1.5rem;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  line-height: 1.9;
+  color: var(--text-secondary);
+  overflow-x: auto;
+  position: relative;
+}
+
+.code-block::before {
+  content: 'terminal';
+  position: absolute;
+  top: 0;
+  right: 0;
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: #7a7060;
+  padding: 0.4rem 0.8rem;
+  background: #241f1a;
+  border-left: 1px solid rgba(255,255,255,0.06);
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+
+.code-block .prompt { color: #8baa6e; }
+.code-block .comment { color: #7a7060; }
+.code-block .cmd { color: #d48a5a; }
+.code-block .flag { color: #8b9fbb; }
+.code-block .str { color: #7dab7d; }
+
+/* ===========================
+   ROADMAP
+   =========================== */
+.roadmap {
+  background: var(--bg-surface);
+}
+
+.roadmap-list {
+  margin-top: 3rem;
+  position: relative;
+  padding-left: 2rem;
+}
+
+/* Vertical line */
+.roadmap-list::before {
+  content: '';
+  position: absolute;
+  left: 5px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: linear-gradient(to bottom, var(--emerald), var(--teal), var(--amber), var(--violet), var(--border));
+}
+
+.roadmap-item {
+  position: relative;
+  padding: 0.75rem 0;
+  padding-left: 1rem;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.75rem;
+  align-items: baseline;
+}
+
+.roadmap-item::before {
+  content: '';
+  position: absolute;
+  left: -2rem;
+  top: 1.05rem;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  border: 2px solid var(--text-dim);
+  background: var(--bg-surface);
+}
+
+.roadmap-item.done::before {
+  background: var(--emerald);
+  border-color: var(--emerald);
+  box-shadow: 0 0 6px rgba(82, 122, 82, 0.4);
+}
+
+.roadmap-item.phase-teal::before { border-color: var(--teal-dim); }
+.roadmap-item.phase-amber::before { border-color: var(--amber-dim); }
+.roadmap-item.phase-violet::before { border-color: var(--violet-dim); }
+
+.roadmap-item .phase {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.roadmap-item.done .phase {
+  color: var(--emerald);
+}
+.roadmap-item.phase-teal .phase { color: var(--teal-dim); }
+.roadmap-item.phase-amber .phase { color: var(--amber-dim); }
+.roadmap-item.phase-violet .phase { color: var(--violet-dim); }
+
+.roadmap-item .phase-desc {
+  font-size: 0.92rem;
+  color: var(--text-secondary);
+}
+
+.roadmap-item.done .phase-desc {
+  color: var(--text-primary);
+}
+
+/* ===========================
+   FOOTER
+   =========================== */
+footer {
+  padding: 5rem 0 3rem;
+  text-align: center;
+}
+
+footer .origin {
+  font-family: var(--font-display);
+  font-style: italic;
+  font-size: 1.1rem;
+  color: var(--text-secondary);
+  max-width: 580px;
+  margin: 0 auto 2.5rem;
+  line-height: 1.7;
+}
+
+footer .footer-links {
+  display: flex;
+  justify-content: center;
+  gap: 2rem;
+  margin-bottom: 2.5rem;
+}
+
+footer .footer-links a {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  text-decoration: none;
+  transition: color 0.2s ease;
+}
+footer .footer-links a:hover { color: var(--amber); }
+
+footer .closing {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  background: linear-gradient(90deg, var(--teal), var(--amber), var(--violet));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  letter-spacing: 0.04em;
+}
+
+/* ===========================
+   RESPONSIVE
+   =========================== */
+@media (max-width: 900px) {
+  .problem-grid { grid-template-columns: 1fr; gap: 2rem; }
+  .layers-grid { grid-template-columns: 1fr; }
+  .tech-grid { grid-template-columns: 1fr; }
+  .network-grid { grid-template-columns: repeat(2, 1fr); }
+  .network-connections { display: none; }
+  .hero-line { display: none; }
+  .stack-row { grid-template-columns: 120px 1fr; }
+}
+
+@media (max-width: 600px) {
+  section { padding: 4rem 0; }
+  .container { padding: 0 1.25rem; }
+  .network-grid { grid-template-columns: 1fr; }
+  .pipeline { flex-direction: column; align-items: stretch; gap: 0; }
+  .pipeline-arrow { transform: rotate(90deg); padding: 0.15rem 0; align-self: center; }
+  .pipeline-node { min-width: 100%; }
+  .pipeline-box { width: 100%; text-align: center; }
+  .comparison-table { font-size: 0.75rem; }
+  .section-road { height: 20px; }
+}
+</style>
+<noscript><style>.reveal { opacity: 1 !important; transform: none !important; } .hero .wordmark, .hero .tagline, .hero .description, .hero-actions { opacity: 1 !important; animation: none !important; }</style></noscript>
+</head>
+<body>
+
+<!-- ==================== HERO ==================== -->
+<section class="hero">
+  <div class="roman-bricks" aria-hidden="true"></div>
+  <div class="container hero-content">
+    <h1 class="wordmark">Numa</h1>
+    <div class="tagline">DNS you own. Everywhere you go.</div>
+    <p class="epigraph">After Numa Pompilius, who built institutions that outlasted kings.</p>
+    <p class="description">
+      Block ads and trackers. Override DNS for development. Cache for speed. A single portable binary built from scratch in Rust &mdash; no Raspberry Pi, no cloud, no account. Your DNS travels with you.
+    </p>
+    <div class="hero-actions">
+      <a href="#technical" class="btn btn-primary">Get Started</a>
+      <a href="#architecture" class="btn btn-ghost">Read the Architecture</a>
+      <a href="https://github.com/razvandimescu/numa" class="btn btn-ghost" target="_blank" rel="noopener">View on GitHub</a>
+    </div>
+  </div>
+  <div class="hero-line" aria-hidden="true">
+    <div class="dot"></div>
+    <div class="dot"></div>
+    <div class="dot"></div>
+  </div>
+</section>
+
+<div class="section-road" aria-hidden="true"><div class="roman-bricks"></div></div>
+
+<!-- ==================== THE PROBLEM ==================== -->
+<section class="problem">
+  <div class="container">
+    <div class="reveal">
+      <div class="section-label" style="color: var(--rose)">The Problem</div>
+      <h2>DNS is a single point of control</h2>
+    </div>
+    <div class="problem-grid">
+      <div class="problem-text reveal reveal-delay-1">
+        <p>Every time you visit a website, you ask a DNS resolver where to go. That resolver sees every domain you visit, when, and how often.</p>
+        <p>Today, a handful of operators control this infrastructure. ICANN governs the root. Registrars can seize domains. Governments compel censorship. Your ISP logs your queries by default.</p>
+        <p>The protocol that underpins the entire internet has no built-in privacy, no cryptographic ownership, and no way for users to choose who they trust.</p>
+      </div>
+      <div class="dns-diagram reveal reveal-delay-2">
+        <div class="dns-node"><span class="node-dot dim"></span>Your browser</div>
+        <div class="dns-node"><span class="node-dot dim"></span>Your ISP / OS resolver</div>
+        <div class="dns-arrows">|</div>
+        <div class="bottleneck-label">Single point of failure</div>
+        <div class="dns-node central"><span class="node-dot red"></span>Cloudflare 1.1.1.1 / Google 8.8.8.8</div>
+        <div class="dns-arrows">|</div>
+        <div class="dns-node"><span class="node-dot dim"></span>ICANN root servers</div>
+        <div class="dns-node"><span class="node-dot dim"></span>TLD registrars (.com, .io, ...)</div>
+        <div class="dns-node"><span class="node-dot dim"></span>Authoritative nameservers</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="section-road on-surface" aria-hidden="true"><div class="roman-bricks"></div></div>
+
+<!-- ==================== HOW IT WORKS ==================== -->
+<section id="layers">
+  <div class="container">
+    <div class="reveal">
+      <div class="section-label">How It Works</div>
+      <h2>Three layers, built incrementally</h2>
+      <p class="lead">Numa starts as a practical developer tool and evolves toward a decentralized network. Each layer stands on its own.</p>
+    </div>
+    <div class="layers-grid">
+      <div class="layer-card reveal reveal-delay-1">
+        <div class="layer-badge">Today</div>
+        <h3>DNS You Control</h3>
+        <ul>
+          <li>Ad &amp; tracker blocking &mdash; 385K+ domains, zero config</li>
+          <li>Ephemeral DNS overrides with auto-revert</li>
+          <li>Live dashboard with real-time stats and controls</li>
+          <li>REST API &mdash; 18 endpoints for programmatic control</li>
+          <li>TTL-aware caching (sub-ms lookups)</li>
+          <li>Single binary, portable &mdash; your ad blocker travels with you</li>
+        </ul>
+      </div>
+      <div class="layer-card reveal reveal-delay-2">
+        <div class="layer-badge">Next</div>
+        <h3>Self-Sovereign DNS</h3>
+        <ul>
+          <li>pkarr integration: Ed25519 keys as domains</li>
+          <li>Resolve via Mainline BitTorrent DHT (10M+ nodes)</li>
+          <li>No registrar, no blockchain, no ICANN</li>
+          <li>Cryptographic verification built-in</li>
+          <li>Human-readable aliases for pkarr domains</li>
+        </ul>
+      </div>
+      <div class="layer-card reveal reveal-delay-3">
+        <div class="layer-badge">Vision</div>
+        <h3>Decentralized Resolver Network</h3>
+        <ul>
+          <li>Operators run Numa nodes and stake tokens</li>
+          <li>Earn rewards for uptime, correctness, latency</li>
+          <li>Independent auditors send challenge queries</li>
+          <li>Slashing for NXDOMAIN hijacking or poisoned records</li>
+          <li>Geographic diversity bonuses</li>
+          <li>Privacy-preserving resolution (DoH/DoT)</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="section-road" aria-hidden="true"><div class="roman-bricks"></div></div>
+
+<!-- ==================== ARCHITECTURE ==================== -->
+<section class="architecture" id="architecture">
+  <div class="container">
+    <div class="reveal">
+      <div class="section-label">Architecture</div>
+      <h2>Resolution pipeline</h2>
+      <p class="lead">Every query walks through the same deterministic pipeline. Local data takes priority; the network is the fallback.</p>
+    </div>
+
+    <div class="reveal reveal-delay-1">
+      <div class="pipeline">
+        <div class="pipeline-node"><div class="pipeline-box hl-teal">Query</div></div>
+        <span class="pipeline-arrow">&rarr;</span>
+        <div class="pipeline-node"><div class="pipeline-box highlight">Overrides</div></div>
+        <span class="pipeline-arrow">&rarr;</span>
+        <div class="pipeline-node"><div class="pipeline-box">Local Zones</div></div>
+        <span class="pipeline-arrow">&rarr;</span>
+        <div class="pipeline-node"><div class="pipeline-box">Cache</div></div>
+        <span class="pipeline-arrow">&rarr;</span>
+        <div class="pipeline-node"><div class="pipeline-box hl-violet">pkarr / DHT</div></div>
+        <span class="pipeline-arrow">&rarr;</span>
+        <div class="pipeline-node"><div class="pipeline-box">Upstream</div></div>
+        <span class="pipeline-arrow">&rarr;</span>
+        <div class="pipeline-node"><div class="pipeline-box hl-emerald">Respond</div></div>
+      </div>
+    </div>
+
+    <div class="arch-subsection reveal">
+      <h3>Layered resilience</h3>
+      <div class="layer-stack">
+        <div class="stack-row">
+          <div class="stack-label" style="color: var(--violet)">L4 Permanence</div>
+          <div class="stack-value">Arweave immutable zone snapshots (future)</div>
+        </div>
+        <div class="stack-row">
+          <div class="stack-label" style="color: var(--violet-dim)">L3 Distribution</div>
+          <div class="stack-value">Mainline DHT via pkarr &mdash; 10M+ nodes</div>
+        </div>
+        <div class="stack-row">
+          <div class="stack-label" style="color: var(--amber)">L2 Serving</div>
+          <div class="stack-value">Numa instances worldwide</div>
+        </div>
+        <div class="stack-row">
+          <div class="stack-label" style="color: var(--teal)">L1 Compatibility</div>
+          <div class="stack-value">Standard DNS wire protocol &mdash; RFC 1035</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="arch-subsection reveal">
+      <h3>Network actors</h3>
+      <div class="network-grid">
+        <div class="network-actor">
+          <span class="actor-icon" style="color: var(--teal)" aria-hidden="true">&compfn;</span>
+          <h4 style="color: var(--teal)">Users</h4>
+          <p>Choose resolvers from a decentralized marketplace based on latency, privacy, and reputation</p>
+        </div>
+        <div class="network-actor">
+          <span class="actor-icon" style="color: var(--amber)" aria-hidden="true">&diamond;</span>
+          <h4 style="color: var(--amber)">Operators</h4>
+          <p>Stake tokens, run Numa nodes, earn rewards proportional to verified service quality</p>
+        </div>
+        <div class="network-actor">
+          <span class="actor-icon" style="color: var(--rose)" aria-hidden="true">&target;</span>
+          <h4 style="color: var(--rose)">Auditors</h4>
+          <p>Send challenge queries from diverse locations, verify correctness and latency</p>
+        </div>
+        <div class="network-actor">
+          <span class="actor-icon" style="color: var(--violet)" aria-hidden="true">&equiv;</span>
+          <h4 style="color: var(--violet)">Chain</h4>
+          <p>Accounting, reputation scores, reward distribution, slashing proofs</p>
+        </div>
+      </div>
+      <div class="network-connections" aria-hidden="true">
+        <div class="network-conn-line"></div>
+        <div class="network-conn-line"></div>
+        <div class="network-conn-line"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="section-road on-surface" aria-hidden="true"><div class="roman-bricks"></div></div>
+
+<!-- ==================== WHY NUMA IS DIFFERENT ==================== -->
+<section>
+  <div class="container">
+    <div class="reveal">
+      <div class="section-label">Comparison</div>
+      <h2>Why Numa is different</h2>
+    </div>
+    <div class="comparison-wrapper reveal reveal-delay-1">
+      <table class="comparison-table">
+        <caption class="sr-only">Comparison of Numa with existing DNS solutions</caption>
+        <thead>
+          <tr>
+            <th></th>
+            <th>Pi-hole</th>
+            <th>NextDNS</th>
+            <th>Cloudflare</th>
+            <th>AdGuard Home</th>
+            <th>Numa</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Ad &amp; tracker blocking</td>
+            <td class="check">Yes</td>
+            <td class="check">Yes</td>
+            <td class="muted">Limited</td>
+            <td class="check">Yes</td>
+            <td class="check">385K+ domains</td>
+          </tr>
+          <tr>
+            <td>Portable (travels with laptop)</td>
+            <td class="cross">No (Raspberry Pi)</td>
+            <td class="muted">Cloud only</td>
+            <td class="muted">Cloud only</td>
+            <td class="cross">No (network appliance)</td>
+            <td class="check">Single binary</td>
+          </tr>
+          <tr>
+            <td>Developer overrides</td>
+            <td class="cross">No</td>
+            <td class="cross">No</td>
+            <td class="cross">No</td>
+            <td class="cross">No</td>
+            <td class="check">REST API + auto-expiry</td>
+          </tr>
+          <tr>
+            <td>Data stays local</td>
+            <td class="check">Yes</td>
+            <td class="cross">Cloud</td>
+            <td class="cross">Cloud</td>
+            <td class="check">Yes</td>
+            <td class="check">100% local</td>
+          </tr>
+          <tr>
+            <td>Live dashboard</td>
+            <td class="check">Yes</td>
+            <td class="check">Yes</td>
+            <td class="cross">No</td>
+            <td class="check">Yes</td>
+            <td class="check">Real-time + controls</td>
+          </tr>
+          <tr>
+            <td>Zero config needed</td>
+            <td class="cross">Complex setup</td>
+            <td class="check">Yes</td>
+            <td class="check">Yes</td>
+            <td class="cross">Docker/setup</td>
+            <td class="check">Works out of the box</td>
+          </tr>
+          <tr>
+            <td>Self-sovereign DNS roadmap</td>
+            <td class="cross">No</td>
+            <td class="cross">No</td>
+            <td class="cross">No</td>
+            <td class="cross">No</td>
+            <td class="check">pkarr / DHT</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<div class="section-road" aria-hidden="true"><div class="roman-bricks"></div></div>
+
+<!-- ==================== TECHNICAL ==================== -->
+<section id="technical">
+  <div class="container">
+    <div class="reveal">
+      <div class="section-label">Under the Hood</div>
+      <h2>Technical details</h2>
+    </div>
+    <div class="tech-grid">
+      <dl class="tech-specs reveal reveal-delay-1">
+        <dt>Runtime</dt>
+        <dd>Rust + tokio async (rt-multi-thread)</dd>
+
+        <dt>DNS Libraries</dt>
+        <dd>Zero &mdash; wire protocol parsed from scratch</dd>
+
+        <dt>Dependencies</dt>
+        <dd>6 runtime crates (tokio, axum, serde, serde_json, toml, log)</dd>
+
+        <dt>Packet Format</dt>
+        <dd>RFC 1035 compliant, 512-byte UDP</dd>
+
+        <dt>Concurrency</dt>
+        <dd>Arc&lt;ServerCtx&gt; + std::sync::Mutex (sub-&micro;s holds, never across .await)</dd>
+
+        <dt>Signatures</dt>
+        <dd>Ed25519 via pkarr for self-sovereign domains</dd>
+      </dl>
+      <div class="code-block reveal reveal-delay-2">
+<span class="prompt">$</span> <span class="cmd">cargo install</span> numa
+<span class="prompt">$</span> <span class="cmd">sudo numa</span>                          <span class="comment"># bind to :53</span>
+<span class="prompt">$</span> <span class="cmd">dig</span> <span class="flag">@127.0.0.1</span> google.com         <span class="comment"># test resolution</span>
+<span class="prompt">$</span> <span class="cmd">curl</span> localhost:5380/overrides      <span class="comment"># REST API</span>
+<span class="prompt">$</span> <span class="cmd">curl</span> <span class="flag">-X POST</span> localhost:5380/overrides \
+    <span class="flag">-d</span> <span class="str">'{"domain":"api.stripe.com",
+         "target":"127.0.0.1",
+         "duration_secs":1800}'</span>        <span class="comment"># 30-min override</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="section-road" aria-hidden="true"><div class="roman-bricks"></div></div>
+
+<!-- ==================== ROADMAP ==================== -->
+<section class="roadmap">
+  <div class="container">
+    <div class="reveal">
+      <div class="section-label">Roadmap</div>
+      <h2>Where we're going</h2>
+    </div>
+    <div class="roadmap-list reveal reveal-delay-1">
+      <div class="roadmap-item done">
+        <span class="phase">Phase 0</span>
+        <span class="phase-desc">DNS proxy core &mdash; zones, caching, forwarding, async tokio runtime</span>
+      </div>
+      <div class="roadmap-item done">
+        <span class="phase">Phase 1</span>
+        <span class="phase-desc">Override layer + REST API with 18 endpoints</span>
+      </div>
+      <div class="roadmap-item done">
+        <span class="phase">Phase 2</span>
+        <span class="phase-desc">Ad &amp; tracker blocking &mdash; 385K+ domains, live dashboard, one-click allowlist</span>
+      </div>
+      <div class="roadmap-item phase-teal">
+        <span class="phase">Phase 3</span>
+        <span class="phase-desc">System integration &mdash; auto-discovery of OS DNS routing, one-command install</span>
+      </div>
+      <div class="roadmap-item phase-teal">
+        <span class="phase">Phase 4</span>
+        <span class="phase-desc">pkarr spike &mdash; DHT resolution and publish endpoint</span>
+      </div>
+      <div class="roadmap-item phase-teal">
+        <span class="phase">Phase 5</span>
+        <span class="phase-desc">pkarr product &mdash; human-readable aliases, re-publish daemon, key management</span>
+      </div>
+      <div class="roadmap-item phase-amber">
+        <span class="phase">Phase 4</span>
+        <span class="phase-desc">Challenge and audit protocol for verifiable resolver behavior</span>
+      </div>
+      <div class="roadmap-item phase-violet">
+        <span class="phase">Phase 5</span>
+        <span class="phase-desc">Token economics, staking, and slashing mechanism</span>
+      </div>
+      <div class="roadmap-item phase-violet">
+        <span class="phase">Phase 6</span>
+        <span class="phase-desc">Decentralized resolver marketplace</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ==================== FOOTER ==================== -->
+<footer>
+  <div class="container">
+    <p class="origin reveal">
+      Named after Numa Pompilius &mdash; the second king of Rome who established the institutions, laws, and religious practices that outlasted the monarchy itself.
+    </p>
+    <div class="footer-links reveal reveal-delay-1">
+      <a href="https://github.com/razvandimescu/numa" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://github.com/razvandimescu/numa/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a>
+    </div>
+    <p class="closing reveal reveal-delay-2">Built from scratch in Rust. No dependencies on trust.</p>
+  </div>
+</footer>
+
+<script>
+// Intersection Observer for reveal animations
+const observer = new IntersectionObserver((entries) => {
+  entries.forEach(entry => {
+    if (entry.isIntersecting) {
+      entry.target.classList.add('visible');
+    }
+  });
+}, {
+  threshold: 0.1,
+  rootMargin: '0px 0px -40px 0px'
+});
+
+document.querySelectorAll('.reveal').forEach(el => observer.observe(el));
+</script>
+
+</body>
+</html>

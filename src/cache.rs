@@ -11,8 +11,11 @@ struct CacheEntry {
     ttl: Duration,
 }
 
+/// DNS cache using a two-level map (domain -> query_type -> entry) so that
+/// lookups can borrow `&str` instead of allocating a `String` key.
 pub struct DnsCache {
-    entries: HashMap<(String, QueryType), CacheEntry>,
+    entries: HashMap<String, HashMap<QueryType, CacheEntry>>,
+    entry_count: usize,
     max_entries: usize,
     min_ttl: u32,
     max_ttl: u32,
@@ -23,6 +26,7 @@ impl DnsCache {
     pub fn new(max_entries: usize, min_ttl: u32, max_ttl: u32) -> Self {
         DnsCache {
             entries: HashMap::new(),
+            entry_count: 0,
             max_entries,
             min_ttl,
             max_ttl,
@@ -33,17 +37,22 @@ impl DnsCache {
     pub fn lookup(&mut self, domain: &str, qtype: QueryType) -> Option<DnsPacket> {
         self.query_count += 1;
 
-        // Periodic eviction every 1000 queries
         if self.query_count.is_multiple_of(1000) {
             self.evict_expired();
         }
 
-        let key = (domain.to_string(), qtype);
-        let entry = self.entries.get(&key)?;
+        let type_map = self.entries.get(domain)?;
+        let entry = type_map.get(&qtype)?;
 
         let elapsed = entry.inserted_at.elapsed();
         if elapsed >= entry.ttl {
-            self.entries.remove(&key);
+            // Expired: remove this entry
+            let type_map = self.entries.get_mut(domain).unwrap();
+            type_map.remove(&qtype);
+            self.entry_count -= 1;
+            if type_map.is_empty() {
+                self.entries.remove(domain);
+            }
             return None;
         }
 
@@ -59,10 +68,9 @@ impl DnsCache {
     }
 
     pub fn insert(&mut self, domain: &str, qtype: QueryType, packet: &DnsPacket) {
-        if self.entries.len() >= self.max_entries {
+        if self.entry_count >= self.max_entries {
             self.evict_expired();
-            // If still full after eviction, skip insertion
-            if self.entries.len() >= self.max_entries {
+            if self.entry_count >= self.max_entries {
                 return;
             }
         }
@@ -71,9 +79,18 @@ impl DnsCache {
             .unwrap_or(self.min_ttl)
             .clamp(self.min_ttl, self.max_ttl);
 
-        let key = (domain.to_string(), qtype);
-        self.entries.insert(
-            key,
+        let type_map = if let Some(existing) = self.entries.get_mut(domain) {
+            existing
+        } else {
+            self.entries.entry(domain.to_string()).or_default()
+        };
+
+        if !type_map.contains_key(&qtype) {
+            self.entry_count += 1;
+        }
+
+        type_map.insert(
+            qtype,
             CacheEntry {
                 packet: packet.clone(),
                 inserted_at: Instant::now(),
@@ -82,10 +99,64 @@ impl DnsCache {
         );
     }
 
-    fn evict_expired(&mut self) {
-        self.entries
-            .retain(|_, entry| entry.inserted_at.elapsed() < entry.ttl);
+    pub fn len(&self) -> usize {
+        self.entry_count
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.entry_count == 0
+    }
+
+    pub fn max_entries(&self) -> usize {
+        self.max_entries
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.entry_count = 0;
+    }
+
+    pub fn remove(&mut self, domain: &str) {
+        let domain_lower = domain.to_lowercase();
+        if let Some(type_map) = self.entries.remove(&domain_lower) {
+            self.entry_count -= type_map.len();
+        }
+    }
+
+    pub fn list(&self) -> Vec<CacheInfo> {
+        let mut result = Vec::new();
+        for (domain, type_map) in &self.entries {
+            for (qtype, entry) in type_map {
+                let elapsed = entry.inserted_at.elapsed();
+                if elapsed < entry.ttl {
+                    let remaining = (entry.ttl - elapsed).as_secs() as u32;
+                    result.push(CacheInfo {
+                        domain: domain.clone(),
+                        query_type: *qtype,
+                        ttl_remaining: remaining,
+                    });
+                }
+            }
+        }
+        result
+    }
+
+    fn evict_expired(&mut self) {
+        let mut count = 0;
+        self.entries.retain(|_, type_map| {
+            let before = type_map.len();
+            type_map.retain(|_, entry| entry.inserted_at.elapsed() < entry.ttl);
+            count += before - type_map.len();
+            !type_map.is_empty()
+        });
+        self.entry_count -= count;
+    }
+}
+
+pub struct CacheInfo {
+    pub domain: String,
+    pub query_type: QueryType,
+    pub ttl_remaining: u32,
 }
 
 fn extract_min_ttl(records: &[DnsRecord]) -> Option<u32> {

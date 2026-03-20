@@ -33,6 +33,33 @@ impl QueryType {
             _ => QueryType::UNKNOWN(num),
         }
     }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            QueryType::A => "A",
+            QueryType::NS => "NS",
+            QueryType::CNAME => "CNAME",
+            QueryType::MX => "MX",
+            QueryType::AAAA => "AAAA",
+            QueryType::UNKNOWN(_) => "UNKNOWN",
+        }
+    }
+
+    pub fn parse_str(s: &str) -> Option<QueryType> {
+        if s.eq_ignore_ascii_case("A") {
+            Some(QueryType::A)
+        } else if s.eq_ignore_ascii_case("NS") {
+            Some(QueryType::NS)
+        } else if s.eq_ignore_ascii_case("CNAME") {
+            Some(QueryType::CNAME)
+        } else if s.eq_ignore_ascii_case("MX") {
+            Some(QueryType::MX)
+        } else if s.eq_ignore_ascii_case("AAAA") {
+            Some(QueryType::AAAA)
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
