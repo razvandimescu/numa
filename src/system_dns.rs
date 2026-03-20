@@ -820,13 +820,34 @@ fn untrust_ca() -> Result<(), String> {
 
     #[cfg(target_os = "macos")]
     {
-        if ca_path.exists() {
-            let _ = std::process::Command::new("security")
-                .args(["remove-trusted-cert", "-d"])
-                .arg(&ca_path)
-                .status();
-            eprintln!("  Removed Numa CA from system keychain");
+        // Find all Numa CA certs by hash and delete each one
+        if let Ok(out) = std::process::Command::new("security")
+            .args([
+                "find-certificate",
+                "-c",
+                "Numa Local CA",
+                "-a",
+                "-Z",
+                "/Library/Keychains/System.keychain",
+            ])
+            .output()
+        {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            for line in stdout.lines() {
+                if let Some(hash) = line.strip_prefix("SHA-1 hash: ") {
+                    let hash = hash.trim();
+                    let _ = std::process::Command::new("security")
+                        .args([
+                            "delete-certificate",
+                            "-Z",
+                            hash,
+                            "/Library/Keychains/System.keychain",
+                        ])
+                        .output();
+                }
+            }
         }
+        eprintln!("  Removed Numa CA from system keychain");
     }
 
     #[cfg(target_os = "linux")]

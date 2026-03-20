@@ -8,7 +8,7 @@ Block ads and trackers. Override DNS for development. Name your local services. 
 
 - **Ad blocking that travels with you** — 385K+ domains blocked out of the box. Works on any network: coffee shops, hotels, airports.
 - **Developer overrides** — point any hostname to any IP with auto-revert. No more editing `/etc/hosts`.
-- **Local service proxy** — access `frontend.numa`, `api.numa` instead of `localhost:5173`. Clean URLs with WebSocket support for HMR.
+- **Local service proxy** — access `https://frontend.numa` instead of `localhost:5173`. Auto-generated TLS certs, WebSocket support for HMR.
 - **Sub-millisecond caching** — cached lookups in 0ms. Faster than any public resolver.
 - **Live dashboard** — real-time query stats, blocking controls, override management, local services at `http://numa.numa` (or `localhost:5380`).
 - **Single binary, zero config** — just run it.
@@ -86,8 +86,10 @@ target_port = 8000
 ```
 
 - `numa.numa` is pre-configured — the dashboard itself, accessible without remembering the port
+- **HTTPS with green lock** — auto-generated local CA + per-service TLS certs. `sudo numa install` trusts the CA in your system keychain.
 - WebSocket support — Vite/webpack HMR works through the proxy
 - Health checks — dashboard shows green/red status for each service
+- Services persist across restarts (`~/.config/numa/services.json`)
 - Manage via dashboard UI or REST API
 
 ## Resolution Pipeline
@@ -197,7 +199,7 @@ REST API on port 5380 (22 endpoints):
 | Ad blocking | Yes | Yes | Limited | 385K+ domains |
 | Portable | No (Raspberry Pi) | Cloud only | Cloud only | Single binary |
 | Developer overrides | No | No | No | REST API + auto-expiry |
-| Local service proxy | No | No | No | `.numa` domains + WebSocket |
+| Local service proxy | No | No | No | `.numa` domains + HTTPS + WebSocket |
 | Data stays local | Yes | Cloud | Cloud | 100% local |
 | Zero config | Complex setup | Yes | Yes | Works out of the box |
 | Self-sovereign DNS | No | No | No | pkarr/DHT roadmap |
@@ -225,7 +227,7 @@ Zero external DNS libraries. RFC 1035 wire protocol parsed by hand. Dependencies
 - [x] Ad blocking — 385K+ domains, dashboard, allowlist
 - [x] System DNS auto-discovery — Tailscale, VPN split-DNS
 - [x] System DNS auto-configuration — `numa install` / `numa uninstall`
-- [x] Local service proxy — `.numa` domains with HTTP reverse proxy + WebSocket support
+- [x] Local service proxy — `.numa` domains with HTTP/HTTPS reverse proxy, auto TLS, WebSocket
 - [ ] pkarr integration — self-sovereign DNS via Mainline DHT
 - [ ] Decentralized resolver network — staking, auditing, token economics
 
