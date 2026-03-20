@@ -315,17 +315,253 @@ fn uninstall_macos() -> Result<(), String> {
     Ok(())
 }
 
-// --- Linux stubs ---
+// --- Service management ---
+
+#[cfg(target_os = "macos")]
+const PLIST_LABEL: &str = "com.numa.dns";
+#[cfg(target_os = "macos")]
+const PLIST_DEST: &str = "/Library/LaunchDaemons/com.numa.dns.plist";
+#[cfg(target_os = "linux")]
+const SYSTEMD_UNIT: &str = "/etc/systemd/system/numa.service";
+
+/// Install Numa as a system service that starts on boot and auto-restarts.
+pub fn install_service() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        install_service_macos()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        install_service_linux()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        Err("service installation not supported on this OS".to_string())
+    }
+}
+
+/// Uninstall the Numa system service.
+pub fn uninstall_service() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        uninstall_service_macos()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        uninstall_service_linux()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        Err("service uninstallation not supported on this OS".to_string())
+    }
+}
+
+/// Show the service status.
+pub fn service_status() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        service_status_macos()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        service_status_linux()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        Err("service status not supported on this OS".to_string())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn install_service_macos() -> Result<(), String> {
+    // Check binary exists
+    if !std::path::Path::new("/usr/local/bin/numa").exists() {
+        return Err("numa binary not found at /usr/local/bin/numa. Run: sudo cp target/release/numa /usr/local/bin/numa".to_string());
+    }
+
+    // Create log directory
+    std::fs::create_dir_all("/usr/local/var/log")
+        .map_err(|e| format!("failed to create log dir: {}", e))?;
+
+    // Write plist
+    let plist = include_str!("../com.numa.dns.plist");
+    std::fs::write(PLIST_DEST, plist)
+        .map_err(|e| format!("failed to write {}: {}", PLIST_DEST, e))?;
+
+    // Load the service
+    let status = std::process::Command::new("launchctl")
+        .args(["load", "-w", PLIST_DEST])
+        .status()
+        .map_err(|e| format!("failed to run launchctl: {}", e))?;
+
+    if status.success() {
+        eprintln!("  Service installed and started.");
+        eprintln!("  Numa will auto-start on boot and restart if killed.");
+        eprintln!("  Logs: /usr/local/var/log/numa.log");
+        eprintln!("  Run 'sudo numa service stop' to uninstall.\n");
+        Ok(())
+    } else {
+        Err("launchctl load failed".to_string())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn uninstall_service_macos() -> Result<(), String> {
+    // Unload the service
+    let _ = std::process::Command::new("launchctl")
+        .args(["unload", "-w", PLIST_DEST])
+        .status();
+
+    // Remove plist
+    if std::path::Path::new(PLIST_DEST).exists() {
+        std::fs::remove_file(PLIST_DEST)
+            .map_err(|e| format!("failed to remove {}: {}", PLIST_DEST, e))?;
+    }
+
+    eprintln!("  Service uninstalled. Numa will no longer auto-start.\n");
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn service_status_macos() -> Result<(), String> {
+    let output = std::process::Command::new("launchctl")
+        .args(["list", PLIST_LABEL])
+        .output()
+        .map_err(|e| format!("failed to run launchctl: {}", e))?;
+
+    if output.status.success() {
+        let text = String::from_utf8_lossy(&output.stdout);
+        eprintln!("  Numa service is loaded.\n");
+        for line in text.lines() {
+            eprintln!("  {}", line);
+        }
+        eprintln!();
+    } else {
+        eprintln!("  Numa service is not installed.\n");
+    }
+    Ok(())
+}
+
+// --- Linux implementation ---
+
+#[cfg(target_os = "linux")]
+fn backup_path_linux() -> std::path::PathBuf {
+    let home = std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("/root"));
+    let dir = home.join(".numa");
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join("original-resolv.conf")
+}
 
 #[cfg(target_os = "linux")]
 fn install_linux() -> Result<(), String> {
-    Err(
-        "Linux auto-configuration not yet implemented. Manually set your DNS to 127.0.0.1"
-            .to_string(),
-    )
+    let backup = backup_path_linux();
+    let resolv = std::path::Path::new("/etc/resolv.conf");
+
+    // Save current resolv.conf
+    if resolv.exists() {
+        std::fs::copy(resolv, &backup)
+            .map_err(|e| format!("failed to backup /etc/resolv.conf: {}", e))?;
+        eprintln!("  Saved /etc/resolv.conf to {}", backup.display());
+    }
+
+    // Write new resolv.conf pointing to Numa
+    let content =
+        "# Generated by Numa — run 'sudo numa uninstall' to restore\nnameserver 127.0.0.1\n";
+    std::fs::write(resolv, content)
+        .map_err(|e| format!("failed to write /etc/resolv.conf: {}", e))?;
+
+    eprintln!("  Set /etc/resolv.conf -> nameserver 127.0.0.1");
+    eprintln!("  Run 'sudo numa uninstall' to restore.\n");
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
 fn uninstall_linux() -> Result<(), String> {
-    Err("Linux auto-configuration not yet implemented.".to_string())
+    let backup = backup_path_linux();
+    let resolv = std::path::Path::new("/etc/resolv.conf");
+
+    if backup.exists() {
+        std::fs::copy(&backup, resolv)
+            .map_err(|e| format!("failed to restore /etc/resolv.conf: {}", e))?;
+        std::fs::remove_file(&backup).ok();
+        eprintln!("  Restored /etc/resolv.conf from backup. Backup removed.\n");
+    } else {
+        eprintln!("  No backup found at {}.", backup.display());
+        eprintln!("  Manually edit /etc/resolv.conf to restore your DNS.\n");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn install_service_linux() -> Result<(), String> {
+    if !std::path::Path::new("/usr/local/bin/numa").exists() {
+        return Err("numa binary not found at /usr/local/bin/numa. Run: sudo cp target/release/numa /usr/local/bin/numa".to_string());
+    }
+
+    let unit = include_str!("../numa.service");
+    std::fs::write(SYSTEMD_UNIT, unit)
+        .map_err(|e| format!("failed to write {}: {}", SYSTEMD_UNIT, e))?;
+
+    run_systemctl(&["daemon-reload"])?;
+    run_systemctl(&["enable", "numa"])?;
+    run_systemctl(&["start", "numa"])?;
+
+    eprintln!("  Service installed and started.");
+    eprintln!("  Numa will auto-start on boot and restart if killed.");
+    eprintln!("  Logs: journalctl -u numa -f");
+    eprintln!("  Run 'sudo numa service stop' to uninstall.\n");
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn uninstall_service_linux() -> Result<(), String> {
+    let _ = run_systemctl(&["stop", "numa"]);
+    let _ = run_systemctl(&["disable", "numa"]);
+
+    if std::path::Path::new(SYSTEMD_UNIT).exists() {
+        std::fs::remove_file(SYSTEMD_UNIT)
+            .map_err(|e| format!("failed to remove {}: {}", SYSTEMD_UNIT, e))?;
+    }
+    let _ = run_systemctl(&["daemon-reload"]);
+
+    eprintln!("  Service uninstalled. Numa will no longer auto-start.\n");
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn service_status_linux() -> Result<(), String> {
+    let output = std::process::Command::new("systemctl")
+        .args(["status", "numa"])
+        .output()
+        .map_err(|e| format!("failed to run systemctl: {}", e))?;
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    if text.is_empty() {
+        eprintln!("  Numa service is not installed.\n");
+    } else {
+        for line in text.lines() {
+            eprintln!("  {}", line);
+        }
+        eprintln!();
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn run_systemctl(args: &[&str]) -> Result<(), String> {
+    let status = std::process::Command::new("systemctl")
+        .args(args)
+        .status()
+        .map_err(|e| format!("systemctl {} failed: {}", args.join(" "), e))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "systemctl {} exited with {}",
+            args.join(" "),
+            status
+        ))
+    }
 }
