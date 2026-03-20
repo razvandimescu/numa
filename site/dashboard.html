@@ -519,6 +519,22 @@ body {
 
     <!-- Sidebar -->
     <div class="sidebar">
+      <!-- Blocklist check -->
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Check Domain</span>
+        </div>
+        <div class="panel-body">
+          <form class="override-form" onsubmit="return checkDomain(event)" style="margin-bottom:0;border-bottom:none;padding-bottom:0;">
+            <div class="override-form-row">
+              <input type="text" id="checkDomain" placeholder="Is this domain blocked?" required style="flex:3">
+              <button type="submit" class="btn" style="background:var(--violet);color:white;flex-shrink:0;">Check</button>
+            </div>
+          </form>
+          <div id="checkResult" style="display:none;margin-top:0.6rem;padding:0.5rem 0.6rem;border-radius:5px;font-family:var(--font-mono);font-size:0.72rem;"></div>
+        </div>
+      </div>
+
       <!-- Active overrides -->
       <div class="panel">
         <div class="panel-header">
@@ -832,6 +848,35 @@ async function allowDomain(domain) {
     });
     refresh();
   } catch (err) {}
+}
+
+async function checkDomain(event) {
+  event.preventDefault();
+  const domain = document.getElementById('checkDomain').value.trim();
+  const el = document.getElementById('checkResult');
+  if (!domain) return false;
+  try {
+    const result = await fetchJSON('/blocking/check/' + encodeURIComponent(domain));
+    el.style.display = 'block';
+    if (result.blocked) {
+      el.style.background = 'rgba(181, 68, 58, 0.1)';
+      el.style.color = 'var(--rose)';
+      el.innerHTML = `<strong>Blocked</strong> — ${result.reason}` +
+        (result.matched_rule ? `<br>Rule: <code>${result.matched_rule}</code>` : '') +
+        ` <button class="btn-delete" onclick="allowDomain('${domain}')" style="color:var(--emerald);font-size:0.7rem;margin-left:0.4rem;">allow</button>`;
+    } else {
+      el.style.background = 'rgba(82, 122, 82, 0.1)';
+      el.style.color = 'var(--emerald)';
+      el.innerHTML = `<strong>Allowed</strong> — ${result.reason}` +
+        (result.matched_rule ? `<br>Rule: <code>${result.matched_rule}</code>` : '');
+    }
+  } catch (err) {
+    el.style.display = 'block';
+    el.style.background = 'rgba(181, 68, 58, 0.1)';
+    el.style.color = 'var(--rose)';
+    el.textContent = 'Error: ' + err.message;
+  }
+  return false;
 }
 
 // Initial load + polling

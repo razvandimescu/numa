@@ -37,6 +37,7 @@ pub fn router(ctx: Arc<ServerCtx>) -> Router {
         .route("/blocking/pause", post(blocking_pause))
         .route("/blocking/allowlist", get(blocking_allowlist))
         .route("/blocking/allowlist", post(blocking_allowlist_add))
+        .route("/blocking/check/{domain}", get(blocking_check))
         .route(
             "/blocking/allowlist/{domain}",
             delete(blocking_allowlist_remove),
@@ -530,6 +531,14 @@ async fn blocking_pause(
 ) -> Json<serde_json::Value> {
     ctx.blocklist.lock().unwrap().pause(req.minutes * 60);
     Json(serde_json::json!({ "paused_minutes": req.minutes }))
+}
+
+async fn blocking_check(
+    State(ctx): State<Arc<ServerCtx>>,
+    Path(domain): Path<String>,
+) -> Json<crate::blocklist::BlockCheckResult> {
+    let result = ctx.blocklist.lock().unwrap().check(&domain);
+    Json(result)
 }
 
 async fn blocking_allowlist(State(ctx): State<Arc<ServerCtx>>) -> Json<Vec<String>> {
