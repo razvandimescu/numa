@@ -1,6 +1,4 @@
-use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::path::PathBuf;
 
 use log::info;
 
@@ -150,20 +148,6 @@ pub fn match_forwarding_rule(domain: &str, rules: &[ForwardingRule]) -> Option<S
 
 // --- System DNS configuration (install/uninstall) ---
 
-fn numa_data_dir() -> PathBuf {
-    dirs_or_home().join(".numa")
-}
-
-fn dirs_or_home() -> PathBuf {
-    std::env::var("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/tmp"))
-}
-
-fn backup_path() -> PathBuf {
-    numa_data_dir().join("original-dns.json")
-}
-
 /// Set the system DNS to 127.0.0.1 so all queries go through Numa.
 /// Saves the original DNS settings for later restoration.
 pub fn install_system_dns() -> Result<(), String> {
@@ -200,6 +184,19 @@ pub fn uninstall_system_dns() -> Result<(), String> {
 // --- macOS implementation ---
 
 #[cfg(target_os = "macos")]
+fn numa_data_dir() -> std::path::PathBuf {
+    let home = std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
+    home.join(".numa")
+}
+
+#[cfg(target_os = "macos")]
+fn backup_path() -> std::path::PathBuf {
+    numa_data_dir().join("original-dns.json")
+}
+
+#[cfg(target_os = "macos")]
 fn get_network_services() -> Result<Vec<String>, String> {
     let output = std::process::Command::new("networksetup")
         .arg("-listallnetworkservices")
@@ -234,6 +231,8 @@ fn get_dns_servers(service: &str) -> Result<Vec<String>, String> {
 
 #[cfg(target_os = "macos")]
 fn install_macos() -> Result<(), String> {
+    use std::collections::HashMap;
+
     let services = get_network_services()?;
     let mut original: HashMap<String, Vec<String>> = HashMap::new();
 
@@ -274,6 +273,8 @@ fn install_macos() -> Result<(), String> {
 
 #[cfg(target_os = "macos")]
 fn uninstall_macos() -> Result<(), String> {
+    use std::collections::HashMap;
+
     let path = backup_path();
     let json = std::fs::read_to_string(&path)
         .map_err(|e| format!("no backup found at {}: {}", path.display(), e))?;
