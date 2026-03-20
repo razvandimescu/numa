@@ -838,5 +838,11 @@ async function allowDomain(domain) {
 refresh();
 setInterval(refresh, 2000);
 </script>
+
+<div style="text-align:center;padding:0.8rem;font-family:var(--font-mono);font-size:0.68rem;color:var(--text-dim);">
+  Logs: <span id="logPath" style="user-select:all;">macOS: /usr/local/var/log/numa.log · Linux: journalctl -u numa -f</span>
+  · <a href="https://github.com/razvandimescu/numa" target="_blank" rel="noopener" style="color:var(--amber);text-decoration:none;">GitHub</a>
+</div>
+
 </body>
 </html>

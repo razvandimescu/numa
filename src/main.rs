@@ -13,7 +13,10 @@ use numa::ctx::{handle_query, ServerCtx};
 use numa::override_store::OverrideStore;
 use numa::query_log::QueryLog;
 use numa::stats::ServerStats;
-use numa::system_dns::{discover_forwarding_rules, install_system_dns, uninstall_system_dns};
+use numa::system_dns::{
+    discover_forwarding_rules, install_service, install_system_dns, service_status,
+    uninstall_service, uninstall_system_dns,
+};
 
 #[tokio::main]
 async fn main() -> numa::Result<()> {
@@ -32,14 +35,30 @@ async fn main() -> numa::Result<()> {
             eprintln!("\x1b[1;38;2;192;98;58mNuma\x1b[0m — restoring system DNS\n");
             return uninstall_system_dns().map_err(|e| e.into());
         }
+        "service" => {
+            let sub = std::env::args().nth(2).unwrap_or_default();
+            eprintln!("\x1b[1;38;2;192;98;58mNuma\x1b[0m — service management\n");
+            return match sub.as_str() {
+                "start" => install_service().map_err(|e| e.into()),
+                "stop" => uninstall_service().map_err(|e| e.into()),
+                "status" => service_status().map_err(|e| e.into()),
+                _ => {
+                    eprintln!("Usage: numa service <start|stop|status>");
+                    Ok(())
+                }
+            };
+        }
         "help" | "--help" | "-h" => {
             eprintln!("Usage: numa [command] [config-path]");
             eprintln!();
             eprintln!("Commands:");
-            eprintln!("  (none)       Start the DNS server (default)");
-            eprintln!("  install      Set system DNS to 127.0.0.1 (requires sudo)");
-            eprintln!("  uninstall    Restore original system DNS settings");
-            eprintln!("  help         Show this help");
+            eprintln!("  (none)          Start the DNS server (default)");
+            eprintln!("  install         Set system DNS to 127.0.0.1 (requires sudo)");
+            eprintln!("  uninstall       Restore original system DNS settings");
+            eprintln!("  service start   Install as system service (auto-start on boot)");
+            eprintln!("  service stop    Uninstall the system service");
+            eprintln!("  service status  Check if the service is running");
+            eprintln!("  help            Show this help");
             eprintln!();
             eprintln!("Config path defaults to numa.toml");
             return Ok(());
