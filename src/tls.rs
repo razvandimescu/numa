@@ -28,7 +28,11 @@ pub fn build_tls_config(tld: &str, service_names: &[String]) -> crate::Result<Ar
         .with_no_client_auth()
         .with_single_cert(cert_chain, key)?;
 
-    info!("TLS configured for {} .{} domains", service_names.len(), tld);
+    info!(
+        "TLS configured for {} .{} domains",
+        service_names.len(),
+        tld
+    );
     Ok(Arc::new(config))
 }
 

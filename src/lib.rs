@@ -14,8 +14,8 @@ pub mod question;
 pub mod record;
 pub mod service_store;
 pub mod stats;
-pub mod tls;
 pub mod system_dns;
+pub mod tls;
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub type Result<T> = std::result::Result<T, Error>;
