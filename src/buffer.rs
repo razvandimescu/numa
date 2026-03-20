@@ -1,7 +1,9 @@
 use crate::Result;
 
+const BUF_SIZE: usize = 4096;
+
 pub struct BytePacketBuffer {
-    pub buf: [u8; 512],
+    pub buf: [u8; BUF_SIZE],
     pub pos: usize,
 }
 
@@ -14,7 +16,7 @@ impl Default for BytePacketBuffer {
 impl BytePacketBuffer {
     pub fn new() -> BytePacketBuffer {
         BytePacketBuffer {
-            buf: [0; 512],
+            buf: [0; BUF_SIZE],
             pos: 0,
         }
     }
@@ -38,7 +40,7 @@ impl BytePacketBuffer {
     }
 
     pub fn read(&mut self) -> Result<u8> {
-        if self.pos >= 512 {
+        if self.pos >= BUF_SIZE {
             return Err("End of buffer".into());
         }
         let res = self.buf[self.pos];
@@ -47,14 +49,14 @@ impl BytePacketBuffer {
     }
 
     pub fn get(&self, pos: usize) -> Result<u8> {
-        if pos >= 512 {
+        if pos >= BUF_SIZE {
             return Err("End of buffer".into());
         }
         Ok(self.buf[pos])
     }
 
     pub fn get_range(&self, start: usize, len: usize) -> Result<&[u8]> {
-        if start + len > 512 {
+        if start + len > BUF_SIZE {
             return Err("End of buffer".into());
         }
         Ok(&self.buf[start..start + len])
@@ -128,7 +130,7 @@ impl BytePacketBuffer {
     }
 
     pub fn write(&mut self, val: u8) -> Result<()> {
-        if self.pos >= 512 {
+        if self.pos >= BUF_SIZE {
             return Err("End of buffer".into());
         }
         self.buf[self.pos] = val;
@@ -172,7 +174,7 @@ impl BytePacketBuffer {
     }
 
     pub fn set(&mut self, pos: usize, val: u8) -> Result<()> {
-        if pos >= 512 {
+        if pos >= BUF_SIZE {
             return Err("End of buffer".into());
         }
         self.buf[pos] = val;
