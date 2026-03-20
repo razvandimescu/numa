@@ -14,8 +14,8 @@ use numa::override_store::OverrideStore;
 use numa::query_log::QueryLog;
 use numa::stats::ServerStats;
 use numa::system_dns::{
-    discover_system_dns, install_service, install_system_dns, service_status, uninstall_service,
-    uninstall_system_dns,
+    discover_system_dns, install_service, install_system_dns, restart_service, service_status,
+    uninstall_service, uninstall_system_dns,
 };
 
 #[tokio::main]
@@ -41,9 +41,10 @@ async fn main() -> numa::Result<()> {
             return match sub.as_str() {
                 "start" => install_service().map_err(|e| e.into()),
                 "stop" => uninstall_service().map_err(|e| e.into()),
+                "restart" => restart_service().map_err(|e| e.into()),
                 "status" => service_status().map_err(|e| e.into()),
                 _ => {
-                    eprintln!("Usage: numa service <start|stop|status>");
+                    eprintln!("Usage: numa service <start|stop|restart|status>");
                     Ok(())
                 }
             };
@@ -57,6 +58,7 @@ async fn main() -> numa::Result<()> {
             eprintln!("  uninstall       Restore original system DNS settings");
             eprintln!("  service start   Install as system service (auto-start on boot)");
             eprintln!("  service stop    Uninstall the system service");
+            eprintln!("  service restart Restart the service with updated binary");
             eprintln!("  service status  Check if the service is running");
             eprintln!("  help            Show this help");
             eprintln!();
