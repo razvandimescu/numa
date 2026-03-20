@@ -41,8 +41,13 @@ dig @127.0.0.1 ads.google.com       # ✗ blocked → 0.0.0.0
 
 Set Numa as your system DNS (all traffic goes through Numa):
 ```bash
-sudo numa install                   # saves current DNS, sets system to 127.0.0.1
-sudo numa uninstall                 # restores original DNS settings
+sudo cargo run -- install           # saves current DNS, sets system to 127.0.0.1
+sudo cargo run -- uninstall         # restores original DNS settings
+
+# Or if installed to PATH:
+sudo cp target/release/numa /usr/local/bin/
+sudo numa install
+sudo numa uninstall
 ```
 
 Create an override:
