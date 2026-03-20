@@ -434,10 +434,17 @@ pub fn restart_service() -> Result<(), String> {
             .output();
         match output {
             Ok(o) if o.status.success() => {
+                eprintln!("  Tip: use 'make deploy' instead — handles codesign + restart.\n");
+                // Codesign, then kill service. Launchd KeepAlive respawns it.
+                // This will kill us too (we ARE /usr/local/bin/numa), so
+                // codesign and print output first.
+                let _ = std::process::Command::new("codesign")
+                    .args(["-f", "-s", "-", "/usr/local/bin/numa"])
+                    .output(); // use output() to suppress codesign stderr
+                eprintln!("  Service restarting → {}\n", version);
                 let _ = std::process::Command::new("pkill")
                     .args(["-f", "/usr/local/bin/numa"])
                     .status();
-                eprintln!("  Service restarting → {}\n", version);
                 Ok(())
             }
             _ => Err("Service is not installed. Run 'sudo numa service start' first.".to_string()),
