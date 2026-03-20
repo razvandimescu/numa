@@ -43,6 +43,10 @@ pub enum DnsRecord {
 }
 
 impl DnsRecord {
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, DnsRecord::UNKNOWN { .. })
+    }
+
     pub fn ttl(&self) -> u32 {
         match self {
             DnsRecord::A { ttl, .. }
