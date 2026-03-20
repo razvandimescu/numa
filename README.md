@@ -39,6 +39,12 @@ dig @127.0.0.1 google.com           # ✓ resolves normally
 dig @127.0.0.1 ads.google.com       # ✗ blocked → 0.0.0.0
 ```
 
+Set Numa as your system DNS (all traffic goes through Numa):
+```bash
+sudo numa install                   # saves current DNS, sets system to 127.0.0.1
+sudo numa uninstall                 # restores original DNS settings
+```
+
 Create an override:
 ```bash
 curl -X POST http://localhost:5380/overrides \
@@ -164,7 +170,7 @@ Zero external DNS libraries. RFC 1035 wire protocol parsed by hand. Dependencies
 - [x] Developer overrides — REST API with auto-expiry
 - [x] Ad blocking — 385K+ domains, dashboard, allowlist
 - [x] System DNS auto-discovery — Tailscale, VPN split-DNS
-- [ ] System DNS auto-configuration — `numa install` / `numa uninstall`
+- [x] System DNS auto-configuration — `numa install` / `numa uninstall`
 - [ ] pkarr integration — self-sovereign DNS via Mainline DHT
 - [ ] Decentralized resolver network — staking, auditing, token economics
 
