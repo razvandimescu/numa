@@ -13,7 +13,7 @@ use numa::ctx::{handle_query, ServerCtx};
 use numa::override_store::OverrideStore;
 use numa::query_log::QueryLog;
 use numa::stats::ServerStats;
-use numa::system_dns::discover_forwarding_rules;
+use numa::system_dns::{discover_forwarding_rules, install_system_dns, uninstall_system_dns};
 
 #[tokio::main]
 async fn main() -> numa::Result<()> {
@@ -21,9 +21,39 @@ async fn main() -> numa::Result<()> {
         .format_timestamp_millis()
         .init();
 
-    let config_path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "numa.toml".to_string());
+    // Handle CLI subcommands
+    let arg1 = std::env::args().nth(1).unwrap_or_default();
+    match arg1.as_str() {
+        "install" => {
+            eprintln!("\x1b[1;38;2;192;98;58mNuma\x1b[0m — configuring system DNS\n");
+            return install_system_dns().map_err(|e| e.into());
+        }
+        "uninstall" => {
+            eprintln!("\x1b[1;38;2;192;98;58mNuma\x1b[0m — restoring system DNS\n");
+            return uninstall_system_dns().map_err(|e| e.into());
+        }
+        "help" | "--help" | "-h" => {
+            eprintln!("Usage: numa [command] [config-path]");
+            eprintln!();
+            eprintln!("Commands:");
+            eprintln!("  (none)       Start the DNS server (default)");
+            eprintln!("  install      Set system DNS to 127.0.0.1 (requires sudo)");
+            eprintln!("  uninstall    Restore original system DNS settings");
+            eprintln!("  help         Show this help");
+            eprintln!();
+            eprintln!("Config path defaults to numa.toml");
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    let config_path = if arg1.is_empty() || arg1 == "run" {
+        std::env::args()
+            .nth(2)
+            .unwrap_or_else(|| "numa.toml".to_string())
+    } else {
+        arg1 // treat as config path for backwards compatibility
+    };
     let config = load_config(&config_path)?;
 
     let upstream: SocketAddr =
