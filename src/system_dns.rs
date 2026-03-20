@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use log::{debug, info, warn};
+use log::info;
 
 /// A conditional forwarding rule: domains matching `suffix` are forwarded to `upstream`.
 #[derive(Debug, Clone)]
@@ -27,6 +27,8 @@ pub fn discover_forwarding_rules() -> Vec<ForwardingRule> {
 
 #[cfg(target_os = "macos")]
 fn discover_macos() -> Vec<ForwardingRule> {
+    use log::{debug, warn};
+
     let output = match std::process::Command::new("scutil").arg("--dns").output() {
         Ok(o) => o,
         Err(e) => {
@@ -122,6 +124,7 @@ fn discover_macos() -> Vec<ForwardingRule> {
     rules
 }
 
+#[cfg(target_os = "macos")]
 fn make_rule(domain: &str, nameserver: &str) -> Option<ForwardingRule> {
     let addr: SocketAddr = format!("{}:53", nameserver).parse().ok()?;
     Some(ForwardingRule {
