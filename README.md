@@ -1,36 +1,64 @@
-# dns_fun
+# Numa
 
-A DNS forwarding/caching proxy written from scratch in Rust. Parses and serializes DNS wire protocol (RFC 1035), serves local zone records from TOML config, caches upstream responses with TTL-aware expiration, and logs every query with structured output.
+**DNS you own. Everywhere you go.**
 
-No DNS libraries — just `tokio::net::UdpSocket` and manual packet parsing. Each query is handled concurrently via `tokio::spawn`.
+Block ads and trackers. Override DNS for development. Cache for speed. A single portable binary built from scratch in Rust — no Raspberry Pi, no cloud, no account.
 
-## Record Types
+## Why
 
-A, NS, CNAME, MX, AAAA
+- **Ad blocking that travels with you** — 385K+ domains blocked out of the box. Works on any network: coffee shops, hotels, airports.
+- **Developer overrides** — point any hostname to any IP with auto-revert. No more editing `/etc/hosts`.
+- **Sub-millisecond caching** — cached lookups in 0ms. Faster than any public resolver.
+- **Live dashboard** — real-time query stats, blocking controls, override management at `http://localhost:5380`.
+- **Single binary, zero config** — just run it.
 
-## Usage
+## Quick Start
 
 ```bash
-# Run with default config (dns_fun.toml)
-sudo cargo run
-
-# Run with custom config path
-sudo cargo run -- path/to/config.toml
-
-# Test
-dig @127.0.0.1 google.com
-dig @127.0.0.1 mysite.local
+cargo build
+sudo cargo run                      # binds to port 53
 ```
 
-Requires root/sudo for binding to port 53.
+Open the dashboard: **http://localhost:5380**
+
+Test it:
+```bash
+dig @127.0.0.1 google.com           # normal resolution
+dig @127.0.0.1 ads.google.com       # blocked → 0.0.0.0
+```
+
+## Resolution Pipeline
+
+```
+Query → Overrides → Blocklist → Local Zones → Cache → Upstream → Respond
+```
+
+1. **Overrides** — ephemeral, time-scoped redirects (highest priority)
+2. **Blocklist** — 385K+ ad/tracker domains → returns `0.0.0.0` / `::`
+3. **Local zones** — records defined in `[[zones]]` config
+4. **Cache** — TTL-adjusted cached upstream responses (sub-ms)
+5. **Forward** — query upstream resolver, cache the result
+6. **SERVFAIL** — returned on upstream failure
+
+## Dashboard
+
+Live at `http://localhost:5380` when Numa is running:
+
+- Total queries, cache hit rate, blocked count, uptime
+- Resolution path breakdown (forward / cached / local / override / blocked)
+- Scrolling query log with colored path tags
+- Active overrides with create/edit/delete
+- Blocking controls: toggle on/off, pause 5 minutes, one-click allowlist
+- Cached domains list
 
 ## Configuration
 
-Edit `dns_fun.toml`:
+`numa.toml` (all sections optional, sensible defaults if missing):
 
 ```toml
 [server]
 bind_addr = "0.0.0.0:53"
+api_port = 5380
 
 [upstream]
 address = "8.8.8.8"
@@ -39,85 +67,87 @@ timeout_ms = 3000
 
 [cache]
 max_entries = 10000
-min_ttl = 60        # floor: cache at least 60s
-max_ttl = 86400     # ceiling: never cache longer than 24h
+min_ttl = 60
+max_ttl = 86400
+
+[blocking]
+enabled = true
+lists = [
+  "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/hosts/pro.txt",
+]
+refresh_hours = 24
+allowlist = []
 
 [[zones]]
 domain = "mysite.local"
 record_type = "A"
 value = "127.0.0.1"
 ttl = 60
-
-[[zones]]
-domain = "other.local"
-record_type = "AAAA"
-value = "::1"
-ttl = 120
 ```
 
-All sections are optional — sensible defaults are used if the config file is missing.
+## HTTP API
 
-## Request Pipeline
+REST API on port 5380 (18 endpoints):
 
-```
-Query -> Parse -> Local Zones -> Cache -> Upstream Forward -> Respond
-```
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/` | GET | Live dashboard |
+| `/overrides` | POST | Create override(s) |
+| `/overrides` | GET | List active overrides |
+| `/overrides` | DELETE | Clear all overrides |
+| `/overrides/environment` | POST | Batch load overrides |
+| `/overrides/{domain}` | GET | Get specific override |
+| `/overrides/{domain}` | DELETE | Remove specific override |
+| `/blocking/stats` | GET | Blocklist stats (domains loaded, sources, enabled) |
+| `/blocking/toggle` | PUT | Enable/disable blocking |
+| `/blocking/pause` | POST | Pause blocking for N minutes |
+| `/blocking/allowlist` | GET | List allowlisted domains |
+| `/blocking/allowlist` | POST | Add domain to allowlist |
+| `/blocking/allowlist/{domain}` | DELETE | Remove from allowlist |
+| `/diagnose/{domain}` | GET | Trace resolution path |
+| `/query-log` | GET | Recent queries (filterable) |
+| `/stats` | GET | Server statistics |
+| `/cache` | GET | List cached entries |
+| `/cache` | DELETE | Flush cache |
+| `/cache/{domain}` | DELETE | Flush specific domain |
+| `/health` | GET | Health check |
 
-1. **Local zones** — match against records defined in `[[zones]]`, respond immediately
-2. **Cache** — return TTL-adjusted cached response if available
-3. **Forward** — send query to upstream resolver, cache the response
-4. **SERVFAIL** — returned to client on upstream failure
+## How It Compares
 
-## Caching
+| | Pi-hole | NextDNS | Cloudflare | Numa |
+|---|---|---|---|---|
+| Ad blocking | Yes | Yes | Limited | 385K+ domains |
+| Portable | No (Raspberry Pi) | Cloud only | Cloud only | Single binary |
+| Developer overrides | No | No | No | REST API + auto-expiry |
+| Data stays local | Yes | Cloud | Cloud | 100% local |
+| Zero config | Complex setup | Yes | Yes | Works out of the box |
+| Self-sovereign DNS | No | No | No | pkarr/DHT roadmap |
 
-- TTL derived from minimum TTL across answer records
-- Clamped to configured `min_ttl`/`max_ttl` bounds
-- TTLs in cached responses decrease over time (adjusted on serve)
-- Lazy eviction on capacity overflow + periodic sweep every 1000 queries
+## Use Cases
 
-## Logging
+**Block ads everywhere** — Run Numa on your laptop. Your ad blocker works on any network.
 
-Controlled via `RUST_LOG` environment variable:
+**Mock external services** — `Point api.stripe.com to localhost:8080 for 30 minutes`
+
+**Provision dev environments** — Create overrides for `db.dev`, `api.dev`, `cache.dev`
+
+**Debug DNS** — `/diagnose/example.com` traces the full resolution path
+
+## Docker
 
 ```bash
-RUST_LOG=info sudo cargo run    # default — one line per query
-RUST_LOG=debug sudo cargo run   # includes response details
-RUST_LOG=warn sudo cargo run    # errors only
-```
-
-Log output:
-
-```
-2026-03-10T14:23:01.123Z INFO  192.168.1.5:41234 | A google.com | FORWARD | NOERROR | 12ms
-2026-03-10T14:23:01.456Z INFO  192.168.1.5:41235 | A mysite.local | LOCAL | NOERROR | 0ms
-2026-03-10T14:23:02.789Z INFO  192.168.1.5:41236 | A google.com | CACHED | NOERROR | 0ms
-```
-
-Stats summary (total, forwarded, cached, local, blocked, errors) logged every 1000 queries.
-
-## Project Structure
-
-```
-src/
-  main.rs       # async startup, tokio event loop, ServerCtx, per-query task spawn
-  lib.rs        # module declarations, Error/Result type aliases
-  buffer.rs     # BytePacketBuffer — 512-byte DNS wire format read/write
-  header.rs     # DnsHeader, ResultCode
-  question.rs   # DnsQuestion, QueryType
-  record.rs     # DnsRecord (A, NS, CNAME, MX, AAAA, UNKNOWN)
-  packet.rs     # DnsPacket — full DNS message parse/serialize
-  config.rs     # TOML config loading, zone map builder
-  cache.rs      # TTL-aware DNS response cache with lazy eviction
-  forward.rs    # async upstream forwarding
-  stats.rs      # query counters and periodic summary
+docker build -t numa .
+docker run -p 53:53/udp -p 5380:5380 numa
 ```
 
 ## Dependencies
 
-```toml
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
-toml = "0.8"
-serde = { version = "1", features = ["derive"] }
-log = "0.4"
-env_logger = "0.11"
 ```
+tokio, axum, serde, serde_json, toml, log, env_logger, reqwest
+```
+
+Zero external DNS libraries. Wire protocol (RFC 1035) parsed from scratch.
+
+## License
+
+MIT

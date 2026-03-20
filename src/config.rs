@@ -18,6 +18,8 @@ pub struct Config {
     #[serde(default)]
     pub cache: CacheConfig,
     #[serde(default)]
+    pub blocking: BlockingConfig,
+    #[serde(default)]
     pub zones: Vec<ZoneRecord>,
 }
 
@@ -25,18 +27,25 @@ pub struct Config {
 pub struct ServerConfig {
     #[serde(default = "default_bind_addr")]
     pub bind_addr: String,
+    #[serde(default = "default_api_port")]
+    pub api_port: u16,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
         ServerConfig {
             bind_addr: default_bind_addr(),
+            api_port: default_api_port(),
         }
     }
 }
 
 fn default_bind_addr() -> String {
     "0.0.0.0:53".to_string()
+}
+
+fn default_api_port() -> u16 {
+    5380
 }
 
 #[derive(Deserialize)]
@@ -108,6 +117,41 @@ pub struct ZoneRecord {
     pub ttl: u32,
 }
 
+#[derive(Deserialize)]
+pub struct BlockingConfig {
+    #[serde(default = "default_blocking_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_blocklists")]
+    pub lists: Vec<String>,
+    #[serde(default = "default_refresh_hours")]
+    pub refresh_hours: u64,
+    #[serde(default)]
+    pub allowlist: Vec<String>,
+}
+
+impl Default for BlockingConfig {
+    fn default() -> Self {
+        BlockingConfig {
+            enabled: default_blocking_enabled(),
+            lists: default_blocklists(),
+            refresh_hours: default_refresh_hours(),
+            allowlist: Vec::new(),
+        }
+    }
+}
+
+fn default_blocking_enabled() -> bool {
+    true
+}
+
+fn default_blocklists() -> Vec<String> {
+    vec!["https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/hosts/pro.txt".to_string()]
+}
+
+fn default_refresh_hours() -> u64 {
+    24
+}
+
 fn default_zone_ttl() -> u32 {
     300
 }
@@ -118,6 +162,7 @@ pub fn load_config(path: &str) -> Result<Config> {
             server: ServerConfig::default(),
             upstream: UpstreamConfig::default(),
             cache: CacheConfig::default(),
+            blocking: BlockingConfig::default(),
             zones: Vec::new(),
         });
     }
@@ -126,10 +171,10 @@ pub fn load_config(path: &str) -> Result<Config> {
     Ok(config)
 }
 
-pub fn build_zone_map(
-    zones: &[ZoneRecord],
-) -> Result<HashMap<(String, QueryType), Vec<DnsRecord>>> {
-    let mut map: HashMap<(String, QueryType), Vec<DnsRecord>> = HashMap::new();
+pub type ZoneMap = HashMap<String, HashMap<QueryType, Vec<DnsRecord>>>;
+
+pub fn build_zone_map(zones: &[ZoneRecord]) -> Result<ZoneMap> {
+    let mut map: ZoneMap = HashMap::new();
 
     for zone in zones {
         let domain = zone.domain.to_lowercase();
@@ -203,7 +248,11 @@ pub fn build_zone_map(
             }
         };
 
-        map.entry((domain, qtype)).or_default().push(record);
+        map.entry(domain)
+            .or_default()
+            .entry(qtype)
+            .or_default()
+            .push(record);
     }
 
     Ok(map)

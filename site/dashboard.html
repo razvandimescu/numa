@@ -1,0 +1,842 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Numa — Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --bg-deep: #f5f0e8;
+  --bg-surface: #ece5da;
+  --bg-elevated: #e3dbce;
+  --bg-card: #faf7f2;
+  --amber: #c0623a;
+  --amber-dim: #9e4e2d;
+  --teal: #6b7c4e;
+  --teal-dim: #566540;
+  --violet: #64748b;
+  --violet-dim: #4a5568;
+  --emerald: #527a52;
+  --rose: #b5443a;
+  --cyan: #4a7c8a;
+  --text-primary: #2c2418;
+  --text-secondary: #6b5e4f;
+  --text-dim: #a39888;
+  --border: rgba(0, 0, 0, 0.08);
+  --border-amber: rgba(192, 98, 58, 0.22);
+  --font-display: 'Instrument Serif', Georgia, serif;
+  --font-body: 'DM Sans', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', monospace;
+}
+
+html { font-size: 15px; }
+body {
+  font-family: var(--font-body);
+  background: var(--bg-deep);
+  color: var(--text-primary);
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Header */
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1.2rem 2rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-card);
+}
+.header-left {
+  display: flex;
+  align-items: baseline;
+  gap: 1rem;
+}
+.logo {
+  font-family: var(--font-display);
+  font-size: 1.8rem;
+  color: var(--amber);
+  letter-spacing: 0.04em;
+}
+.tagline {
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  font-style: italic;
+  font-family: var(--font-display);
+}
+.status-badge {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+}
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--emerald);
+  animation: pulse 2s ease-in-out infinite;
+}
+.status-dot.error { background: var(--rose); animation: none; }
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+/* Layout */
+.dashboard {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 1.5rem 2rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.2rem;
+}
+
+/* Stat cards row */
+.stats-row {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 1rem;
+}
+.stat-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.2rem 1.4rem;
+  position: relative;
+  overflow: hidden;
+}
+.stat-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+}
+.stat-card.queries::before { background: var(--amber); }
+.stat-card.cache::before { background: var(--teal); }
+.stat-card.blocked::before { background: var(--rose); }
+.stat-card.overrides::before { background: var(--violet); }
+.stat-card.uptime::before { background: var(--cyan); }
+
+.stat-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-dim);
+  margin-bottom: 0.5rem;
+}
+.stat-value {
+  font-family: var(--font-mono);
+  font-size: 2rem;
+  font-weight: 500;
+  line-height: 1;
+}
+.stat-card.queries .stat-value { color: var(--amber); }
+.stat-card.cache .stat-value { color: var(--teal); }
+.stat-card.blocked .stat-value { color: var(--rose); }
+.stat-card.overrides .stat-value { color: var(--violet); }
+.stat-card.uptime .stat-value { color: var(--cyan); }
+.stat-sub {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  margin-top: 0.3rem;
+}
+
+/* Two-column main area */
+.main-grid {
+  display: grid;
+  grid-template-columns: 1fr 340px;
+  gap: 1.2rem;
+}
+
+/* Panels */
+.panel {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.9rem 1.2rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-surface);
+}
+.panel-title {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-secondary);
+}
+.panel-body {
+  padding: 1rem 1.2rem;
+}
+
+/* Resolution paths bar chart */
+.path-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  margin-bottom: 0.6rem;
+}
+.path-bar-row:last-child { margin-bottom: 0; }
+.path-label {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  width: 70px;
+  text-align: right;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+.path-bar-track {
+  flex: 1;
+  height: 22px;
+  background: var(--bg-surface);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.path-bar-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.6s ease;
+  min-width: 2px;
+}
+.path-bar-fill.forward { background: var(--amber); }
+.path-bar-fill.cached { background: var(--teal); }
+.path-bar-fill.local { background: var(--violet); }
+.path-bar-fill.override { background: var(--emerald); }
+.path-bar-fill.error { background: var(--rose); }
+.path-bar-fill.blocked { background: var(--text-dim); }
+.path-pct {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  width: 42px;
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+
+/* Query log table */
+.query-log {
+  max-height: 380px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--bg-elevated) transparent;
+}
+.query-log table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+.query-log th {
+  text-align: left;
+  padding: 0.5rem 0.6rem;
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  background: var(--bg-card);
+  z-index: 1;
+}
+.query-log td {
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  color: var(--text-secondary);
+}
+.query-log tr:hover td {
+  background: var(--bg-surface);
+}
+.query-log .domain-cell {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-primary);
+}
+.path-tag {
+  display: inline-block;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  font-size: 0.65rem;
+  font-weight: 500;
+}
+.path-tag.FORWARD { background: rgba(192, 98, 58, 0.12); color: var(--amber-dim); }
+.path-tag.CACHED { background: rgba(107, 124, 78, 0.12); color: var(--teal-dim); }
+.path-tag.LOCAL { background: rgba(100, 116, 139, 0.12); color: var(--violet-dim); }
+.path-tag.OVERRIDE { background: rgba(82, 122, 82, 0.12); color: var(--emerald); }
+.path-tag.SERVFAIL { background: rgba(181, 68, 58, 0.12); color: var(--rose); }
+.path-tag.BLOCKED { background: rgba(163, 152, 136, 0.15); color: var(--text-dim); }
+
+/* Sidebar panels */
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 1.2rem;
+}
+
+/* Overrides list */
+.override-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.6rem 0;
+  border-bottom: 1px solid var(--border);
+}
+.override-item:last-child { border-bottom: none; }
+.override-domain {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--emerald);
+}
+.override-target {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--text-dim);
+}
+.override-ttl {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--amber);
+}
+.empty-state {
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  font-style: italic;
+  padding: 0.8rem 0;
+}
+
+/* Cache panel */
+.cache-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.35rem 0;
+  border-bottom: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+}
+.cache-item:last-child { border-bottom: none; }
+.cache-domain {
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 200px;
+}
+.cache-ttl {
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+
+/* Override form */
+.override-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding-bottom: 0.8rem;
+  margin-bottom: 0.6rem;
+  border-bottom: 1px solid var(--border);
+}
+.override-form input {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  outline: none;
+  transition: border-color 0.2s;
+}
+.override-form input:focus {
+  border-color: var(--amber);
+}
+.override-form input::placeholder {
+  color: var(--text-dim);
+}
+.override-form-row {
+  display: flex;
+  gap: 0.4rem;
+}
+.override-form-row input {
+  flex: 1;
+  min-width: 0;
+}
+.btn {
+  font-family: var(--font-body);
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 0.4rem 0.8rem;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+.btn:hover { opacity: 0.85; }
+.btn:active { opacity: 0.7; }
+.btn-add {
+  background: var(--emerald);
+  color: white;
+}
+.btn-delete {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 0.75rem;
+  padding: 0.15rem 0.3rem;
+  border-radius: 3px;
+  transition: color 0.2s, background 0.2s;
+}
+.btn-delete:hover {
+  color: var(--rose);
+  background: rgba(181, 68, 58, 0.08);
+}
+.override-item-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.override-error {
+  font-size: 0.7rem;
+  color: var(--rose);
+  display: none;
+}
+
+/* Responsive */
+@media (max-width: 1100px) {
+  .main-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 700px) {
+  .stats-row { grid-template-columns: repeat(2, 1fr); }
+  .dashboard { padding: 1rem; }
+  .header { padding: 1rem; }
+}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-left">
+    <div class="logo">Numa</div>
+    <div class="tagline">DNS that governs itself</div>
+  </div>
+  <div style="display:flex;align-items:center;gap:1.2rem;">
+    <button class="btn" id="pauseBtn" onclick="pauseBlocking()" style="background:var(--amber);color:white;font-family:var(--font-mono);font-size:0.7rem;display:none;">Pause 5m</button>
+    <button class="btn" id="toggleBtn" onclick="toggleBlocking()" style="background:var(--rose);color:white;font-family:var(--font-mono);font-size:0.7rem;display:none;"></button>
+    <div class="status-badge">
+      <span class="status-dot" id="statusDot"></span>
+      <span id="statusText">connecting...</span>
+    </div>
+  </div>
+</div>
+
+<div class="dashboard">
+  <!-- Stat cards -->
+  <div class="stats-row">
+    <div class="stat-card queries">
+      <div class="stat-label">Total Queries</div>
+      <div class="stat-value" id="totalQueries">—</div>
+      <div class="stat-sub" id="qps">—</div>
+    </div>
+    <div class="stat-card cache">
+      <div class="stat-label">Cache Hit Rate</div>
+      <div class="stat-value" id="cacheRate">—</div>
+      <div class="stat-sub" id="cacheEntries">—</div>
+    </div>
+    <div class="stat-card blocked">
+      <div class="stat-label">Blocked</div>
+      <div class="stat-value" id="blockedCount">—</div>
+      <div class="stat-sub" id="blockedSub">&nbsp;</div>
+    </div>
+    <div class="stat-card overrides">
+      <div class="stat-label">Active Overrides</div>
+      <div class="stat-value" id="overrideCount">—</div>
+      <div class="stat-sub">&nbsp;</div>
+    </div>
+    <div class="stat-card uptime">
+      <div class="stat-label">Uptime</div>
+      <div class="stat-value" id="uptime">—</div>
+      <div class="stat-sub" id="uptimeSub">&nbsp;</div>
+    </div>
+  </div>
+
+  <!-- Resolution paths -->
+  <div class="panel">
+    <div class="panel-header">
+      <span class="panel-title">Resolution Paths</span>
+    </div>
+    <div class="panel-body" id="pathBars">
+      <!-- Populated by JS -->
+    </div>
+  </div>
+
+  <!-- Main grid: query log + sidebar -->
+  <div class="main-grid">
+    <!-- Query log -->
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">Recent Queries</span>
+        <span class="panel-title" id="queryCount" style="color: var(--text-dim)"></span>
+      </div>
+      <div class="query-log" id="queryLog">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Type</th>
+              <th>Domain</th>
+              <th>Path</th>
+              <th>Result</th>
+              <th>Latency</th>
+            </tr>
+          </thead>
+          <tbody id="queryLogBody">
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Sidebar -->
+    <div class="sidebar">
+      <!-- Active overrides -->
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Active Overrides</span>
+        </div>
+        <div class="panel-body">
+          <form class="override-form" id="overrideForm" onsubmit="return addOverride(event)">
+            <input type="text" id="ovDomain" placeholder="domain (e.g. api.dev)" required>
+            <input type="text" id="ovTarget" placeholder="target IP (e.g. 127.0.0.1)" required>
+            <div class="override-form-row">
+              <input type="number" id="ovTTL" placeholder="TTL" value="60" min="1">
+              <input type="number" id="ovDuration" placeholder="Duration (s)" value="300" min="1">
+            </div>
+            <button type="submit" class="btn btn-add">Add Override</button>
+            <div class="override-error" id="overrideError"></div>
+          </form>
+          <div id="overridesList">
+            <div class="empty-state">No active overrides</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Cache entries -->
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Cached Domains</span>
+          <span class="panel-title" id="cacheCount" style="color: var(--text-dim)"></span>
+        </div>
+        <div class="panel-body" id="cacheList" style="max-height: 240px; overflow-y: auto; scrollbar-width: thin;">
+          <div class="empty-state">Cache empty</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = '';
+let prevTotal = null;
+let prevTime = null;
+
+async function fetchJSON(path) {
+  const res = await fetch(API + path);
+  if (!res.ok) throw new Error(res.status);
+  return res.json();
+}
+
+function formatUptime(secs) {
+  if (secs < 60) return `${secs}s`;
+  if (secs < 3600) return `${Math.floor(secs / 60)}m`;
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  return `${h}h ${m}m`;
+}
+
+function formatUptimeSub(secs) {
+  const d = Math.floor(secs / 86400);
+  const h = Math.floor((secs % 86400) / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  const s = secs % 60;
+  if (d > 0) return `${d}d ${h}h ${m}m ${s}s`;
+  if (h > 0) return `${h}h ${m}m ${s}s`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+function formatNumber(n) {
+  if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+  if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+  return n.toString();
+}
+
+function formatTime(epoch) {
+  const d = new Date(epoch * 1000);
+  return d.toLocaleTimeString([], { hour12: false });
+}
+
+function formatRemaining(secs) {
+  if (secs == null) return 'permanent';
+  if (secs < 60) return `${secs}s left`;
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ${secs % 60}s left`;
+  return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m left`;
+}
+
+const PATH_DEFS = [
+  { key: 'forwarded', label: 'Forward', cls: 'forward' },
+  { key: 'cached',    label: 'Cached',  cls: 'cached' },
+  { key: 'local',     label: 'Local',   cls: 'local' },
+  { key: 'overridden', label: 'Override', cls: 'override' },
+  { key: 'blocked',   label: 'Blocked', cls: 'blocked' },
+  { key: 'errors',    label: 'Errors',  cls: 'error' },
+];
+
+function renderPaths(queries) {
+  const total = queries.total || 1;
+  const container = document.getElementById('pathBars');
+  container.innerHTML = PATH_DEFS.map(p => {
+    const count = queries[p.key] || 0;
+    const pct = ((count / total) * 100).toFixed(1);
+    return `
+      <div class="path-bar-row">
+        <span class="path-label">${p.label}</span>
+        <div class="path-bar-track">
+          <div class="path-bar-fill ${p.cls}" style="width: ${pct}%"></div>
+        </div>
+        <span class="path-pct">${pct}%</span>
+      </div>`;
+  }).join('');
+}
+
+function renderQueryLog(entries) {
+  const tbody = document.getElementById('queryLogBody');
+  document.getElementById('queryCount').textContent = `last ${entries.length}`;
+  tbody.innerHTML = entries.map(e => {
+    const allowBtn = e.path === 'BLOCKED'
+      ? ` <button class="btn-delete" onclick="allowDomain('${e.domain}')" title="Allow this domain" style="color:var(--emerald);font-size:0.65rem;">allow</button>`
+      : '';
+    return `
+    <tr>
+      <td>${formatTime(e.timestamp_epoch)}</td>
+      <td>${e.query_type}</td>
+      <td class="domain-cell" title="${e.domain}">${e.domain}${allowBtn}</td>
+      <td><span class="path-tag ${e.path}">${e.path}</span></td>
+      <td>${e.rescode}</td>
+      <td>${e.latency_ms.toFixed(1)}ms</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderOverrides(entries) {
+  const el = document.getElementById('overridesList');
+  if (!entries.length) {
+    el.innerHTML = '<div class="empty-state">No active overrides</div>';
+    return;
+  }
+  el.innerHTML = entries.map(e => `
+    <div class="override-item">
+      <div class="override-item-header">
+        <span class="override-domain" style="cursor:pointer" onclick="editOverride('${e.domain}','${e.target}',${e.ttl || 60},${e.remaining_secs || 300})" title="Click to edit">${e.domain}</span>
+        <button class="btn-delete" onclick="deleteOverride('${e.domain}')" title="Remove override">&times;</button>
+      </div>
+      <div class="override-target">${e.record_type} &rarr; ${e.target}</div>
+      <div class="override-ttl">${e.remaining_secs != null ? formatRemaining(e.remaining_secs) : 'permanent'}</div>
+    </div>
+  `).join('');
+}
+
+async function addOverride(event) {
+  event.preventDefault();
+  const errEl = document.getElementById('overrideError');
+  errEl.style.display = 'none';
+  try {
+    const body = {
+      domain: document.getElementById('ovDomain').value.trim(),
+      target: document.getElementById('ovTarget').value.trim(),
+      ttl: parseInt(document.getElementById('ovTTL').value) || 60,
+      duration_secs: parseInt(document.getElementById('ovDuration').value) || 300,
+    };
+    const res = await fetch(API + '/overrides', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(text);
+    }
+    document.getElementById('ovDomain').value = '';
+    document.getElementById('ovTarget').value = '';
+    refresh();
+  } catch (err) {
+    errEl.textContent = err.message;
+    errEl.style.display = 'block';
+  }
+  return false;
+}
+
+async function deleteOverride(domain) {
+  try {
+    await fetch(API + '/overrides/' + encodeURIComponent(domain), { method: 'DELETE' });
+    refresh();
+  } catch (err) { /* next refresh will update */ }
+}
+
+function editOverride(domain, target, ttl, duration) {
+  document.getElementById('ovDomain').value = domain;
+  document.getElementById('ovTarget').value = target;
+  document.getElementById('ovTTL').value = ttl;
+  document.getElementById('ovDuration').value = duration;
+  document.getElementById('ovDomain').focus();
+}
+
+function renderCache(entries) {
+  const el = document.getElementById('cacheList');
+  document.getElementById('cacheCount').textContent = entries.length ? `${entries.length} entries` : '';
+  if (!entries.length) {
+    el.innerHTML = '<div class="empty-state">Cache empty</div>';
+    return;
+  }
+  // Show first 50, sorted by TTL remaining desc
+  const sorted = entries.sort((a, b) => b.ttl_remaining - a.ttl_remaining).slice(0, 50);
+  el.innerHTML = sorted.map(e => `
+    <div class="cache-item">
+      <span class="cache-domain" title="${e.domain}">${e.domain}</span>
+      <span class="cache-ttl">${e.query_type} ${e.ttl_remaining}s</span>
+    </div>
+  `).join('');
+}
+
+async function refresh() {
+  try {
+    const [stats, logs, overrides, cache] = await Promise.all([
+      fetchJSON('/stats'),
+      fetchJSON('/query-log?limit=100'),
+      fetchJSON('/overrides'),
+      fetchJSON('/cache'),
+    ]);
+
+    // Connection status
+    document.getElementById('statusDot').className = 'status-dot';
+    document.getElementById('statusText').textContent = 'connected';
+
+    // Stats cards
+    const q = stats.queries;
+    document.getElementById('totalQueries').textContent = formatNumber(q.total);
+    document.getElementById('uptime').textContent = formatUptime(stats.uptime_secs);
+    document.getElementById('uptimeSub').textContent = formatUptimeSub(stats.uptime_secs);
+    document.getElementById('overrideCount').textContent = stats.overrides.active;
+    document.getElementById('blockedCount').textContent = formatNumber(q.blocked);
+    const bl = stats.blocking;
+    document.getElementById('blockedSub').textContent =
+      bl.domains_loaded > 0 ? `${formatNumber(bl.domains_loaded)} in blocklist` : 'loading...';
+
+    // Blocking controls
+    const toggleBtn = document.getElementById('toggleBtn');
+    const pauseBtn = document.getElementById('pauseBtn');
+    toggleBtn.style.display = 'inline-block';
+    pauseBtn.style.display = bl.enabled && !bl.paused ? 'inline-block' : 'none';
+    if (bl.paused) {
+      toggleBtn.textContent = 'Paused';
+      toggleBtn.style.background = 'var(--amber)';
+    } else if (bl.enabled) {
+      toggleBtn.textContent = 'Blocking On';
+      toggleBtn.style.background = 'var(--emerald)';
+    } else {
+      toggleBtn.textContent = 'Blocking Off';
+      toggleBtn.style.background = 'var(--rose)';
+    }
+
+    document.getElementById('cacheEntries').textContent =
+      `${stats.cache.entries} / ${formatNumber(stats.cache.max_entries)} entries`;
+
+    // QPS calculation
+    const now = Date.now();
+    if (prevTotal !== null && prevTime !== null) {
+      const dt = (now - prevTime) / 1000;
+      const dq = q.total - prevTotal;
+      const qps = dt > 0 ? (dq / dt).toFixed(1) : '0.0';
+      document.getElementById('qps').textContent = `~${qps}/s`;
+    }
+    prevTotal = q.total;
+    prevTime = now;
+
+    // Cache hit rate
+    const answered = q.cached + q.forwarded + q.local + q.overridden;
+    const hitRate = answered > 0 ? ((q.cached / answered) * 100).toFixed(1) : '0.0';
+    document.getElementById('cacheRate').textContent = hitRate + '%';
+
+    // Panels
+    renderPaths(q);
+    renderQueryLog(logs);
+    renderOverrides(overrides);
+    renderCache(cache);
+
+  } catch (err) {
+    document.getElementById('statusDot').className = 'status-dot error';
+    document.getElementById('statusText').textContent = 'disconnected';
+  }
+}
+
+async function toggleBlocking() {
+  try {
+    const stats = await fetchJSON('/blocking/stats');
+    const newState = !stats.enabled;
+    await fetch(API + '/blocking/toggle', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: newState }),
+    });
+    refresh();
+  } catch (err) {}
+}
+
+async function pauseBlocking() {
+  try {
+    await fetch(API + '/blocking/pause', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ minutes: 5 }),
+    });
+    refresh();
+  } catch (err) {}
+}
+
+async function allowDomain(domain) {
+  try {
+    await fetch(API + '/blocking/allowlist', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ domain: domain }),
+    });
+    refresh();
+  } catch (err) {}
+}
+
+// Initial load + polling
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>

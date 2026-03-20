@@ -1,5 +1,6 @@
 [server]
 bind_addr = "0.0.0.0:53"
+api_port = 5380
 
 [upstream]
 address = "8.8.8.8"

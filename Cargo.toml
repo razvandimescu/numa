@@ -1,14 +1,20 @@
 [package]
-name = "dns_fun"
+name = "numa"
 version = "0.1.0"
 authors = ["razvandimescu <razvan@dimescu.com>"]
-edition = "2018"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+edition = "2021"
+description = "Ephemeral DNS overrides for development and testing. Point any hostname to any endpoint. Auto-revert when you're done."
+license = "MIT"
+repository = "https://github.com/razvandimescu/numa"
+keywords = ["dns", "proxy", "override", "development", "networking"]
+categories = ["network-programming", "development-tools"]
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
-toml = "0.8"
+axum = "0.8"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
 log = "0.4"
 env_logger = "0.11"
+reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }

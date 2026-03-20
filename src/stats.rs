@@ -6,15 +6,18 @@ pub struct ServerStats {
     queries_cached: u64,
     queries_blocked: u64,
     queries_local: u64,
+    queries_overridden: u64,
     upstream_errors: u64,
     started_at: Instant,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum QueryPath {
     Local,
     Cached,
     Forwarded,
     Blocked,
+    Overridden,
     UpstreamError,
 }
 
@@ -25,7 +28,26 @@ impl QueryPath {
             QueryPath::Cached => "CACHED",
             QueryPath::Forwarded => "FORWARD",
             QueryPath::Blocked => "BLOCKED",
+            QueryPath::Overridden => "OVERRIDE",
             QueryPath::UpstreamError => "SERVFAIL",
+        }
+    }
+
+    pub fn parse_str(s: &str) -> Option<QueryPath> {
+        if s.eq_ignore_ascii_case("LOCAL") {
+            Some(QueryPath::Local)
+        } else if s.eq_ignore_ascii_case("CACHED") {
+            Some(QueryPath::Cached)
+        } else if s.eq_ignore_ascii_case("FORWARD") {
+            Some(QueryPath::Forwarded)
+        } else if s.eq_ignore_ascii_case("BLOCKED") {
+            Some(QueryPath::Blocked)
+        } else if s.eq_ignore_ascii_case("OVERRIDE") {
+            Some(QueryPath::Overridden)
+        } else if s.eq_ignore_ascii_case("SERVFAIL") {
+            Some(QueryPath::UpstreamError)
+        } else {
+            None
         }
     }
 }
@@ -44,6 +66,7 @@ impl ServerStats {
             queries_cached: 0,
             queries_blocked: 0,
             queries_local: 0,
+            queries_overridden: 0,
             upstream_errors: 0,
             started_at: Instant::now(),
         }
@@ -56,6 +79,7 @@ impl ServerStats {
             QueryPath::Cached => self.queries_cached += 1,
             QueryPath::Forwarded => self.queries_forwarded += 1,
             QueryPath::Blocked => self.queries_blocked += 1,
+            QueryPath::Overridden => self.queries_overridden += 1,
             QueryPath::UpstreamError => self.upstream_errors += 1,
         }
         self.queries_total
@@ -65,6 +89,23 @@ impl ServerStats {
         self.queries_total
     }
 
+    pub fn uptime_secs(&self) -> u64 {
+        self.started_at.elapsed().as_secs()
+    }
+
+    pub fn snapshot(&self) -> StatsSnapshot {
+        StatsSnapshot {
+            uptime_secs: self.uptime_secs(),
+            total: self.queries_total,
+            forwarded: self.queries_forwarded,
+            cached: self.queries_cached,
+            local: self.queries_local,
+            overridden: self.queries_overridden,
+            blocked: self.queries_blocked,
+            errors: self.upstream_errors,
+        }
+    }
+
     pub fn log_summary(&self) {
         let uptime = self.started_at.elapsed();
         let hours = uptime.as_secs() / 3600;
@@ -72,14 +113,26 @@ impl ServerStats {
         let secs = uptime.as_secs() % 60;
 
         log::info!(
-            "STATS | uptime {}h{}m{}s | total {} | fwd {} | cached {} | local {} | blocked {} | errors {}",
+            "STATS | uptime {}h{}m{}s | total {} | fwd {} | cached {} | local {} | override {} | blocked {} | errors {}",
             hours, mins, secs,
             self.queries_total,
             self.queries_forwarded,
             self.queries_cached,
             self.queries_local,
+            self.queries_overridden,
             self.queries_blocked,
             self.upstream_errors,
         );
     }
+}
+
+pub struct StatsSnapshot {
+    pub uptime_secs: u64,
+    pub total: u64,
+    pub forwarded: u64,
+    pub cached: u64,
+    pub local: u64,
+    pub overridden: u64,
+    pub blocked: u64,
+    pub errors: u64,
 }
