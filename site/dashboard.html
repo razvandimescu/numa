@@ -497,7 +497,21 @@ body {
     <div class="panel">
       <div class="panel-header">
         <span class="panel-title">Recent Queries</span>
-        <span class="panel-title" id="queryCount" style="color: var(--text-dim)"></span>
+        <div style="display:flex;align-items:center;gap:0.5rem;">
+          <input type="text" id="logFilterDomain" placeholder="filter domain..." oninput="applyLogFilter()"
+            style="font-family:var(--font-mono);font-size:0.7rem;padding:0.25rem 0.5rem;border:1px solid var(--border);border-radius:4px;background:var(--bg-surface);color:var(--text-primary);outline:none;width:150px;">
+          <select id="logFilterPath" onchange="applyLogFilter()"
+            style="font-family:var(--font-mono);font-size:0.7rem;padding:0.25rem 0.4rem;border:1px solid var(--border);border-radius:4px;background:var(--bg-surface);color:var(--text-secondary);outline:none;">
+            <option value="">all paths</option>
+            <option value="FORWARD">forward</option>
+            <option value="CACHED">cached</option>
+            <option value="BLOCKED">blocked</option>
+            <option value="OVERRIDE">override</option>
+            <option value="LOCAL">local</option>
+            <option value="SERVFAIL">error</option>
+          </select>
+          <span class="panel-title" id="queryCount" style="color: var(--text-dim)"></span>
+        </div>
       </div>
       <div class="query-log" id="queryLog">
         <table>
@@ -527,7 +541,7 @@ body {
         <div class="panel-body">
           <form class="override-form" onsubmit="return checkDomain(event)" style="margin-bottom:0;border-bottom:none;padding-bottom:0;">
             <div class="override-form-row">
-              <input type="text" id="checkDomain" placeholder="Is this domain blocked?" required style="flex:3">
+              <input type="text" id="checkDomainInput" placeholder="Is this domain blocked?" required style="flex:3">
               <button type="submit" class="btn" style="background:var(--violet);color:white;flex-shrink:0;">Check</button>
             </div>
           </form>
@@ -574,6 +588,7 @@ body {
 <script>
 const API = '';
 let prevTotal = null;
+let lastLogEntries = [];
 let prevTime = null;
 
 async function fetchJSON(path) {
@@ -646,9 +661,29 @@ function renderPaths(queries) {
 }
 
 function renderQueryLog(entries) {
+  lastLogEntries = entries;
+  applyLogFilter();
+}
+
+function applyLogFilter() {
+  const domainFilter = document.getElementById('logFilterDomain').value.trim().toLowerCase();
+  const pathFilter = document.getElementById('logFilterPath').value;
+
+  let filtered = lastLogEntries;
+  if (domainFilter) {
+    filtered = filtered.filter(e => e.domain.toLowerCase().includes(domainFilter));
+  }
+  if (pathFilter) {
+    filtered = filtered.filter(e => e.path === pathFilter);
+  }
+
   const tbody = document.getElementById('queryLogBody');
-  document.getElementById('queryCount').textContent = `last ${entries.length}`;
-  tbody.innerHTML = entries.map(e => {
+  document.getElementById('queryCount').textContent =
+    filtered.length < lastLogEntries.length
+      ? `${filtered.length} / ${lastLogEntries.length}`
+      : `last ${filtered.length}`;
+
+  tbody.innerHTML = filtered.map(e => {
     const allowBtn = e.path === 'BLOCKED'
       ? ` <button class="btn-delete" onclick="allowDomain('${e.domain}')" title="Allow this domain" style="color:var(--emerald);font-size:0.65rem;">allow</button>`
       : '';
@@ -852,7 +887,7 @@ async function allowDomain(domain) {
 
 async function checkDomain(event) {
   event.preventDefault();
-  const domain = document.getElementById('checkDomain').value.trim();
+  const domain = document.getElementById('checkDomainInput').value.trim();
   const el = document.getElementById('checkResult');
   if (!domain) return false;
   try {
