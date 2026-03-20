@@ -13,6 +13,20 @@ max_entries = 10000
 min_ttl = 60
 max_ttl = 86400
 
+[proxy]
+enabled = true
+port = 80
+tld = "numa"
+
+# Pre-configured services (numa.numa is always added automatically)
+# [[services]]
+# name = "frontend"
+# target_port = 5173
+#
+# [[services]]
+# name = "api"
+# target_port = 8000
+
 # Example zone records:
 # [[zones]]
 # domain = "dimescu.ro"

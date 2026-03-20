@@ -418,6 +418,15 @@ pub fn uninstall_service() -> Result<(), String> {
 
 /// Restart the service (kill process, launchd/systemd auto-restarts with new binary).
 pub fn restart_service() -> Result<(), String> {
+    // Show version of the binary that will be running after restart
+    let version = match std::process::Command::new("/usr/local/bin/numa")
+        .arg("--version")
+        .output()
+    {
+        Ok(o) => String::from_utf8_lossy(&o.stderr).trim().to_string(),
+        Err(_) => "unknown".to_string(),
+    };
+
     #[cfg(target_os = "macos")]
     {
         let output = std::process::Command::new("launchctl")
@@ -425,11 +434,10 @@ pub fn restart_service() -> Result<(), String> {
             .output();
         match output {
             Ok(o) if o.status.success() => {
-                // Service is loaded — kill the process, launchd restarts it
                 let _ = std::process::Command::new("pkill")
                     .args(["-f", "/usr/local/bin/numa"])
                     .status();
-                eprintln!("  Service restarting (launchd will respawn).\n");
+                eprintln!("  Service restarting → {}\n", version);
                 Ok(())
             }
             _ => Err("Service is not installed. Run 'sudo numa service start' first.".to_string()),
@@ -438,7 +446,7 @@ pub fn restart_service() -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
         run_systemctl(&["restart", "numa"])?;
-        eprintln!("  Service restarted.\n");
+        eprintln!("  Service restarted → {}\n", version);
         Ok(())
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]

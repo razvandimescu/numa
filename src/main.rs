@@ -12,6 +12,7 @@ use numa::config::{build_zone_map, load_config};
 use numa::ctx::{handle_query, ServerCtx};
 use numa::override_store::OverrideStore;
 use numa::query_log::QueryLog;
+use numa::service_store::ServiceStore;
 use numa::stats::ServerStats;
 use numa::system_dns::{
     discover_system_dns, install_service, install_system_dns, restart_service, service_status,
@@ -48,6 +49,10 @@ async fn main() -> numa::Result<()> {
                     Ok(())
                 }
             };
+        }
+        "version" | "--version" | "-V" => {
+            eprintln!("numa {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
         }
         "help" | "--help" | "-h" => {
             eprintln!("Usage: numa [command] [config-path]");
@@ -99,6 +104,13 @@ async fn main() -> numa::Result<()> {
         blocklist.set_enabled(false);
     }
 
+    // Build service store from config, always include numa dashboard
+    let mut service_store = ServiceStore::new();
+    service_store.insert("numa", config.server.api_port);
+    for svc in &config.services {
+        service_store.insert(&svc.name, svc.target_port);
+    }
+
     let forwarding_rules = system_dns.forwarding_rules;
 
     let ctx = Arc::new(ServerCtx {
@@ -113,14 +125,21 @@ async fn main() -> numa::Result<()> {
         overrides: Mutex::new(OverrideStore::new()),
         blocklist: Mutex::new(blocklist),
         query_log: Mutex::new(QueryLog::new(1000)),
+        services: Mutex::new(service_store),
         forwarding_rules,
         upstream,
         timeout: Duration::from_millis(config.upstream.timeout_ms),
+        proxy_tld_suffix: if config.proxy.tld.is_empty() {
+            String::new()
+        } else {
+            format!(".{}", config.proxy.tld)
+        },
+        proxy_tld: config.proxy.tld.clone(),
     });
 
     let zone_count: usize = ctx.zone_map.values().map(|m| m.len()).sum();
     eprintln!("\n\x1b[38;2;192;98;58m  ╔══════════════════════════════════════════╗\x1b[0m");
-    eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[1;38;2;192;98;58mNUMA\x1b[0m  \x1b[3;38;2;163;152;136mDNS that governs itself\x1b[0m       \x1b[38;2;192;98;58m║\x1b[0m");
+    eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[1;38;2;192;98;58mNUMA\x1b[0m  \x1b[3;38;2;163;152;136mDNS that governs itself\x1b[0m  \x1b[38;2;163;152;136mv{}\x1b[0m \x1b[38;2;192;98;58m║\x1b[0m", env!("CARGO_PKG_VERSION"));
     eprintln!("\x1b[38;2;192;98;58m  ╠══════════════════════════════════════════╣\x1b[0m");
     eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;107;124;78mDNS\x1b[0m       {:<30}\x1b[38;2;192;98;58m║\x1b[0m", config.server.bind_addr);
     eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;107;124;78mAPI\x1b[0m       http://localhost:{:<16}\x1b[38;2;192;98;58m║\x1b[0m", api_port);
@@ -130,6 +149,10 @@ async fn main() -> numa::Result<()> {
     eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;107;124;78mCache\x1b[0m     {:<30}\x1b[38;2;192;98;58m║\x1b[0m", format!("max {} entries", config.cache.max_entries));
     eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;107;124;78mBlocking\x1b[0m  {:<30}\x1b[38;2;192;98;58m║\x1b[0m",
         if config.blocking.enabled { format!("{} lists", config.blocking.lists.len()) } else { "disabled".to_string() });
+    if config.proxy.enabled {
+        eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;107;124;78mProxy\x1b[0m     {:<30}\x1b[38;2;192;98;58m║\x1b[0m",
+            format!("http://*.{} on :{}", config.proxy.tld, config.proxy.port));
+    }
     if !ctx.forwarding_rules.is_empty() {
         eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;107;124;78mRouting\x1b[0m   {:<30}\x1b[38;2;192;98;58m║\x1b[0m",
             format!("{} conditional rules", ctx.forwarding_rules.len()));
@@ -170,6 +193,16 @@ async fn main() -> numa::Result<()> {
         info!("HTTP API listening on {}", api_addr);
         axum::serve(listener, app).await.unwrap();
     });
+
+    // Spawn HTTP reverse proxy for .numa domains
+    if config.proxy.enabled {
+        let proxy_ctx = Arc::clone(&ctx);
+        let proxy_port = config.proxy.port;
+        let proxy_tld = config.proxy.tld.clone();
+        tokio::spawn(async move {
+            numa::proxy::start_proxy(proxy_ctx, proxy_port, &proxy_tld).await;
+        });
+    }
 
     // UDP DNS listener
     #[allow(clippy::infinite_loop)]

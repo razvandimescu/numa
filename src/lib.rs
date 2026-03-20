@@ -8,9 +8,11 @@ pub mod forward;
 pub mod header;
 pub mod override_store;
 pub mod packet;
+pub mod proxy;
 pub mod query_log;
 pub mod question;
 pub mod record;
+pub mod service_store;
 pub mod stats;
 pub mod system_dns;
 

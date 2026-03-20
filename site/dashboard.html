@@ -348,6 +348,41 @@ body {
   flex-shrink: 0;
 }
 
+/* Service items */
+.service-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--border);
+}
+.service-item:last-child { border-bottom: none; }
+.service-info { flex: 1; min-width: 0; }
+.service-name {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--cyan);
+}
+.service-name a {
+  color: inherit;
+  text-decoration: none;
+}
+.service-name a:hover { text-decoration: underline; }
+.service-port {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--text-dim);
+}
+.health-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.health-dot.up { background: var(--emerald); }
+.health-dot.down { background: var(--rose); }
+
 /* Override form */
 .override-form {
   display: flex;
@@ -571,6 +606,26 @@ body {
         </div>
       </div>
 
+      <!-- Local services -->
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Local Services</span>
+        </div>
+        <div class="panel-body">
+          <form class="override-form" id="serviceForm" onsubmit="return addService(event)">
+            <div class="override-form-row">
+              <input type="text" id="svcName" placeholder="name (e.g. myapp)" required style="flex:2">
+              <input type="number" id="svcPort" placeholder="port" required min="1" max="65535" style="flex:1">
+            </div>
+            <button type="submit" class="btn btn-add">Add Service</button>
+            <div class="override-error" id="serviceError"></div>
+          </form>
+          <div id="servicesList">
+            <div class="empty-state">No services configured</div>
+          </div>
+        </div>
+      </div>
+
       <!-- Cache entries -->
       <div class="panel">
         <div class="panel-header">
@@ -781,11 +836,12 @@ function renderCache(entries) {
 
 async function refresh() {
   try {
-    const [stats, logs, overrides, cache] = await Promise.all([
+    const [stats, logs, overrides, cache, services] = await Promise.all([
       fetchJSON('/stats'),
       fetchJSON('/query-log?limit=100'),
       fetchJSON('/overrides'),
       fetchJSON('/cache'),
+      fetchJSON('/services'),
     ]);
 
     // Connection status
@@ -843,6 +899,7 @@ async function refresh() {
     renderQueryLog(logs);
     renderOverrides(overrides);
     renderCache(cache);
+    renderServices(services);
 
   } catch (err) {
     document.getElementById('statusDot').className = 'status-dot error';
@@ -912,6 +969,59 @@ async function checkDomain(event) {
     el.textContent = 'Error: ' + err.message;
   }
   return false;
+}
+
+function renderServices(entries) {
+  const el = document.getElementById('servicesList');
+  if (!entries.length) {
+    el.innerHTML = '<div class="empty-state">No services configured</div>';
+    return;
+  }
+  el.innerHTML = entries.map(e => `
+    <div class="service-item">
+      <span class="health-dot ${e.healthy ? 'up' : 'down'}" title="${e.healthy ? 'running' : 'not reachable'}"></span>
+      <div class="service-info">
+        <div class="service-name"><a href="${e.url}" target="_blank">${e.name}.numa</a></div>
+        <div class="service-port">:${e.target_port}</div>
+      </div>
+      ${e.name === 'numa' ? '' : `<button class="btn-delete" onclick="deleteService('${e.name}')" title="Remove service">&times;</button>`}
+    </div>
+  `).join('');
+}
+
+async function addService(event) {
+  event.preventDefault();
+  const errEl = document.getElementById('serviceError');
+  errEl.style.display = 'none';
+  try {
+    const body = {
+      name: document.getElementById('svcName').value.trim(),
+      target_port: parseInt(document.getElementById('svcPort').value) || 0,
+    };
+    const res = await fetch(API + '/services', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(text);
+    }
+    document.getElementById('svcName').value = '';
+    document.getElementById('svcPort').value = '';
+    refresh();
+  } catch (err) {
+    errEl.textContent = err.message;
+    errEl.style.display = 'block';
+  }
+  return false;
+}
+
+async function deleteService(name) {
+  try {
+    await fetch(API + '/services/' + encodeURIComponent(name), { method: 'DELETE' });
+    refresh();
+  } catch (err) { /* next refresh will update */ }
 }
 
 // Initial load + polling
