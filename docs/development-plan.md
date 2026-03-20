@@ -24,12 +24,22 @@ Long-term: self-sovereign DNS via pkarr/DHT, then an incentivized decentralized 
   - Auto-download on startup, background refresh every 24h
   - Lock-free hot path: blocklist parsed outside lock, swapped in sub-microsecond
   - Adblock filter syntax support (`||domain^$options`)
-- Blocking API: `/blocking/stats`, `/blocking/toggle`, `/blocking/pause`, `/blocking/allowlist`
+- Blocking API: `/blocking/stats`, `/blocking/toggle`, `/blocking/pause`, `/blocking/allowlist`, `/blocking/check/{domain}`
+- Domain check search box in dashboard sidebar
+- Query log filtering by domain and path (client-side, instant)
 - Diagnose endpoint includes blocklist check in pipeline
-- Startup banner with system info (DNS, API, upstream, zones, cache, blocking status)
+- System DNS auto-detection (no Google default, falls back to Quad9)
+- Conditional forwarding auto-discovery (Tailscale, VPN split-DNS)
+- `numa install/uninstall` — set/restore system DNS
+- `numa service start/stop/status` — launchd (macOS) + systemd (Linux) with auto-restart
+- Service start/stop couples DNS configuration automatically
+- Install script (`curl | sh`) + GitHub Actions release workflow (4 platform targets)
+- EDNS fix: 4096-byte buffer, filter UNKNOWN records on serialization
+- Startup banner with system info (DNS, API, upstream, zones, cache, blocking, routing)
 - Performance benchmarks (`bench/dns-bench.sh`) — Numa cached: 0ms, vs Google/Cloudflare: 15-22ms
 - Single binary, zero DNS libraries, async tokio
 - MIT license, CI via GitHub Actions
+- Dogfooding as system DNS on macOS
 
 ## Strategic Positioning
 
