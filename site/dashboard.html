@@ -232,7 +232,7 @@ body {
 
 /* Query log table */
 .query-log {
-  max-height: 380px;
+  max-height: 600px;
   overflow-y: auto;
   scrollbar-width: thin;
   scrollbar-color: var(--bg-elevated) transparent;
@@ -477,7 +477,7 @@ body {
     <div class="tagline">DNS that governs itself</div>
   </div>
   <div style="display:flex;align-items:center;gap:1.2rem;">
-    <button class="btn" id="pauseBtn" onclick="pauseBlocking()" style="background:var(--amber);color:white;font-family:var(--font-mono);font-size:0.7rem;display:none;">Pause 5m</button>
+    <button class="btn" id="pauseBtn" style="background:var(--amber);color:white;font-family:var(--font-mono);font-size:0.7rem;display:none;">Pause 5m</button>
     <button class="btn" id="toggleBtn" onclick="toggleBlocking()" style="background:var(--rose);color:white;font-family:var(--font-mono);font-size:0.7rem;display:none;"></button>
     <div class="status-badge">
       <span class="status-dot" id="statusDot"></span>
@@ -568,10 +568,11 @@ body {
 
     <!-- Sidebar -->
     <div class="sidebar">
-      <!-- Blocklist check -->
-      <div class="panel">
+      <!-- Blocking -->
+      <div class="panel" id="blockingPanel">
         <div class="panel-header">
-          <span class="panel-title">Check Domain</span>
+          <span class="panel-title">Blocking</span>
+          <span class="panel-title" id="blockingRefresh" style="color:var(--text-dim);font-weight:400;"></span>
         </div>
         <div class="panel-body">
           <form class="override-form" onsubmit="return checkDomain(event)" style="margin-bottom:0;border-bottom:none;padding-bottom:0;">
@@ -581,21 +582,26 @@ body {
             </div>
           </form>
           <div id="checkResult" style="display:none;margin-top:0.6rem;padding:0.5rem 0.6rem;border-radius:5px;font-family:var(--font-mono);font-size:0.72rem;"></div>
+          <div id="blockingSources" style="margin-top:0.8rem;padding-top:0.6rem;border-top:1px solid var(--border);"></div>
+          <div id="blockingAllowlist" style="margin-top:0.8rem;padding-top:0.6rem;border-top:1px solid var(--border);"></div>
         </div>
       </div>
 
       <!-- Active overrides -->
       <div class="panel">
         <div class="panel-header">
-          <span class="panel-title">Active Overrides</span>
+          <div>
+            <span class="panel-title">Active Overrides</span>
+            <div style="font-size:0.68rem;color:var(--text-dim);margin-top:0.15rem;">Redirect any domain to any IP. Temporary, DNS-only.</div>
+          </div>
         </div>
         <div class="panel-body">
           <form class="override-form" id="overrideForm" onsubmit="return addOverride(event)">
-            <input type="text" id="ovDomain" placeholder="domain (e.g. api.dev)" required>
-            <input type="text" id="ovTarget" placeholder="target IP (e.g. 127.0.0.1)" required>
+            <input type="text" id="ovDomain" placeholder="domain (e.g. api.stripe.com)" required>
+            <input type="text" id="ovTarget" placeholder="target (e.g. 10.0.0.5 or 127.0.0.1)" required>
             <div class="override-form-row">
-              <input type="number" id="ovTTL" placeholder="TTL" value="60" min="1">
-              <input type="number" id="ovDuration" placeholder="Duration (s)" value="300" min="1">
+              <input type="number" id="ovTTL" placeholder="DNS TTL" value="60" min="1" title="How long clients may cache this DNS response">
+              <input type="number" id="ovDuration" placeholder="Expires in (s)" value="300" min="1">
             </div>
             <button type="submit" class="btn btn-add">Add Override</button>
             <div class="override-error" id="overrideError"></div>
@@ -609,13 +615,16 @@ body {
       <!-- Local services -->
       <div class="panel">
         <div class="panel-header">
-          <span class="panel-title">Local Services</span>
+          <div>
+            <span class="panel-title">Local Services</span>
+            <div style="font-size:0.68rem;color:var(--text-dim);margin-top:0.15rem;">Give localhost apps clean .numa URLs. Persistent, with HTTP proxy.</div>
+          </div>
         </div>
         <div class="panel-body">
           <form class="override-form" id="serviceForm" onsubmit="return addService(event)">
             <div class="override-form-row">
-              <input type="text" id="svcName" placeholder="name (e.g. myapp)" required style="flex:2">
-              <input type="number" id="svcPort" placeholder="port" required min="1" max="65535" style="flex:1">
+              <input type="text" id="svcName" placeholder="name (becomes name.numa)" required style="flex:2">
+              <input type="number" id="svcPort" placeholder="port (e.g. 3000)" required min="1" max="65535" style="flex:1">
             </div>
             <button type="submit" class="btn btn-add">Add Service</button>
             <div class="override-error" id="serviceError"></div>
@@ -836,12 +845,14 @@ function renderCache(entries) {
 
 async function refresh() {
   try {
-    const [stats, logs, overrides, cache, services] = await Promise.all([
+    const [stats, logs, overrides, cache, services, blockingInfo, allowlist] = await Promise.all([
       fetchJSON('/stats'),
-      fetchJSON('/query-log?limit=100'),
+      fetchJSON('/query-log?limit=200'),
       fetchJSON('/overrides'),
       fetchJSON('/cache'),
       fetchJSON('/services'),
+      fetchJSON('/blocking/stats'),
+      fetchJSON('/blocking/allowlist'),
     ]);
 
     // Connection status
@@ -857,16 +868,22 @@ async function refresh() {
     document.getElementById('blockedCount').textContent = formatNumber(q.blocked);
     const bl = stats.blocking;
     document.getElementById('blockedSub').textContent =
+      bl.paused ? 'paused' :
+      !bl.enabled ? 'disabled' :
       bl.domains_loaded > 0 ? `${formatNumber(bl.domains_loaded)} in blocklist` : 'loading...';
 
-    // Blocking controls
+    // Blocking controls — single primary button + secondary toggle
     const toggleBtn = document.getElementById('toggleBtn');
     const pauseBtn = document.getElementById('pauseBtn');
     toggleBtn.style.display = 'inline-block';
-    pauseBtn.style.display = bl.enabled && !bl.paused ? 'inline-block' : 'none';
     if (bl.paused) {
+      // Primary action: unpause. Hide toggle to prevent accidental disable.
+      pauseBtn.style.display = 'inline-block';
+      pauseBtn.textContent = 'Unpause';
+      pauseBtn.onclick = unpauseBlocking;
       toggleBtn.textContent = 'Paused';
       toggleBtn.style.background = 'var(--amber)';
+      toggleBtn.onclick = unpauseBlocking; // clicking "Paused" unpauses, not disables
     } else if (bl.enabled) {
       toggleBtn.textContent = 'Blocking On';
       toggleBtn.style.background = 'var(--emerald)';
@@ -900,6 +917,8 @@ async function refresh() {
     renderOverrides(overrides);
     renderCache(cache);
     renderServices(services);
+    renderBlockingInfo(blockingInfo);
+    renderAllowlist(allowlist);
 
   } catch (err) {
     document.getElementById('statusDot').className = 'status-dot error';
@@ -927,6 +946,13 @@ async function pauseBlocking() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ minutes: 5 }),
     });
+    refresh();
+  } catch (err) {}
+}
+
+async function unpauseBlocking() {
+  try {
+    await fetch(API + '/blocking/unpause', { method: 'POST' });
     refresh();
   } catch (err) {}
 }
@@ -971,6 +997,85 @@ async function checkDomain(event) {
   return false;
 }
 
+function shortenUrl(url) {
+  try {
+    const u = new URL(url);
+    const parts = u.pathname.split('/').filter(Boolean);
+    // For GitHub CDN URLs, show "owner/repo/.../filename"
+    if (u.hostname.includes('jsdelivr') || u.hostname.includes('github')) {
+      const owner = parts[1] || '';
+      const file = parts[parts.length - 1] || '';
+      return owner ? `${owner} / ${file}` : file;
+    }
+    // For other URLs, show hostname + filename
+    const file = parts[parts.length - 1] || '';
+    return `${u.hostname} / ${file}`;
+  } catch { return url; }
+}
+
+function renderBlockingInfo(info) {
+  const el = document.getElementById('blockingSources');
+  const refreshEl = document.getElementById('blockingRefresh');
+  if (info.last_refresh_secs_ago != null) {
+    refreshEl.textContent = `refreshed ${formatUptime(info.last_refresh_secs_ago)} ago`;
+  }
+  const sources = info.list_sources || [];
+  if (!sources.length) {
+    el.innerHTML = '';
+    return;
+  }
+  el.innerHTML = `
+    <div style="font-size:0.65rem;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-dim);margin-bottom:0.4rem;">Sources &middot; ${formatNumber(info.domains_loaded)} domains</div>
+    ${sources.map(s => `
+      <div style="padding:0.3rem 0;font-family:var(--font-mono);font-size:0.72rem;">
+        <a href="${s}" target="_blank" rel="noopener" style="color:var(--text-secondary);text-decoration:none;" title="${s}">${shortenUrl(s)}</a>
+      </div>
+    `).join('')}
+  `;
+}
+
+function renderAllowlist(entries) {
+  const el = document.getElementById('blockingAllowlist');
+  const count = entries.length;
+  el.innerHTML = `
+    <div style="font-size:0.65rem;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-dim);margin-bottom:0.4rem;">Allowlist${count ? ` (${count})` : ''}</div>
+    ${count ? entries.map(d => `
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:0.25rem 0;border-bottom:1px solid var(--border);">
+        <span style="font-family:var(--font-mono);font-size:0.75rem;color:var(--emerald);">${d}</span>
+        <button class="btn-delete" onclick="removeAllowlistDomain('${d}')">&times;</button>
+      </div>
+    `).join('') : '<div class="empty-state">No exceptions</div>'}
+    <form onsubmit="return addAllowlistDomain(event)" style="display:flex;gap:0.4rem;margin-top:0.4rem;">
+      <input type="text" id="allowDomainInput" placeholder="domain to allow" required style="flex:1;font-family:var(--font-mono);font-size:0.75rem;padding:0.35rem 0.5rem;border:1px solid var(--border);border-radius:4px;background:var(--bg-surface);color:var(--text-primary);outline:none;">
+      <button type="submit" class="btn" style="background:var(--emerald);color:white;flex-shrink:0;">Allow</button>
+    </form>
+  `;
+}
+
+async function addAllowlistDomain(event) {
+  event.preventDefault();
+  const input = document.getElementById('allowDomainInput');
+  const domain = input.value.trim();
+  if (!domain) return false;
+  try {
+    await fetch(API + '/blocking/allowlist', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ domain }),
+    });
+    input.value = '';
+    refresh();
+  } catch (err) {}
+  return false;
+}
+
+async function removeAllowlistDomain(domain) {
+  try {
+    await fetch(API + '/blocking/allowlist/' + encodeURIComponent(domain), { method: 'DELETE' });
+    refresh();
+  } catch (err) {}
+}
+
 function renderServices(entries) {
   const el = document.getElementById('servicesList');
   if (!entries.length) {
@@ -982,7 +1087,7 @@ function renderServices(entries) {
       <span class="health-dot ${e.healthy ? 'up' : 'down'}" title="${e.healthy ? 'running' : 'not reachable'}"></span>
       <div class="service-info">
         <div class="service-name"><a href="${e.url}" target="_blank">${e.name}.numa</a></div>
-        <div class="service-port">:${e.target_port}</div>
+        <div class="service-port">localhost:${e.target_port} &rarr; proxied</div>
       </div>
       ${e.name === 'numa' ? '' : `<button class="btn-delete" onclick="deleteService('${e.name}')" title="Remove service">&times;</button>`}
     </div>

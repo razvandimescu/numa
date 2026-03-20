@@ -16,6 +16,7 @@ max_ttl = 86400
 [proxy]
 enabled = true
 port = 80
+tls_port = 443
 tld = "numa"
 
 # Pre-configured services (numa.numa is always added automatically)

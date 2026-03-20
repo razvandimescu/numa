@@ -104,12 +104,13 @@ async fn main() -> numa::Result<()> {
         blocklist.set_enabled(false);
     }
 
-    // Build service store from config, always include numa dashboard
+    // Build service store: config services + persisted user services
     let mut service_store = ServiceStore::new();
-    service_store.insert("numa", config.server.api_port);
+    service_store.insert_from_config("numa", config.server.api_port);
     for svc in &config.services {
-        service_store.insert(&svc.name, svc.target_port);
+        service_store.insert_from_config(&svc.name, svc.target_port);
     }
+    service_store.load_persisted();
 
     let forwarding_rules = system_dns.forwarding_rules;
 
@@ -150,8 +151,12 @@ async fn main() -> numa::Result<()> {
     eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;107;124;78mBlocking\x1b[0m  {:<30}\x1b[38;2;192;98;58m║\x1b[0m",
         if config.blocking.enabled { format!("{} lists", config.blocking.lists.len()) } else { "disabled".to_string() });
     if config.proxy.enabled {
-        eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;107;124;78mProxy\x1b[0m     {:<30}\x1b[38;2;192;98;58m║\x1b[0m",
-            format!("http://*.{} on :{}", config.proxy.tld, config.proxy.port));
+        let schemes = if config.proxy.tls_port > 0 {
+            format!("http://:{} https://:{}", config.proxy.port, config.proxy.tls_port)
+        } else {
+            format!("http://*.{} on :{}", config.proxy.tld, config.proxy.port)
+        };
+        eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;107;124;78mProxy\x1b[0m     {:<30}\x1b[38;2;192;98;58m║\x1b[0m", schemes);
     }
     if !ctx.forwarding_rules.is_empty() {
         eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;107;124;78mRouting\x1b[0m   {:<30}\x1b[38;2;192;98;58m║\x1b[0m",
@@ -198,10 +203,33 @@ async fn main() -> numa::Result<()> {
     if config.proxy.enabled {
         let proxy_ctx = Arc::clone(&ctx);
         let proxy_port = config.proxy.port;
-        let proxy_tld = config.proxy.tld.clone();
         tokio::spawn(async move {
-            numa::proxy::start_proxy(proxy_ctx, proxy_port, &proxy_tld).await;
+            numa::proxy::start_proxy(proxy_ctx, proxy_port).await;
         });
+    }
+
+    // Spawn HTTPS reverse proxy with TLS termination
+    if config.proxy.enabled && config.proxy.tls_port > 0 {
+        let service_names: Vec<String> = ctx
+            .services
+            .lock()
+            .unwrap()
+            .list()
+            .iter()
+            .map(|e| e.name.clone())
+            .collect();
+        match numa::tls::build_tls_config(&config.proxy.tld, &service_names) {
+            Ok(tls_config) => {
+                let proxy_ctx = Arc::clone(&ctx);
+                let tls_port = config.proxy.tls_port;
+                tokio::spawn(async move {
+                    numa::proxy::start_proxy_tls(proxy_ctx, tls_port, tls_config).await;
+                });
+            }
+            Err(e) => {
+                log::warn!("TLS setup failed, HTTPS proxy disabled: {}", e);
+            }
+        }
     }
 
     // UDP DNS listener
