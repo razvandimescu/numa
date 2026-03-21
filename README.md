@@ -228,8 +228,11 @@ Zero external DNS libraries. RFC 1035 wire protocol parsed by hand. Dependencies
 - [x] System DNS auto-discovery — Tailscale, VPN split-DNS
 - [x] System DNS auto-configuration — `numa install` / `numa uninstall`
 - [x] Local service proxy — `.numa` domains with HTTP/HTTPS reverse proxy, auto TLS, WebSocket
-- [ ] pkarr integration — self-sovereign DNS via Mainline DHT
-- [ ] Decentralized resolver network — staking, auditing, token economics
+- [ ] pkarr integration — resolve Ed25519 keys via Mainline DHT (15M nodes)
+- [ ] Global `.numa` names — self-publish, DHT-backed, first-come-first-served
+- [ ] Audit protocol — challenge-based verification of resolver honesty
+- [ ] Numa Network — proof-of-service consensus, NUMA token, paid `.numa` domains
+- [ ] `.onion` bridge — human-readable `.numa` names for Tor hidden services
 
 ## License
 

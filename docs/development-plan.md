@@ -100,18 +100,48 @@ Auto-generated CA, wildcard `*.numa` cert, HTTPS proxy on :443, OS trust store i
 - `.numa.toml` project file (committed to repos, team-level service names)
 - Integration examples with Docker, CI pipelines
 
-### Phase 8: Decentralized DNS (Months 6-12)
+### Phase 8: Pkarr Integration (Months 6-8)
 
-- pkarr spike: resolve pkarr names via Mainline DHT
-- Publish endpoint: users publish DNS records to DHT
-- Re-publish daemon, key management
-- Human-readable aliases for pkarr domains
+- Add `pkarr-client` crate dependency (DHT resolution)
+- Detect z-base32 TLDs (52-char) in DNS pipeline → DHT lookup
+- Translate `simple-dns` records → Numa `DnsRecord` types
+- Cache pkarr results in Numa DNS cache
+- New `QueryPath::Pkarr` variant in stats
+- Config: `[pkarr] enabled = true`
+- API: `GET /pkarr/resolve/{z32key}` for debugging
 
-### Phase 9: Network Economics (Month 12+)
+### Phase 9: .numa Global Names (Months 8-10)
 
-- Resolver staking, challenge-based auditing
-- Decentralized blocklist governance
-- Token economics — only if Phase 8 validates demand
+- Self-publishing: `numa register myblog` → generates keypair, publishes to DHT
+- DHT-based name claims: `sha1("numa-claim:myblog")` → SignedPacket with owner + records
+- First-come-first-served via timestamps (no chain needed initially)
+- Background republish task (every hour, keeps names alive on DHT)
+- Key management: keypairs stored at config dir
+- Human-readable `.numa` names that resolve globally across all Numa instances
+
+### Phase 10: Audit Protocol (Months 10-12)
+
+- Challenge-based auditing: auditor nodes send test queries to verify resolver honesty
+- Reputation scores for nodes (correct resolution, latency, uptime)
+- Service score: `queries_resolved × w1 + names_republished × w2 + audits_passed × w3`
+- Dashboard: node reputation and audit results
+
+### Phase 11: Network Economics (Month 12+)
+
+- NUMA token: earned by running nodes, spent on name registration
+- Proof-of-service consensus (block production weighted by service score, not hash power)
+- Lightweight chain for name ownership only (DNS records stay on DHT)
+- Paid `.numa` names: $1-5/month, revenue split among republishing nodes
+- Staking and slashing for node operators
+- Full details: `docs/numa-network-economics.md`
+
+### Phase 12: .onion Bridge
+
+- Human-readable `.numa` names for Tor hidden services
+- `protonmail.numa` → `protonmailrmez3lot...onion`
+- Proxy routes through Tor SOCKS5 (localhost:9050)
+- Combined with Numa's auto TLS: `https://protonmail.numa` with green lock
+- Curated registry (git-based initially) + DHT propagation
 
 ---
 
@@ -124,6 +154,7 @@ Auto-generated CA, wildcard `*.numa` cert, HTTPS proxy on :443, OS trust store i
 - **Environment switching** — `api.numa` → local vs staging with one click
 - **Per-source domain counts** — show how many domains each blocklist contributes
 - **Firefox NSS trust** — auto-add CA to Firefox's cert store via `certutil`
+- **`.numa.toml` project file** — committed to repos, team-level service names on clone
 
 ---
 
@@ -136,4 +167,7 @@ Auto-generated CA, wildcard `*.numa` cert, HTTPS proxy on :443, OS trust store i
 | Local service proxy | .numa domains with HTTP + HTTPS proxy | Done |
 | Show HN launch | 200+ stars day 1, front page 4+ hours | Upcoming |
 | Month 1 post-launch | 1000+ stars, awesome-selfhosted listing | — |
-| Month 6 | pkarr prototype working | — |
+| Pkarr resolution | 100 z-base32 domains resolvable | — |
+| .numa self-publishing | 1,000 globally resolvable .numa names | — |
+| Token launch | 10,000 Numa installations, 5,000 names | — |
+| .onion bridge | 100 mapped Tor hidden services | — |
