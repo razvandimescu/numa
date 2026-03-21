@@ -25,4 +25,4 @@ jobs:
       - name: test
         run: cargo test
       - name: audit
-        run: cargo install cargo-audit && cargo audit --ignore RUSTSEC-2025-0134
+        run: cargo install cargo-audit && cargo audit
