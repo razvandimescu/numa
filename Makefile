@@ -1,17 +1,20 @@
-.PHONY: all build lint fmt check test clean deploy
+.PHONY: all build lint fmt check audit test clean deploy
 
 all: lint build
 
 build:
 	cargo build
 
-lint: fmt check
+lint: fmt check audit
 
 fmt:
 	cargo fmt --check
 
 check:
 	cargo clippy -- -D warnings
+
+audit:
+	cargo audit
 
 test:
 	cargo test
