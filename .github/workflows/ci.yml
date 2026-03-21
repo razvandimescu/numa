@@ -24,3 +24,5 @@ jobs:
         run: cargo clippy -- -D warnings
       - name: test
         run: cargo test
+      - name: audit
+        run: cargo install cargo-audit && cargo audit

@@ -1,5 +1,9 @@
 # Numa
 
+[![CI](https://github.com/razvandimescu/numa/actions/workflows/ci.yml/badge.svg)](https://github.com/razvandimescu/numa/actions)
+[![crates.io](https://img.shields.io/crates/v/numa.svg)](https://crates.io/crates/numa)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 **DNS you own. Everywhere you go.**
 
 A portable DNS resolver in a single binary. Block ads on any network, name your local services (`frontend.numa`), and override any hostname with auto-revert — all from your laptop, no cloud account or Raspberry Pi required.
