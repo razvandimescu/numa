@@ -19,10 +19,10 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-latest
             name: numa-macos-aarch64
-          - target: x86_64-unknown-linux-gnu
+          - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             name: numa-linux-x86_64
-          - target: aarch64-unknown-linux-gnu
+          - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
             name: numa-linux-aarch64
 
@@ -36,15 +36,22 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Install cross-compilation tools
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        if: contains(matrix.target, 'linux')
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+          sudo apt-get install -y musl-tools
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-musl" ]; then
+            sudo apt-get install -y gcc-aarch64-linux-gnu musl-dev
+            # Install aarch64 musl cross-compiler
+            wget -q https://musl.cc/aarch64-linux-musl-cross.tgz
+            tar xzf aarch64-linux-musl-cross.tgz -C /opt
+            echo "/opt/aarch64-linux-musl-cross/bin" >> $GITHUB_PATH
+          fi
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
         env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-musl-gcc
 
       - name: Package
         run: |
