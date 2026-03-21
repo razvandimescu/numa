@@ -135,11 +135,15 @@ async fn proxy_handler(State(state): State<ProxyState>, req: Request) -> axum::r
         }
     };
 
-    let target_port = {
+    let (target_host, target_port) = {
         let store = state.ctx.services.lock().unwrap();
-        match store.lookup(&service_name) {
-            Some(entry) => entry.target_port,
-            None => {
+        if let Some(entry) = store.lookup(&service_name) {
+            ("localhost".to_string(), entry.target_port)
+        } else {
+            let mut peers = state.ctx.lan_peers.lock().unwrap();
+            match peers.lookup(&service_name) {
+                Some((ip, port)) => (ip.to_string(), port),
+                None => {
                 return (
                     StatusCode::NOT_FOUND,
                     [(hyper::header::CONTENT_TYPE, "text/html; charset=utf-8")],
@@ -259,6 +263,7 @@ pre .str {{ color: #d48a5a }}
                     ),
                 )
                     .into_response()
+                }
             }
         }
     };
@@ -268,7 +273,7 @@ pre .str {{ color: #d48a5a }}
         .path_and_query()
         .map(|pq| pq.as_str())
         .unwrap_or("/");
-    let target_uri: hyper::Uri = format!("http://localhost:{}{}", target_port, path_and_query)
+    let target_uri: hyper::Uri = format!("http://{}:{}{}", target_host, target_port, path_and_query)
         .parse()
         .unwrap();
 

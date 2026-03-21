@@ -127,6 +127,7 @@ async fn main() -> numa::Result<()> {
         blocklist: Mutex::new(blocklist),
         query_log: Mutex::new(QueryLog::new(1000)),
         services: Mutex::new(service_store),
+        lan_peers: Mutex::new(numa::lan::PeerStore::new(config.lan.peer_timeout_secs)),
         forwarding_rules,
         upstream,
         timeout: Duration::from_millis(config.upstream.timeout_ms),
@@ -160,6 +161,10 @@ async fn main() -> numa::Result<()> {
             format!("http://*.{} on :{}", config.proxy.tld, config.proxy.port)
         };
         eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;107;124;78mProxy\x1b[0m     {:<30}\x1b[38;2;192;98;58m║\x1b[0m", schemes);
+    }
+    if config.lan.enabled {
+        eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;107;124;78mLAN\x1b[0m       {:<30}\x1b[38;2;192;98;58m║\x1b[0m",
+            format!("{}:{}", config.lan.multicast_group, config.lan.port));
     }
     if !ctx.forwarding_rules.is_empty() {
         eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;107;124;78mRouting\x1b[0m   {:<30}\x1b[38;2;192;98;58m║\x1b[0m",
@@ -233,6 +238,15 @@ async fn main() -> numa::Result<()> {
                 log::warn!("TLS setup failed, HTTPS proxy disabled: {}", e);
             }
         }
+    }
+
+    // Spawn LAN service discovery
+    if config.lan.enabled {
+        let lan_ctx = Arc::clone(&ctx);
+        let lan_config = config.lan.clone();
+        tokio::spawn(async move {
+            numa::lan::start_lan_discovery(lan_ctx, &lan_config).await;
+        });
     }
 
     // UDP DNS listener

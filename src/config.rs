@@ -25,6 +25,8 @@ pub struct Config {
     pub proxy: ProxyConfig,
     #[serde(default)]
     pub services: Vec<ServiceConfig>,
+    #[serde(default)]
+    pub lan: LanConfig,
 }
 
 #[derive(Deserialize)]
@@ -200,6 +202,48 @@ fn default_proxy_tld() -> String {
 pub struct ServiceConfig {
     pub name: String,
     pub target_port: u16,
+}
+
+#[derive(Deserialize, Clone)]
+pub struct LanConfig {
+    #[serde(default = "default_lan_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_lan_multicast_group")]
+    pub multicast_group: String,
+    #[serde(default = "default_lan_port")]
+    pub port: u16,
+    #[serde(default = "default_lan_broadcast_interval")]
+    pub broadcast_interval_secs: u64,
+    #[serde(default = "default_lan_peer_timeout")]
+    pub peer_timeout_secs: u64,
+}
+
+impl Default for LanConfig {
+    fn default() -> Self {
+        LanConfig {
+            enabled: default_lan_enabled(),
+            multicast_group: default_lan_multicast_group(),
+            port: default_lan_port(),
+            broadcast_interval_secs: default_lan_broadcast_interval(),
+            peer_timeout_secs: default_lan_peer_timeout(),
+        }
+    }
+}
+
+fn default_lan_enabled() -> bool {
+    true
+}
+fn default_lan_multicast_group() -> String {
+    "239.255.70.78".to_string()
+}
+fn default_lan_port() -> u16 {
+    5390
+}
+fn default_lan_broadcast_interval() -> u64 {
+    30
+}
+fn default_lan_peer_timeout() -> u64 {
+    90
 }
 
 pub fn load_config(path: &str) -> Result<Config> {
