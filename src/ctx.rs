@@ -150,8 +150,17 @@ pub async fn handle_query(
     );
 
     let mut resp_buffer = BytePacketBuffer::new();
-    response.write(&mut resp_buffer)?;
-    ctx.socket.send_to(resp_buffer.filled(), src_addr).await?;
+    if response.write(&mut resp_buffer).is_err() {
+        // Response too large for UDP — set TC bit and send header + question only
+        debug!("response too large, setting TC bit for {}", qname);
+        let mut tc_response = DnsPacket::response_from(&query, response.header.rescode);
+        tc_response.header.truncated_message = true;
+        let mut tc_buffer = BytePacketBuffer::new();
+        tc_response.write(&mut tc_buffer)?;
+        ctx.socket.send_to(tc_buffer.filled(), src_addr).await?;
+    } else {
+        ctx.socket.send_to(resp_buffer.filled(), src_addr).await?;
+    }
 
     // Record stats and query log
     {
