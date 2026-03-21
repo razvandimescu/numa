@@ -22,7 +22,7 @@ dig @127.0.0.1 google.com           # ✓ resolves normally
 dig @127.0.0.1 ads.google.com       # ✗ blocked → 0.0.0.0
 ```
 
-Open the dashboard: **http://localhost:5380**
+Open the dashboard: **http://numa.numa** (or `http://localhost:5380`)
 
 Or build from source:
 ```bash
