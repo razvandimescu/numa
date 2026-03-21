@@ -24,7 +24,11 @@ pub async fn forward_query(
     let (size, _) = timeout(timeout_duration, socket.recv_from(&mut recv_buffer.buf)).await??;
 
     if size >= recv_buffer.buf.len() {
-        log::debug!("upstream response truncated ({} bytes, buffer {})", size, recv_buffer.buf.len());
+        log::debug!(
+            "upstream response truncated ({} bytes, buffer {})",
+            size,
+            recv_buffer.buf.len()
+        );
     }
 
     DnsPacket::from_buffer(&mut recv_buffer)
