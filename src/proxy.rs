@@ -141,9 +141,120 @@ async fn proxy_handler(State(state): State<ProxyState>, req: Request) -> axum::r
             Some(entry) => entry.target_port,
             None => {
                 return (
-                    StatusCode::BAD_GATEWAY,
+                    StatusCode::NOT_FOUND,
+                    [(hyper::header::CONTENT_TYPE, "text/html; charset=utf-8")],
                     format!(
-                        "unknown service: {}{}",
+                        r##"<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>404 — {0}{1}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=DM+Sans:opsz,wght@9..40,400;9..40,500&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after {{ margin:0;padding:0;box-sizing:border-box }}
+body {{
+  font-family: 'DM Sans', system-ui, sans-serif;
+  background: #f5f0e8;
+  color: #2c2418;
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  -webkit-font-smoothing: antialiased;
+  position: relative;
+  overflow: hidden;
+}}
+body::before {{
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg width='120' height='60' xmlns='http://www.w3.org/2000/svg'%3E%3Crect x='1' y='1' width='56' height='27' rx='1' fill='none' stroke='%23a39888' stroke-width='0.5' opacity='0.12'/%3E%3Crect x='61' y='1' width='56' height='27' rx='1' fill='none' stroke='%23a39888' stroke-width='0.5' opacity='0.12'/%3E%3Crect x='31' y='31' width='56' height='27' rx='1' fill='none' stroke='%23a39888' stroke-width='0.5' opacity='0.12'/%3E%3C/svg%3E");
+  background-size: 120px 60px;
+  pointer-events: none;
+  opacity: 0.5;
+  -webkit-mask-image: radial-gradient(ellipse at center, transparent 20%, rgba(0,0,0,0.4) 70%);
+  mask-image: radial-gradient(ellipse at center, transparent 20%, rgba(0,0,0,0.4) 70%);
+}}
+.container {{
+  position: relative;
+  z-index: 1;
+  text-align: center;
+  max-width: 480px;
+  padding: 2rem;
+  animation: rise 0.6s cubic-bezier(0.22,1,0.36,1);
+}}
+@keyframes rise {{
+  from {{ opacity:0; transform:translateY(20px) }}
+  to {{ opacity:1; transform:translateY(0) }}
+}}
+.code {{
+  font-family: 'Instrument Serif', Georgia, serif;
+  font-size: 6rem;
+  line-height: 1;
+  color: #c0623a;
+  letter-spacing: 0.04em;
+  opacity: 0.85;
+}}
+.domain {{
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 1.1rem;
+  color: #2c2418;
+  margin-top: 1rem;
+  padding: 0.4rem 1rem;
+  background: rgba(192,98,58,0.08);
+  border: 1px solid rgba(192,98,58,0.15);
+  border-radius: 6px;
+  display: inline-block;
+}}
+.message {{
+  color: #6b5e4f;
+  margin-top: 1.2rem;
+  line-height: 1.7;
+  font-size: 0.95rem;
+}}
+.message a {{
+  color: #c0623a;
+  text-decoration: none;
+  border-bottom: 1px solid rgba(192,98,58,0.3);
+}}
+.message a:hover {{ border-bottom-color: #c0623a }}
+pre {{
+  text-align: left;
+  background: #1a1814;
+  color: #e8e0d4;
+  padding: 1rem 1.2rem;
+  border-radius: 8px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.78rem;
+  line-height: 1.7;
+  margin-top: 1.2rem;
+  overflow-x: auto;
+}}
+pre .prompt {{ color: #8baa6e }}
+pre .flag {{ color: #8b9fbb }}
+pre .str {{ color: #d48a5a }}
+.lyrics {{
+  margin-top: 2.5rem;
+  font-family: 'Instrument Serif', Georgia, serif;
+  font-style: italic;
+  font-size: 0.85rem;
+  color: #a39888;
+  letter-spacing: 0.03em;
+  opacity: 0;
+  animation: fade 0.8s 1.5s forwards;
+}}
+@keyframes fade {{ to {{ opacity: 1 }} }}
+</style></head><body>
+<div class="container">
+  <div class="code">404</div>
+  <div class="domain">{0}{1}</div>
+  <p class="message">This service isn't registered yet.<br>Add it from the <a href="http://numa.numa">dashboard</a> or:</p>
+  <pre><span class="prompt">$</span> <span class="str">curl</span> <span class="flag">-X POST</span> numa.numa:5380/services \
+    <span class="flag">-H</span> 'Content-Type: application/json' \
+    <span class="flag">-d</span> '<span class="str">{{"name":"{0}","target_port":3000}}</span>'</pre>
+  <div class="lyrics">ma-ia hii, ma-ia huu, ma-ia haa, ma-ia ha-ha</div>
+</div>
+</body></html>"##,
                         service_name, state.ctx.proxy_tld_suffix
                     ),
                 )
