@@ -27,8 +27,7 @@ impl PeerStore {
     pub fn update(&mut self, host: IpAddr, services: &[(String, u16)]) {
         let now = Instant::now();
         for (name, port) in services {
-            self.peers
-                .insert(name.to_lowercase(), (host, *port, now));
+            self.peers.insert(name.to_lowercase(), (host, *port, now));
         }
     }
 
@@ -44,11 +43,17 @@ impl PeerStore {
 
     pub fn list(&mut self) -> Vec<(String, IpAddr, u16, u64)> {
         let now = Instant::now();
-        self.peers.retain(|_, (_, _, seen)| now.duration_since(*seen) < self.timeout);
+        self.peers
+            .retain(|_, (_, _, seen)| now.duration_since(*seen) < self.timeout);
         self.peers
             .iter()
             .map(|(name, (ip, port, seen))| {
-                (name.clone(), *ip, *port, now.duration_since(*seen).as_secs())
+                (
+                    name.clone(),
+                    *ip,
+                    *port,
+                    now.duration_since(*seen).as_secs(),
+                )
             })
             .collect()
     }
@@ -81,7 +86,10 @@ pub async fn start_lan_discovery(ctx: Arc<ServerCtx>, config: &LanConfig) {
     let multicast_group: Ipv4Addr = match config.multicast_group.parse() {
         Ok(g) => g,
         Err(e) => {
-            warn!("LAN: invalid multicast group {}: {}", config.multicast_group, e);
+            warn!(
+                "LAN: invalid multicast group {}: {}",
+                config.multicast_group, e
+            );
             return;
         }
     };
@@ -89,13 +97,19 @@ pub async fn start_lan_discovery(ctx: Arc<ServerCtx>, config: &LanConfig) {
     let interval = Duration::from_secs(config.broadcast_interval_secs);
 
     let local_ip = detect_lan_ip().unwrap_or(Ipv4Addr::LOCALHOST);
-    info!("LAN discovery on {}:{}, local IP {}", multicast_group, port, local_ip);
+    info!(
+        "LAN discovery on {}:{}, local IP {}",
+        multicast_group, port, local_ip
+    );
 
     // Create socket with SO_REUSEADDR for multicast
     let std_socket = match create_multicast_socket(multicast_group, port) {
         Ok(s) => s,
         Err(e) => {
-            warn!("LAN: could not bind multicast socket: {} — LAN discovery disabled", e);
+            warn!(
+                "LAN: could not bind multicast socket: {} — LAN discovery disabled",
+                e
+            );
             return;
         }
     };
@@ -178,10 +192,7 @@ pub async fn start_lan_discovery(ctx: Arc<ServerCtx>, config: &LanConfig) {
     }
 }
 
-fn create_multicast_socket(
-    group: Ipv4Addr,
-    port: u16,
-) -> std::io::Result<std::net::UdpSocket> {
+fn create_multicast_socket(group: Ipv4Addr, port: u16) -> std::io::Result<std::net::UdpSocket> {
     use std::net::SocketAddrV4;
 
     let addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port);

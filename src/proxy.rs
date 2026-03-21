@@ -273,9 +273,10 @@ pre .str {{ color: #d48a5a }}
         .path_and_query()
         .map(|pq| pq.as_str())
         .unwrap_or("/");
-    let target_uri: hyper::Uri = format!("http://{}:{}{}", target_host, target_port, path_and_query)
-        .parse()
-        .unwrap();
+    let target_uri: hyper::Uri =
+        format!("http://{}:{}{}", target_host, target_port, path_and_query)
+            .parse()
+            .unwrap();
 
     // Check for upgrade request (WebSocket, etc.)
     let is_upgrade = req.headers().get(hyper::header::UPGRADE).is_some();
