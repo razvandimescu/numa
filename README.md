@@ -4,6 +4,8 @@
 
 Block ads and trackers. Override DNS for development. Name your local services. Cache for speed. A single portable binary built from scratch in Rust — no Raspberry Pi, no cloud, no account.
 
+![Numa dashboard](assets/hero-demo.gif)
+
 ## Why
 
 - **Ad blocking that travels with you** — 385K+ domains blocked out of the box. Works on any network: coffee shops, hotels, airports.
