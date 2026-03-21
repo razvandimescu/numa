@@ -11,12 +11,12 @@ use crate::cache::DnsCache;
 use crate::config::ZoneMap;
 use crate::forward::forward_query;
 use crate::header::ResultCode;
+use crate::lan::PeerStore;
 use crate::override_store::OverrideStore;
 use crate::packet::DnsPacket;
 use crate::query_log::{QueryLog, QueryLogEntry};
 use crate::question::QueryType;
 use crate::record::DnsRecord;
-use crate::lan::PeerStore;
 use crate::service_store::ServiceStore;
 use crate::stats::{QueryPath, ServerStats};
 use crate::system_dns::ForwardingRule;
@@ -70,9 +70,7 @@ pub async fn handle_query(
             && (qname.ends_with(&ctx.proxy_tld_suffix) || qname == ctx.proxy_tld)
         {
             // Resolve .numa: local services → 127.0.0.1, LAN peers → peer IP
-            let service_name = qname
-                .strip_suffix(&ctx.proxy_tld_suffix)
-                .unwrap_or(&qname);
+            let service_name = qname.strip_suffix(&ctx.proxy_tld_suffix).unwrap_or(&qname);
             let resolve_ip = {
                 let local = ctx.services.lock().unwrap();
                 if local.lookup(service_name).is_some() {
