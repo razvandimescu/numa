@@ -4,7 +4,7 @@
 
 A portable DNS resolver in a single binary. Block ads on any network, name your local services (`frontend.numa`), and override any hostname with auto-revert — all from your laptop, no cloud account or Raspberry Pi required.
 
-Built from scratch in Rust. Zero DNS libraries. RFC 1035 wire protocol parsed by hand.
+Built from scratch in Rust. Zero DNS libraries. RFC 1035 wire protocol parsed by hand. One ~8MB binary, no PHP, no web server, no database — everything is embedded.
 
 ![Numa dashboard](assets/hero-demo.gif)
 
