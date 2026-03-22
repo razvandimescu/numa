@@ -382,6 +382,15 @@ body {
 }
 .health-dot.up { background: var(--emerald); }
 .health-dot.down { background: var(--rose); }
+.lan-badge {
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  padding: 1px 5px;
+  border-radius: 3px;
+  margin-left: 0.3rem;
+}
+.lan-badge.shared { background: rgba(82, 122, 82, 0.12); color: var(--emerald); }
+.lan-badge.local-only { background: rgba(192, 98, 58, 0.12); color: var(--amber-dim); }
 
 /* Override form */
 .override-form {
@@ -1082,16 +1091,22 @@ function renderServices(entries) {
     el.innerHTML = '<div class="empty-state">No services configured</div>';
     return;
   }
-  el.innerHTML = entries.map(e => `
+  el.innerHTML = entries.map(e => {
+    const lanBadge = e.healthy
+      ? (e.lan_accessible
+        ? '<span class="lan-badge shared" title="Reachable from other devices on the network">LAN</span>'
+        : '<span class="lan-badge local-only" title="Bound to localhost — not reachable from other devices. Start with 0.0.0.0 to share on LAN.">local only</span>')
+      : '';
+    return `
     <div class="service-item">
       <span class="health-dot ${e.healthy ? 'up' : 'down'}" title="${e.healthy ? 'running' : 'not reachable'}"></span>
       <div class="service-info">
-        <div class="service-name"><a href="${e.url}" target="_blank">${e.name}.numa</a></div>
+        <div class="service-name"><a href="${e.url}" target="_blank">${e.name}.numa</a>${lanBadge}</div>
         <div class="service-port">localhost:${e.target_port} &rarr; proxied</div>
       </div>
       ${e.name === 'numa' ? '' : `<button class="btn-delete" onclick="deleteService('${e.name}')" title="Remove service">&times;</button>`}
     </div>
-  `).join('');
+  `}).join('');
 }
 
 async function addService(event) {

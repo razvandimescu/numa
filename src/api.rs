@@ -590,6 +590,7 @@ struct ServiceResponse {
     target_port: u16,
     url: String,
     healthy: bool,
+    lan_accessible: bool,
 }
 
 #[derive(Deserialize)]
@@ -609,22 +610,38 @@ async fn list_services(State(ctx): State<Arc<ServerCtx>>) -> Json<Vec<ServiceRes
     };
     let tld = &ctx.proxy_tld;
 
-    // Run all health checks concurrently
-    let health_futures: Vec<_> = entries
+    let lan_ip = crate::lan::detect_lan_ip();
+
+    let check_futures: Vec<_> = entries
         .iter()
-        .map(|(_, port)| check_health(*port))
+        .map(|(_, port)| {
+            let port = *port;
+            let localhost = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+            let lan_addr = lan_ip.map(|ip| std::net::SocketAddr::new(ip.into(), port));
+            async move {
+                let healthy = check_tcp(localhost).await;
+                let lan_accessible = match lan_addr {
+                    Some(addr) => check_tcp(addr).await,
+                    None => false,
+                };
+                (healthy, lan_accessible)
+            }
+        })
         .collect();
-    let health_results = futures::future::join_all(health_futures).await;
+    let check_results = futures::future::join_all(check_futures).await;
 
     let results: Vec<_> = entries
         .into_iter()
-        .zip(health_results)
-        .map(|((name, port), healthy)| ServiceResponse {
-            url: format!("http://{}.{}", name, tld),
-            name,
-            target_port: port,
-            healthy,
-        })
+        .zip(check_results)
+        .map(
+            |((name, port), (healthy, lan_accessible))| ServiceResponse {
+                url: format!("http://{}.{}", name, tld),
+                name,
+                target_port: port,
+                healthy,
+                lan_accessible,
+            },
+        )
         .collect();
     Json(results)
 }
@@ -655,7 +672,15 @@ async fn create_service(
     let tld = &ctx.proxy_tld;
     ctx.services.lock().unwrap().insert(&name, req.target_port);
 
-    let healthy = check_health(req.target_port).await;
+    let localhost = std::net::SocketAddr::from(([127, 0, 0, 1], req.target_port));
+    let lan_addr =
+        crate::lan::detect_lan_ip().map(|ip| std::net::SocketAddr::new(ip.into(), req.target_port));
+    let (healthy, lan_accessible) = tokio::join!(check_tcp(localhost), async {
+        match lan_addr {
+            Some(a) => check_tcp(a).await,
+            None => false,
+        }
+    });
     Ok((
         StatusCode::CREATED,
         Json(ServiceResponse {
@@ -663,6 +688,7 @@ async fn create_service(
             name,
             target_port: req.target_port,
             healthy,
+            lan_accessible,
         }),
     ))
 }
@@ -679,10 +705,10 @@ async fn remove_service(State(ctx): State<Arc<ServerCtx>>, Path(name): Path<Stri
     }
 }
 
-async fn check_health(port: u16) -> bool {
+async fn check_tcp(addr: std::net::SocketAddr) -> bool {
     tokio::time::timeout(
         std::time::Duration::from_millis(100),
-        tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port)),
+        tokio::net::TcpStream::connect(addr),
     )
     .await
     .map(|r| r.is_ok())
