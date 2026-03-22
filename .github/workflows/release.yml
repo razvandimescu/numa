@@ -25,6 +25,9 @@ jobs:
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
             name: numa-linux-aarch64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            name: numa-windows-x86_64
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -51,12 +54,20 @@ jobs:
         if: matrix.target == 'aarch64-unknown-linux-musl'
         run: cross build --release --target ${{ matrix.target }}
 
-      - name: Package
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
         run: |
           cd target/${{ matrix.target }}/release
           tar czf ../../../${{ matrix.name }}.tar.gz numa
           cd ../../..
           sha256sum ${{ matrix.name }}.tar.gz > ${{ matrix.name }}.tar.gz.sha256 || shasum -a 256 ${{ matrix.name }}.tar.gz > ${{ matrix.name }}.tar.gz.sha256
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "target/${{ matrix.target }}/release/numa.exe" -DestinationPath "${{ matrix.name }}.zip"
+          (Get-FileHash "${{ matrix.name }}.zip" -Algorithm SHA256).Hash.ToLower() + "  ${{ matrix.name }}.zip" | Out-File "${{ matrix.name }}.zip.sha256" -Encoding ascii
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -65,6 +76,8 @@ jobs:
           path: |
             ${{ matrix.name }}.tar.gz
             ${{ matrix.name }}.tar.gz.sha256
+            ${{ matrix.name }}.zip
+            ${{ matrix.name }}.zip.sha256
 
   release:
     needs: build
@@ -80,4 +93,5 @@ jobs:
           generate_release_notes: true
           files: |
             *.tar.gz
+            *.zip
             *.sha256

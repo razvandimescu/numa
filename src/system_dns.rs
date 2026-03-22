@@ -24,10 +24,22 @@ pub fn discover_system_dns() -> SystemDnsInfo {
     {
         discover_macos()
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
     {
         SystemDnsInfo {
             default_upstream: detect_upstream_linux_or_backup(),
+            forwarding_rules: Vec::new(),
+        }
+    }
+    #[cfg(windows)]
+    {
+        discover_windows()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    {
+        log::debug!("no conditional forwarding rules discovered");
+        SystemDnsInfo {
+            default_upstream: None,
             forwarding_rules: Vec::new(),
         }
     }
@@ -156,7 +168,7 @@ fn make_rule(domain: &str, nameserver: &str) -> Option<ForwardingRule> {
 
 /// Detect upstream from /etc/resolv.conf, falling back to backup file if resolv.conf
 /// only has loopback (meaning numa install already ran).
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 fn detect_upstream_linux_or_backup() -> Option<String> {
     // Try /etc/resolv.conf first
     if let Some(ns) = read_upstream_from_file("/etc/resolv.conf") {
@@ -177,7 +189,7 @@ fn detect_upstream_linux_or_backup() -> Option<String> {
     None
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 fn read_upstream_from_file(path: &str) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
     for line in text.lines() {
@@ -191,6 +203,56 @@ fn read_upstream_from_file(path: &str) -> Option<String> {
         }
     }
     None
+}
+
+// --- Windows implementation ---
+
+#[cfg(windows)]
+fn discover_windows() -> SystemDnsInfo {
+    use log::{debug, warn};
+
+    let output = match std::process::Command::new("ipconfig").arg("/all").output() {
+        Ok(o) => o,
+        Err(e) => {
+            warn!("failed to run ipconfig /all: {}", e);
+            return SystemDnsInfo {
+                default_upstream: None,
+                forwarding_rules: Vec::new(),
+            };
+        }
+    };
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut upstream = None;
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        // Match "DNS Servers" line (English) or similar localized variants
+        if trimmed.contains("DNS Servers") || trimmed.contains("DNS-Server") {
+            if let Some(ip) = trimmed.split(':').last() {
+                let ip = ip.trim();
+                if !ip.is_empty() && ip != "127.0.0.1" && ip != "::1" {
+                    upstream = Some(ip.to_string());
+                    break;
+                }
+            }
+        }
+        // Continuation lines (indented IPs after DNS Servers line)
+        if upstream.is_none() && trimmed.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+            // Skip continuation lines — we only need the first DNS server
+        }
+    }
+
+    if let Some(ref ns) = upstream {
+        info!("detected Windows upstream: {}", ns);
+    } else {
+        debug!("no DNS servers found in ipconfig output");
+    }
+
+    SystemDnsInfo {
+        default_upstream: upstream,
+        forwarding_rules: Vec::new(),
+    }
 }
 
 /// Find the upstream for a domain by checking forwarding rules.
@@ -769,7 +831,7 @@ fn run_systemctl(args: &[&str]) -> Result<(), String> {
 // --- CA trust management ---
 
 fn trust_ca() -> Result<(), String> {
-    let ca_path = std::path::PathBuf::from("/usr/local/var/numa/ca.pem");
+    let ca_path = crate::data_dir().join("ca.pem");
     if !ca_path.exists() {
         return Err("CA not generated yet — start numa first to create certificates".into());
     }
@@ -816,7 +878,7 @@ fn trust_ca() -> Result<(), String> {
 }
 
 fn untrust_ca() -> Result<(), String> {
-    let ca_path = std::path::PathBuf::from("/usr/local/var/numa/ca.pem");
+    let ca_path = crate::data_dir().join("ca.pem");
 
     #[cfg(target_os = "macos")]
     {

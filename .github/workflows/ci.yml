@@ -26,3 +26,14 @@ jobs:
         run: cargo test
       - name: audit
         run: cargo install cargo-audit && cargo audit
+
+  check-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build
+        run: cargo build
+      - name: clippy
+        run: cargo clippy -- -D warnings
