@@ -86,10 +86,13 @@ async fn main() -> numa::Result<()> {
     let system_dns = discover_system_dns();
 
     let upstream_addr = if config.upstream.address.is_empty() {
-        system_dns.default_upstream.unwrap_or_else(|| {
-            info!("could not detect system DNS, falling back to 9.9.9.9 (Quad9)");
-            "9.9.9.9".to_string()
-        })
+        system_dns
+            .default_upstream
+            .or_else(numa::system_dns::detect_dhcp_dns)
+            .unwrap_or_else(|| {
+                info!("could not detect system DNS, falling back to 9.9.9.9 (Quad9)");
+                "9.9.9.9".to_string()
+            })
     } else {
         config.upstream.address.clone()
     };
@@ -129,7 +132,10 @@ async fn main() -> numa::Result<()> {
         services: Mutex::new(service_store),
         lan_peers: Mutex::new(numa::lan::PeerStore::new(config.lan.peer_timeout_secs)),
         forwarding_rules,
-        upstream,
+        upstream: Mutex::new(upstream),
+        upstream_auto: config.upstream.address.is_empty(),
+        upstream_port: config.upstream.port,
+        lan_ip: Mutex::new(numa::lan::detect_lan_ip().unwrap_or(std::net::Ipv4Addr::LOCALHOST)),
         timeout: Duration::from_millis(config.upstream.timeout_ms),
         proxy_tld_suffix: if config.proxy.tld.is_empty() {
             String::new()
@@ -240,6 +246,14 @@ async fn main() -> numa::Result<()> {
         }
     }
 
+    // Spawn network change watcher (upstream re-detection, LAN IP update, peer flush)
+    {
+        let watch_ctx = Arc::clone(&ctx);
+        tokio::spawn(async move {
+            network_watch_loop(watch_ctx).await;
+        });
+    }
+
     // Spawn LAN service discovery
     if config.lan.enabled {
         let lan_ctx = Arc::clone(&ctx);
@@ -261,6 +275,52 @@ async fn main() -> numa::Result<()> {
                 error!("{} | HANDLER ERROR | {}", src_addr, e);
             }
         });
+    }
+}
+
+async fn network_watch_loop(ctx: Arc<numa::ctx::ServerCtx>) {
+    let mut interval = tokio::time::interval(Duration::from_secs(30));
+    interval.tick().await; // skip immediate tick
+
+    loop {
+        interval.tick().await;
+        let mut changed = false;
+
+        // Check LAN IP change
+        if let Some(new_ip) = numa::lan::detect_lan_ip() {
+            let mut current_ip = ctx.lan_ip.lock().unwrap();
+            if new_ip != *current_ip {
+                info!("LAN IP changed: {} → {}", current_ip, new_ip);
+                *current_ip = new_ip;
+                changed = true;
+            }
+        }
+
+        // Check upstream change (only for auto-detected upstream)
+        if ctx.upstream_auto {
+            let dns_info = numa::system_dns::discover_system_dns();
+            // Use detected upstream, or try DHCP-provided DNS, or fall back to Quad9
+            let new_addr = dns_info
+                .default_upstream
+                .or_else(numa::system_dns::detect_dhcp_dns)
+                .unwrap_or_else(|| "9.9.9.9".to_string());
+            if let Ok(new_upstream) =
+                format!("{}:{}", new_addr, ctx.upstream_port).parse::<SocketAddr>()
+            {
+                let mut upstream = ctx.upstream.lock().unwrap();
+                if new_upstream != *upstream {
+                    info!("upstream changed: {} → {}", *upstream, new_upstream);
+                    *upstream = new_upstream;
+                    changed = true;
+                }
+            }
+        }
+
+        // Flush stale LAN peers on any network change
+        if changed {
+            ctx.lan_peers.lock().unwrap().clear();
+            info!("flushed LAN peers after network change");
+        }
     }
 }
 

@@ -57,6 +57,10 @@ impl PeerStore {
             })
             .collect()
     }
+
+    pub fn clear(&mut self) {
+        self.peers.clear();
+    }
 }
 
 // --- Multicast ---
@@ -109,7 +113,7 @@ pub async fn start_lan_discovery(ctx: Arc<ServerCtx>, config: &LanConfig) {
             .as_nanos() as u64;
         pid ^ ts
     };
-    let local_ip = detect_lan_ip().unwrap_or(Ipv4Addr::LOCALHOST);
+    let local_ip = *ctx.lan_ip.lock().unwrap();
     info!(
         "LAN discovery on {}:{}, local IP {}, instance {:016x}",
         multicast_group, port, local_ip, instance_id
@@ -138,7 +142,6 @@ pub async fn start_lan_discovery(ctx: Arc<ServerCtx>, config: &LanConfig) {
     // Spawn sender
     let sender_ctx = Arc::clone(&ctx);
     let sender_socket = Arc::clone(&socket);
-    let local_ip_str = local_ip.to_string();
     let dest = SocketAddr::new(IpAddr::V4(multicast_group), port);
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
@@ -158,9 +161,10 @@ pub async fn start_lan_discovery(ctx: Arc<ServerCtx>, config: &LanConfig) {
             if services.is_empty() {
                 continue;
             }
+            let current_ip = sender_ctx.lan_ip.lock().unwrap().to_string();
             let announcement = Announcement {
                 instance_id,
-                host: local_ip_str.clone(),
+                host: current_ip,
                 services,
             };
             if let Ok(json) = serde_json::to_vec(&announcement) {
