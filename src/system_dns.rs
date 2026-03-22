@@ -229,7 +229,7 @@ fn discover_windows() -> SystemDnsInfo {
         let trimmed = line.trim();
         // Match "DNS Servers" line (English) or similar localized variants
         if trimmed.contains("DNS Servers") || trimmed.contains("DNS-Server") {
-            if let Some(ip) = trimmed.split(':').last() {
+            if let Some(ip) = trimmed.split(':').next_back() {
                 let ip = ip.trim();
                 if !ip.is_empty() && ip != "127.0.0.1" && ip != "::1" {
                     upstream = Some(ip.to_string());
@@ -238,7 +238,7 @@ fn discover_windows() -> SystemDnsInfo {
             }
         }
         // Continuation lines (indented IPs after DNS Servers line)
-        if upstream.is_none() && trimmed.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+        if upstream.is_none() && trimmed.chars().next().is_some_and(|c| c.is_ascii_digit()) {
             // Skip continuation lines — we only need the first DNS server
         }
     }
@@ -484,13 +484,15 @@ pub fn uninstall_service() -> Result<(), String> {
 
 /// Restart the service (kill process, launchd/systemd auto-restarts with new binary).
 pub fn restart_service() -> Result<(), String> {
-    // Show version of the binary that will be running after restart
-    let version = match std::process::Command::new("/usr/local/bin/numa")
-        .arg("--version")
-        .output()
-    {
-        Ok(o) => String::from_utf8_lossy(&o.stderr).trim().to_string(),
-        Err(_) => "unknown".to_string(),
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    let version = {
+        match std::process::Command::new("/usr/local/bin/numa")
+            .arg("--version")
+            .output()
+        {
+            Ok(o) => String::from_utf8_lossy(&o.stderr).trim().to_string(),
+            Err(_) => "unknown".to_string(),
+        }
     };
 
     #[cfg(target_os = "macos")]
@@ -874,6 +876,7 @@ fn trust_ca() -> Result<(), String> {
         return Err("CA trust not supported on this OS".into());
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     Ok(())
 }
 
