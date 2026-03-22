@@ -8,8 +8,10 @@
 #   1. Opens the dashboard in Chrome --app mode (clean, no address bar)
 #   2. Generates DNS traffic (forward, cache hit, blocked)
 #   3. Types "peekm" / "6419" into the Local Services form on camera
-#   4. Opens peekm.numa to show the proxy working
-#   5. Records via ffmpeg and converts to optimized GIF
+#   4. Shows LAN accessibility badge ("local only" / "LAN")
+#   5. Checks a blocked domain
+#   6. Opens peekm.numa to show the proxy working
+#   7. Records via ffmpeg and converts to optimized GIF
 
 set -euo pipefail
 
@@ -228,18 +230,10 @@ dig @127.0.0.1 github.com +short > /dev/null 2>&1
 dig @127.0.0.1 ad.doubleclick.net +short > /dev/null 2>&1
 sleep 3
 
-# --------------- Scene 2: Check Domain blocker (3-6s) ---------------
-log "Scene 2: Check Domain — blocked tracker..."
-type_into "#checkDomainInput" "ads.doubleclick.net" 0.04
-sleep 0.3
-# Click Check button
-run_js "document.querySelector('#checkDomainInput').closest('form').querySelector('.btn').click();"
-sleep 2
+# --------------- Scene 2: Add peekm service via UI (3-7s) ---------------
+log "Scene 2: Adding peekm.numa service..."
 
-# --------------- Scene 3: Add peekm service via UI (6-10s) ---------------
-log "Scene 3: Adding peekm.numa service..."
-
-# Scroll to Local Services form
+# Services panel is now first — scroll to it
 run_js "
     var svcPanel = document.getElementById('serviceForm');
     if (svcPanel) svcPanel.scrollIntoView({behavior: 'smooth', block: 'center'});
@@ -251,19 +245,33 @@ sleep 0.2
 type_into "#svcPort" "6419" 0.1
 sleep 0.3
 
-# Click "Add Service"
+# Click "Add Service" — LAN badge ("local only" or "LAN") will appear
 run_js "document.querySelector('#serviceForm .btn-add').click();"
-sleep 1.5
+sleep 2
 
-# --------------- Scene 4: Open peekm.numa (10-14s) ---------------
-log "Scene 4: Opening peekm.numa in browser..."
+# --------------- Scene 3: Open peekm.numa (7-11s) ---------------
+log "Scene 3: Opening peekm.numa in browser..."
 open "http://peekm.numa/view/peekm/README.md" 2>/dev/null || true
 sleep 4
 
-# --------------- Scene 5: Back to dashboard (14-17s) ---------------
-log "Scene 5: Back to dashboard — LOCAL queries visible..."
+# --------------- Scene 4: Back to dashboard (11-14s) ---------------
+log "Scene 4: Back to dashboard — LAN badges + LOCAL queries visible..."
 osascript -e "tell application \"System Events\" to set frontmost of (first process whose unix id is $CHROME_PID) to true" 2>/dev/null || true
 sleep 3
+
+# --------------- Scene 5: Check Domain blocker (14-17s) ---------------
+log "Scene 5: Check Domain — blocked tracker..."
+# Scroll down to blocking panel
+run_js "
+    var blockPanel = document.getElementById('blockingPanel');
+    if (blockPanel) blockPanel.scrollIntoView({behavior: 'smooth', block: 'center'});
+"
+sleep 0.5
+type_into "#checkDomainInput" "ads.doubleclick.net" 0.04
+sleep 0.3
+# Click Check button
+run_js "document.querySelector('#checkDomainInput').closest('form').querySelector('.btn').click();"
+sleep 2
 
 # --------------- Scene 6: Terminal-style dig overlay (17-20s) ---------------
 log "Scene 6: dig proof overlay..."

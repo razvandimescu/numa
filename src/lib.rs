@@ -6,6 +6,7 @@ pub mod config;
 pub mod ctx;
 pub mod forward;
 pub mod header;
+pub mod lan;
 pub mod override_store;
 pub mod packet;
 pub mod proxy;

@@ -11,6 +11,7 @@ use crate::cache::DnsCache;
 use crate::config::ZoneMap;
 use crate::forward::forward_query;
 use crate::header::ResultCode;
+use crate::lan::PeerStore;
 use crate::override_store::OverrideStore;
 use crate::packet::DnsPacket;
 use crate::query_log::{QueryLog, QueryLogEntry};
@@ -29,6 +30,7 @@ pub struct ServerCtx {
     pub blocklist: Mutex<BlocklistStore>,
     pub query_log: Mutex<QueryLog>,
     pub services: Mutex<ServiceStore>,
+    pub lan_peers: Mutex<PeerStore>,
     pub forwarding_rules: Vec<ForwardingRule>,
     pub upstream: SocketAddr,
     pub timeout: Duration,
@@ -67,16 +69,37 @@ pub async fn handle_query(
         } else if !ctx.proxy_tld_suffix.is_empty()
             && (qname.ends_with(&ctx.proxy_tld_suffix) || qname == ctx.proxy_tld)
         {
+            // Resolve .numa: local services → 127.0.0.1, LAN peers → peer IP
+            let service_name = qname.strip_suffix(&ctx.proxy_tld_suffix).unwrap_or(&qname);
+            let resolve_ip = {
+                let local = ctx.services.lock().unwrap();
+                if local.lookup(service_name).is_some() {
+                    std::net::Ipv4Addr::LOCALHOST
+                } else {
+                    let mut peers = ctx.lan_peers.lock().unwrap();
+                    peers
+                        .lookup(service_name)
+                        .and_then(|(ip, _)| match ip {
+                            std::net::IpAddr::V4(v4) => Some(v4),
+                            _ => None,
+                        })
+                        .unwrap_or(std::net::Ipv4Addr::LOCALHOST)
+                }
+            };
             let mut resp = DnsPacket::response_from(&query, ResultCode::NOERROR);
             match qtype {
                 QueryType::AAAA => resp.answers.push(DnsRecord::AAAA {
                     domain: qname.clone(),
-                    addr: std::net::Ipv6Addr::LOCALHOST,
+                    addr: if resolve_ip == std::net::Ipv4Addr::LOCALHOST {
+                        std::net::Ipv6Addr::LOCALHOST
+                    } else {
+                        resolve_ip.to_ipv6_mapped()
+                    },
                     ttl: 300,
                 }),
                 _ => resp.answers.push(DnsRecord::A {
                     domain: qname.clone(),
-                    addr: std::net::Ipv4Addr::LOCALHOST,
+                    addr: resolve_ip,
                     ttl: 300,
                 }),
             }
