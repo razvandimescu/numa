@@ -32,7 +32,9 @@ pub struct ServerCtx {
     pub services: Mutex<ServiceStore>,
     pub lan_peers: Mutex<PeerStore>,
     pub forwarding_rules: Vec<ForwardingRule>,
-    pub upstream: SocketAddr,
+    pub upstream: Mutex<SocketAddr>,
+    pub upstream_auto: bool, // true = auto-detected, false = explicitly configured
+    pub upstream_port: u16,
     pub timeout: Duration,
     pub proxy_tld: String,
     pub proxy_tld_suffix: String, // pre-computed ".{tld}" to avoid per-query allocation
@@ -132,7 +134,7 @@ pub async fn handle_query(
             } else {
                 let upstream =
                     crate::system_dns::match_forwarding_rule(&qname, &ctx.forwarding_rules)
-                        .unwrap_or(ctx.upstream);
+                        .unwrap_or_else(|| *ctx.upstream.lock().unwrap());
                 match forward_query(&query, upstream, ctx.timeout).await {
                     Ok(resp) => {
                         ctx.cache.lock().unwrap().insert(&qname, qtype, &resp);

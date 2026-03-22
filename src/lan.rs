@@ -57,6 +57,10 @@ impl PeerStore {
             })
             .collect()
     }
+
+    pub fn clear(&mut self) {
+        self.peers.clear();
+    }
 }
 
 // --- Multicast ---

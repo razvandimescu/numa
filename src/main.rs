@@ -129,7 +129,9 @@ async fn main() -> numa::Result<()> {
         services: Mutex::new(service_store),
         lan_peers: Mutex::new(numa::lan::PeerStore::new(config.lan.peer_timeout_secs)),
         forwarding_rules,
-        upstream,
+        upstream: Mutex::new(upstream),
+        upstream_auto: config.upstream.address.is_empty(),
+        upstream_port: config.upstream.port,
         timeout: Duration::from_millis(config.upstream.timeout_ms),
         proxy_tld_suffix: if config.proxy.tld.is_empty() {
             String::new()
@@ -240,6 +242,14 @@ async fn main() -> numa::Result<()> {
         }
     }
 
+    // Spawn upstream re-detection (only for auto-detected upstream)
+    if ctx.upstream_auto {
+        let redetect_ctx = Arc::clone(&ctx);
+        tokio::spawn(async move {
+            upstream_redetect_loop(redetect_ctx).await;
+        });
+    }
+
     // Spawn LAN service discovery
     if config.lan.enabled {
         let lan_ctx = Arc::clone(&ctx);
@@ -261,6 +271,39 @@ async fn main() -> numa::Result<()> {
                 error!("{} | HANDLER ERROR | {}", src_addr, e);
             }
         });
+    }
+}
+
+async fn upstream_redetect_loop(ctx: Arc<numa::ctx::ServerCtx>) {
+    use numa::system_dns::discover_system_dns;
+
+    let mut interval = tokio::time::interval(Duration::from_secs(30));
+    interval.tick().await; // skip immediate tick
+
+    loop {
+        interval.tick().await;
+
+        let dns_info = discover_system_dns();
+        let new_addr = match dns_info.default_upstream {
+            Some(addr) => addr,
+            None => continue,
+        };
+        let new_upstream: SocketAddr = match format!("{}:{}", new_addr, ctx.upstream_port).parse() {
+            Ok(addr) => addr,
+            Err(_) => continue,
+        };
+
+        let mut upstream = ctx.upstream.lock().unwrap();
+        let current = *upstream;
+        if new_upstream != current {
+            *upstream = new_upstream;
+            drop(upstream);
+            info!("upstream changed: {} → {}", current, new_upstream);
+
+            // Flush stale LAN peers from old network
+            ctx.lan_peers.lock().unwrap().clear();
+            info!("flushed LAN peers after network change");
+        }
     }
 }
 
