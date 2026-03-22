@@ -873,7 +873,7 @@ fn trust_ca() -> Result<(), String> {
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        return Err("CA trust not supported on this OS".into());
+        Err("CA trust not supported on this OS".into())
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
