@@ -21,9 +21,25 @@ pub mod tls;
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Shared config directory: ~/.config/numa/
-/// Handles sudo (uses SUDO_USER) and launchd (falls back to /usr/local/var/numa/).
+/// Shared config directory for persistent data (services.json, etc).
+/// Unix: ~/.config/numa/ (or /usr/local/var/numa/ when running as root daemon)
+/// Windows: %APPDATA%\numa
 pub fn config_dir() -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        std::path::PathBuf::from(
+            std::env::var("APPDATA").unwrap_or_else(|_| "C:\\ProgramData".into()),
+        )
+        .join("numa")
+    }
+    #[cfg(not(windows))]
+    {
+        config_dir_unix()
+    }
+}
+
+#[cfg(not(windows))]
+fn config_dir_unix() -> std::path::PathBuf {
     // When run via sudo, SUDO_USER has the real user
     if let Ok(user) = std::env::var("SUDO_USER") {
         let home = if cfg!(target_os = "macos") {
@@ -37,7 +53,6 @@ pub fn config_dir() -> std::path::PathBuf {
     // Normal user (not root)
     if let Ok(home) = std::env::var("HOME") {
         let path = std::path::PathBuf::from(&home);
-        // /var/root on macOS is read-only (SIP), use /usr/local/var/numa instead
         if !home.starts_with("/var/root") && !home.starts_with("/root") {
             return path.join(".config").join("numa");
         }
@@ -45,4 +60,21 @@ pub fn config_dir() -> std::path::PathBuf {
 
     // Running as root daemon (launchd/systemd) — use system-wide path
     std::path::PathBuf::from("/usr/local/var/numa")
+}
+
+/// System-wide data directory for TLS certs.
+/// Unix: /usr/local/var/numa
+/// Windows: %PROGRAMDATA%\numa
+pub fn data_dir() -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        std::path::PathBuf::from(
+            std::env::var("PROGRAMDATA").unwrap_or_else(|_| "C:\\ProgramData".into()),
+        )
+        .join("numa")
+    }
+    #[cfg(not(windows))]
+    {
+        std::path::PathBuf::from("/usr/local/var/numa")
+    }
 }
