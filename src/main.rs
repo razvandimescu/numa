@@ -132,6 +132,7 @@ async fn main() -> numa::Result<()> {
         upstream: Mutex::new(upstream),
         upstream_auto: config.upstream.address.is_empty(),
         upstream_port: config.upstream.port,
+        lan_ip: Mutex::new(numa::lan::detect_lan_ip().unwrap_or(std::net::Ipv4Addr::LOCALHOST)),
         timeout: Duration::from_millis(config.upstream.timeout_ms),
         proxy_tld_suffix: if config.proxy.tld.is_empty() {
             String::new()
@@ -242,11 +243,11 @@ async fn main() -> numa::Result<()> {
         }
     }
 
-    // Spawn upstream re-detection (only for auto-detected upstream)
-    if ctx.upstream_auto {
-        let redetect_ctx = Arc::clone(&ctx);
+    // Spawn network change watcher (upstream re-detection, LAN IP update, peer flush)
+    {
+        let watch_ctx = Arc::clone(&ctx);
         tokio::spawn(async move {
-            upstream_redetect_loop(redetect_ctx).await;
+            network_watch_loop(watch_ctx).await;
         });
     }
 
@@ -274,33 +275,43 @@ async fn main() -> numa::Result<()> {
     }
 }
 
-async fn upstream_redetect_loop(ctx: Arc<numa::ctx::ServerCtx>) {
-    use numa::system_dns::discover_system_dns;
-
+async fn network_watch_loop(ctx: Arc<numa::ctx::ServerCtx>) {
     let mut interval = tokio::time::interval(Duration::from_secs(30));
     interval.tick().await; // skip immediate tick
 
     loop {
         interval.tick().await;
+        let mut changed = false;
 
-        let dns_info = discover_system_dns();
-        let new_addr = match dns_info.default_upstream {
-            Some(addr) => addr,
-            None => continue,
-        };
-        let new_upstream: SocketAddr = match format!("{}:{}", new_addr, ctx.upstream_port).parse() {
-            Ok(addr) => addr,
-            Err(_) => continue,
-        };
+        // Check LAN IP change
+        if let Some(new_ip) = numa::lan::detect_lan_ip() {
+            let mut current_ip = ctx.lan_ip.lock().unwrap();
+            if new_ip != *current_ip {
+                info!("LAN IP changed: {} → {}", current_ip, new_ip);
+                *current_ip = new_ip;
+                changed = true;
+            }
+        }
 
-        let mut upstream = ctx.upstream.lock().unwrap();
-        let current = *upstream;
-        if new_upstream != current {
-            *upstream = new_upstream;
-            drop(upstream);
-            info!("upstream changed: {} → {}", current, new_upstream);
+        // Check upstream change (only for auto-detected upstream)
+        if ctx.upstream_auto {
+            let dns_info = numa::system_dns::discover_system_dns();
+            if let Some(new_addr) = dns_info.default_upstream {
+                if let Ok(new_upstream) =
+                    format!("{}:{}", new_addr, ctx.upstream_port).parse::<SocketAddr>()
+                {
+                    let mut upstream = ctx.upstream.lock().unwrap();
+                    if new_upstream != *upstream {
+                        info!("upstream changed: {} → {}", *upstream, new_upstream);
+                        *upstream = new_upstream;
+                        changed = true;
+                    }
+                }
+            }
+        }
 
-            // Flush stale LAN peers from old network
+        // Flush stale LAN peers on any network change
+        if changed {
             ctx.lan_peers.lock().unwrap().clear();
             info!("flushed LAN peers after network change");
         }

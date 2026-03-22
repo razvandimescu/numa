@@ -33,8 +33,9 @@ pub struct ServerCtx {
     pub lan_peers: Mutex<PeerStore>,
     pub forwarding_rules: Vec<ForwardingRule>,
     pub upstream: Mutex<SocketAddr>,
-    pub upstream_auto: bool, // true = auto-detected, false = explicitly configured
+    pub upstream_auto: bool,
     pub upstream_port: u16,
+    pub lan_ip: Mutex<std::net::Ipv4Addr>,
     pub timeout: Duration,
     pub proxy_tld: String,
     pub proxy_tld_suffix: String, // pre-computed ".{tld}" to avoid per-query allocation
