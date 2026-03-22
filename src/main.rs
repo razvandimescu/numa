@@ -279,14 +279,17 @@ async fn main() -> numa::Result<()> {
 }
 
 async fn network_watch_loop(ctx: Arc<numa::ctx::ServerCtx>) {
-    let mut interval = tokio::time::interval(Duration::from_secs(30));
+    let mut tick: u64 = 0;
+
+    let mut interval = tokio::time::interval(Duration::from_secs(5));
     interval.tick().await; // skip immediate tick
 
     loop {
         interval.tick().await;
+        tick += 1;
         let mut changed = false;
 
-        // Check LAN IP change
+        // Check LAN IP change (every 5s — cheap, one UDP socket call)
         if let Some(new_ip) = numa::lan::detect_lan_ip() {
             let mut current_ip = ctx.lan_ip.lock().unwrap();
             if new_ip != *current_ip {
@@ -296,10 +299,10 @@ async fn network_watch_loop(ctx: Arc<numa::ctx::ServerCtx>) {
             }
         }
 
-        // Check upstream change (only for auto-detected upstream)
-        if ctx.upstream_auto {
+        // Check upstream change every 30s or immediately on LAN IP change
+        // (heavier — spawns scutil/ipconfig, only when auto-detected)
+        if ctx.upstream_auto && (changed || tick.is_multiple_of(6)) {
             let dns_info = numa::system_dns::discover_system_dns();
-            // Use detected upstream, or try DHCP-provided DNS, or fall back to Quad9
             let new_addr = dns_info
                 .default_upstream
                 .or_else(numa::system_dns::detect_dhcp_dns)
