@@ -126,6 +126,7 @@ struct QueryLogResponse {
 #[derive(Serialize)]
 struct StatsResponse {
     uptime_secs: u64,
+    upstream: String,
     queries: QueriesStats,
     cache: CacheStats,
     overrides: OverrideStats,
@@ -341,8 +342,9 @@ async fn diagnose(
     }
 
     // Check upstream (async, no locks held)
+    let upstream = *ctx.upstream.lock().unwrap();
     let (upstream_matched, upstream_detail) =
-        forward_query_for_diagnose(&domain_lower, ctx.upstream, ctx.timeout).await;
+        forward_query_for_diagnose(&domain_lower, upstream, ctx.timeout).await;
     steps.push(DiagnoseStep {
         source: "upstream".to_string(),
         matched: upstream_matched,
@@ -434,8 +436,11 @@ async fn stats(State(ctx): State<Arc<ServerCtx>>) -> Json<StatsResponse> {
     let override_count = ctx.overrides.lock().unwrap().active_count();
     let bl_stats = ctx.blocklist.lock().unwrap().stats();
 
+    let upstream = ctx.upstream.lock().unwrap().to_string();
+
     Json(StatsResponse {
         uptime_secs: snap.uptime_secs,
+        upstream,
         queries: QueriesStats {
             total: snap.total,
             forwarded: snap.forwarded,
