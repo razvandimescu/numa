@@ -10,14 +10,11 @@ use time::{Duration, OffsetDateTime};
 const CA_VALIDITY_DAYS: i64 = 3650; // 10 years
 const CERT_VALIDITY_DAYS: i64 = 365; // 1 year
 
-/// TLS certs use a fixed system path — both the daemon and `sudo numa install` must agree.
-pub const TLS_DIR: &str = "/usr/local/var/numa";
-
 /// Build a TLS config with a cert covering all provided service names.
 /// Wildcards under single-label TLDs (*.numa) are rejected by browsers,
 /// so we list each service explicitly as a SAN.
 pub fn build_tls_config(tld: &str, service_names: &[String]) -> crate::Result<Arc<ServerConfig>> {
-    let dir = std::path::PathBuf::from(TLS_DIR);
+    let dir = crate::data_dir();
     let (ca_cert, ca_key) = ensure_ca(&dir)?;
     let (cert_chain, key) = generate_service_cert(&ca_cert, &ca_key, tld, service_names)?;
 
