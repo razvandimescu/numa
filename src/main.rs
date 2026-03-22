@@ -86,10 +86,13 @@ async fn main() -> numa::Result<()> {
     let system_dns = discover_system_dns();
 
     let upstream_addr = if config.upstream.address.is_empty() {
-        system_dns.default_upstream.unwrap_or_else(|| {
-            info!("could not detect system DNS, falling back to 9.9.9.9 (Quad9)");
-            "9.9.9.9".to_string()
-        })
+        system_dns
+            .default_upstream
+            .or_else(numa::system_dns::detect_dhcp_dns)
+            .unwrap_or_else(|| {
+                info!("could not detect system DNS, falling back to 9.9.9.9 (Quad9)");
+                "9.9.9.9".to_string()
+            })
     } else {
         config.upstream.address.clone()
     };
@@ -296,16 +299,19 @@ async fn network_watch_loop(ctx: Arc<numa::ctx::ServerCtx>) {
         // Check upstream change (only for auto-detected upstream)
         if ctx.upstream_auto {
             let dns_info = numa::system_dns::discover_system_dns();
-            if let Some(new_addr) = dns_info.default_upstream {
-                if let Ok(new_upstream) =
-                    format!("{}:{}", new_addr, ctx.upstream_port).parse::<SocketAddr>()
-                {
-                    let mut upstream = ctx.upstream.lock().unwrap();
-                    if new_upstream != *upstream {
-                        info!("upstream changed: {} → {}", *upstream, new_upstream);
-                        *upstream = new_upstream;
-                        changed = true;
-                    }
+            // Use detected upstream, or try DHCP-provided DNS, or fall back to Quad9
+            let new_addr = dns_info
+                .default_upstream
+                .or_else(numa::system_dns::detect_dhcp_dns)
+                .unwrap_or_else(|| "9.9.9.9".to_string());
+            if let Ok(new_upstream) =
+                format!("{}:{}", new_addr, ctx.upstream_port).parse::<SocketAddr>()
+            {
+                let mut upstream = ctx.upstream.lock().unwrap();
+                if new_upstream != *upstream {
+                    info!("upstream changed: {} → {}", *upstream, new_upstream);
+                    *upstream = new_upstream;
+                    changed = true;
                 }
             }
         }

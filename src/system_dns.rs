@@ -205,6 +205,53 @@ fn read_upstream_from_file(path: &str) -> Option<String> {
     None
 }
 
+/// Detect DNS server from DHCP lease — fallback when scutil/resolv.conf only shows 127.0.0.1.
+/// On macOS: parses `ipconfig getpacket en0` for domain_name_server.
+/// On Linux/Windows: returns None (not implemented yet).
+pub fn detect_dhcp_dns() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        detect_dhcp_dns_macos()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn detect_dhcp_dns_macos() -> Option<String> {
+    // Try common interfaces
+    for iface in &["en0", "en1"] {
+        let output = std::process::Command::new("ipconfig")
+            .args(["getpacket", iface])
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&output.stdout);
+        for line in text.lines() {
+            if line.contains("domain_name_server") {
+                // Format: "domain_name_server (ip_mult): {213.154.124.25, 1.0.0.1}"
+                if let Some(braces) = line.split('{').nth(1) {
+                    let inner = braces.trim_end_matches('}').trim();
+                    // Take the first non-loopback DNS server
+                    for addr in inner.split(',') {
+                        let addr = addr.trim();
+                        if !addr.is_empty()
+                            && addr != "127.0.0.1"
+                            && addr != "0.0.0.0"
+                            && addr.parse::<std::net::Ipv4Addr>().is_ok()
+                        {
+                            log::info!("detected DHCP DNS: {}", addr);
+                            return Some(addr.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 // --- Windows implementation ---
 
 #[cfg(windows)]
