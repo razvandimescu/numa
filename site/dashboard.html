@@ -577,22 +577,26 @@ body {
 
     <!-- Sidebar -->
     <div class="sidebar">
-      <!-- Blocking -->
-      <div class="panel" id="blockingPanel">
+      <!-- Local services -->
+      <div class="panel">
         <div class="panel-header">
-          <span class="panel-title">Blocking</span>
-          <span class="panel-title" id="blockingRefresh" style="color:var(--text-dim);font-weight:400;"></span>
+          <div>
+            <span class="panel-title">Local Services</span>
+            <div style="font-size:0.68rem;color:var(--text-dim);margin-top:0.15rem;">Give localhost apps clean .numa URLs. Persistent, with HTTP proxy.</div>
+          </div>
         </div>
         <div class="panel-body">
-          <form class="override-form" onsubmit="return checkDomain(event)" style="margin-bottom:0;border-bottom:none;padding-bottom:0;">
+          <form class="override-form" id="serviceForm" onsubmit="return addService(event)">
             <div class="override-form-row">
-              <input type="text" id="checkDomainInput" placeholder="Is this domain blocked?" required style="flex:3">
-              <button type="submit" class="btn" style="background:var(--violet);color:white;flex-shrink:0;">Check</button>
+              <input type="text" id="svcName" placeholder="name (becomes name.numa)" required style="flex:2">
+              <input type="number" id="svcPort" placeholder="port (e.g. 3000)" required min="1" max="65535" style="flex:1">
             </div>
+            <button type="submit" class="btn btn-add">Add Service</button>
+            <div class="override-error" id="serviceError"></div>
           </form>
-          <div id="checkResult" style="display:none;margin-top:0.6rem;padding:0.5rem 0.6rem;border-radius:5px;font-family:var(--font-mono);font-size:0.72rem;"></div>
-          <div id="blockingSources" style="margin-top:0.8rem;padding-top:0.6rem;border-top:1px solid var(--border);"></div>
-          <div id="blockingAllowlist" style="margin-top:0.8rem;padding-top:0.6rem;border-top:1px solid var(--border);"></div>
+          <div id="servicesList">
+            <div class="empty-state">No services configured</div>
+          </div>
         </div>
       </div>
 
@@ -621,26 +625,22 @@ body {
         </div>
       </div>
 
-      <!-- Local services -->
-      <div class="panel">
+      <!-- Blocking -->
+      <div class="panel" id="blockingPanel">
         <div class="panel-header">
-          <div>
-            <span class="panel-title">Local Services</span>
-            <div style="font-size:0.68rem;color:var(--text-dim);margin-top:0.15rem;">Give localhost apps clean .numa URLs. Persistent, with HTTP proxy.</div>
-          </div>
+          <span class="panel-title">Blocking</span>
+          <span class="panel-title" id="blockingRefresh" style="color:var(--text-dim);font-weight:400;"></span>
         </div>
         <div class="panel-body">
-          <form class="override-form" id="serviceForm" onsubmit="return addService(event)">
+          <form class="override-form" onsubmit="return checkDomain(event)" style="margin-bottom:0;border-bottom:none;padding-bottom:0;">
             <div class="override-form-row">
-              <input type="text" id="svcName" placeholder="name (becomes name.numa)" required style="flex:2">
-              <input type="number" id="svcPort" placeholder="port (e.g. 3000)" required min="1" max="65535" style="flex:1">
+              <input type="text" id="checkDomainInput" placeholder="Is this domain blocked?" required style="flex:3">
+              <button type="submit" class="btn" style="background:var(--violet);color:white;flex-shrink:0;">Check</button>
             </div>
-            <button type="submit" class="btn btn-add">Add Service</button>
-            <div class="override-error" id="serviceError"></div>
           </form>
-          <div id="servicesList">
-            <div class="empty-state">No services configured</div>
-          </div>
+          <div id="checkResult" style="display:none;margin-top:0.6rem;padding:0.5rem 0.6rem;border-radius:5px;font-family:var(--font-mono);font-size:0.72rem;"></div>
+          <div id="blockingSources" style="margin-top:0.8rem;padding-top:0.6rem;border-top:1px solid var(--border);"></div>
+          <div id="blockingAllowlist" style="margin-top:0.8rem;padding-top:0.6rem;border-top:1px solid var(--border);"></div>
         </div>
       </div>
 
