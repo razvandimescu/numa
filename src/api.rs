@@ -777,8 +777,11 @@ async fn add_route(
     if req.path.is_empty() || !req.path.starts_with('/') {
         return Err((StatusCode::BAD_REQUEST, "path must start with /".into()));
     }
-    if req.path.contains("/../") || req.path.ends_with("/..") {
-        return Err((StatusCode::BAD_REQUEST, "path must not contain '..'".into()));
+    if req.path.contains("/../") || req.path.ends_with("/..") || req.path.contains("%") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "path must not contain '..' or percent-encoding".into(),
+        ));
     }
     if req.port == 0 {
         return Err((StatusCode::BAD_REQUEST, "port must be > 0".into()));

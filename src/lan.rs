@@ -256,7 +256,7 @@ fn build_announcement(
     let rdata_start = buf.pos();
     buf.write_u16(0)?; // priority
     buf.write_u16(0)?; // weight
-    buf.write_u16(0)?; // port (services have individual ports in TXT)
+    buf.write_u16(services.first().map(|(_, p)| *p).unwrap_or(0))?; // first service port for SRV display
     buf.write_qname(&host_local)?;
     patch_rdlen(&mut buf, rdlen_pos, rdata_start)?;
 
