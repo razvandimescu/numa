@@ -8,6 +8,47 @@ use serde::{Deserialize, Serialize};
 pub struct ServiceEntry {
     pub name: String,
     pub target_port: u16,
+    #[serde(default)]
+    pub routes: Vec<RouteEntry>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct RouteEntry {
+    pub path: String,
+    pub port: u16,
+    #[serde(default)]
+    pub strip: bool,
+}
+
+impl ServiceEntry {
+    /// Resolve backend port and (possibly rewritten) path for a request
+    pub fn resolve_route(&self, request_path: &str) -> (u16, String) {
+        // Longest prefix match
+        let matched = self.routes.iter()
+            .filter(|r| {
+                request_path == r.path
+                    || request_path.starts_with(&r.path)
+                        && (r.path.ends_with('/') || request_path.as_bytes().get(r.path.len()) == Some(&b'/'))
+            })
+            .max_by_key(|r| r.path.len());
+
+        match matched {
+            Some(route) => {
+                let path = if route.strip {
+                    let stripped = &request_path[route.path.len()..];
+                    if stripped.is_empty() || !stripped.starts_with('/') {
+                        format!("/{}", stripped.trim_start_matches('/'))
+                    } else {
+                        stripped.to_string()
+                    }
+                } else {
+                    request_path.to_string()
+                };
+                (route.port, path)
+            }
+            None => (self.target_port, request_path.to_string()),
+        }
+    }
 }
 
 pub struct ServiceStore {
@@ -34,7 +75,7 @@ impl ServiceStore {
     }
 
     /// Insert a service from numa.toml config (not persisted)
-    pub fn insert_from_config(&mut self, name: &str, target_port: u16) {
+    pub fn insert_from_config(&mut self, name: &str, target_port: u16, routes: Vec<RouteEntry>) {
         let key = name.to_lowercase();
         self.config_services.insert(key.clone());
         self.entries.insert(
@@ -42,6 +83,7 @@ impl ServiceStore {
             ServiceEntry {
                 name: key,
                 target_port,
+                routes,
             },
         );
     }
@@ -54,9 +96,35 @@ impl ServiceStore {
             ServiceEntry {
                 name: key,
                 target_port,
+                routes: Vec::new(),
             },
         );
         self.save();
+    }
+
+    pub fn add_route(&mut self, service: &str, path: String, port: u16, strip: bool) -> bool {
+        let key = service.to_lowercase();
+        if let Some(entry) = self.entries.get_mut(&key) {
+            entry.routes.retain(|r| r.path != path);
+            entry.routes.push(RouteEntry { path, port, strip });
+            self.save();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn remove_route(&mut self, service: &str, path: &str) -> bool {
+        let key = service.to_lowercase();
+        if let Some(entry) = self.entries.get_mut(&key) {
+            let before = entry.routes.len();
+            entry.routes.retain(|r| r.path != path);
+            if entry.routes.len() < before {
+                self.save();
+                return true;
+            }
+        }
+        false
     }
 
     pub fn lookup(&self, name: &str) -> Option<&ServiceEntry> {

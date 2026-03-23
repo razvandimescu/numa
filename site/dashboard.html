@@ -1098,12 +1098,20 @@ function renderServices(entries) {
         ? '<span class="lan-badge shared" title="Reachable from other devices on the network">LAN</span>'
         : '<span class="lan-badge local-only" title="Bound to localhost — not reachable from other devices. Start with 0.0.0.0 to share on LAN.">local only</span>')
       : '';
+    const routeLines = (e.routes || []).map(r =>
+      `<div class="service-port" style="color:var(--text-dim);">` +
+        `<span style="display:inline-block;min-width:60px;">${r.path}</span> ` +
+        `&rarr; :${r.port}` +
+        (r.strip ? ` <span style="opacity:0.6;">(strip)</span>` : '') +
+      `</div>`
+    ).join('');
     return `
     <div class="service-item">
       <span class="health-dot ${e.healthy ? 'up' : 'down'}" title="${e.healthy ? 'running' : 'not reachable'}"></span>
       <div class="service-info">
         <div class="service-name"><a href="${e.url}" target="_blank">${e.name}.numa</a>${lanBadge}</div>
         <div class="service-port">localhost:${e.target_port} &rarr; proxied</div>
+        ${routeLines}
       </div>
       ${e.name === 'numa' ? '' : `<button class="btn-delete" onclick="deleteService('${e.name}')" title="Remove service">&times;</button>`}
     </div>
