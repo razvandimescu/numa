@@ -9,7 +9,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::ctx::ServerCtx;
-use crate::forward::forward_query;
+use crate::forward::{forward_query, Upstream};
 use crate::query_log::QueryLogFilter;
 use crate::question::QueryType;
 use crate::stats::QueryPath;
@@ -355,9 +355,9 @@ async fn diagnose(
     }
 
     // Check upstream (async, no locks held)
-    let upstream = *ctx.upstream.lock().unwrap();
+    let upstream = ctx.upstream.lock().unwrap().clone();
     let (upstream_matched, upstream_detail) =
-        forward_query_for_diagnose(&domain_lower, upstream, ctx.timeout).await;
+        forward_query_for_diagnose(&domain_lower, &upstream, ctx.timeout).await;
     steps.push(DiagnoseStep {
         source: "upstream".to_string(),
         matched: upstream_matched,
@@ -373,7 +373,7 @@ async fn diagnose(
 
 async fn forward_query_for_diagnose(
     domain: &str,
-    upstream: std::net::SocketAddr,
+    upstream: &Upstream,
     timeout: std::time::Duration,
 ) -> (bool, String) {
     use crate::packet::DnsPacket;
