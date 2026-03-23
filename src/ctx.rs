@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -39,6 +40,11 @@ pub struct ServerCtx {
     pub timeout: Duration,
     pub proxy_tld: String,
     pub proxy_tld_suffix: String, // pre-computed ".{tld}" to avoid per-query allocation
+    pub lan_enabled: bool,
+    pub config_path: String,
+    pub config_found: bool,
+    pub config_dir: PathBuf,
+    pub data_dir: PathBuf,
 }
 
 pub async fn handle_query(

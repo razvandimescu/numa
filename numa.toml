@@ -1,6 +1,7 @@
 [server]
 bind_addr = "0.0.0.0:53"
 api_port = 5380
+# api_bind_addr = "127.0.0.1"  # default; set to "0.0.0.0" for LAN dashboard access
 
 # [upstream]
 # address = ""       # auto-detect from system resolver (default)
@@ -18,6 +19,7 @@ enabled = true
 port = 80
 tls_port = 443
 tld = "numa"
+# bind_addr = "127.0.0.1"  # default; auto 0.0.0.0 when [lan] enabled
 
 # Pre-configured services (numa.numa is always added automatically)
 # [[services]]
@@ -40,3 +42,9 @@ tld = "numa"
 # record_type = "A"
 # value = "127.0.0.1"
 # ttl = 60
+
+# LAN service discovery via mDNS (disabled by default — no network traffic unless enabled)
+# [lan]
+# enabled = true              # discover other Numa instances via mDNS (_numa._tcp.local)
+# broadcast_interval_secs = 30
+# peer_timeout_secs = 90

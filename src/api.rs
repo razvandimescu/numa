@@ -46,6 +46,10 @@ pub fn router(ctx: Arc<ServerCtx>) -> Router {
         .route("/services", get(list_services))
         .route("/services", post(create_service))
         .route("/services/{name}", delete(remove_service))
+        .route("/services/{name}/routes", get(list_routes))
+        .route("/services/{name}/routes", post(add_route))
+        .route("/services/{name}/routes", delete(remove_route))
+        .route("/ca.pem", get(serve_ca))
         .with_state(ctx)
 }
 
@@ -127,10 +131,19 @@ struct QueryLogResponse {
 struct StatsResponse {
     uptime_secs: u64,
     upstream: String,
+    config_path: String,
+    data_dir: String,
     queries: QueriesStats,
     cache: CacheStats,
     overrides: OverrideStats,
     blocking: BlockingStatsResponse,
+    lan: LanStatsResponse,
+}
+
+#[derive(Serialize)]
+struct LanStatsResponse {
+    enabled: bool,
+    peers: usize,
 }
 
 #[derive(Serialize)]
@@ -441,6 +454,8 @@ async fn stats(State(ctx): State<Arc<ServerCtx>>) -> Json<StatsResponse> {
     Json(StatsResponse {
         uptime_secs: snap.uptime_secs,
         upstream,
+        config_path: ctx.config_path.clone(),
+        data_dir: ctx.data_dir.to_string_lossy().to_string(),
         queries: QueriesStats {
             total: snap.total,
             forwarded: snap.forwarded,
@@ -462,6 +477,10 @@ async fn stats(State(ctx): State<Arc<ServerCtx>>) -> Json<StatsResponse> {
             paused: bl_stats.paused,
             domains_loaded: bl_stats.domains_loaded,
             allowlist_size: bl_stats.allowlist_size,
+        },
+        lan: LanStatsResponse {
+            enabled: ctx.lan_enabled,
+            peers: ctx.lan_peers.lock().unwrap().list().len(),
         },
     })
 }
@@ -596,6 +615,9 @@ struct ServiceResponse {
     url: String,
     healthy: bool,
     lan_accessible: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    routes: Vec<crate::service_store::RouteEntry>,
+    source: String,
 }
 
 #[derive(Deserialize)]
@@ -610,7 +632,19 @@ async fn list_services(State(ctx): State<Arc<ServerCtx>>) -> Json<Vec<ServiceRes
         store
             .list()
             .into_iter()
-            .map(|e| (e.name.clone(), e.target_port))
+            .map(|e| {
+                let source = if store.is_config_service(&e.name) {
+                    "config"
+                } else {
+                    "api"
+                };
+                (
+                    e.name.clone(),
+                    e.target_port,
+                    e.routes.clone(),
+                    source.to_string(),
+                )
+            })
             .collect()
     };
     let tld = &ctx.proxy_tld;
@@ -619,7 +653,7 @@ async fn list_services(State(ctx): State<Arc<ServerCtx>>) -> Json<Vec<ServiceRes
 
     let check_futures: Vec<_> = entries
         .iter()
-        .map(|(_, port)| {
+        .map(|(_, port, _, _)| {
             let port = *port;
             let localhost = std::net::SocketAddr::from(([127, 0, 0, 1], port));
             let lan_addr = lan_ip.map(|ip| std::net::SocketAddr::new(ip.into(), port));
@@ -639,12 +673,14 @@ async fn list_services(State(ctx): State<Arc<ServerCtx>>) -> Json<Vec<ServiceRes
         .into_iter()
         .zip(check_results)
         .map(
-            |((name, port), (healthy, lan_accessible))| ServiceResponse {
+            |((name, port, routes, source), (healthy, lan_accessible))| ServiceResponse {
                 url: format!("http://{}.{}", name, tld),
                 name,
                 target_port: port,
                 healthy,
                 lan_accessible,
+                routes,
+                source,
             },
         )
         .collect();
@@ -694,6 +730,8 @@ async fn create_service(
             target_port: req.target_port,
             healthy,
             lan_accessible,
+            routes: Vec::new(),
+            source: "api".to_string(),
         }),
     ))
 }
@@ -708,6 +746,92 @@ async fn remove_service(State(ctx): State<Arc<ServerCtx>>, Path(name): Path<Stri
     } else {
         StatusCode::NOT_FOUND
     }
+}
+
+// --- Route handlers ---
+
+#[derive(Deserialize)]
+struct AddRouteRequest {
+    path: String,
+    port: u16,
+    #[serde(default)]
+    strip: bool,
+}
+
+#[derive(Deserialize)]
+struct RemoveRouteRequest {
+    path: String,
+}
+
+async fn list_routes(
+    State(ctx): State<Arc<ServerCtx>>,
+    Path(name): Path<String>,
+) -> Result<Json<Vec<crate::service_store::RouteEntry>>, StatusCode> {
+    let store = ctx.services.lock().unwrap();
+    match store.lookup(&name) {
+        Some(entry) => Ok(Json(entry.routes.clone())),
+        None => Err(StatusCode::NOT_FOUND),
+    }
+}
+
+async fn add_route(
+    State(ctx): State<Arc<ServerCtx>>,
+    Path(name): Path<String>,
+    Json(req): Json<AddRouteRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    if req.path.is_empty() || !req.path.starts_with('/') {
+        return Err((StatusCode::BAD_REQUEST, "path must start with /".into()));
+    }
+    if req.path.contains("/../") || req.path.ends_with("/..") || req.path.contains("%") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "path must not contain '..' or percent-encoding".into(),
+        ));
+    }
+    if req.port == 0 {
+        return Err((StatusCode::BAD_REQUEST, "port must be > 0".into()));
+    }
+    let mut store = ctx.services.lock().unwrap();
+    if store.add_route(&name, req.path, req.port, req.strip) {
+        Ok(StatusCode::CREATED)
+    } else {
+        Err((
+            StatusCode::NOT_FOUND,
+            format!("service '{}' not found", name),
+        ))
+    }
+}
+
+async fn remove_route(
+    State(ctx): State<Arc<ServerCtx>>,
+    Path(name): Path<String>,
+    Json(req): Json<RemoveRouteRequest>,
+) -> StatusCode {
+    let mut store = ctx.services.lock().unwrap();
+    if store.remove_route(&name, &req.path) {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::NOT_FOUND
+    }
+}
+
+async fn serve_ca(State(ctx): State<Arc<ServerCtx>>) -> Result<impl IntoResponse, StatusCode> {
+    let ca_path = ctx.data_dir.join("ca.pem");
+    let bytes = tokio::task::spawn_blocking(move || std::fs::read(ca_path))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/x-pem-file"),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"numa-ca.pem\"",
+            ),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        bytes,
+    ))
 }
 
 async fn check_tcp(addr: std::net::SocketAddr) -> bool {
