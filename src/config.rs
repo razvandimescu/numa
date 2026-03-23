@@ -35,6 +35,8 @@ pub struct ServerConfig {
     pub bind_addr: String,
     #[serde(default = "default_api_port")]
     pub api_port: u16,
+    #[serde(default = "default_api_bind_addr")]
+    pub api_bind_addr: String,
 }
 
 impl Default for ServerConfig {
@@ -42,8 +44,13 @@ impl Default for ServerConfig {
         ServerConfig {
             bind_addr: default_bind_addr(),
             api_port: default_api_port(),
+            api_bind_addr: default_api_bind_addr(),
         }
     }
+}
+
+fn default_api_bind_addr() -> String {
+    "127.0.0.1".to_string()
 }
 
 fn default_bind_addr() -> String {
@@ -172,6 +179,8 @@ pub struct ProxyConfig {
     pub tls_port: u16,
     #[serde(default = "default_proxy_tld")]
     pub tld: String,
+    #[serde(default = "default_proxy_bind_addr")]
+    pub bind_addr: String,
 }
 
 impl Default for ProxyConfig {
@@ -181,8 +190,13 @@ impl Default for ProxyConfig {
             port: default_proxy_port(),
             tls_port: default_proxy_tls_port(),
             tld: default_proxy_tld(),
+            bind_addr: default_proxy_bind_addr(),
         }
     }
+}
+
+fn default_proxy_bind_addr() -> String {
+    "127.0.0.1".to_string()
 }
 
 fn default_proxy_enabled() -> bool {
@@ -202,16 +216,14 @@ fn default_proxy_tld() -> String {
 pub struct ServiceConfig {
     pub name: String,
     pub target_port: u16,
+    #[serde(default)]
+    pub routes: Vec<crate::service_store::RouteEntry>,
 }
 
 #[derive(Deserialize, Clone)]
 pub struct LanConfig {
     #[serde(default = "default_lan_enabled")]
     pub enabled: bool,
-    #[serde(default = "default_lan_multicast_group")]
-    pub multicast_group: String,
-    #[serde(default = "default_lan_port")]
-    pub port: u16,
     #[serde(default = "default_lan_broadcast_interval")]
     pub broadcast_interval_secs: u64,
     #[serde(default = "default_lan_peer_timeout")]
@@ -222,8 +234,6 @@ impl Default for LanConfig {
     fn default() -> Self {
         LanConfig {
             enabled: default_lan_enabled(),
-            multicast_group: default_lan_multicast_group(),
-            port: default_lan_port(),
             broadcast_interval_secs: default_lan_broadcast_interval(),
             peer_timeout_secs: default_lan_peer_timeout(),
         }
@@ -231,13 +241,7 @@ impl Default for LanConfig {
 }
 
 fn default_lan_enabled() -> bool {
-    true
-}
-fn default_lan_multicast_group() -> String {
-    "239.255.70.78".to_string()
-}
-fn default_lan_port() -> u16 {
-    5390
+    false
 }
 fn default_lan_broadcast_interval() -> u64 {
     30

@@ -109,9 +109,9 @@ async fn main() -> numa::Result<()> {
 
     // Build service store: config services + persisted user services
     let mut service_store = ServiceStore::new();
-    service_store.insert_from_config("numa", config.server.api_port);
+    service_store.insert_from_config("numa", config.server.api_port, Vec::new());
     for svc in &config.services {
-        service_store.insert_from_config(&svc.name, svc.target_port);
+        service_store.insert_from_config(&svc.name, svc.target_port, svc.routes.clone());
     }
     service_store.load_persisted();
 
@@ -170,7 +170,7 @@ async fn main() -> numa::Result<()> {
     }
     if config.lan.enabled {
         eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;107;124;78mLAN\x1b[0m       {:<30}\x1b[38;2;192;98;58m║\x1b[0m",
-            format!("{}:{}", config.lan.multicast_group, config.lan.port));
+            "mDNS (_numa._tcp.local)");
     }
     if !ctx.forwarding_rules.is_empty() {
         eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;107;124;78mRouting\x1b[0m   {:<30}\x1b[38;2;192;98;58m║\x1b[0m",
@@ -205,7 +205,7 @@ async fn main() -> numa::Result<()> {
 
     // Spawn HTTP API server
     let api_ctx = Arc::clone(&ctx);
-    let api_addr: SocketAddr = format!("0.0.0.0:{}", api_port).parse()?;
+    let api_addr: SocketAddr = format!("{}:{}", config.server.api_bind_addr, api_port).parse()?;
     tokio::spawn(async move {
         let app = numa::api::router(api_ctx);
         let listener = tokio::net::TcpListener::bind(api_addr).await.unwrap();
@@ -213,12 +213,19 @@ async fn main() -> numa::Result<()> {
         axum::serve(listener, app).await.unwrap();
     });
 
+    // Proxy binds 0.0.0.0 when LAN is enabled (cross-machine access), otherwise config value
+    let proxy_bind: std::net::Ipv4Addr = if config.lan.enabled {
+        std::net::Ipv4Addr::UNSPECIFIED
+    } else {
+        config.proxy.bind_addr.parse().unwrap_or(std::net::Ipv4Addr::LOCALHOST)
+    };
+
     // Spawn HTTP reverse proxy for .numa domains
     if config.proxy.enabled {
         let proxy_ctx = Arc::clone(&ctx);
         let proxy_port = config.proxy.port;
         tokio::spawn(async move {
-            numa::proxy::start_proxy(proxy_ctx, proxy_port).await;
+            numa::proxy::start_proxy(proxy_ctx, proxy_port, proxy_bind).await;
         });
     }
 
@@ -237,7 +244,7 @@ async fn main() -> numa::Result<()> {
                 let proxy_ctx = Arc::clone(&ctx);
                 let tls_port = config.proxy.tls_port;
                 tokio::spawn(async move {
-                    numa::proxy::start_proxy_tls(proxy_ctx, tls_port, tls_config).await;
+                    numa::proxy::start_proxy_tls(proxy_ctx, tls_port, proxy_bind, tls_config).await;
                 });
             }
             Err(e) => {

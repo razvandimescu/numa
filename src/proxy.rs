@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -25,8 +25,8 @@ struct ProxyState {
     client: HttpClient,
 }
 
-pub async fn start_proxy(ctx: Arc<ServerCtx>, port: u16) {
-    let addr: SocketAddr = ([0, 0, 0, 0], port).into();
+pub async fn start_proxy(ctx: Arc<ServerCtx>, port: u16, bind_addr: Ipv4Addr) {
+    let addr: SocketAddr = (bind_addr, port).into();
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
         Err(e) => {
@@ -50,8 +50,8 @@ pub async fn start_proxy(ctx: Arc<ServerCtx>, port: u16) {
     axum::serve(listener, app).await.unwrap();
 }
 
-pub async fn start_proxy_tls(ctx: Arc<ServerCtx>, port: u16, tls_config: Arc<ServerConfig>) {
-    let addr: SocketAddr = ([0, 0, 0, 0], port).into();
+pub async fn start_proxy_tls(ctx: Arc<ServerCtx>, port: u16, bind_addr: Ipv4Addr, tls_config: Arc<ServerConfig>) {
+    let addr: SocketAddr = (bind_addr, port).into();
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
         Err(e) => {
@@ -135,14 +135,17 @@ async fn proxy_handler(State(state): State<ProxyState>, req: Request) -> axum::r
         }
     };
 
-    let (target_host, target_port) = {
+    let request_path = req.uri().path().to_string();
+
+    let (target_host, target_port, rewritten_path) = {
         let store = state.ctx.services.lock().unwrap();
         if let Some(entry) = store.lookup(&service_name) {
-            ("localhost".to_string(), entry.target_port)
+            let (port, path) = entry.resolve_route(&request_path);
+            ("localhost".to_string(), port, path)
         } else {
             let mut peers = state.ctx.lan_peers.lock().unwrap();
             match peers.lookup(&service_name) {
-                Some((ip, port)) => (ip.to_string(), port),
+                Some((ip, port)) => (ip.to_string(), port, request_path.clone()),
                 None => {
                 return (
                     StatusCode::NOT_FOUND,
@@ -268,13 +271,9 @@ pre .str {{ color: #d48a5a }}
         }
     };
 
-    let path_and_query = req
-        .uri()
-        .path_and_query()
-        .map(|pq| pq.as_str())
-        .unwrap_or("/");
+    let query_string = req.uri().query().map(|q| format!("?{}", q)).unwrap_or_default();
     let target_uri: hyper::Uri =
-        format!("http://{}:{}{}", target_host, target_port, path_and_query)
+        format!("http://{}:{}{}{}", target_host, target_port, rewritten_path, query_string)
             .parse()
             .unwrap();
 

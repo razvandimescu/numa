@@ -46,6 +46,9 @@ pub fn router(ctx: Arc<ServerCtx>) -> Router {
         .route("/services", get(list_services))
         .route("/services", post(create_service))
         .route("/services/{name}", delete(remove_service))
+        .route("/services/{name}/routes", get(list_routes))
+        .route("/services/{name}/routes", post(add_route))
+        .route("/services/{name}/routes", delete(remove_route))
         .with_state(ctx)
 }
 
@@ -596,6 +599,8 @@ struct ServiceResponse {
     url: String,
     healthy: bool,
     lan_accessible: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    routes: Vec<crate::service_store::RouteEntry>,
 }
 
 #[derive(Deserialize)]
@@ -610,7 +615,7 @@ async fn list_services(State(ctx): State<Arc<ServerCtx>>) -> Json<Vec<ServiceRes
         store
             .list()
             .into_iter()
-            .map(|e| (e.name.clone(), e.target_port))
+            .map(|e| (e.name.clone(), e.target_port, e.routes.clone()))
             .collect()
     };
     let tld = &ctx.proxy_tld;
@@ -619,7 +624,7 @@ async fn list_services(State(ctx): State<Arc<ServerCtx>>) -> Json<Vec<ServiceRes
 
     let check_futures: Vec<_> = entries
         .iter()
-        .map(|(_, port)| {
+        .map(|(_, port, _)| {
             let port = *port;
             let localhost = std::net::SocketAddr::from(([127, 0, 0, 1], port));
             let lan_addr = lan_ip.map(|ip| std::net::SocketAddr::new(ip.into(), port));
@@ -639,12 +644,13 @@ async fn list_services(State(ctx): State<Arc<ServerCtx>>) -> Json<Vec<ServiceRes
         .into_iter()
         .zip(check_results)
         .map(
-            |((name, port), (healthy, lan_accessible))| ServiceResponse {
+            |((name, port, routes), (healthy, lan_accessible))| ServiceResponse {
                 url: format!("http://{}.{}", name, tld),
                 name,
                 target_port: port,
                 healthy,
                 lan_accessible,
+                routes,
             },
         )
         .collect();
@@ -694,6 +700,7 @@ async fn create_service(
             target_port: req.target_port,
             healthy,
             lan_accessible,
+            routes: Vec::new(),
         }),
     ))
 }
@@ -704,6 +711,67 @@ async fn remove_service(State(ctx): State<Arc<ServerCtx>>, Path(name): Path<Stri
     }
     let mut store = ctx.services.lock().unwrap();
     if store.remove(&name) {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::NOT_FOUND
+    }
+}
+
+// --- Route handlers ---
+
+#[derive(Deserialize)]
+struct AddRouteRequest {
+    path: String,
+    port: u16,
+    #[serde(default)]
+    strip: bool,
+}
+
+#[derive(Deserialize)]
+struct RemoveRouteRequest {
+    path: String,
+}
+
+async fn list_routes(
+    State(ctx): State<Arc<ServerCtx>>,
+    Path(name): Path<String>,
+) -> Result<Json<Vec<crate::service_store::RouteEntry>>, StatusCode> {
+    let store = ctx.services.lock().unwrap();
+    match store.lookup(&name) {
+        Some(entry) => Ok(Json(entry.routes.clone())),
+        None => Err(StatusCode::NOT_FOUND),
+    }
+}
+
+async fn add_route(
+    State(ctx): State<Arc<ServerCtx>>,
+    Path(name): Path<String>,
+    Json(req): Json<AddRouteRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    if req.path.is_empty() || !req.path.starts_with('/') {
+        return Err((StatusCode::BAD_REQUEST, "path must start with /".into()));
+    }
+    if req.path.contains("/../") || req.path.ends_with("/..") {
+        return Err((StatusCode::BAD_REQUEST, "path must not contain '..'".into()));
+    }
+    if req.port == 0 {
+        return Err((StatusCode::BAD_REQUEST, "port must be > 0".into()));
+    }
+    let mut store = ctx.services.lock().unwrap();
+    if store.add_route(&name, req.path, req.port, req.strip) {
+        Ok(StatusCode::CREATED)
+    } else {
+        Err((StatusCode::NOT_FOUND, format!("service '{}' not found", name)))
+    }
+}
+
+async fn remove_route(
+    State(ctx): State<Arc<ServerCtx>>,
+    Path(name): Path<String>,
+    Json(req): Json<RemoveRouteRequest>,
+) -> StatusCode {
+    let mut store = ctx.services.lock().unwrap();
+    if store.remove_route(&name, &req.path) {
         StatusCode::NO_CONTENT
     } else {
         StatusCode::NOT_FOUND
