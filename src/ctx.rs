@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 
+use arc_swap::ArcSwap;
 use log::{debug, error, info, warn};
+use rustls::ServerConfig;
 use tokio::net::UdpSocket;
 
 use crate::blocklist::BlocklistStore;
@@ -45,6 +47,7 @@ pub struct ServerCtx {
     pub config_found: bool,
     pub config_dir: PathBuf,
     pub data_dir: PathBuf,
+    pub tls_config: Option<ArcSwap<ServerConfig>>,
 }
 
 pub async fn handle_query(

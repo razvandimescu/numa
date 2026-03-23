@@ -11,7 +11,6 @@ use hyper::StatusCode;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use log::{debug, error, info, warn};
-use rustls::ServerConfig;
 use tokio::io::copy_bidirectional;
 use tokio_rustls::TlsAcceptor;
 
@@ -50,12 +49,7 @@ pub async fn start_proxy(ctx: Arc<ServerCtx>, port: u16, bind_addr: Ipv4Addr) {
     axum::serve(listener, app).await.unwrap();
 }
 
-pub async fn start_proxy_tls(
-    ctx: Arc<ServerCtx>,
-    port: u16,
-    bind_addr: Ipv4Addr,
-    tls_config: Arc<ServerConfig>,
-) {
+pub async fn start_proxy_tls(ctx: Arc<ServerCtx>, port: u16, bind_addr: Ipv4Addr) {
     let addr: SocketAddr = (bind_addr, port).into();
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
@@ -69,11 +63,17 @@ pub async fn start_proxy_tls(
     };
     info!("HTTPS proxy listening on {}", addr);
 
-    let acceptor = TlsAcceptor::from(tls_config);
+    if ctx.tls_config.is_none() {
+        warn!("proxy: no TLS config — HTTPS proxy disabled");
+        return;
+    }
+
     let client: HttpClient = Client::builder(TokioExecutor::new())
         .http1_preserve_header_case(true)
         .build_http();
 
+    // Hold a separate Arc so we can access tls_config after ctx moves into ProxyState
+    let tls_holder = Arc::clone(&ctx);
     let state = ProxyState { ctx, client };
 
     let app = Router::new().fallback(any(proxy_handler)).with_state(state);
@@ -87,7 +87,10 @@ pub async fn start_proxy_tls(
             }
         };
 
-        let acceptor = acceptor.clone();
+        // Load the latest TLS config on each connection (picks up new service certs)
+        // unwrap safe: guarded by is_none() check above
+        let acceptor =
+            TlsAcceptor::from(Arc::clone(&*tls_holder.tls_config.as_ref().unwrap().load()));
         let app = app.clone();
 
         tokio::spawn(async move {

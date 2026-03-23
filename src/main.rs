@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use log::{error, info};
 use tokio::net::UdpSocket;
 
@@ -137,6 +138,20 @@ async fn main() -> numa::Result<()> {
 
     let forwarding_rules = system_dns.forwarding_rules;
 
+    // Build initial TLS config before ServerCtx (so ArcSwap is ready at construction)
+    let initial_tls = if config.proxy.enabled && config.proxy.tls_port > 0 {
+        let service_names = service_store.names();
+        match numa::tls::build_tls_config(&config.proxy.tld, &service_names) {
+            Ok(tls_config) => Some(ArcSwap::from(tls_config)),
+            Err(e) => {
+                log::warn!("TLS setup failed, HTTPS proxy disabled: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let ctx = Arc::new(ServerCtx {
         socket: UdpSocket::bind(&config.server.bind_addr).await?,
         zone_map: build_zone_map(&config.zones)?,
@@ -168,6 +183,7 @@ async fn main() -> numa::Result<()> {
         config_found,
         config_dir: numa::config_dir(),
         data_dir: numa::data_dir(),
+        tls_config: initial_tls,
     });
 
     let zone_count: usize = ctx.zone_map.values().map(|m| m.len()).sum();
@@ -336,27 +352,12 @@ async fn main() -> numa::Result<()> {
     }
 
     // Spawn HTTPS reverse proxy with TLS termination
-    if config.proxy.enabled && config.proxy.tls_port > 0 {
-        let service_names: Vec<String> = ctx
-            .services
-            .lock()
-            .unwrap()
-            .list()
-            .iter()
-            .map(|e| e.name.clone())
-            .collect();
-        match numa::tls::build_tls_config(&config.proxy.tld, &service_names) {
-            Ok(tls_config) => {
-                let proxy_ctx = Arc::clone(&ctx);
-                let tls_port = config.proxy.tls_port;
-                tokio::spawn(async move {
-                    numa::proxy::start_proxy_tls(proxy_ctx, tls_port, proxy_bind, tls_config).await;
-                });
-            }
-            Err(e) => {
-                log::warn!("TLS setup failed, HTTPS proxy disabled: {}", e);
-            }
-        }
+    if config.proxy.enabled && config.proxy.tls_port > 0 && ctx.tls_config.is_some() {
+        let proxy_ctx = Arc::clone(&ctx);
+        let tls_port = config.proxy.tls_port;
+        tokio::spawn(async move {
+            numa::proxy::start_proxy_tls(proxy_ctx, tls_port, proxy_bind).await;
+        });
     }
 
     // Spawn network change watcher (upstream re-detection, LAN IP update, peer flush)
