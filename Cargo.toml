@@ -1,6 +1,6 @@
 [package]
 name = "numa"
-version = "0.4.0"
+version = "0.5.0"
 authors = ["razvandimescu <razvan@dimescu.com>"]
 edition = "2021"
 description = "Ephemeral DNS overrides for development and testing. Point any hostname to any endpoint. Auto-revert when you're done."
