@@ -50,7 +50,12 @@ pub async fn start_proxy(ctx: Arc<ServerCtx>, port: u16, bind_addr: Ipv4Addr) {
     axum::serve(listener, app).await.unwrap();
 }
 
-pub async fn start_proxy_tls(ctx: Arc<ServerCtx>, port: u16, bind_addr: Ipv4Addr, tls_config: Arc<ServerConfig>) {
+pub async fn start_proxy_tls(
+    ctx: Arc<ServerCtx>,
+    port: u16,
+    bind_addr: Ipv4Addr,
+    tls_config: Arc<ServerConfig>,
+) {
     let addr: SocketAddr = (bind_addr, port).into();
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
@@ -271,11 +276,17 @@ pre .str {{ color: #d48a5a }}
         }
     };
 
-    let query_string = req.uri().query().map(|q| format!("?{}", q)).unwrap_or_default();
-    let target_uri: hyper::Uri =
-        format!("http://{}:{}{}{}", target_host, target_port, rewritten_path, query_string)
-            .parse()
-            .unwrap();
+    let query_string = req
+        .uri()
+        .query()
+        .map(|q| format!("?{}", q))
+        .unwrap_or_default();
+    let target_uri: hyper::Uri = format!(
+        "http://{}:{}{}{}",
+        target_host, target_port, rewritten_path, query_string
+    )
+    .parse()
+    .unwrap();
 
     // Check for upgrade request (WebSocket, etc.)
     let is_upgrade = req.headers().get(hyper::header::UPGRADE).is_some();
