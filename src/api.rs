@@ -601,6 +601,7 @@ struct ServiceResponse {
     lan_accessible: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     routes: Vec<crate::service_store::RouteEntry>,
+    source: String,
 }
 
 #[derive(Deserialize)]
@@ -615,7 +616,19 @@ async fn list_services(State(ctx): State<Arc<ServerCtx>>) -> Json<Vec<ServiceRes
         store
             .list()
             .into_iter()
-            .map(|e| (e.name.clone(), e.target_port, e.routes.clone()))
+            .map(|e| {
+                let source = if store.is_config_service(&e.name) {
+                    "config"
+                } else {
+                    "api"
+                };
+                (
+                    e.name.clone(),
+                    e.target_port,
+                    e.routes.clone(),
+                    source.to_string(),
+                )
+            })
             .collect()
     };
     let tld = &ctx.proxy_tld;
@@ -624,7 +637,7 @@ async fn list_services(State(ctx): State<Arc<ServerCtx>>) -> Json<Vec<ServiceRes
 
     let check_futures: Vec<_> = entries
         .iter()
-        .map(|(_, port, _)| {
+        .map(|(_, port, _, _)| {
             let port = *port;
             let localhost = std::net::SocketAddr::from(([127, 0, 0, 1], port));
             let lan_addr = lan_ip.map(|ip| std::net::SocketAddr::new(ip.into(), port));
@@ -644,13 +657,14 @@ async fn list_services(State(ctx): State<Arc<ServerCtx>>) -> Json<Vec<ServiceRes
         .into_iter()
         .zip(check_results)
         .map(
-            |((name, port, routes), (healthy, lan_accessible))| ServiceResponse {
+            |((name, port, routes, source), (healthy, lan_accessible))| ServiceResponse {
                 url: format!("http://{}.{}", name, tld),
                 name,
                 target_port: port,
                 healthy,
                 lan_accessible,
                 routes,
+                source,
             },
         )
         .collect();
@@ -701,6 +715,7 @@ async fn create_service(
             healthy,
             lan_accessible,
             routes: Vec::new(),
+            source: "api".to_string(),
         }),
     ))
 }
