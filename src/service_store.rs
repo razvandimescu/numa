@@ -143,6 +143,11 @@ impl ServiceStore {
         removed
     }
 
+    /// Names are always stored lowercased, so callers must pass lowercase keys.
+    pub fn is_config_service(&self, name: &str) -> bool {
+        self.config_services.contains(name)
+    }
+
     pub fn list(&self) -> Vec<&ServiceEntry> {
         let mut entries: Vec<_> = self.entries.values().collect();
         entries.sort_by(|a, b| a.name.cmp(&b.name));
