@@ -39,6 +39,7 @@ pub struct ServerCtx {
     pub timeout: Duration,
     pub proxy_tld: String,
     pub proxy_tld_suffix: String, // pre-computed ".{tld}" to avoid per-query allocation
+    pub lan_enabled: bool,
 }
 
 pub async fn handle_query(

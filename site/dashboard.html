@@ -580,10 +580,11 @@ body {
       <!-- Local services -->
       <div class="panel">
         <div class="panel-header">
-          <div>
+          <div style="flex:1;">
             <span class="panel-title">Local Services</span>
             <div style="font-size:0.68rem;color:var(--text-dim);margin-top:0.15rem;">Give localhost apps clean .numa URLs. Persistent, with HTTP proxy.</div>
           </div>
+          <span id="lanToggle" style="font-family:var(--font-mono);font-size:0.68rem;cursor:default;user-select:none;" title=""></span>
         </div>
         <div class="panel-body">
           <form class="override-form" id="serviceForm" onsubmit="return addService(event)">
@@ -874,6 +875,22 @@ async function refresh() {
     document.getElementById('uptime').textContent = formatUptime(stats.uptime_secs);
     document.getElementById('uptimeSub').textContent = formatUptimeSub(stats.uptime_secs);
     document.getElementById('footerUpstream').textContent = stats.upstream || '';
+
+    // LAN status indicator
+    const lanEl = document.getElementById('lanToggle');
+    if (stats.lan) {
+      if (!stats.lan.enabled) {
+        lanEl.style.color = 'var(--text-dim)';
+        lanEl.textContent = 'LAN off';
+        lanEl.title = 'Enable with: numa lan on';
+      } else {
+        const pc = stats.lan.peers || 0;
+        lanEl.style.color = pc > 0 ? 'var(--emerald)' : 'var(--teal)';
+        lanEl.textContent = `LAN on · ${pc} peer${pc !== 1 ? 's' : ''}`;
+        lanEl.title = 'mDNS discovery active (_numa._tcp.local)';
+      }
+    }
+
     document.getElementById('overrideCount').textContent = stats.overrides.active;
     document.getElementById('blockedCount').textContent = formatNumber(q.blocked);
     const bl = stats.blocking;

@@ -159,6 +159,7 @@ async fn main() -> numa::Result<()> {
             format!(".{}", config.proxy.tld)
         },
         proxy_tld: config.proxy.tld.clone(),
+        lan_enabled: config.lan.enabled,
     });
 
     let zone_count: usize = ctx.zone_map.values().map(|m| m.len()).sum();

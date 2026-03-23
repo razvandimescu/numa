@@ -134,6 +134,13 @@ struct StatsResponse {
     cache: CacheStats,
     overrides: OverrideStats,
     blocking: BlockingStatsResponse,
+    lan: LanStatsResponse,
+}
+
+#[derive(Serialize)]
+struct LanStatsResponse {
+    enabled: bool,
+    peers: usize,
 }
 
 #[derive(Serialize)]
@@ -465,6 +472,10 @@ async fn stats(State(ctx): State<Arc<ServerCtx>>) -> Json<StatsResponse> {
             paused: bl_stats.paused,
             domains_loaded: bl_stats.domains_loaded,
             allowlist_size: bl_stats.allowlist_size,
+        },
+        lan: LanStatsResponse {
+            enabled: ctx.lan_enabled,
+            peers: ctx.lan_peers.lock().unwrap().list().len(),
         },
     })
 }
