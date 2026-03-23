@@ -250,6 +250,72 @@ fn default_lan_peer_timeout() -> u64 {
     90
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lan_disabled_by_default() {
+        assert!(!LanConfig::default().enabled);
+    }
+
+    #[test]
+    fn api_binds_localhost_by_default() {
+        assert_eq!(ServerConfig::default().api_bind_addr, "127.0.0.1");
+    }
+
+    #[test]
+    fn proxy_binds_localhost_by_default() {
+        assert_eq!(ProxyConfig::default().bind_addr, "127.0.0.1");
+    }
+
+    #[test]
+    fn empty_toml_gives_defaults() {
+        let config: Config = toml::from_str("").unwrap();
+        assert!(!config.lan.enabled);
+        assert_eq!(config.server.api_bind_addr, "127.0.0.1");
+        assert_eq!(config.proxy.bind_addr, "127.0.0.1");
+        assert_eq!(config.server.api_port, ServerConfig::default().api_port);
+    }
+
+    #[test]
+    fn lan_enabled_parses() {
+        let config: Config = toml::from_str("[lan]\nenabled = true").unwrap();
+        assert!(config.lan.enabled);
+    }
+
+    #[test]
+    fn custom_bind_addrs_parse() {
+        let toml = r#"
+            [server]
+            api_bind_addr = "0.0.0.0"
+            [proxy]
+            bind_addr = "0.0.0.0"
+        "#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.server.api_bind_addr, "0.0.0.0");
+        assert_eq!(config.proxy.bind_addr, "0.0.0.0");
+    }
+
+    #[test]
+    fn service_routes_parse_from_toml() {
+        let toml = r#"
+            [[services]]
+            name = "app"
+            target_port = 3000
+            routes = [
+                { path = "/api", port = 4000, strip = true },
+                { path = "/static", port = 5000 },
+            ]
+        "#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.services.len(), 1);
+        assert_eq!(config.services[0].routes.len(), 2);
+        assert!(config.services[0].routes[0].strip);
+        assert!(!config.services[0].routes[1].strip); // default false
+    }
+}
+
 pub fn load_config(path: &str) -> Result<Config> {
     if !Path::new(path).exists() {
         return Ok(Config::default());
