@@ -102,7 +102,11 @@ dig @127.0.0.1 api.numa          # → 192.168.1.5
 curl http://api.numa              # → proxied to Machine A's port 8000
 ```
 
-Enable LAN discovery in `numa.toml`:
+Enable LAN discovery:
+```bash
+numa lan on
+```
+Or in `numa.toml`:
 ```toml
 [lan]
 enabled = true
