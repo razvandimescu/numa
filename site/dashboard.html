@@ -875,6 +875,8 @@ async function refresh() {
     document.getElementById('uptime').textContent = formatUptime(stats.uptime_secs);
     document.getElementById('uptimeSub').textContent = formatUptimeSub(stats.uptime_secs);
     document.getElementById('footerUpstream').textContent = stats.upstream || '';
+    document.getElementById('footerConfig').textContent = stats.config_path || '';
+    document.getElementById('footerData').textContent = stats.data_dir || '';
 
     // LAN status indicator
     const lanEl = document.getElementById('lanToggle');
@@ -1006,14 +1008,16 @@ async function checkDomain(event) {
     if (result.blocked) {
       el.style.background = 'rgba(181, 68, 58, 0.1)';
       el.style.color = 'var(--rose)';
-      el.innerHTML = `<strong>Blocked</strong> — ${result.reason}` +
-        (result.matched_rule ? `<br>Rule: <code>${result.matched_rule}</code>` : '') +
-        ` <button class="btn-delete" onclick="allowDomain('${domain}')" style="color:var(--emerald);font-size:0.7rem;margin-left:0.4rem;">allow</button>`;
+      const hd = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+      el.innerHTML = `<strong>Blocked</strong> — ${hd(result.reason)}` +
+        (result.matched_rule ? `<br>Rule: <code>${hd(result.matched_rule)}</code>` : '') +
+        ` <button class="btn-delete" onclick="allowDomain('${hd(domain)}')" style="color:var(--emerald);font-size:0.7rem;margin-left:0.4rem;">allow</button>`;
     } else {
+      const hd = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
       el.style.background = 'rgba(82, 122, 82, 0.1)';
       el.style.color = 'var(--emerald)';
-      el.innerHTML = `<strong>Allowed</strong> — ${result.reason}` +
-        (result.matched_rule ? `<br>Rule: <code>${result.matched_rule}</code>` : '');
+      el.innerHTML = `<strong>Allowed</strong> — ${hd(result.reason)}` +
+        (result.matched_rule ? `<br>Rule: <code>${hd(result.matched_rule)}</code>` : '');
     }
   } catch (err) {
     el.style.display = 'block';
@@ -1118,26 +1122,27 @@ function renderServices(entries) {
         ? '<span class="lan-badge shared" title="Reachable from other devices on the network">LAN</span>'
         : '<span class="lan-badge local-only" title="Bound to localhost — not reachable from other devices. Start with 0.0.0.0 to share on LAN.">local only</span>')
       : '';
-    const esc = s => s.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+    const h = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
     const routeLines = (e.routes || []).map(r =>
       `<div class="service-port" style="color:var(--text-dim);display:flex;align-items:center;gap:0.3rem;">` +
-        `<span style="display:inline-block;min-width:60px;">${r.path}</span> ` +
-        `&rarr; :${r.port}` +
+        `<span style="display:inline-block;min-width:60px;">${h(r.path)}</span> ` +
+        `&rarr; :${parseInt(r.port)||0}` +
         (r.strip ? ` <span style="opacity:0.6;">(strip)</span>` : '') +
-        (e.name === 'numa' ? '' : ` <button class="btn-delete" onclick="deleteRoute('${esc(e.name)}','${esc(r.path)}')" title="Remove route" style="font-size:0.65rem;padding:0 0.25rem;min-width:auto;opacity:0.5;">&times;</button>`) +
+        (e.name === 'numa' ? '' : ` <button class="btn-delete" onclick="deleteRoute('${h(e.name)}','${h(r.path)}')" title="Remove route" style="font-size:0.65rem;padding:0 0.25rem;min-width:auto;opacity:0.5;">&times;</button>`) +
       `</div>`
     ).join('');
     const deletable = e.source !== 'config' && e.name !== 'numa';
+    const name = h(e.name);
     return `
     <div class="service-item">
       <span class="health-dot ${e.healthy ? 'up' : 'down'}" title="${e.healthy ? 'running' : 'not reachable'}"></span>
       <div class="service-info">
-        <div class="service-name"><a href="${e.url}" target="_blank">${e.name}.numa</a>${lanBadge}</div>
-        <div class="service-port">localhost:${e.target_port} &rarr; proxied</div>
+        <div class="service-name"><a href="${h(e.url)}" target="_blank">${name}.numa</a>${lanBadge}</div>
+        <div class="service-port">localhost:${parseInt(e.target_port)||0} &rarr; proxied</div>
         ${routeLines}
-        ${e.name === 'numa' ? '' : `<div style="margin-top:0.3rem;"><button onclick="toggleRouteForm('${e.name}')" style="font-size:0.7rem;padding:0.1rem 0.4rem;background:var(--emerald);color:var(--bg);border:none;border-radius:4px;cursor:pointer;">+ route</button><div id="routeForm-${e.name}" style="display:none;margin-top:0.3rem;"><div style="display:flex;gap:0.3rem;align-items:center;"><input type="text" id="routePath-${e.name}" placeholder="/path" style="flex:2;padding:0.25rem 0.4rem;font-size:0.75rem;"><input type="number" id="routePort-${e.name}" value="${e.target_port}" min="1" max="65535" style="flex:1;padding:0.25rem 0.4rem;font-size:0.75rem;"><label style="font-size:0.7rem;color:var(--text-dim);display:flex;align-items:center;gap:0.2rem;"><input type="checkbox" id="routeStrip-${e.name}">strip</label><button onclick="addRoute('${e.name}')" style="font-size:0.7rem;padding:0.2rem 0.5rem;background:var(--emerald);color:var(--bg);border:none;border-radius:4px;cursor:pointer;">add</button></div><div class="override-error" id="routeError-${e.name}" style="display:none;font-size:0.7rem;"></div></div></div>`}
+        ${e.name === 'numa' ? '' : `<div style="margin-top:0.3rem;"><button onclick="toggleRouteForm('${name}')" style="font-size:0.7rem;padding:0.1rem 0.4rem;background:var(--emerald);color:var(--bg);border:none;border-radius:4px;cursor:pointer;">+ route</button><div id="routeForm-${name}" style="display:none;margin-top:0.3rem;"><div style="display:flex;gap:0.3rem;align-items:center;"><input type="text" id="routePath-${name}" placeholder="/path" style="flex:2;padding:0.25rem 0.4rem;font-size:0.75rem;"><input type="number" id="routePort-${name}" value="${parseInt(e.target_port)||0}" min="1" max="65535" style="flex:1;padding:0.25rem 0.4rem;font-size:0.75rem;"><label style="font-size:0.7rem;color:var(--text-dim);display:flex;align-items:center;gap:0.2rem;"><input type="checkbox" id="routeStrip-${name}">strip</label><button onclick="addRoute('${name}')" style="font-size:0.7rem;padding:0.2rem 0.5rem;background:var(--emerald);color:var(--bg);border:none;border-radius:4px;cursor:pointer;">add</button></div><div class="override-error" id="routeError-${name}" style="display:none;font-size:0.7rem;"></div></div></div>`}
       </div>
-      ${deletable ? `<button class="btn-delete" onclick="deleteService('${e.name}')" title="Remove service">&times;</button>` : ''}
+      ${deletable ? `<button class="btn-delete" onclick="deleteService('${name}')" title="Remove service">&times;</button>` : ''}
     </div>
   `}).join('');
 }
@@ -1222,8 +1227,9 @@ setInterval(refresh, 2000);
 </script>
 
 <div style="text-align:center;padding:0.8rem;font-family:var(--font-mono);font-size:0.68rem;color:var(--text-dim);">
-  Upstream: <span id="footerUpstream" style="user-select:all;color:var(--emerald);"></span>
-  · Logs: <span id="logPath" style="user-select:all;">macOS: /usr/local/var/log/numa.log · Linux: journalctl -u numa -f</span>
+  Config: <span id="footerConfig" style="user-select:all;color:var(--emerald);"></span>
+  · Data: <span id="footerData" style="user-select:all;color:var(--emerald);"></span>
+  · Upstream: <span id="footerUpstream" style="user-select:all;color:var(--emerald);"></span>
   · <a href="https://github.com/razvandimescu/numa" target="_blank" rel="noopener" style="color:var(--amber);text-decoration:none;">GitHub</a>
 </div>
 

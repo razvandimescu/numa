@@ -8,7 +8,7 @@ use tokio::net::UdpSocket;
 use numa::blocklist::{download_blocklists, parse_blocklist, BlocklistStore};
 use numa::buffer::BytePacketBuffer;
 use numa::cache::DnsCache;
-use numa::config::{build_zone_map, load_config};
+use numa::config::{build_zone_map, load_config, ConfigLoad};
 use numa::ctx::{handle_query, ServerCtx};
 use numa::override_store::OverrideStore;
 use numa::query_log::QueryLog;
@@ -96,7 +96,11 @@ async fn main() -> numa::Result<()> {
     } else {
         arg1 // treat as config path for backwards compatibility
     };
-    let config = load_config(&config_path)?;
+    let ConfigLoad {
+        config,
+        path: resolved_config_path,
+        found: config_found,
+    } = load_config(&config_path)?;
 
     // Discover system DNS in a single pass (upstream + forwarding rules)
     let system_dns = discover_system_dns();
@@ -160,6 +164,10 @@ async fn main() -> numa::Result<()> {
         },
         proxy_tld: config.proxy.tld.clone(),
         lan_enabled: config.lan.enabled,
+        config_path: resolved_config_path,
+        config_found,
+        config_dir: numa::config_dir(),
+        data_dir: numa::data_dir(),
     });
 
     let zone_count: usize = ctx.zone_map.values().map(|m| m.len()).sum();
@@ -193,6 +201,15 @@ async fn main() -> numa::Result<()> {
         eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;107;124;78mRouting\x1b[0m   {:<30}\x1b[38;2;192;98;58m║\x1b[0m",
             format!("{} conditional rules", ctx.forwarding_rules.len()));
     }
+    eprintln!("\x1b[38;2;192;98;58m  ╠──────────────────────────────────────────╣\x1b[0m");
+    let config_label = if ctx.config_found {
+        ctx.config_path.clone()
+    } else {
+        format!("{} (defaults)", ctx.config_path)
+    };
+    eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;163;152;136mConfig\x1b[0m    {:<30}\x1b[38;2;192;98;58m║\x1b[0m", config_label);
+    eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;163;152;136mData\x1b[0m      {:<30}\x1b[38;2;192;98;58m║\x1b[0m", ctx.data_dir.display());
+    eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;163;152;136mServices\x1b[0m  {:<30}\x1b[38;2;192;98;58m║\x1b[0m", ctx.config_dir.join("services.json").display());
     eprintln!("\x1b[38;2;192;98;58m  ╚══════════════════════════════════════════╝\x1b[0m\n");
 
     info!(

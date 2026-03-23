@@ -29,9 +29,9 @@ impl ServiceEntry {
             .iter()
             .filter(|r| {
                 request_path == r.path
-                    || request_path.starts_with(&r.path)
+                    || (request_path.starts_with(&r.path)
                         && (r.path.ends_with('/')
-                            || request_path.as_bytes().get(r.path.len()) == Some(&b'/'))
+                            || request_path.as_bytes().get(r.path.len()) == Some(&b'/')))
             })
             .max_by_key(|r| r.path.len());
 

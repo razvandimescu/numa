@@ -49,6 +49,7 @@ pub fn router(ctx: Arc<ServerCtx>) -> Router {
         .route("/services/{name}/routes", get(list_routes))
         .route("/services/{name}/routes", post(add_route))
         .route("/services/{name}/routes", delete(remove_route))
+        .route("/ca.pem", get(serve_ca))
         .with_state(ctx)
 }
 
@@ -130,6 +131,8 @@ struct QueryLogResponse {
 struct StatsResponse {
     uptime_secs: u64,
     upstream: String,
+    config_path: String,
+    data_dir: String,
     queries: QueriesStats,
     cache: CacheStats,
     overrides: OverrideStats,
@@ -451,6 +454,8 @@ async fn stats(State(ctx): State<Arc<ServerCtx>>) -> Json<StatsResponse> {
     Json(StatsResponse {
         uptime_secs: snap.uptime_secs,
         upstream,
+        config_path: ctx.config_path.clone(),
+        data_dir: ctx.data_dir.to_string_lossy().to_string(),
         queries: QueriesStats {
             total: snap.total,
             forwarded: snap.forwarded,
@@ -808,6 +813,24 @@ async fn remove_route(
     } else {
         StatusCode::NOT_FOUND
     }
+}
+
+async fn serve_ca(State(ctx): State<Arc<ServerCtx>>) -> Result<impl IntoResponse, StatusCode> {
+    let ca_path = ctx.data_dir.join("ca.pem");
+    let bytes = tokio::task::spawn_blocking(move || std::fs::read(ca_path))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/x-pem-file"),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"numa-ca.pem\"",
+            ),
+        ],
+        bytes,
+    ))
 }
 
 async fn check_tcp(addr: std::net::SocketAddr) -> bool {
