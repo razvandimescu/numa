@@ -21,6 +21,13 @@ impl BytePacketBuffer {
         }
     }
 
+    pub fn from_bytes(data: &[u8]) -> Self {
+        let mut buf = Self::new();
+        let len = data.len().min(BUF_SIZE);
+        buf.buf[..len].copy_from_slice(&data[..len]);
+        buf
+    }
+
     pub fn pos(&self) -> usize {
         self.pos
     }

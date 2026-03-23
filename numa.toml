@@ -4,9 +4,11 @@ api_port = 5380
 # api_bind_addr = "127.0.0.1"  # default; set to "0.0.0.0" for LAN dashboard access
 
 # [upstream]
-# address = ""       # auto-detect from system resolver (default)
-# address = "9.9.9.9"  # or set explicitly
-# port = 53
+# address = ""                                  # auto-detect from system resolver (default)
+# address = "https://dns.quad9.net/dns-query"   # DNS-over-HTTPS (encrypted)
+# address = "https://cloudflare-dns.com/dns-query"  # Cloudflare DoH
+# address = "9.9.9.9"                           # plain UDP
+# port = 53                                     # only used for plain UDP
 # timeout_ms = 3000
 
 # [blocking]

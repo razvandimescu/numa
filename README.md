@@ -43,6 +43,7 @@ sudo ./target/release/numa
 - **Path-based routing** — `app.numa/api → :5001`, `app.numa/auth → :5002`. Route URL paths to different backends with optional prefix stripping. Like nginx location blocks, zero config files.
 - **LAN service discovery** — Numa instances on the same network find each other automatically via mDNS. Access a teammate's `api.numa` from your machine. Opt-in via `[lan] enabled = true`.
 - **Developer overrides** — point any hostname to any IP, auto-reverts after N minutes. REST API with 25+ endpoints. Built-in diagnostics: `curl localhost:5380/diagnose/example.com` tells you exactly how any domain resolves.
+- **DNS-over-HTTPS** — upstream queries encrypted via DoH. Your ISP sees HTTPS traffic, not DNS queries. Set `address = "https://9.9.9.9/dns-query"` in `[upstream]` or any DoH provider.
 - **Ad blocking that travels with you** — 385K+ domains blocked via [Hagezi Pro](https://github.com/hagezi/dns-blocklists). Works on any network: coffee shops, hotels, airports.
 - **Sub-millisecond caching** — cached lookups in 0ms. Faster than any public resolver.
 - **Live dashboard** — real-time stats, query log, blocking controls, service management. LAN accessibility badges show which services are reachable from other devices.
@@ -134,6 +135,7 @@ bind_addr = "0.0.0.0:53"
 | Path-based routing | No | No | No | No | Prefix match + strip |
 | LAN service discovery | No | No | No | No | mDNS, opt-in |
 | Developer overrides | No | No | No | No | REST API + auto-expiry |
+| Encrypted upstream (DoH) | No (needs cloudflared) | Yes | Cloud only | Cloud only | Native, single binary |
 | Portable (travels with laptop) | No (appliance) | No (appliance) | Cloud only | Cloud only | Single binary |
 | Zero config | Complex | Docker/setup | Yes | Yes | Works out of the box |
 | Ad blocking | Yes | Yes | Yes | Limited | 385K+ domains |
@@ -158,6 +160,7 @@ No DNS libraries — no `hickory-dns`, no `trust-dns`. The wire protocol — hea
 - [x] Local service proxy — `.numa` domains, HTTP/HTTPS proxy, auto TLS, WebSocket
 - [x] Path-based routing — URL prefix routing with optional strip, REST API
 - [x] LAN service discovery — mDNS auto-discovery (opt-in), cross-machine DNS + proxy
+- [x] DNS-over-HTTPS — encrypted upstream via DoH (Quad9, Cloudflare, any provider)
 - [ ] pkarr integration — self-sovereign DNS via Mainline DHT (15M nodes)
 - [ ] Global `.numa` names — self-publish, DHT-backed, first-come-first-served
 

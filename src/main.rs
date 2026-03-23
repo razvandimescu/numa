@@ -11,6 +11,7 @@ use numa::buffer::BytePacketBuffer;
 use numa::cache::DnsCache;
 use numa::config::{build_zone_map, load_config, ConfigLoad};
 use numa::ctx::{handle_query, ServerCtx};
+use numa::forward::Upstream;
 use numa::override_store::OverrideStore;
 use numa::query_log::QueryLog;
 use numa::service_store::ServiceStore;
@@ -111,13 +112,27 @@ async fn main() -> numa::Result<()> {
             .default_upstream
             .or_else(numa::system_dns::detect_dhcp_dns)
             .unwrap_or_else(|| {
-                info!("could not detect system DNS, falling back to 9.9.9.9 (Quad9)");
-                "9.9.9.9".to_string()
+                info!("could not detect system DNS, falling back to Quad9 DoH");
+                "https://dns.quad9.net/dns-query".to_string()
             })
     } else {
         config.upstream.address.clone()
     };
-    let upstream: SocketAddr = format!("{}:{}", upstream_addr, config.upstream.port).parse()?;
+
+    let upstream: Upstream = if upstream_addr.starts_with("https://") {
+        let client = reqwest::Client::builder()
+            .use_rustls_tls()
+            .build()
+            .unwrap_or_default();
+        Upstream::Doh {
+            url: upstream_addr,
+            client,
+        }
+    } else {
+        let addr: SocketAddr = format!("{}:{}", upstream_addr, config.upstream.port).parse()?;
+        Upstream::Udp(addr)
+    };
+    let upstream_label = upstream.to_string();
     let api_port = config.server.api_port;
 
     let mut blocklist = BlocklistStore::new();
@@ -217,7 +232,7 @@ async fn main() -> numa::Result<()> {
     let val_w = [
         config.server.bind_addr.len(),
         api_url.len(),
-        upstream.to_string().len(),
+        upstream_label.len(),
         config_label.len(),
         data_label.len(),
         services_label.len(),
@@ -261,7 +276,7 @@ async fn main() -> numa::Result<()> {
     row("DNS", g, &config.server.bind_addr);
     row("API", g, &api_url);
     row("Dashboard", g, &api_url);
-    row("Upstream", g, &upstream.to_string());
+    row("Upstream", g, &upstream_label);
     row("Zones", g, &format!("{} records", zone_count));
     row(
         "Cache",
@@ -298,7 +313,7 @@ async fn main() -> numa::Result<()> {
 
     info!(
         "numa listening on {}, upstream {}, {} zone records, cache max {}, API on port {}",
-        config.server.bind_addr, upstream, zone_count, config.cache.max_entries, api_port,
+        config.server.bind_addr, upstream_label, zone_count, config.cache.max_entries, api_port,
     );
 
     // Download blocklists on startup
@@ -413,20 +428,24 @@ async fn network_watch_loop(ctx: Arc<numa::ctx::ServerCtx>) {
             }
         }
 
-        // Check upstream change every 30s or immediately on LAN IP change
-        // (heavier — spawns scutil/ipconfig, only when auto-detected)
-        if ctx.upstream_auto && (changed || tick.is_multiple_of(6)) {
+        // Re-detect upstream every 30s or on LAN IP change (UDP only —
+        // DoH upstreams are explicitly configured via URL, not auto-detected)
+        if ctx.upstream_auto
+            && matches!(*ctx.upstream.lock().unwrap(), Upstream::Udp(_))
+            && (changed || tick.is_multiple_of(6))
+        {
             let dns_info = numa::system_dns::discover_system_dns();
             let new_addr = dns_info
                 .default_upstream
                 .or_else(numa::system_dns::detect_dhcp_dns)
                 .unwrap_or_else(|| "9.9.9.9".to_string());
-            if let Ok(new_upstream) =
+            if let Ok(new_sock) =
                 format!("{}:{}", new_addr, ctx.upstream_port).parse::<SocketAddr>()
             {
+                let new_upstream = Upstream::Udp(new_sock);
                 let mut upstream = ctx.upstream.lock().unwrap();
-                if new_upstream != *upstream {
-                    info!("upstream changed: {} → {}", *upstream, new_upstream);
+                if *upstream != new_upstream {
+                    info!("upstream changed: {} → {}", upstream, new_upstream);
                     *upstream = new_upstream;
                     changed = true;
                 }
