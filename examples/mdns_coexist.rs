@@ -1,3 +1,4 @@
+use socket2::{Domain, Protocol, Socket, Type};
 /// Spike: can we bind to mDNS multicast (224.0.0.251:5353) alongside macOS mDNSResponder?
 ///
 /// Tests:
@@ -8,10 +9,8 @@
 /// 5. Send a _numa._tcp.local announcement — does it conflict?
 ///
 /// Run: cargo run --example mdns_coexist
-
 use std::mem::MaybeUninit;
 use std::net::{Ipv4Addr, SocketAddrV4};
-use socket2::{Domain, Protocol, Socket, Type};
 
 const MDNS_ADDR: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 251);
 const MDNS_PORT: u16 = 5353;
@@ -66,7 +65,8 @@ fn main() -> std::io::Result<()> {
     loop {
         match socket.recv_from(&mut buf) {
             Ok((n, addr)) => {
-                let data: &[u8] = unsafe { &*(&buf[..n] as *const [MaybeUninit<u8>] as *const [u8]) };
+                let data: &[u8] =
+                    unsafe { &*(&buf[..n] as *const [MaybeUninit<u8>] as *const [u8]) };
                 count += 1;
                 let flags = u16::from_be_bytes([data[2], data[3]]);
                 let is_response = flags & 0x8000 != 0;
@@ -98,7 +98,8 @@ fn main() -> std::io::Result<()> {
     }
 
     // Step 6: Send a _numa._tcp.local announcement
-    let announcement = build_mdns_announcement("_numa._tcp.local", "test-numa._numa._tcp.local", 5380);
+    let announcement =
+        build_mdns_announcement("_numa._tcp.local", "test-numa._numa._tcp.local", 5380);
     match socket.send_to(&announcement, &dest.into()) {
         Ok(n) => println!("\n[OK] Sent _numa._tcp.local announcement ({} bytes)", n),
         Err(e) => println!("\n[FAIL] Cannot send announcement: {}", e),
@@ -111,7 +112,8 @@ fn main() -> std::io::Result<()> {
     loop {
         match socket.recv_from(&mut buf2) {
             Ok((n, addr)) => {
-                let data: &[u8] = unsafe { &*(&buf2[..n] as *const [MaybeUninit<u8>] as *const [u8]) };
+                let data: &[u8] =
+                    unsafe { &*(&buf2[..n] as *const [MaybeUninit<u8>] as *const [u8]) };
                 let flags = u16::from_be_bytes([data[2], data[3]]);
                 let is_response = flags & 0x8000 != 0;
                 if is_response {
@@ -133,7 +135,10 @@ fn main() -> std::io::Result<()> {
     // Verdict
     println!("\n=== Verdict ===");
     if count > 0 {
-        println!("[PASS] mDNS coexistence works — received {} packets alongside mDNSResponder", count);
+        println!(
+            "[PASS] mDNS coexistence works — received {} packets alongside mDNSResponder",
+            count
+        );
         println!("       Safe to proceed with mDNS-based LAN discovery");
     } else {
         println!("[WARN] No mDNS packets received — may need further investigation");
@@ -163,7 +168,7 @@ fn build_mdns_query(name: &str) -> Vec<u8> {
     pkt.push(0); // root label
 
     pkt.extend_from_slice(&[0, 12]); // QTYPE = PTR (12)
-    pkt.extend_from_slice(&[0, 1]);  // QCLASS = IN (1)
+    pkt.extend_from_slice(&[0, 1]); // QCLASS = IN (1)
 
     pkt
 }
@@ -173,17 +178,17 @@ fn build_mdns_announcement(service_type: &str, instance_name: &str, port: u16) -
     let mut pkt = Vec::new();
 
     // Header: ID=0, flags=0x8400 (response, authoritative), ANCOUNT=1
-    pkt.extend_from_slice(&[0, 0]);       // ID
+    pkt.extend_from_slice(&[0, 0]); // ID
     pkt.extend_from_slice(&[0x84, 0x00]); // Flags: QR=1, AA=1
-    pkt.extend_from_slice(&[0, 0]);       // QDCOUNT
-    pkt.extend_from_slice(&[0, 1]);       // ANCOUNT = 1 (just PTR for now)
-    pkt.extend_from_slice(&[0, 0]);       // NSCOUNT
-    pkt.extend_from_slice(&[0, 0]);       // ARCOUNT
+    pkt.extend_from_slice(&[0, 0]); // QDCOUNT
+    pkt.extend_from_slice(&[0, 1]); // ANCOUNT = 1 (just PTR for now)
+    pkt.extend_from_slice(&[0, 0]); // NSCOUNT
+    pkt.extend_from_slice(&[0, 0]); // ARCOUNT
 
     // PTR record: _numa._tcp.local → test-numa._numa._tcp.local
     encode_name(&mut pkt, service_type);
-    pkt.extend_from_slice(&[0, 12]);      // TYPE = PTR
-    pkt.extend_from_slice(&[0, 1]);       // CLASS = IN
+    pkt.extend_from_slice(&[0, 12]); // TYPE = PTR
+    pkt.extend_from_slice(&[0, 1]); // CLASS = IN
     pkt.extend_from_slice(&[0, 0, 0, 120]); // TTL = 120s
 
     // RDATA: the instance name

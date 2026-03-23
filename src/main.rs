@@ -217,7 +217,11 @@ async fn main() -> numa::Result<()> {
     let proxy_bind: std::net::Ipv4Addr = if config.lan.enabled {
         std::net::Ipv4Addr::UNSPECIFIED
     } else {
-        config.proxy.bind_addr.parse().unwrap_or(std::net::Ipv4Addr::LOCALHOST)
+        config
+            .proxy
+            .bind_addr
+            .parse()
+            .unwrap_or(std::net::Ipv4Addr::LOCALHOST)
     };
 
     // Spawn HTTP reverse proxy for .numa domains

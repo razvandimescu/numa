@@ -761,7 +761,10 @@ async fn add_route(
     if store.add_route(&name, req.path, req.port, req.strip) {
         Ok(StatusCode::CREATED)
     } else {
-        Err((StatusCode::NOT_FOUND, format!("service '{}' not found", name)))
+        Err((
+            StatusCode::NOT_FOUND,
+            format!("service '{}' not found", name),
+        ))
     }
 }
 

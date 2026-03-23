@@ -96,10 +96,15 @@ fn get_hostname() -> String {
 
 /// Generate a per-process instance ID for self-filtering on multi-instance hosts
 fn instance_id() -> String {
-    format!("{}:{}", std::process::id(), std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos() % 1_000_000)
+    format!(
+        "{}:{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+            % 1_000_000
+    )
 }
 
 pub async fn start_lan_discovery(ctx: Arc<ServerCtx>, config: &LanConfig) {
@@ -116,7 +121,10 @@ pub async fn start_lan_discovery(ctx: Arc<ServerCtx>, config: &LanConfig) {
     let std_socket = match create_mdns_socket() {
         Ok(s) => s,
         Err(e) => {
-            warn!("LAN: could not bind mDNS socket: {} — LAN discovery disabled", e);
+            warn!(
+                "LAN: could not bind mDNS socket: {} — LAN discovery disabled",
+                e
+            );
             return;
         }
     };
@@ -141,13 +149,19 @@ pub async fn start_lan_discovery(ctx: Arc<ServerCtx>, config: &LanConfig) {
             ticker.tick().await;
             let services: Vec<(String, u16)> = {
                 let store = sender_ctx.services.lock().unwrap();
-                store.list().iter().map(|e| (e.name.clone(), e.target_port)).collect()
+                store
+                    .list()
+                    .iter()
+                    .map(|e| (e.name.clone(), e.target_port))
+                    .collect()
             };
             if services.is_empty() {
                 continue;
             }
             let current_ip = *sender_ctx.lan_ip.lock().unwrap();
-            if let Ok(pkt) = build_announcement(&sender_hostname, current_ip, &services, &sender_instance_id) {
+            if let Ok(pkt) =
+                build_announcement(&sender_hostname, current_ip, &services, &sender_instance_id)
+            {
                 let _ = sender_socket.send_to(pkt.filled(), dest).await;
             }
         }
@@ -170,14 +184,21 @@ pub async fn start_lan_discovery(ctx: Arc<ServerCtx>, config: &LanConfig) {
         };
 
         let data = &buf[..len];
-        if let Some((services, peer_ip, peer_id)) = parse_mdns_response(data) {
+        if let Some(ann) = parse_mdns_response(data) {
             // Skip our own announcements via instance ID (works on multi-instance same-host)
-            if peer_id.as_deref() == Some(our_instance_id.as_str()) {
+            if ann.instance_id.as_deref() == Some(our_instance_id.as_str()) {
                 continue;
             }
-            if !services.is_empty() {
-                ctx.lan_peers.lock().unwrap().update(peer_ip, &services);
-                debug!("LAN: {} services from {} (mDNS)", services.len(), peer_ip);
+            if !ann.services.is_empty() {
+                ctx.lan_peers
+                    .lock()
+                    .unwrap()
+                    .update(ann.peer_ip, &ann.services);
+                debug!(
+                    "LAN: {} services from {} (mDNS)",
+                    ann.services.len(),
+                    ann.peer_ip
+                );
             }
         }
     }
@@ -223,18 +244,30 @@ fn build_announcement(
 
     // SRV: <instance>._numa._tcp.local → <hostname>.local
     // Port in SRV is informational; actual service ports are in TXT
-    write_record_header(&mut buf, &instance_name, QueryType::SRV.to_num(), 0x8001, MDNS_TTL)?;
+    write_record_header(
+        &mut buf,
+        &instance_name,
+        QueryType::SRV.to_num(),
+        0x8001,
+        MDNS_TTL,
+    )?;
     let rdlen_pos = buf.pos();
     buf.write_u16(0)?;
     let rdata_start = buf.pos();
-    buf.write_u16(0)?;     // priority
-    buf.write_u16(0)?;     // weight
-    buf.write_u16(0)?;     // port (services have individual ports in TXT)
+    buf.write_u16(0)?; // priority
+    buf.write_u16(0)?; // weight
+    buf.write_u16(0)?; // port (services have individual ports in TXT)
     buf.write_qname(&host_local)?;
     patch_rdlen(&mut buf, rdlen_pos, rdata_start)?;
 
     // TXT: services + instance ID for self-filtering
-    write_record_header(&mut buf, &instance_name, QueryType::TXT.to_num(), 0x8001, MDNS_TTL)?;
+    write_record_header(
+        &mut buf,
+        &instance_name,
+        QueryType::TXT.to_num(),
+        0x8001,
+        MDNS_TTL,
+    )?;
     let rdlen_pos = buf.pos();
     buf.write_u16(0)?;
     let rdata_start = buf.pos();
@@ -248,7 +281,13 @@ fn build_announcement(
     patch_rdlen(&mut buf, rdlen_pos, rdata_start)?;
 
     // A: <hostname>.local → IP
-    write_record_header(&mut buf, &host_local, QueryType::A.to_num(), 0x8001, MDNS_TTL)?;
+    write_record_header(
+        &mut buf,
+        &host_local,
+        QueryType::A.to_num(),
+        0x8001,
+        MDNS_TTL,
+    )?;
     buf.write_u16(4)?;
     for &b in &ip.octets() {
         buf.write_u8(b)?;
@@ -271,7 +310,11 @@ fn write_record_header(
     Ok(())
 }
 
-fn patch_rdlen(buf: &mut BytePacketBuffer, rdlen_pos: usize, rdata_start: usize) -> crate::Result<()> {
+fn patch_rdlen(
+    buf: &mut BytePacketBuffer,
+    rdlen_pos: usize,
+    rdata_start: usize,
+) -> crate::Result<()> {
     let rdlen = (buf.pos() - rdata_start) as u16;
     buf.set_u16(rdlen_pos, rdlen)
 }
@@ -289,8 +332,13 @@ fn write_txt_string(buf: &mut BytePacketBuffer, s: &str) -> crate::Result<()> {
 
 // --- mDNS Packet Parsing ---
 
-/// Returns (services, peer_ip, instance_id) if this is a Numa mDNS announcement
-fn parse_mdns_response(data: &[u8]) -> Option<(Vec<(String, u16)>, IpAddr, Option<String>)> {
+struct MdnsAnnouncement {
+    services: Vec<(String, u16)>,
+    peer_ip: IpAddr,
+    instance_id: Option<String>,
+}
+
+fn parse_mdns_response(data: &[u8]) -> Option<MdnsAnnouncement> {
     if data.len() < 12 {
         return None;
     }
@@ -381,7 +429,11 @@ fn parse_mdns_response(data: &[u8]) -> Option<(Vec<(String, u16)>, IpAddr, Optio
     // Trust the A record IP if present, otherwise this isn't a complete announcement
     let peer_ip = a_ip?;
 
-    Some((services, peer_ip, peer_instance_id))
+    Some(MdnsAnnouncement {
+        services,
+        peer_ip,
+        instance_id: peer_instance_id,
+    })
 }
 
 fn create_mdns_socket() -> std::io::Result<std::net::UdpSocket> {

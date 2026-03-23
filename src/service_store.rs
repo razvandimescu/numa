@@ -24,11 +24,14 @@ impl ServiceEntry {
     /// Resolve backend port and (possibly rewritten) path for a request
     pub fn resolve_route(&self, request_path: &str) -> (u16, String) {
         // Longest prefix match
-        let matched = self.routes.iter()
+        let matched = self
+            .routes
+            .iter()
             .filter(|r| {
                 request_path == r.path
                     || request_path.starts_with(&r.path)
-                        && (r.path.ends_with('/') || request_path.as_bytes().get(r.path.len()) == Some(&b'/'))
+                        && (r.path.ends_with('/')
+                            || request_path.as_bytes().get(r.path.len()) == Some(&b'/'))
             })
             .max_by_key(|r| r.path.len());
 
