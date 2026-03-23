@@ -8,7 +8,7 @@ use tokio::net::UdpSocket;
 use numa::blocklist::{download_blocklists, parse_blocklist, BlocklistStore};
 use numa::buffer::BytePacketBuffer;
 use numa::cache::DnsCache;
-use numa::config::{build_zone_map, load_config};
+use numa::config::{build_zone_map, load_config, ConfigLoad};
 use numa::ctx::{handle_query, ServerCtx};
 use numa::override_store::OverrideStore;
 use numa::query_log::QueryLog;
@@ -50,6 +50,20 @@ async fn main() -> numa::Result<()> {
                 }
             };
         }
+        "lan" => {
+            let sub = std::env::args().nth(2).unwrap_or_default();
+            let config_path = std::env::args()
+                .nth(3)
+                .unwrap_or_else(|| "numa.toml".to_string());
+            return match sub.as_str() {
+                "on" => set_lan_enabled(true, &config_path),
+                "off" => set_lan_enabled(false, &config_path),
+                _ => {
+                    eprintln!("Usage: numa lan <on|off> [config-path]");
+                    Ok(())
+                }
+            };
+        }
         "version" | "--version" | "-V" => {
             eprintln!("numa {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
@@ -65,6 +79,8 @@ async fn main() -> numa::Result<()> {
             eprintln!("  service stop    Uninstall the system service");
             eprintln!("  service restart Restart the service with updated binary");
             eprintln!("  service status  Check if the service is running");
+            eprintln!("  lan on          Enable LAN service discovery (mDNS)");
+            eprintln!("  lan off         Disable LAN service discovery");
             eprintln!("  help            Show this help");
             eprintln!();
             eprintln!("Config path defaults to numa.toml");
@@ -80,7 +96,11 @@ async fn main() -> numa::Result<()> {
     } else {
         arg1 // treat as config path for backwards compatibility
     };
-    let config = load_config(&config_path)?;
+    let ConfigLoad {
+        config,
+        path: resolved_config_path,
+        found: config_found,
+    } = load_config(&config_path)?;
 
     // Discover system DNS in a single pass (upstream + forwarding rules)
     let system_dns = discover_system_dns();
@@ -109,9 +129,9 @@ async fn main() -> numa::Result<()> {
 
     // Build service store: config services + persisted user services
     let mut service_store = ServiceStore::new();
-    service_store.insert_from_config("numa", config.server.api_port);
+    service_store.insert_from_config("numa", config.server.api_port, Vec::new());
     for svc in &config.services {
-        service_store.insert_from_config(&svc.name, svc.target_port);
+        service_store.insert_from_config(&svc.name, svc.target_port, svc.routes.clone());
     }
     service_store.load_persisted();
 
@@ -143,40 +163,122 @@ async fn main() -> numa::Result<()> {
             format!(".{}", config.proxy.tld)
         },
         proxy_tld: config.proxy.tld.clone(),
+        lan_enabled: config.lan.enabled,
+        config_path: resolved_config_path,
+        config_found,
+        config_dir: numa::config_dir(),
+        data_dir: numa::data_dir(),
     });
 
     let zone_count: usize = ctx.zone_map.values().map(|m| m.len()).sum();
-    eprintln!("\n\x1b[38;2;192;98;58m  ╔══════════════════════════════════════════╗\x1b[0m");
-    eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[1;38;2;192;98;58mNUMA\x1b[0m  \x1b[3;38;2;163;152;136mDNS that governs itself\x1b[0m  \x1b[38;2;163;152;136mv{}\x1b[0m \x1b[38;2;192;98;58m║\x1b[0m", env!("CARGO_PKG_VERSION"));
-    eprintln!("\x1b[38;2;192;98;58m  ╠══════════════════════════════════════════╣\x1b[0m");
-    eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;107;124;78mDNS\x1b[0m       {:<30}\x1b[38;2;192;98;58m║\x1b[0m", config.server.bind_addr);
-    eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;107;124;78mAPI\x1b[0m       http://localhost:{:<16}\x1b[38;2;192;98;58m║\x1b[0m", api_port);
-    eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;107;124;78mDashboard\x1b[0m http://localhost:{:<16}\x1b[38;2;192;98;58m║\x1b[0m", api_port);
-    eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;107;124;78mUpstream\x1b[0m  {:<30}\x1b[38;2;192;98;58m║\x1b[0m", upstream);
-    eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;107;124;78mZones\x1b[0m     {:<30}\x1b[38;2;192;98;58m║\x1b[0m", format!("{} records", zone_count));
-    eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;107;124;78mCache\x1b[0m     {:<30}\x1b[38;2;192;98;58m║\x1b[0m", format!("max {} entries", config.cache.max_entries));
-    eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;107;124;78mBlocking\x1b[0m  {:<30}\x1b[38;2;192;98;58m║\x1b[0m",
-        if config.blocking.enabled { format!("{} lists", config.blocking.lists.len()) } else { "disabled".to_string() });
-    if config.proxy.enabled {
-        let schemes = if config.proxy.tls_port > 0 {
-            format!(
+
+    // Build banner rows, then size the box to fit the longest value
+    let api_url = format!("http://localhost:{}", api_port);
+    let proxy_label = if config.proxy.enabled {
+        if config.proxy.tls_port > 0 {
+            Some(format!(
                 "http://:{} https://:{}",
                 config.proxy.port, config.proxy.tls_port
-            )
+            ))
         } else {
-            format!("http://*.{} on :{}", config.proxy.tld, config.proxy.port)
-        };
-        eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;107;124;78mProxy\x1b[0m     {:<30}\x1b[38;2;192;98;58m║\x1b[0m", schemes);
+            Some(format!(
+                "http://*.{} on :{}",
+                config.proxy.tld, config.proxy.port
+            ))
+        }
+    } else {
+        None
+    };
+    let config_label = if ctx.config_found {
+        ctx.config_path.clone()
+    } else {
+        format!("{} (defaults)", ctx.config_path)
+    };
+    let data_label = ctx.data_dir.display().to_string();
+    let services_label = ctx.config_dir.join("services.json").display().to_string();
+
+    // label (10) + value + padding (2) = inner width; minimum 40 for the title row
+    let val_w = [
+        config.server.bind_addr.len(),
+        api_url.len(),
+        upstream.to_string().len(),
+        config_label.len(),
+        data_label.len(),
+        services_label.len(),
+    ]
+    .into_iter()
+    .chain(proxy_label.as_ref().map(|s| s.len()))
+    .max()
+    .unwrap_or(30);
+    let w = (val_w + 12).max(42); // 10 label + 2 padding, min 42 for title
+
+    let o = "\x1b[38;2;192;98;58m"; // orange
+    let g = "\x1b[38;2;107;124;78m"; // green
+    let d = "\x1b[38;2;163;152;136m"; // dim
+    let r = "\x1b[0m"; // reset
+    let b = "\x1b[1;38;2;192;98;58m"; // bold orange
+    let it = "\x1b[3;38;2;163;152;136m"; // italic dim
+
+    let bar_top = "═".repeat(w);
+    let bar_mid = "─".repeat(w);
+    let row = |label: &str, color: &str, value: &str| {
+        eprintln!(
+            "{o}  ║{r}  {color}{:<9}{r} {:<vw$}{o}║{r}",
+            label,
+            value,
+            vw = w - 12
+        );
+    };
+
+    // Title row: center within the box
+    let title = format!(
+        "{b}NUMA{r}  {it}DNS that governs itself{r}  {d}v{}{r}",
+        env!("CARGO_PKG_VERSION")
+    );
+    // The title contains ANSI codes; visible length is ~38 chars. Pad to fill the box.
+    let title_visible_len = 4 + 2 + 24 + 2 + 1 + env!("CARGO_PKG_VERSION").len() + 1;
+    let title_pad = w.saturating_sub(title_visible_len);
+    eprintln!("\n{o}  ╔{bar_top}╗{r}");
+    eprint!("{o}  ║{r} {title}");
+    eprintln!("{}{o}║{r}", " ".repeat(title_pad));
+    eprintln!("{o}  ╠{bar_top}╣{r}");
+    row("DNS", g, &config.server.bind_addr);
+    row("API", g, &api_url);
+    row("Dashboard", g, &api_url);
+    row("Upstream", g, &upstream.to_string());
+    row("Zones", g, &format!("{} records", zone_count));
+    row(
+        "Cache",
+        g,
+        &format!("max {} entries", config.cache.max_entries),
+    );
+    row(
+        "Blocking",
+        g,
+        &if config.blocking.enabled {
+            format!("{} lists", config.blocking.lists.len())
+        } else {
+            "disabled".to_string()
+        },
+    );
+    if let Some(ref label) = proxy_label {
+        row("Proxy", g, label);
     }
     if config.lan.enabled {
-        eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;107;124;78mLAN\x1b[0m       {:<30}\x1b[38;2;192;98;58m║\x1b[0m",
-            format!("{}:{}", config.lan.multicast_group, config.lan.port));
+        row("LAN", g, "mDNS (_numa._tcp.local)");
     }
     if !ctx.forwarding_rules.is_empty() {
-        eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;107;124;78mRouting\x1b[0m   {:<30}\x1b[38;2;192;98;58m║\x1b[0m",
-            format!("{} conditional rules", ctx.forwarding_rules.len()));
+        row(
+            "Routing",
+            g,
+            &format!("{} conditional rules", ctx.forwarding_rules.len()),
+        );
     }
-    eprintln!("\x1b[38;2;192;98;58m  ╚══════════════════════════════════════════╝\x1b[0m\n");
+    eprintln!("{o}  ╠{bar_mid}╣{r}");
+    row("Config", d, &config_label);
+    row("Data", d, &data_label);
+    row("Services", d, &services_label);
+    eprintln!("{o}  ╚{bar_top}╝{r}\n");
 
     info!(
         "numa listening on {}, upstream {}, {} zone records, cache max {}, API on port {}",
@@ -205,7 +307,7 @@ async fn main() -> numa::Result<()> {
 
     // Spawn HTTP API server
     let api_ctx = Arc::clone(&ctx);
-    let api_addr: SocketAddr = format!("0.0.0.0:{}", api_port).parse()?;
+    let api_addr: SocketAddr = format!("{}:{}", config.server.api_bind_addr, api_port).parse()?;
     tokio::spawn(async move {
         let app = numa::api::router(api_ctx);
         let listener = tokio::net::TcpListener::bind(api_addr).await.unwrap();
@@ -213,12 +315,23 @@ async fn main() -> numa::Result<()> {
         axum::serve(listener, app).await.unwrap();
     });
 
+    // Proxy binds 0.0.0.0 when LAN is enabled (cross-machine access), otherwise config value
+    let proxy_bind: std::net::Ipv4Addr = if config.lan.enabled {
+        std::net::Ipv4Addr::UNSPECIFIED
+    } else {
+        config
+            .proxy
+            .bind_addr
+            .parse()
+            .unwrap_or(std::net::Ipv4Addr::LOCALHOST)
+    };
+
     // Spawn HTTP reverse proxy for .numa domains
     if config.proxy.enabled {
         let proxy_ctx = Arc::clone(&ctx);
         let proxy_port = config.proxy.port;
         tokio::spawn(async move {
-            numa::proxy::start_proxy(proxy_ctx, proxy_port).await;
+            numa::proxy::start_proxy(proxy_ctx, proxy_port, proxy_bind).await;
         });
     }
 
@@ -237,7 +350,7 @@ async fn main() -> numa::Result<()> {
                 let proxy_ctx = Arc::clone(&ctx);
                 let tls_port = config.proxy.tls_port;
                 tokio::spawn(async move {
-                    numa::proxy::start_proxy_tls(proxy_ctx, tls_port, tls_config).await;
+                    numa::proxy::start_proxy_tls(proxy_ctx, tls_port, proxy_bind, tls_config).await;
                 });
             }
             Err(e) => {
@@ -324,6 +437,71 @@ async fn network_watch_loop(ctx: Arc<numa::ctx::ServerCtx>) {
             ctx.lan_peers.lock().unwrap().clear();
             info!("flushed LAN peers after network change");
         }
+    }
+}
+
+fn set_lan_enabled(enabled: bool, path: &str) -> numa::Result<()> {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::write(path, format!("[lan]\nenabled = {}\n", enabled))?;
+            print_lan_status(enabled);
+            return Ok(());
+        }
+        Err(e) => return Err(e.into()),
+    };
+
+    // Track current TOML section while scanning lines
+    let mut in_lan = false;
+    let mut found = false;
+    let mut lines: Vec<String> = contents
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim();
+            if trimmed.starts_with('[') {
+                in_lan = trimmed == "[lan]";
+            }
+            if in_lan && !found {
+                if let Some((key, _)) = trimmed.split_once('=') {
+                    if key.trim() == "enabled" {
+                        found = true;
+                        let indent = &line[..line.len() - trimmed.len()];
+                        return format!("{}enabled = {}", indent, enabled);
+                    }
+                }
+            }
+            line.to_string()
+        })
+        .collect();
+
+    if !found {
+        if let Some(i) = lines.iter().position(|l| l.trim() == "[lan]") {
+            lines.insert(i + 1, format!("enabled = {}", enabled));
+        } else {
+            lines.push(String::new());
+            lines.push("[lan]".to_string());
+            lines.push(format!("enabled = {}", enabled));
+        }
+    }
+
+    let mut result = lines.join("\n");
+    if !result.ends_with('\n') {
+        result.push('\n');
+    }
+    std::fs::write(path, result)?;
+    print_lan_status(enabled);
+    Ok(())
+}
+
+fn print_lan_status(enabled: bool) {
+    let label = if enabled { "enabled" } else { "disabled" };
+    let color = if enabled { "32" } else { "33" };
+    eprintln!(
+        "\x1b[1;38;2;192;98;58mNuma\x1b[0m — LAN discovery \x1b[{}m{}\x1b[0m",
+        color, label
+    );
+    if enabled {
+        eprintln!("  Restart Numa to start mDNS discovery");
     }
 }
 

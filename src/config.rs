@@ -35,6 +35,8 @@ pub struct ServerConfig {
     pub bind_addr: String,
     #[serde(default = "default_api_port")]
     pub api_port: u16,
+    #[serde(default = "default_api_bind_addr")]
+    pub api_bind_addr: String,
 }
 
 impl Default for ServerConfig {
@@ -42,8 +44,13 @@ impl Default for ServerConfig {
         ServerConfig {
             bind_addr: default_bind_addr(),
             api_port: default_api_port(),
+            api_bind_addr: default_api_bind_addr(),
         }
     }
+}
+
+fn default_api_bind_addr() -> String {
+    "127.0.0.1".to_string()
 }
 
 fn default_bind_addr() -> String {
@@ -172,6 +179,8 @@ pub struct ProxyConfig {
     pub tls_port: u16,
     #[serde(default = "default_proxy_tld")]
     pub tld: String,
+    #[serde(default = "default_proxy_bind_addr")]
+    pub bind_addr: String,
 }
 
 impl Default for ProxyConfig {
@@ -181,8 +190,13 @@ impl Default for ProxyConfig {
             port: default_proxy_port(),
             tls_port: default_proxy_tls_port(),
             tld: default_proxy_tld(),
+            bind_addr: default_proxy_bind_addr(),
         }
     }
+}
+
+fn default_proxy_bind_addr() -> String {
+    "127.0.0.1".to_string()
 }
 
 fn default_proxy_enabled() -> bool {
@@ -202,16 +216,14 @@ fn default_proxy_tld() -> String {
 pub struct ServiceConfig {
     pub name: String,
     pub target_port: u16,
+    #[serde(default)]
+    pub routes: Vec<crate::service_store::RouteEntry>,
 }
 
 #[derive(Deserialize, Clone)]
 pub struct LanConfig {
     #[serde(default = "default_lan_enabled")]
     pub enabled: bool,
-    #[serde(default = "default_lan_multicast_group")]
-    pub multicast_group: String,
-    #[serde(default = "default_lan_port")]
-    pub port: u16,
     #[serde(default = "default_lan_broadcast_interval")]
     pub broadcast_interval_secs: u64,
     #[serde(default = "default_lan_peer_timeout")]
@@ -222,8 +234,6 @@ impl Default for LanConfig {
     fn default() -> Self {
         LanConfig {
             enabled: default_lan_enabled(),
-            multicast_group: default_lan_multicast_group(),
-            port: default_lan_port(),
             broadcast_interval_secs: default_lan_broadcast_interval(),
             peer_timeout_secs: default_lan_peer_timeout(),
         }
@@ -231,13 +241,7 @@ impl Default for LanConfig {
 }
 
 fn default_lan_enabled() -> bool {
-    true
-}
-fn default_lan_multicast_group() -> String {
-    "239.255.70.78".to_string()
-}
-fn default_lan_port() -> u16 {
-    5390
+    false
 }
 fn default_lan_broadcast_interval() -> u64 {
     30
@@ -246,13 +250,128 @@ fn default_lan_peer_timeout() -> u64 {
     90
 }
 
-pub fn load_config(path: &str) -> Result<Config> {
-    if !Path::new(path).exists() {
-        return Ok(Config::default());
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lan_disabled_by_default() {
+        assert!(!LanConfig::default().enabled);
     }
-    let contents = std::fs::read_to_string(path)?;
-    let config: Config = toml::from_str(&contents)?;
-    Ok(config)
+
+    #[test]
+    fn api_binds_localhost_by_default() {
+        assert_eq!(ServerConfig::default().api_bind_addr, "127.0.0.1");
+    }
+
+    #[test]
+    fn proxy_binds_localhost_by_default() {
+        assert_eq!(ProxyConfig::default().bind_addr, "127.0.0.1");
+    }
+
+    #[test]
+    fn empty_toml_gives_defaults() {
+        let config: Config = toml::from_str("").unwrap();
+        assert!(!config.lan.enabled);
+        assert_eq!(config.server.api_bind_addr, "127.0.0.1");
+        assert_eq!(config.proxy.bind_addr, "127.0.0.1");
+        assert_eq!(config.server.api_port, ServerConfig::default().api_port);
+    }
+
+    #[test]
+    fn lan_enabled_parses() {
+        let config: Config = toml::from_str("[lan]\nenabled = true").unwrap();
+        assert!(config.lan.enabled);
+    }
+
+    #[test]
+    fn custom_bind_addrs_parse() {
+        let toml = r#"
+            [server]
+            api_bind_addr = "0.0.0.0"
+            [proxy]
+            bind_addr = "0.0.0.0"
+        "#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.server.api_bind_addr, "0.0.0.0");
+        assert_eq!(config.proxy.bind_addr, "0.0.0.0");
+    }
+
+    #[test]
+    fn service_routes_parse_from_toml() {
+        let toml = r#"
+            [[services]]
+            name = "app"
+            target_port = 3000
+            routes = [
+                { path = "/api", port = 4000, strip = true },
+                { path = "/static", port = 5000 },
+            ]
+        "#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.services.len(), 1);
+        assert_eq!(config.services[0].routes.len(), 2);
+        assert!(config.services[0].routes[0].strip);
+        assert!(!config.services[0].routes[1].strip); // default false
+    }
+}
+
+pub struct ConfigLoad {
+    pub config: Config,
+    pub path: String,
+    pub found: bool,
+}
+
+fn resolve_path(path: &str) -> String {
+    // canonicalize gives the real absolute path for existing files;
+    // for non-existent files, build an absolute path manually
+    std::fs::canonicalize(path)
+        .or_else(|_| std::env::current_dir().map(|cwd| cwd.join(path)))
+        .unwrap_or_else(|_| Path::new(path).to_path_buf())
+        .to_string_lossy()
+        .to_string()
+}
+
+pub fn load_config(path: &str) -> Result<ConfigLoad> {
+    // Try the given path first, then well-known locations (for service mode where cwd is /)
+    let candidates: Vec<std::path::PathBuf> = {
+        let p = Path::new(path);
+        let mut v = vec![p.to_path_buf()];
+        if p.is_relative() {
+            let filename = p.file_name().unwrap_or(p.as_os_str());
+            v.push(crate::config_dir().join(filename));
+            v.push(crate::data_dir().join(filename));
+        }
+        v
+    };
+
+    for candidate in &candidates {
+        match std::fs::read_to_string(candidate) {
+            Ok(contents) => {
+                let resolved = resolve_path(&candidate.to_string_lossy());
+                let config: Config = toml::from_str(&contents)?;
+                return Ok(ConfigLoad {
+                    config,
+                    path: resolved,
+                    found: true,
+                });
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    // Show config_dir candidate as the "expected" path — it's actionable
+    let display_path = candidates
+        .get(1)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| resolve_path(path));
+    log::info!("config not found, using defaults (create {})", display_path);
+    Ok(ConfigLoad {
+        config: Config::default(),
+        path: display_path,
+        found: false,
+    })
 }
 
 pub type ZoneMap = HashMap<String, HashMap<QueryType, Vec<DnsRecord>>>;
