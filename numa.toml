@@ -9,6 +9,12 @@ api_port = 5380
 # port = 53
 # timeout_ms = 3000
 
+# [blocking]
+# enabled = true               # set to false to disable ad blocking
+# refresh_hours = 24
+# lists = ["https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/hosts/pro.txt"]
+# allowlist = ["example.com"]  # domains to never block
+
 [cache]
 max_entries = 10000
 min_ttl = 60
