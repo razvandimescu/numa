@@ -316,13 +316,62 @@ mod tests {
     }
 }
 
-pub fn load_config(path: &str) -> Result<Config> {
-    if !Path::new(path).exists() {
-        return Ok(Config::default());
+pub struct ConfigLoad {
+    pub config: Config,
+    pub path: String,
+    pub found: bool,
+}
+
+fn resolve_path(path: &str) -> String {
+    // canonicalize gives the real absolute path for existing files;
+    // for non-existent files, build an absolute path manually
+    std::fs::canonicalize(path)
+        .or_else(|_| std::env::current_dir().map(|cwd| cwd.join(path)))
+        .unwrap_or_else(|_| Path::new(path).to_path_buf())
+        .to_string_lossy()
+        .to_string()
+}
+
+pub fn load_config(path: &str) -> Result<ConfigLoad> {
+    // Try the given path first, then well-known locations (for service mode where cwd is /)
+    let candidates: Vec<std::path::PathBuf> = {
+        let p = Path::new(path);
+        let mut v = vec![p.to_path_buf()];
+        if p.is_relative() {
+            let filename = p.file_name().unwrap_or(p.as_os_str());
+            v.push(crate::config_dir().join(filename));
+            v.push(crate::data_dir().join(filename));
+        }
+        v
+    };
+
+    for candidate in &candidates {
+        match std::fs::read_to_string(candidate) {
+            Ok(contents) => {
+                let resolved = resolve_path(&candidate.to_string_lossy());
+                let config: Config = toml::from_str(&contents)?;
+                return Ok(ConfigLoad {
+                    config,
+                    path: resolved,
+                    found: true,
+                });
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.into()),
+        }
     }
-    let contents = std::fs::read_to_string(path)?;
-    let config: Config = toml::from_str(&contents)?;
-    Ok(config)
+
+    // Show config_dir candidate as the "expected" path — it's actionable
+    let display_path = candidates
+        .get(1)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| resolve_path(path));
+    log::info!("config not found, using defaults (create {})", display_path);
+    Ok(ConfigLoad {
+        config: Config::default(),
+        path: display_path,
+        found: false,
+    })
 }
 
 pub type ZoneMap = HashMap<String, HashMap<QueryType, Vec<DnsRecord>>>;

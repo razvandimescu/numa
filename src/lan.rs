@@ -85,11 +85,10 @@ pub fn detect_lan_ip() -> Option<Ipv4Addr> {
 
 fn get_hostname() -> String {
     std::process::Command::new("hostname")
-        .arg("-s")
         .output()
         .ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|h| h.trim().to_string())
+        .map(|h| h.trim().split('.').next().unwrap_or("numa").to_string())
         .filter(|h| !h.is_empty())
         .unwrap_or_else(|| "numa".to_string())
 }
