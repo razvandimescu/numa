@@ -162,10 +162,7 @@ mod tests {
                 let body = response_bytes.clone();
                 async move {
                     (
-                        [(
-                            axum::http::header::CONTENT_TYPE,
-                            "application/dns-message",
-                        )],
+                        [(axum::http::header::CONTENT_TYPE, "application/dns-message")],
                         body,
                     )
                 }
@@ -192,7 +189,10 @@ mod tests {
         match &result.answers[0] {
             DnsRecord::A { domain, addr, ttl } => {
                 assert_eq!(domain, "example.com");
-                assert_eq!(*addr, "93.184.216.34".parse::<std::net::Ipv4Addr>().unwrap());
+                assert_eq!(
+                    *addr,
+                    "93.184.216.34".parse::<std::net::Ipv4Addr>().unwrap()
+                );
                 assert_eq!(*ttl, 300);
             }
             other => panic!("expected A record, got {:?}", other),
@@ -240,8 +240,7 @@ mod tests {
             client: reqwest::Client::new(),
         };
 
-        let result =
-            forward_query(&make_query(), &upstream, Duration::from_millis(100)).await;
+        let result = forward_query(&make_query(), &upstream, Duration::from_millis(100)).await;
         assert!(result.is_err());
     }
 }

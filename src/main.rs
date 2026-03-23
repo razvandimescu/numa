@@ -7,11 +7,11 @@ use log::{error, info};
 use tokio::net::UdpSocket;
 
 use numa::blocklist::{download_blocklists, parse_blocklist, BlocklistStore};
-use numa::forward::Upstream;
 use numa::buffer::BytePacketBuffer;
 use numa::cache::DnsCache;
 use numa::config::{build_zone_map, load_config, ConfigLoad};
 use numa::ctx::{handle_query, ServerCtx};
+use numa::forward::Upstream;
 use numa::override_store::OverrideStore;
 use numa::query_log::QueryLog;
 use numa::service_store::ServiceStore;
