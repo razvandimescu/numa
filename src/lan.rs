@@ -33,11 +33,18 @@ impl PeerStore {
         }
     }
 
-    pub fn update(&mut self, host: IpAddr, services: &[(String, u16)]) {
+    /// Returns true if a previously-unseen name was inserted.
+    pub fn update(&mut self, host: IpAddr, services: &[(String, u16)]) -> bool {
         let now = Instant::now();
+        let mut changed = false;
         for (name, port) in services {
-            self.peers.insert(name.to_lowercase(), (host, *port, now));
+            let key = name.to_lowercase();
+            if !self.peers.contains_key(&key) {
+                changed = true;
+            }
+            self.peers.insert(key, (host, *port, now));
         }
+        changed
     }
 
     pub fn lookup(&mut self, name: &str) -> Option<(IpAddr, u16)> {
@@ -65,6 +72,13 @@ impl PeerStore {
                 )
             })
             .collect()
+    }
+
+    pub fn names(&mut self) -> Vec<String> {
+        let now = Instant::now();
+        self.peers
+            .retain(|_, (_, _, seen)| now.duration_since(*seen) < self.timeout);
+        self.peers.keys().cloned().collect()
     }
 
     pub fn clear(&mut self) {
@@ -189,10 +203,14 @@ pub async fn start_lan_discovery(ctx: Arc<ServerCtx>, config: &LanConfig) {
                 continue;
             }
             if !ann.services.is_empty() {
-                ctx.lan_peers
+                let changed = ctx
+                    .lan_peers
                     .lock()
                     .unwrap()
                     .update(ann.peer_ip, &ann.services);
+                if changed {
+                    crate::tls::regenerate_tls(&ctx);
+                }
                 debug!(
                     "LAN: {} services from {} (mDNS)",
                     ann.services.len(),

@@ -154,6 +154,15 @@ impl ServiceStore {
         entries
     }
 
+    pub fn names(&self) -> Vec<String> {
+        self.entries.keys().cloned().collect()
+    }
+
+    /// Returns true if the name is new (not already registered).
+    pub fn has_name(&self, name: &str) -> bool {
+        self.entries.contains_key(&name.to_lowercase())
+    }
+
     /// Load user-defined services from ~/.config/numa/services.json
     pub fn load_persisted(&mut self) {
         if !self.persist_path.exists() {

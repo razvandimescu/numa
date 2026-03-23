@@ -711,7 +711,11 @@ async fn create_service(
     }
 
     let tld = &ctx.proxy_tld;
+    let is_new = !ctx.services.lock().unwrap().has_name(&name);
     ctx.services.lock().unwrap().insert(&name, req.target_port);
+    if is_new {
+        crate::tls::regenerate_tls(&ctx);
+    }
 
     let localhost = std::net::SocketAddr::from(([127, 0, 0, 1], req.target_port));
     let lan_addr =
@@ -740,8 +744,9 @@ async fn remove_service(State(ctx): State<Arc<ServerCtx>>, Path(name): Path<Stri
     if name.eq_ignore_ascii_case("numa") {
         return StatusCode::FORBIDDEN;
     }
-    let mut store = ctx.services.lock().unwrap();
-    if store.remove(&name) {
+    let removed = ctx.services.lock().unwrap().remove(&name);
+    if removed {
+        crate::tls::regenerate_tls(&ctx);
         StatusCode::NO_CONTENT
     } else {
         StatusCode::NOT_FOUND

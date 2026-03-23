@@ -1,7 +1,10 @@
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
 use log::{info, warn};
+
+use crate::ctx::ServerCtx;
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, KeyUsagePurpose, SanType};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::ServerConfig;
@@ -9,6 +12,26 @@ use time::{Duration, OffsetDateTime};
 
 const CA_VALIDITY_DAYS: i64 = 3650; // 10 years
 const CERT_VALIDITY_DAYS: i64 = 365; // 1 year
+
+/// Collect all service + LAN peer names and regenerate the TLS cert.
+pub fn regenerate_tls(ctx: &ServerCtx) {
+    let tls = match &ctx.tls_config {
+        Some(t) => t,
+        None => return,
+    };
+
+    let mut names: HashSet<String> = ctx.services.lock().unwrap().names().into_iter().collect();
+    names.extend(ctx.lan_peers.lock().unwrap().names());
+    let names: Vec<String> = names.into_iter().collect();
+
+    match build_tls_config(&ctx.proxy_tld, &names) {
+        Ok(new_config) => {
+            tls.store(new_config);
+            info!("TLS cert regenerated for {} services", names.len());
+        }
+        Err(e) => warn!("TLS regeneration failed: {}", e),
+    }
+}
 
 /// Build a TLS config with a cert covering all provided service names.
 /// Wildcards under single-label TLDs (*.numa) are rejected by browsers,
