@@ -661,6 +661,7 @@ body {
 
 <script>
 const API = '';
+const h = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 let prevTotal = null;
 let lastLogEntries = [];
 let prevTime = null;
@@ -1008,16 +1009,14 @@ async function checkDomain(event) {
     if (result.blocked) {
       el.style.background = 'rgba(181, 68, 58, 0.1)';
       el.style.color = 'var(--rose)';
-      const hd = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
-      el.innerHTML = `<strong>Blocked</strong> — ${hd(result.reason)}` +
-        (result.matched_rule ? `<br>Rule: <code>${hd(result.matched_rule)}</code>` : '') +
-        ` <button class="btn-delete" onclick="allowDomain('${hd(domain)}')" style="color:var(--emerald);font-size:0.7rem;margin-left:0.4rem;">allow</button>`;
+      el.innerHTML = `<strong>Blocked</strong> — ${h(result.reason)}` +
+        (result.matched_rule ? `<br>Rule: <code>${h(result.matched_rule)}</code>` : '') +
+        ` <button class="btn-delete" onclick="allowDomain('${h(domain)}')" style="color:var(--emerald);font-size:0.7rem;margin-left:0.4rem;">allow</button>`;
     } else {
-      const hd = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
       el.style.background = 'rgba(82, 122, 82, 0.1)';
       el.style.color = 'var(--emerald)';
-      el.innerHTML = `<strong>Allowed</strong> — ${hd(result.reason)}` +
-        (result.matched_rule ? `<br>Rule: <code>${hd(result.matched_rule)}</code>` : '');
+      el.innerHTML = `<strong>Allowed</strong> — ${h(result.reason)}` +
+        (result.matched_rule ? `<br>Rule: <code>${h(result.matched_rule)}</code>` : '');
     }
   } catch (err) {
     el.style.display = 'block';
@@ -1122,7 +1121,6 @@ function renderServices(entries) {
         ? '<span class="lan-badge shared" title="Reachable from other devices on the network">LAN</span>'
         : '<span class="lan-badge local-only" title="Bound to localhost — not reachable from other devices. Start with 0.0.0.0 to share on LAN.">local only</span>')
       : '';
-    const h = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
     const routeLines = (e.routes || []).map(r =>
       `<div class="service-port" style="color:var(--text-dim);display:flex;align-items:center;gap:0.3rem;">` +
         `<span style="display:inline-block;min-width:60px;">${h(r.path)}</span> ` +
@@ -1230,6 +1228,7 @@ setInterval(refresh, 2000);
   Config: <span id="footerConfig" style="user-select:all;color:var(--emerald);"></span>
   · Data: <span id="footerData" style="user-select:all;color:var(--emerald);"></span>
   · Upstream: <span id="footerUpstream" style="user-select:all;color:var(--emerald);"></span>
+  · Logs: <span style="user-select:all;color:var(--emerald);">macOS: /usr/local/var/log/numa.log · Linux: journalctl -u numa -f</span>
   · <a href="https://github.com/razvandimescu/numa" target="_blank" rel="noopener" style="color:var(--amber);text-decoration:none;">GitHub</a>
 </div>
 

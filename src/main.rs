@@ -171,46 +171,114 @@ async fn main() -> numa::Result<()> {
     });
 
     let zone_count: usize = ctx.zone_map.values().map(|m| m.len()).sum();
-    eprintln!("\n\x1b[38;2;192;98;58m  ╔══════════════════════════════════════════╗\x1b[0m");
-    eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[1;38;2;192;98;58mNUMA\x1b[0m  \x1b[3;38;2;163;152;136mDNS that governs itself\x1b[0m  \x1b[38;2;163;152;136mv{}\x1b[0m \x1b[38;2;192;98;58m║\x1b[0m", env!("CARGO_PKG_VERSION"));
-    eprintln!("\x1b[38;2;192;98;58m  ╠══════════════════════════════════════════╣\x1b[0m");
-    eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;107;124;78mDNS\x1b[0m       {:<30}\x1b[38;2;192;98;58m║\x1b[0m", config.server.bind_addr);
-    eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;107;124;78mAPI\x1b[0m       http://localhost:{:<16}\x1b[38;2;192;98;58m║\x1b[0m", api_port);
-    eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;107;124;78mDashboard\x1b[0m http://localhost:{:<16}\x1b[38;2;192;98;58m║\x1b[0m", api_port);
-    eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;107;124;78mUpstream\x1b[0m  {:<30}\x1b[38;2;192;98;58m║\x1b[0m", upstream);
-    eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;107;124;78mZones\x1b[0m     {:<30}\x1b[38;2;192;98;58m║\x1b[0m", format!("{} records", zone_count));
-    eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;107;124;78mCache\x1b[0m     {:<30}\x1b[38;2;192;98;58m║\x1b[0m", format!("max {} entries", config.cache.max_entries));
-    eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;107;124;78mBlocking\x1b[0m  {:<30}\x1b[38;2;192;98;58m║\x1b[0m",
-        if config.blocking.enabled { format!("{} lists", config.blocking.lists.len()) } else { "disabled".to_string() });
-    if config.proxy.enabled {
-        let schemes = if config.proxy.tls_port > 0 {
-            format!(
+
+    // Build banner rows, then size the box to fit the longest value
+    let api_url = format!("http://localhost:{}", api_port);
+    let proxy_label = if config.proxy.enabled {
+        if config.proxy.tls_port > 0 {
+            Some(format!(
                 "http://:{} https://:{}",
                 config.proxy.port, config.proxy.tls_port
-            )
+            ))
         } else {
-            format!("http://*.{} on :{}", config.proxy.tld, config.proxy.port)
-        };
-        eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;107;124;78mProxy\x1b[0m     {:<30}\x1b[38;2;192;98;58m║\x1b[0m", schemes);
-    }
-    if config.lan.enabled {
-        eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;107;124;78mLAN\x1b[0m       {:<30}\x1b[38;2;192;98;58m║\x1b[0m",
-            "mDNS (_numa._tcp.local)");
-    }
-    if !ctx.forwarding_rules.is_empty() {
-        eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;107;124;78mRouting\x1b[0m   {:<30}\x1b[38;2;192;98;58m║\x1b[0m",
-            format!("{} conditional rules", ctx.forwarding_rules.len()));
-    }
-    eprintln!("\x1b[38;2;192;98;58m  ╠──────────────────────────────────────────╣\x1b[0m");
+            Some(format!(
+                "http://*.{} on :{}",
+                config.proxy.tld, config.proxy.port
+            ))
+        }
+    } else {
+        None
+    };
     let config_label = if ctx.config_found {
         ctx.config_path.clone()
     } else {
         format!("{} (defaults)", ctx.config_path)
     };
-    eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;163;152;136mConfig\x1b[0m    {:<30}\x1b[38;2;192;98;58m║\x1b[0m", config_label);
-    eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;163;152;136mData\x1b[0m      {:<30}\x1b[38;2;192;98;58m║\x1b[0m", ctx.data_dir.display());
-    eprintln!("\x1b[38;2;192;98;58m  ║\x1b[0m  \x1b[38;2;163;152;136mServices\x1b[0m  {:<30}\x1b[38;2;192;98;58m║\x1b[0m", ctx.config_dir.join("services.json").display());
-    eprintln!("\x1b[38;2;192;98;58m  ╚══════════════════════════════════════════╝\x1b[0m\n");
+    let data_label = ctx.data_dir.display().to_string();
+    let services_label = ctx.config_dir.join("services.json").display().to_string();
+
+    // label (10) + value + padding (2) = inner width; minimum 40 for the title row
+    let val_w = [
+        config.server.bind_addr.len(),
+        api_url.len(),
+        upstream.to_string().len(),
+        config_label.len(),
+        data_label.len(),
+        services_label.len(),
+    ]
+    .into_iter()
+    .chain(proxy_label.as_ref().map(|s| s.len()))
+    .max()
+    .unwrap_or(30);
+    let w = (val_w + 12).max(42); // 10 label + 2 padding, min 42 for title
+
+    let o = "\x1b[38;2;192;98;58m"; // orange
+    let g = "\x1b[38;2;107;124;78m"; // green
+    let d = "\x1b[38;2;163;152;136m"; // dim
+    let r = "\x1b[0m"; // reset
+    let b = "\x1b[1;38;2;192;98;58m"; // bold orange
+    let it = "\x1b[3;38;2;163;152;136m"; // italic dim
+
+    let bar_top = "═".repeat(w);
+    let bar_mid = "─".repeat(w);
+    let row = |label: &str, color: &str, value: &str| {
+        eprintln!(
+            "{o}  ║{r}  {color}{:<9}{r} {:<vw$}{o}║{r}",
+            label,
+            value,
+            vw = w - 12
+        );
+    };
+
+    // Title row: center within the box
+    let title = format!(
+        "{b}NUMA{r}  {it}DNS that governs itself{r}  {d}v{}{r}",
+        env!("CARGO_PKG_VERSION")
+    );
+    // The title contains ANSI codes; visible length is ~38 chars. Pad to fill the box.
+    let title_visible_len = 4 + 2 + 24 + 2 + 1 + env!("CARGO_PKG_VERSION").len() + 1;
+    let title_pad = w.saturating_sub(title_visible_len);
+    eprintln!("\n{o}  ╔{bar_top}╗{r}");
+    eprint!("{o}  ║{r} {title}");
+    eprintln!("{}{o}║{r}", " ".repeat(title_pad));
+    eprintln!("{o}  ╠{bar_top}╣{r}");
+    row("DNS", g, &config.server.bind_addr);
+    row("API", g, &api_url);
+    row("Dashboard", g, &api_url);
+    row("Upstream", g, &upstream.to_string());
+    row("Zones", g, &format!("{} records", zone_count));
+    row(
+        "Cache",
+        g,
+        &format!("max {} entries", config.cache.max_entries),
+    );
+    row(
+        "Blocking",
+        g,
+        &if config.blocking.enabled {
+            format!("{} lists", config.blocking.lists.len())
+        } else {
+            "disabled".to_string()
+        },
+    );
+    if let Some(ref label) = proxy_label {
+        row("Proxy", g, label);
+    }
+    if config.lan.enabled {
+        row("LAN", g, "mDNS (_numa._tcp.local)");
+    }
+    if !ctx.forwarding_rules.is_empty() {
+        row(
+            "Routing",
+            g,
+            &format!("{} conditional rules", ctx.forwarding_rules.len()),
+        );
+    }
+    eprintln!("{o}  ╠{bar_mid}╣{r}");
+    row("Config", d, &config_label);
+    row("Data", d, &data_label);
+    row("Services", d, &services_label);
+    eprintln!("{o}  ╚{bar_top}╝{r}\n");
 
     info!(
         "numa listening on {}, upstream {}, {} zone records, cache max {}, API on port {}",

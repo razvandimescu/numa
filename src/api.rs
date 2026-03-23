@@ -828,6 +828,7 @@ async fn serve_ca(State(ctx): State<Arc<ServerCtx>>) -> Result<impl IntoResponse
                 header::CONTENT_DISPOSITION,
                 "attachment; filename=\"numa-ca.pem\"",
             ),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
         ],
         bytes,
     ))
