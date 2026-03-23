@@ -50,6 +50,17 @@ async fn main() -> numa::Result<()> {
                 }
             };
         }
+        "lan" => {
+            let sub = std::env::args().nth(2).unwrap_or_default();
+            return match sub.as_str() {
+                "on" => set_lan_enabled(true),
+                "off" => set_lan_enabled(false),
+                _ => {
+                    eprintln!("Usage: numa lan <on|off>");
+                    Ok(())
+                }
+            };
+        }
         "version" | "--version" | "-V" => {
             eprintln!("numa {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
@@ -65,6 +76,8 @@ async fn main() -> numa::Result<()> {
             eprintln!("  service stop    Uninstall the system service");
             eprintln!("  service restart Restart the service with updated binary");
             eprintln!("  service status  Check if the service is running");
+            eprintln!("  lan on          Enable LAN service discovery (mDNS)");
+            eprintln!("  lan off         Disable LAN service discovery");
             eprintln!("  help            Show this help");
             eprintln!();
             eprintln!("Config path defaults to numa.toml");
@@ -336,6 +349,64 @@ async fn network_watch_loop(ctx: Arc<numa::ctx::ServerCtx>) {
             info!("flushed LAN peers after network change");
         }
     }
+}
+
+fn set_lan_enabled(enabled: bool) -> numa::Result<()> {
+    let path = "numa.toml";
+
+    if std::path::Path::new(path).exists() {
+        let contents = std::fs::read_to_string(path)?;
+
+        // Track current TOML section while scanning lines
+        let mut in_lan = false;
+        let mut found = false;
+        let mut lines: Vec<String> = contents
+            .lines()
+            .map(|line| {
+                let trimmed = line.trim();
+                if trimmed.starts_with('[') {
+                    in_lan = trimmed == "[lan]";
+                }
+                if in_lan && !found && trimmed.starts_with("enabled") && trimmed.contains('=') {
+                    found = true;
+                    return format!("enabled = {}", enabled);
+                }
+                line.to_string()
+            })
+            .collect();
+
+        let has_lan_section = lines.iter().any(|l| l.trim() == "[lan]");
+        if !found && has_lan_section {
+            // [lan] exists but no enabled line — insert after it
+            if let Some(i) = lines.iter().position(|l| l.trim() == "[lan]") {
+                lines.insert(i + 1, format!("enabled = {}", enabled));
+            }
+        } else if !found {
+            // No [lan] section — append
+            lines.push(String::new());
+            lines.push("[lan]".to_string());
+            lines.push(format!("enabled = {}", enabled));
+        }
+
+        let mut result = lines.join("\n");
+        if contents.ends_with('\n') && !result.ends_with('\n') {
+            result.push('\n');
+        }
+        std::fs::write(path, result)?;
+    } else {
+        std::fs::write(path, format!("[lan]\nenabled = {}\n", enabled))?;
+    }
+
+    let label = if enabled { "enabled" } else { "disabled" };
+    let color = if enabled { "32" } else { "33" };
+    eprintln!(
+        "\x1b[1;38;2;192;98;58mNuma\x1b[0m — LAN discovery \x1b[{}m{}\x1b[0m",
+        color, label
+    );
+    if enabled {
+        eprintln!("  Restart Numa to start mDNS discovery");
+    }
+    Ok(())
 }
 
 async fn load_blocklists(ctx: &ServerCtx, lists: &[String]) {
