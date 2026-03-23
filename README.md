@@ -39,8 +39,9 @@ sudo ./target/release/numa
 
 - **Ad blocking that travels with you** — 385K+ domains blocked via [Hagezi Pro](https://github.com/hagezi/dns-blocklists). Works on any network: coffee shops, hotels, airports.
 - **Local service proxy** — `https://frontend.numa` instead of `localhost:5173`. Auto-generated TLS certs, WebSocket support for HMR. Like `/etc/hosts` but with a dashboard and auto-revert.
-- **LAN service discovery** — Numa instances on the same network find each other automatically via multicast. Access a teammate's `api.numa` from your machine, zero config.
-- **Developer overrides** — point any hostname to any IP, auto-reverts after N minutes. REST API with 22 endpoints.
+- **Path-based routing** — `app.numa/api → :5001`, `app.numa/auth → :5002`. Route URL paths to different backends with optional prefix stripping. Like nginx location blocks, zero config files.
+- **LAN service discovery** — Numa instances on the same network find each other automatically via mDNS. Access a teammate's `api.numa` from your machine. Opt-in via `[lan] enabled = true`.
+- **Developer overrides** — point any hostname to any IP, auto-reverts after N minutes. REST API with 25+ endpoints. Built-in diagnostics: `curl localhost:5380/diagnose/example.com` tells you exactly how any domain resolves.
 - **Sub-millisecond caching** — cached lookups in 0ms. Faster than any public resolver.
 - **Live dashboard** — real-time stats, query log, blocking controls, service management. LAN accessibility badges show which services are reachable from other devices.
 - **macOS + Linux** — `numa install` configures system DNS, `numa service start` runs as launchd/systemd service.
@@ -61,6 +62,17 @@ open http://frontend.numa            # → proxied to localhost:5173
 - **WebSocket** — Vite/webpack HMR works through the proxy
 - **Health checks** — dashboard shows green/red status per service
 - **LAN sharing** — services bound to `0.0.0.0` are automatically discoverable by other Numa instances on the network. Dashboard shows "LAN" or "local only" per service.
+- **Path-based routing** — route URL paths to different backends:
+  ```toml
+  [[services]]
+  name = "app"
+  target_port = 3000
+  routes = [
+      { path = "/api", port = 5001 },
+      { path = "/auth", port = 5002, strip = true },
+  ]
+  ```
+  `app.numa/api/users → :5001/api/users`, `app.numa/auth/login → :5002/login` (stripped)
 - **Persistent** — services survive restarts
 - Or configure in `numa.toml`:
 
@@ -77,7 +89,7 @@ Run Numa on multiple machines. They find each other automatically:
 ```
 Machine A (192.168.1.5)              Machine B (192.168.1.20)
 ┌──────────────────────┐             ┌──────────────────────┐
-│ Numa                 │  multicast  │ Numa                 │
+│ Numa                 │    mDNS     │ Numa                 │
 │  services:           │◄───────────►│  services:           │
 │   - api (port 8000)  │  discovery  │   - grafana (3000)   │
 │   - frontend (5173)  │             │                      │
@@ -90,7 +102,12 @@ dig @127.0.0.1 api.numa          # → 192.168.1.5
 curl http://api.numa              # → proxied to Machine A's port 8000
 ```
 
-No configuration needed. Multicast announcements on `239.255.70.78:5390`, configurable via `[lan]` in `numa.toml`.
+Enable LAN discovery in `numa.toml`:
+```toml
+[lan]
+enabled = true
+```
+Uses standard mDNS (`_numa._tcp.local` on port 5353) — compatible with Bonjour/Avahi, silently dropped by corporate firewalls instead of triggering IPS alerts.
 
 **Hub mode** — don't want to install Numa on every machine? Run one instance as a shared DNS server and point other devices to it:
 
@@ -111,7 +128,8 @@ bind_addr = "0.0.0.0:53"
 | Portable (travels with laptop) | No (appliance) | No (appliance) | Cloud only | Cloud only | Single binary |
 | Developer overrides | No | No | No | No | REST API + auto-expiry |
 | Local service proxy | No | No | No | No | `.numa` + HTTPS + WS |
-| LAN service discovery | No | No | No | No | Multicast, zero config |
+| Path-based routing | No | No | No | No | Prefix match + strip |
+| LAN service discovery | No | No | No | No | mDNS, opt-in |
 | Data stays local | Yes | Yes | Cloud | Cloud | 100% local |
 | Zero config | Complex | Docker/setup | Yes | Yes | Works out of the box |
 | Self-sovereign DNS | No | No | No | No | pkarr/DHT roadmap |
@@ -133,7 +151,8 @@ No DNS libraries. The wire protocol — headers, labels, compression pointers, r
 - [x] Ad blocking — 385K+ domains, live dashboard, allowlist
 - [x] System integration — macOS + Linux, launchd/systemd, Tailscale/VPN auto-discovery
 - [x] Local service proxy — `.numa` domains, HTTP/HTTPS proxy, auto TLS, WebSocket
-- [x] LAN service discovery — multicast auto-discovery, cross-machine DNS + proxy
+- [x] Path-based routing — URL prefix routing with optional strip, REST API
+- [x] LAN service discovery — mDNS auto-discovery (opt-in), cross-machine DNS + proxy
 - [ ] pkarr integration — self-sovereign DNS via Mainline DHT (15M nodes)
 - [ ] Global `.numa` names — self-publish, DHT-backed, first-come-first-served
 
