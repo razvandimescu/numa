@@ -15,7 +15,9 @@ Built from scratch in Rust. Zero DNS libraries. RFC 1035 wire protocol parsed by
 ## Quick Start
 
 ```bash
-# Install
+# Install (pick one)
+brew install razvandimescu/tap/numa
+cargo install numa
 curl -fsSL https://raw.githubusercontent.com/razvandimescu/numa/main/install.sh | sh
 
 # Run (port 53 requires root)
@@ -37,11 +39,11 @@ sudo ./target/release/numa
 
 ## Why Numa
 
-- **Ad blocking that travels with you** — 385K+ domains blocked via [Hagezi Pro](https://github.com/hagezi/dns-blocklists). Works on any network: coffee shops, hotels, airports.
-- **Local service proxy** — `https://frontend.numa` instead of `localhost:5173`. Auto-generated TLS certs, WebSocket support for HMR. Like `/etc/hosts` but with a dashboard and auto-revert.
+- **Local service proxy** — `https://frontend.numa` instead of `localhost:5173`. Auto-generated TLS certs, WebSocket support for HMR. Like `/etc/hosts` but with auto TLS, a REST API, LAN discovery, and auto-revert.
 - **Path-based routing** — `app.numa/api → :5001`, `app.numa/auth → :5002`. Route URL paths to different backends with optional prefix stripping. Like nginx location blocks, zero config files.
 - **LAN service discovery** — Numa instances on the same network find each other automatically via mDNS. Access a teammate's `api.numa` from your machine. Opt-in via `[lan] enabled = true`.
 - **Developer overrides** — point any hostname to any IP, auto-reverts after N minutes. REST API with 25+ endpoints. Built-in diagnostics: `curl localhost:5380/diagnose/example.com` tells you exactly how any domain resolves.
+- **Ad blocking that travels with you** — 385K+ domains blocked via [Hagezi Pro](https://github.com/hagezi/dns-blocklists). Works on any network: coffee shops, hotels, airports.
 - **Sub-millisecond caching** — cached lookups in 0ms. Faster than any public resolver.
 - **Live dashboard** — real-time stats, query log, blocking controls, service management. LAN accessibility badges show which services are reachable from other devices.
 - **macOS + Linux** — `numa install` configures system DNS, `numa service start` runs as launchd/systemd service.
@@ -128,15 +130,14 @@ bind_addr = "0.0.0.0:53"
 
 | | Pi-hole | AdGuard Home | NextDNS | Cloudflare | Numa |
 |---|---|---|---|---|---|
-| Ad blocking | Yes | Yes | Yes | Limited | 385K+ domains |
-| Portable (travels with laptop) | No (appliance) | No (appliance) | Cloud only | Cloud only | Single binary |
-| Developer overrides | No | No | No | No | REST API + auto-expiry |
 | Local service proxy | No | No | No | No | `.numa` + HTTPS + WS |
 | Path-based routing | No | No | No | No | Prefix match + strip |
 | LAN service discovery | No | No | No | No | mDNS, opt-in |
-| Data stays local | Yes | Yes | Cloud | Cloud | 100% local |
+| Developer overrides | No | No | No | No | REST API + auto-expiry |
+| Portable (travels with laptop) | No (appliance) | No (appliance) | Cloud only | Cloud only | Single binary |
 | Zero config | Complex | Docker/setup | Yes | Yes | Works out of the box |
-| Self-sovereign DNS | No | No | No | No | pkarr/DHT roadmap |
+| Ad blocking | Yes | Yes | Yes | Limited | 385K+ domains |
+| Data stays local | Yes | Yes | Cloud | Cloud | 100% local |
 
 ## How It Works
 
@@ -144,7 +145,7 @@ bind_addr = "0.0.0.0:53"
 Query → Overrides → .numa TLD → Blocklist → Local Zones → Cache → Upstream
 ```
 
-No DNS libraries. The wire protocol — headers, labels, compression pointers, record types — is parsed and serialized by hand. Runs on `tokio` + `axum`, async per-query task spawning.
+No DNS libraries — no `hickory-dns`, no `trust-dns`. The wire protocol — headers, labels, compression pointers, record types — is parsed and serialized by hand. Runs on `tokio` + `axum`, async per-query task spawning.
 
 [Configuration reference](numa.toml)
 
