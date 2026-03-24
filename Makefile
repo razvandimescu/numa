@@ -1,4 +1,4 @@
-.PHONY: all build lint fmt check audit test clean deploy
+.PHONY: all build lint fmt check audit test bench clean deploy blog
 
 all: lint build
 
@@ -18,6 +18,17 @@ audit:
 
 test:
 	cargo test
+
+bench:
+	cargo bench
+
+blog:
+	@mkdir -p site/blog
+	@for f in blog/*.md; do \
+		name=$$(basename "$$f" .md); \
+		pandoc "$$f" --template=site/blog-template.html -o "site/blog/$$name.html"; \
+		echo "  $$f → site/blog/$$name.html"; \
+	done
 
 clean:
 	cargo clean

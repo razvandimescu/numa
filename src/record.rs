@@ -70,7 +70,7 @@ impl DnsRecord {
     }
 
     pub fn read(buffer: &mut BytePacketBuffer) -> Result<DnsRecord> {
-        let mut domain = String::new();
+        let mut domain = String::with_capacity(64);
         buffer.read_qname(&mut domain)?;
 
         let qtype_num = buffer.read_u16()?;
@@ -110,7 +110,7 @@ impl DnsRecord {
                 Ok(DnsRecord::AAAA { domain, addr, ttl })
             }
             QueryType::NS => {
-                let mut ns = String::new();
+                let mut ns = String::with_capacity(64);
                 buffer.read_qname(&mut ns)?;
 
                 Ok(DnsRecord::NS {
@@ -120,7 +120,7 @@ impl DnsRecord {
                 })
             }
             QueryType::CNAME => {
-                let mut cname = String::new();
+                let mut cname = String::with_capacity(64);
                 buffer.read_qname(&mut cname)?;
 
                 Ok(DnsRecord::CNAME {
@@ -131,7 +131,7 @@ impl DnsRecord {
             }
             QueryType::MX => {
                 let priority = buffer.read_u16()?;
-                let mut mx = String::new();
+                let mut mx = String::with_capacity(64);
                 buffer.read_qname(&mut mx)?;
 
                 Ok(DnsRecord::MX {

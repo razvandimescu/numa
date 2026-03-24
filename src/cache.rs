@@ -19,7 +19,6 @@ pub struct DnsCache {
     max_entries: usize,
     min_ttl: u32,
     max_ttl: u32,
-    query_count: u64,
 }
 
 impl DnsCache {
@@ -30,29 +29,16 @@ impl DnsCache {
             max_entries,
             min_ttl,
             max_ttl,
-            query_count: 0,
         }
     }
 
-    pub fn lookup(&mut self, domain: &str, qtype: QueryType) -> Option<DnsPacket> {
-        self.query_count += 1;
-
-        if self.query_count.is_multiple_of(1000) {
-            self.evict_expired();
-        }
-
+    /// Read-only lookup — expired entries are left in place (cleaned up on insert).
+    pub fn lookup(&self, domain: &str, qtype: QueryType) -> Option<DnsPacket> {
         let type_map = self.entries.get(domain)?;
         let entry = type_map.get(&qtype)?;
 
         let elapsed = entry.inserted_at.elapsed();
         if elapsed >= entry.ttl {
-            // Expired: remove this entry
-            let type_map = self.entries.get_mut(domain).unwrap();
-            type_map.remove(&qtype);
-            self.entry_count -= 1;
-            if type_map.is_empty() {
-                self.entries.remove(domain);
-            }
             return None;
         }
 
