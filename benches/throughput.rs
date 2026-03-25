@@ -37,7 +37,7 @@ fn make_response(domain: &str) -> DnsPacket {
 
 /// Simulates the complete cached query pipeline (sans network I/O):
 /// parse → cache lookup → TTL adjust → serialize response
-fn simulate_cached_pipeline(query_wire: &[u8], cache: &mut numa::cache::DnsCache) -> usize {
+fn simulate_cached_pipeline(query_wire: &[u8], cache: &numa::cache::DnsCache) -> usize {
     let mut buf = BytePacketBuffer::from_bytes(query_wire);
     let query = DnsPacket::from_buffer(&mut buf).unwrap();
     let q = &query.questions[0];
@@ -71,7 +71,7 @@ fn bench_pipeline_throughput(c: &mut Criterion) {
             b.iter(|| {
                 for _ in 0..count {
                     let wire = &query_wires[idx % query_wires.len()];
-                    simulate_cached_pipeline(wire, &mut cache);
+                    simulate_cached_pipeline(wire, &cache);
                     idx += 1;
                 }
             });

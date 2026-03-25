@@ -3,14 +3,13 @@ use std::net::Ipv4Addr;
 
 use numa::buffer::BytePacketBuffer;
 use numa::cache::DnsCache;
-use numa::header::{DnsHeader, ResultCode};
+use numa::header::ResultCode;
 use numa::packet::DnsPacket;
 use numa::question::{DnsQuestion, QueryType};
 use numa::record::DnsRecord;
 
 fn make_response(domain: &str) -> DnsPacket {
     let mut pkt = DnsPacket::new();
-    pkt.header = DnsHeader::new();
     pkt.header.id = 0x1234;
     pkt.header.response = true;
     pkt.header.recursion_desired = true;
@@ -93,7 +92,7 @@ fn bench_cache_lookup_hit(c: &mut Criterion) {
 }
 
 fn bench_cache_lookup_miss(c: &mut Criterion) {
-    let mut cache = DnsCache::new(10_000, 60, 86400);
+    let cache = DnsCache::new(10_000, 60, 86400);
 
     c.bench_function("cache_lookup_miss", |b| {
         b.iter(|| cache.lookup(black_box("nonexistent.com"), QueryType::A))
