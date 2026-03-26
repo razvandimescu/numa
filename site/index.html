@@ -3,8 +3,13 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Numa — DNS that governs itself</title>
+<title>Numa — DNS you own. Everywhere you go.</title>
 <meta name="description" content="DNS you own. Block ads, override DNS for development, name your local services with .numa domains, cache for speed. A single portable binary built from scratch in Rust.">
+<link rel="canonical" href="https://numa.rs">
+<meta property="og:title" content="Numa — DNS you own. Everywhere you go.">
+<meta property="og:description" content="Portable DNS resolver with ad blocking, encrypted upstream, .numa local domains, and developer overrides. Built from scratch in Rust.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://numa.rs">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -786,6 +791,169 @@ p.lead {
 }
 
 /* ===========================
+   PERFORMANCE
+   =========================== */
+.perf-section {
+  background: var(--bg-surface);
+}
+
+.perf-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3rem;
+  margin-top: 3rem;
+  align-items: start;
+}
+
+.perf-table-wrapper {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+}
+
+.perf-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+  min-width: 380px;
+}
+
+.perf-table thead th {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  padding: 0.8rem 1rem;
+  text-align: right;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elevated);
+  font-weight: 500;
+}
+
+.perf-table thead th:first-child {
+  text-align: left;
+}
+
+.perf-table tbody td {
+  padding: 0.65rem 1rem;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-secondary);
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+}
+
+.perf-table tbody td:first-child {
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  text-align: left;
+  font-weight: 400;
+}
+
+.perf-table tbody tr:hover {
+  background: var(--bg-elevated);
+}
+
+.perf-table tbody tr.perf-highlight td {
+  color: var(--emerald);
+  font-weight: 500;
+}
+
+.perf-table tbody tr.perf-highlight td:first-child {
+  color: var(--emerald);
+}
+
+.perf-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.perf-stat {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  padding: 1.5rem;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.04);
+}
+
+.perf-stat-value {
+  font-family: var(--font-display);
+  font-size: 2.2rem;
+  font-weight: 600;
+  line-height: 1.1;
+}
+
+.perf-stat-value.emerald { color: var(--emerald); }
+.perf-stat-value.teal { color: var(--teal); }
+.perf-stat-value.amber { color: var(--amber); }
+
+.perf-stat-label {
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+  margin-top: 0.4rem;
+}
+
+.perf-bar-group {
+  margin-top: 1.5rem;
+}
+
+.perf-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.6rem;
+}
+
+.perf-bar-label {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  width: 80px;
+  flex-shrink: 0;
+  text-align: right;
+}
+
+.perf-bar-track {
+  flex: 1;
+  height: 18px;
+  background: var(--bg-elevated);
+  border-radius: 2px;
+  overflow: hidden;
+  position: relative;
+}
+
+.perf-bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.6s ease;
+}
+
+.perf-bar-fill.emerald { background: var(--emerald); }
+.perf-bar-fill.teal { background: var(--teal); }
+.perf-bar-fill.dim { background: var(--text-dim); }
+
+.perf-bar-ms {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  width: 42px;
+  flex-shrink: 0;
+}
+
+.perf-note {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  margin-top: 2rem;
+  line-height: 1.6;
+}
+
+.perf-note a {
+  color: var(--teal-dim);
+  text-decoration: none;
+  border-bottom: 1px solid var(--border-teal);
+}
+
+/* ===========================
    TECHNICAL
    =========================== */
 .tech-grid {
@@ -824,6 +992,8 @@ p.lead {
   color: var(--text-secondary);
   overflow-x: auto;
   position: relative;
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 
 .code-block::before {
@@ -980,6 +1150,7 @@ footer .closing {
   .problem-grid { grid-template-columns: 1fr; gap: 2rem; }
   .layers-grid { grid-template-columns: 1fr; }
   .tech-grid { grid-template-columns: 1fr; }
+  .perf-grid { grid-template-columns: 1fr; }
   .network-grid { grid-template-columns: repeat(2, 1fr); }
   .network-connections { display: none; }
   .hero-line { display: none; }
@@ -1036,9 +1207,9 @@ footer .closing {
     </div>
     <div class="problem-grid">
       <div class="problem-text reveal reveal-delay-1">
-        <p>Every time you visit a website, you ask a DNS resolver where to go. That resolver sees every domain you visit, when, and how often.</p>
-        <p>Today, a handful of operators control this infrastructure. ICANN governs the root. Registrars can seize domains. Governments compel censorship. Your ISP logs your queries by default.</p>
-        <p>The protocol that underpins the entire internet has no built-in privacy, no cryptographic ownership, and no way for users to choose who they trust.</p>
+        <p>Every time you visit a website, you ask a DNS resolver where to go. That resolver sees every domain you visit, when, and how often. Your ISP logs these queries by default.</p>
+        <p>Ad blockers work in one browser. Pi-hole needs a Raspberry Pi. Your local dev services live at <code>localhost:5173</code> and you can never remember which port is which.</p>
+        <p>DNS is the foundation of everything you do on the internet, but the tools for controlling it locally are either too complex (dnsmasq + nginx + mkcert) or too limited (cloud-only, appliance-only).</p>
       </div>
       <div class="dns-diagram reveal reveal-delay-2">
         <div class="dns-node"><span class="node-dot dim"></span>Your browser</div>
@@ -1062,44 +1233,43 @@ footer .closing {
   <div class="container">
     <div class="reveal">
       <div class="section-label">How It Works</div>
-      <h2>Three layers, built incrementally</h2>
-      <p class="lead">Numa starts as a practical developer tool and evolves toward a decentralized network. Each layer stands on its own.</p>
+      <h2>What it does today</h2>
+      <p class="lead">A portable DNS proxy with ad blocking, encrypted upstream, local service domains, and a REST API. Everything runs in a single binary.</p>
     </div>
     <div class="layers-grid">
       <div class="layer-card reveal reveal-delay-1">
-        <div class="layer-badge">Today</div>
-        <h3>DNS You Control</h3>
+        <div class="layer-badge">Layer 1</div>
+        <h3>Block &amp; Protect</h3>
         <ul>
           <li>Ad &amp; tracker blocking &mdash; 385K+ domains, zero config</li>
-          <li>Ephemeral DNS overrides with auto-revert</li>
-          <li>Local service proxy &mdash; <code>frontend.numa</code> instead of <code>localhost:5173</code></li>
-          <li>Live dashboard with real-time stats and controls</li>
-          <li>REST API &mdash; 22 endpoints for programmatic control</li>
+          <li>DNS-over-HTTPS &mdash; encrypted upstream (Quad9, Cloudflare, any provider)</li>
           <li>TTL-aware caching (sub-ms lookups)</li>
-          <li>Single binary, portable &mdash; your ad blocker travels with you</li>
+          <li>Single binary, portable &mdash; your DNS travels with you</li>
+          <li>macOS, Linux, and Windows</li>
         </ul>
       </div>
       <div class="layer-card reveal reveal-delay-2">
-        <div class="layer-badge">Next</div>
-        <h3>Self-Sovereign DNS</h3>
+        <div class="layer-badge">Layer 2</div>
+        <h3>Developer Tools</h3>
         <ul>
-          <li>pkarr integration: Ed25519 keys as domains</li>
-          <li>Resolve via Mainline BitTorrent DHT (10M+ nodes)</li>
-          <li>No registrar, no blockchain, no ICANN</li>
-          <li>Cryptographic verification built-in</li>
-          <li>Human-readable aliases for pkarr domains</li>
+          <li>Local service proxy &mdash; <code>frontend.numa</code> instead of <code>localhost:5173</code></li>
+          <li>Path-based routing &mdash; <code>app.numa/api</code> &rarr; <code>:5001</code></li>
+          <li>Ephemeral DNS overrides with auto-revert</li>
+          <li>LAN service discovery via mDNS</li>
+          <li>Conditional forwarding &mdash; plays nice with Tailscale/VPN split-DNS</li>
+          <li>REST API &mdash; script everything, automate anything</li>
+          <li>Live dashboard with real-time stats and controls</li>
         </ul>
       </div>
       <div class="layer-card reveal reveal-delay-3">
-        <div class="layer-badge">Vision</div>
-        <h3>Decentralized Resolver Network</h3>
+        <div class="layer-badge">Coming Next</div>
+        <h3>Self-Sovereign DNS</h3>
         <ul>
-          <li>Operators run Numa nodes and stake tokens</li>
-          <li>Earn rewards for uptime, correctness, latency</li>
-          <li>Independent auditors send challenge queries</li>
-          <li>Slashing for NXDOMAIN hijacking or poisoned records</li>
-          <li>Geographic diversity bonuses</li>
-          <li>Privacy-preserving resolution (DoH/DoT)</li>
+          <li>pkarr integration &mdash; DNS via Mainline DHT, no registrar needed</li>
+          <li>Global <code>.numa</code> names &mdash; self-publish, DHT-backed</li>
+          <li>.onion bridge &mdash; human-readable names for Tor hidden services</li>
+          <li>Ed25519 same-key binding &mdash; zero new trust assumptions</li>
+          <li>No blockchain required for core naming</li>
         </ul>
       </div>
     </div>
@@ -1131,66 +1301,12 @@ footer .closing {
         <span class="pipeline-arrow">&rarr;</span>
         <div class="pipeline-node"><div class="pipeline-box">Cache</div></div>
         <span class="pipeline-arrow">&rarr;</span>
-        <div class="pipeline-node"><div class="pipeline-box hl-violet">pkarr / DHT</div></div>
-        <span class="pipeline-arrow">&rarr;</span>
-        <div class="pipeline-node"><div class="pipeline-box">Upstream</div></div>
+        <div class="pipeline-node"><div class="pipeline-box hl-violet">DoH Upstream</div></div>
         <span class="pipeline-arrow">&rarr;</span>
         <div class="pipeline-node"><div class="pipeline-box hl-emerald">Respond</div></div>
       </div>
     </div>
 
-    <div class="arch-subsection reveal">
-      <h3>Layered resilience</h3>
-      <div class="layer-stack">
-        <div class="stack-row">
-          <div class="stack-label" style="color: var(--violet)">L4 Permanence</div>
-          <div class="stack-value">Arweave immutable zone snapshots (future)</div>
-        </div>
-        <div class="stack-row">
-          <div class="stack-label" style="color: var(--violet-dim)">L3 Distribution</div>
-          <div class="stack-value">Mainline DHT via pkarr &mdash; 10M+ nodes</div>
-        </div>
-        <div class="stack-row">
-          <div class="stack-label" style="color: var(--amber)">L2 Serving</div>
-          <div class="stack-value">Numa instances worldwide</div>
-        </div>
-        <div class="stack-row">
-          <div class="stack-label" style="color: var(--teal)">L1 Compatibility</div>
-          <div class="stack-value">Standard DNS wire protocol &mdash; RFC 1035</div>
-        </div>
-      </div>
-    </div>
-
-    <div class="arch-subsection reveal">
-      <h3>Network actors</h3>
-      <div class="network-grid">
-        <div class="network-actor">
-          <span class="actor-icon" style="color: var(--teal)" aria-hidden="true">&compfn;</span>
-          <h4 style="color: var(--teal)">Users</h4>
-          <p>Choose resolvers from a decentralized marketplace based on latency, privacy, and reputation</p>
-        </div>
-        <div class="network-actor">
-          <span class="actor-icon" style="color: var(--amber)" aria-hidden="true">&diamond;</span>
-          <h4 style="color: var(--amber)">Operators</h4>
-          <p>Stake tokens, run Numa nodes, earn rewards proportional to verified service quality</p>
-        </div>
-        <div class="network-actor">
-          <span class="actor-icon" style="color: var(--rose)" aria-hidden="true">&target;</span>
-          <h4 style="color: var(--rose)">Auditors</h4>
-          <p>Send challenge queries from diverse locations, verify correctness and latency</p>
-        </div>
-        <div class="network-actor">
-          <span class="actor-icon" style="color: var(--violet)" aria-hidden="true">&equiv;</span>
-          <h4 style="color: var(--violet)">Chain</h4>
-          <p>Accounting, reputation scores, reward distribution, slashing proofs</p>
-        </div>
-      </div>
-      <div class="network-connections" aria-hidden="true">
-        <div class="network-conn-line"></div>
-        <div class="network-conn-line"></div>
-        <div class="network-conn-line"></div>
-      </div>
-    </div>
   </div>
 </section>
 
@@ -1266,20 +1382,28 @@ footer .closing {
             <td class="check">Real-time + controls</td>
           </tr>
           <tr>
+            <td>DNS-over-HTTPS upstream</td>
+            <td class="cross">No</td>
+            <td class="check">Yes</td>
+            <td class="check">Yes</td>
+            <td class="cross">No</td>
+            <td class="check">Built in (HTTP/2 + rustls)</td>
+          </tr>
+          <tr>
+            <td>Conditional forwarding</td>
+            <td class="cross">No</td>
+            <td class="cross">No</td>
+            <td class="cross">No</td>
+            <td class="muted">Manual</td>
+            <td class="check">Auto-detects Tailscale/VPN</td>
+          </tr>
+          <tr>
             <td>Zero config needed</td>
             <td class="cross">Complex setup</td>
             <td class="check">Yes</td>
             <td class="check">Yes</td>
             <td class="cross">Docker/setup</td>
             <td class="check">Works out of the box</td>
-          </tr>
-          <tr>
-            <td>Self-sovereign DNS roadmap</td>
-            <td class="cross">No</td>
-            <td class="cross">No</td>
-            <td class="cross">No</td>
-            <td class="cross">No</td>
-            <td class="check">pkarr / DHT</td>
           </tr>
         </tbody>
       </table>
@@ -1288,6 +1412,125 @@ footer .closing {
 </section>
 
 <div class="section-road" aria-hidden="true"><div class="roman-bricks"></div></div>
+
+<!-- ==================== PERFORMANCE ==================== -->
+<section class="perf-section" id="performance">
+  <div class="container">
+    <div class="reveal">
+      <div class="section-label" style="color: var(--emerald)">Performance</div>
+      <h2>Measured, not claimed</h2>
+      <p class="lead">Benchmarked with <code style="font-size:0.85em">dig</code> against public resolvers on the same machine. Cached queries resolve in under a microsecond.</p>
+    </div>
+
+    <div class="perf-grid">
+      <div class="reveal reveal-delay-1">
+        <div class="perf-table-wrapper">
+          <table class="perf-table">
+            <caption class="sr-only">DNS resolver latency comparison</caption>
+            <thead>
+              <tr>
+                <th>Resolver</th>
+                <th>Avg</th>
+                <th>P50</th>
+                <th>P99</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr class="perf-highlight">
+                <td>Numa (cached)</td>
+                <td>&lt;1ms</td>
+                <td>&lt;1ms</td>
+                <td>&lt;1ms</td>
+              </tr>
+              <tr>
+                <td>Numa (cold)</td>
+                <td>9ms</td>
+                <td>9ms</td>
+                <td>18ms</td>
+              </tr>
+              <tr>
+                <td>System resolver</td>
+                <td>9ms</td>
+                <td>8ms</td>
+                <td>44ms</td>
+              </tr>
+              <tr>
+                <td>Quad9</td>
+                <td>15ms</td>
+                <td>13ms</td>
+                <td>43ms</td>
+              </tr>
+              <tr>
+                <td>Cloudflare</td>
+                <td>19ms</td>
+                <td>14ms</td>
+                <td>132ms</td>
+              </tr>
+              <tr>
+                <td>Google</td>
+                <td>22ms</td>
+                <td>17ms</td>
+                <td>37ms</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="perf-bar-group">
+          <div class="perf-bar-row">
+            <span class="perf-bar-label">Numa</span>
+            <div class="perf-bar-track"><div class="perf-bar-fill emerald" style="width: 2%"></div></div>
+            <span class="perf-bar-ms">&lt;1ms</span>
+          </div>
+          <div class="perf-bar-row">
+            <span class="perf-bar-label">System</span>
+            <div class="perf-bar-track"><div class="perf-bar-fill dim" style="width: 20%"></div></div>
+            <span class="perf-bar-ms">9ms</span>
+          </div>
+          <div class="perf-bar-row">
+            <span class="perf-bar-label">Quad9</span>
+            <div class="perf-bar-track"><div class="perf-bar-fill dim" style="width: 33%"></div></div>
+            <span class="perf-bar-ms">15ms</span>
+          </div>
+          <div class="perf-bar-row">
+            <span class="perf-bar-label">Cloudflare</span>
+            <div class="perf-bar-track"><div class="perf-bar-fill dim" style="width: 42%"></div></div>
+            <span class="perf-bar-ms">19ms</span>
+          </div>
+          <div class="perf-bar-row">
+            <span class="perf-bar-label">Google</span>
+            <div class="perf-bar-track"><div class="perf-bar-fill dim" style="width: 49%"></div></div>
+            <span class="perf-bar-ms">22ms</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="perf-sidebar reveal reveal-delay-2">
+        <div class="perf-stat">
+          <div class="perf-stat-value emerald">689 ns</div>
+          <div class="perf-stat-label">Cached round-trip &mdash; parse query, cache lookup, serialize response</div>
+        </div>
+        <div class="perf-stat">
+          <div class="perf-stat-value teal">2.0M</div>
+          <div class="perf-stat-label">Queries per second (single-threaded pipeline throughput, batched)</div>
+        </div>
+        <div class="perf-stat">
+          <div class="perf-stat-value amber">0 allocations</div>
+          <div class="perf-stat-label">Heap allocations in the I/O path &mdash; 4KB stack buffers, inline serialization</div>
+        </div>
+
+        <p class="perf-note">
+          Cold queries match system resolver speed &mdash; the bottleneck is upstream RTT, not Numa. We don't claim to be faster when the network is the limit.
+          <br><br>
+          Benchmarks are reproducible: <code style="font-size:0.85em">cargo bench</code> for micro-benchmarks, <code style="font-size:0.85em">python3 bench/dns-bench.sh</code> for end-to-end.
+          <a href="https://github.com/razvandimescu/numa/tree/main/bench">Methodology &rarr;</a>
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="section-road on-surface" aria-hidden="true"><div class="roman-bricks"></div></div>
 
 <!-- ==================== TECHNICAL ==================== -->
 <section id="technical">
@@ -1305,25 +1548,30 @@ footer .closing {
         <dd>Zero &mdash; wire protocol parsed from scratch</dd>
 
         <dt>Dependencies</dt>
-        <dd>8 runtime crates (tokio, axum, hyper, serde, serde_json, toml, log, futures)</dd>
+        <dd>18 runtime crates &mdash; tokio, axum, hyper, reqwest (DoH), rcgen + rustls (TLS), socket2 (multicast), serde, and more</dd>
 
         <dt>Packet Format</dt>
         <dd>RFC 1035 compliant, 4096-byte UDP (EDNS)</dd>
 
         <dt>Concurrency</dt>
-        <dd>Arc&lt;ServerCtx&gt; + std::sync::Mutex (sub-&micro;s holds, never across .await)</dd>
+        <dd>Arc&lt;ServerCtx&gt; + RwLock for reads, Mutex for writes (never across .await)</dd>
 
-        <dt>Signatures</dt>
-        <dd>Ed25519 via pkarr for self-sovereign domains</dd>
+        <dt>Upstream</dt>
+        <dd>DNS-over-HTTPS (DoH) via reqwest + http2 + rustls</dd>
       </dl>
       <div class="code-block reveal reveal-delay-2">
+<span class="comment"># Install (pick one)</span>
+<span class="prompt">$</span> <span class="cmd">brew install</span> razvandimescu/tap/numa
 <span class="prompt">$</span> <span class="cmd">cargo install</span> numa
+<span class="prompt">$</span> <span class="cmd">curl</span> <span class="flag">-fsSL</span> https://raw.githubusercontent.com/razvandimescu/numa/main/install.sh <span class="flag">|</span> <span class="cmd">sh</span>
+
+<span class="comment"># Run</span>
 <span class="prompt">$</span> <span class="cmd">sudo numa</span>                          <span class="comment"># bind to :53, :80, :5380</span>
 <span class="prompt">$</span> <span class="cmd">dig</span> <span class="flag">@127.0.0.1</span> google.com         <span class="comment"># test resolution</span>
-<span class="prompt">$</span> <span class="cmd">open</span> http://numa.numa              <span class="comment"># dashboard</span>
+<span class="prompt">$</span> <span class="cmd">open</span> http://localhost:5380           <span class="comment"># dashboard</span>
 <span class="prompt">$</span> <span class="cmd">curl</span> <span class="flag">-X POST</span> localhost:5380/services \
     <span class="flag">-d</span> <span class="str">'{"name":"frontend",
-         "target_port":5173}'</span>          <span class="comment"># http://frontend.numa</span>
+         "target_port":5173}'</span>          <span class="comment"># https://frontend.numa</span>
       </div>
     </div>
   </div>
@@ -1345,7 +1593,7 @@ footer .closing {
       </div>
       <div class="roadmap-item done">
         <span class="phase">Phase 1</span>
-        <span class="phase-desc">Override layer + REST API with 18 endpoints</span>
+        <span class="phase-desc">Override layer + REST API for programmatic DNS control</span>
       </div>
       <div class="roadmap-item done">
         <span class="phase">Phase 2</span>
@@ -1359,25 +1607,21 @@ footer .closing {
         <span class="phase">Phase 4</span>
         <span class="phase-desc">Local service proxy &mdash; .numa domains, HTTP/HTTPS reverse proxy, auto TLS, WebSocket</span>
       </div>
-      <div class="roadmap-item phase-teal">
+      <div class="roadmap-item done">
         <span class="phase">Phase 5</span>
-        <span class="phase-desc">pkarr integration &mdash; resolve Ed25519 keys via Mainline DHT (15M nodes)</span>
+        <span class="phase-desc">DNS-over-HTTPS &mdash; encrypted upstream, HTTP/2 connection pooling</span>
       </div>
       <div class="roadmap-item phase-teal">
         <span class="phase">Phase 6</span>
+        <span class="phase-desc">pkarr integration &mdash; self-sovereign DNS via Mainline DHT, no registrar needed</span>
+      </div>
+      <div class="roadmap-item phase-teal">
+        <span class="phase">Phase 7</span>
         <span class="phase-desc">Global .numa names &mdash; self-publish, DHT-backed, first-come-first-served</span>
       </div>
-      <div class="roadmap-item phase-amber">
-        <span class="phase">Phase 7</span>
-        <span class="phase-desc">Audit protocol &mdash; challenge-based verification of resolver honesty</span>
-      </div>
-      <div class="roadmap-item phase-violet">
+      <div class="roadmap-item phase-teal">
         <span class="phase">Phase 8</span>
-        <span class="phase-desc">Numa Network &mdash; proof-of-service consensus, NUMA token, paid .numa domains</span>
-      </div>
-      <div class="roadmap-item phase-violet">
-        <span class="phase">Phase 9</span>
-        <span class="phase-desc">.onion bridge &mdash; human-readable .numa names for Tor hidden services</span>
+        <span class="phase-desc">.onion bridge &mdash; human-readable Tor naming via Ed25519 same-key binding</span>
       </div>
     </div>
   </div>
@@ -1391,6 +1635,7 @@ footer .closing {
     </p>
     <div class="footer-links reveal reveal-delay-1">
       <a href="https://github.com/razvandimescu/numa" target="_blank" rel="noopener">GitHub</a>
+      <a href="/blog/">Blog</a>
       <a href="https://github.com/razvandimescu/numa/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a>
     </div>
     <p class="closing reveal reveal-delay-2">Built from scratch in Rust. No dependencies on trust.</p>

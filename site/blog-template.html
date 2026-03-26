@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>$title$ — Numa</title>
+<meta name="description" content="$description$">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --bg-deep: #f5f0e8;
+  --bg-surface: #ece5da;
+  --bg-elevated: #e3dbce;
+  --bg-card: #faf7f2;
+  --amber: #c0623a;
+  --amber-dim: #9e4e2d;
+  --teal: #6b7c4e;
+  --teal-dim: #566540;
+  --violet: #64748b;
+  --text-primary: #2c2418;
+  --text-secondary: #6b5e4f;
+  --text-dim: #a39888;
+  --border: rgba(0, 0, 0, 0.08);
+  --border-amber: rgba(192, 98, 58, 0.22);
+  --font-display: 'Instrument Serif', Georgia, serif;
+  --font-body: 'DM Sans', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+}
+
+html { scroll-behavior: smooth; }
+
+body {
+  background: var(--bg-deep);
+  color: var(--text-primary);
+  font-family: var(--font-body);
+  font-weight: 400;
+  line-height: 1.7;
+  -webkit-font-smoothing: antialiased;
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.025'/%3E%3C/svg%3E");
+  pointer-events: none;
+  z-index: 9999;
+}
+
+/* --- Blog nav --- */
+.blog-nav {
+  padding: 1.5rem 2rem;
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+}
+
+.blog-nav a {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  text-decoration: none;
+  transition: color 0.2s;
+}
+.blog-nav a:hover { color: var(--amber); }
+
+.blog-nav .wordmark {
+  font-family: var(--font-display);
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  text-decoration: none;
+  letter-spacing: -0.02em;
+}
+.blog-nav .wordmark:hover { color: var(--amber); }
+
+.blog-nav .sep {
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+
+/* --- Article --- */
+.article {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 3rem 2rem 6rem;
+}
+
+.article-header {
+  margin-bottom: 3rem;
+  padding-bottom: 2rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.article-header h1 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: clamp(2rem, 5vw, 3rem);
+  line-height: 1.15;
+  margin-bottom: 1rem;
+  color: var(--text-primary);
+}
+
+.article-meta {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  letter-spacing: 0.04em;
+}
+
+.article-meta a {
+  color: var(--amber);
+  text-decoration: none;
+}
+.article-meta a:hover { text-decoration: underline; }
+
+/* --- Prose --- */
+.article h2 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 1.8rem;
+  line-height: 1.2;
+  margin: 3rem 0 1rem;
+  color: var(--text-primary);
+}
+
+.article h3 {
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: 1.2rem;
+  margin: 2rem 0 0.75rem;
+  color: var(--text-primary);
+}
+
+.article p {
+  margin-bottom: 1.25rem;
+  color: var(--text-secondary);
+  font-size: 1.05rem;
+}
+
+.article a {
+  color: var(--amber);
+  text-decoration: underline;
+  text-decoration-color: rgba(192, 98, 58, 0.3);
+  text-underline-offset: 2px;
+  transition: text-decoration-color 0.2s;
+}
+.article a:hover {
+  text-decoration-color: var(--amber);
+}
+
+.article strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.article ul, .article ol {
+  margin-bottom: 1.25rem;
+  padding-left: 1.5rem;
+  color: var(--text-secondary);
+}
+
+.article li {
+  margin-bottom: 0.4rem;
+  font-size: 1.05rem;
+}
+
+.article blockquote {
+  border-left: 3px solid var(--amber);
+  padding: 0.75rem 1.25rem;
+  margin: 1.5rem 0;
+  background: rgba(192, 98, 58, 0.04);
+  border-radius: 0 4px 4px 0;
+}
+
+.article blockquote p {
+  color: var(--text-secondary);
+  font-style: italic;
+  margin-bottom: 0;
+}
+
+/* --- Code --- */
+.article code {
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  background: var(--bg-elevated);
+  padding: 0.15em 0.4em;
+  border-radius: 3px;
+  color: var(--amber-dim);
+}
+
+.article pre {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1.25rem 1.5rem;
+  margin: 1.5rem 0;
+  overflow-x: auto;
+  line-height: 1.55;
+}
+
+.article pre code {
+  background: none;
+  padding: 0;
+  border-radius: 0;
+  color: var(--text-primary);
+  font-size: 0.85rem;
+}
+
+/* --- Images --- */
+.article img {
+  max-width: 100%;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  margin: 1.5rem 0;
+}
+
+/* --- Tables --- */
+.article table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1.5rem 0;
+  font-size: 0.95rem;
+}
+
+.article th {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  text-align: left;
+  padding: 0.6rem 1rem;
+  border-bottom: 2px solid var(--border);
+}
+
+.article td {
+  padding: 0.6rem 1rem;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-secondary);
+}
+
+/* --- Footer --- */
+.blog-footer {
+  text-align: center;
+  padding: 3rem 2rem;
+  border-top: 1px solid var(--border);
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+.blog-footer a {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  text-decoration: none;
+  margin: 0 1rem;
+}
+.blog-footer a:hover { color: var(--amber); }
+
+/* --- Responsive --- */
+@media (max-width: 640px) {
+  .article { padding: 2rem 1.25rem 4rem; }
+  .article pre { padding: 1rem; margin-left: -0.5rem; margin-right: -0.5rem; border-radius: 0; border-left: none; border-right: none; }
+}
+</style>
+</head>
+<body>
+
+<nav class="blog-nav">
+  <a href="/" class="wordmark">Numa</a>
+  <span class="sep">/</span>
+  <a href="/blog/">Blog</a>
+</nav>
+
+<article class="article">
+  <header class="article-header">
+    <h1>$title$</h1>
+    <div class="article-meta">
+      $date$ · <a href="https://dimescu.ro">Razvan Dimescu</a>
+    </div>
+  </header>
+
+$body$
+</article>
+
+<footer class="blog-footer">
+  <a href="https://github.com/razvandimescu/numa">GitHub</a>
+  <a href="/">Home</a>
+  <a href="/blog/">Blog</a>
+</footer>
+
+</body>
+</html>
