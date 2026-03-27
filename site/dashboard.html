@@ -215,6 +215,7 @@ body {
   min-width: 2px;
 }
 .path-bar-fill.forward { background: var(--amber); }
+.path-bar-fill.recursive { background: var(--cyan); }
 .path-bar-fill.cached { background: var(--teal); }
 .path-bar-fill.local { background: var(--violet); }
 .path-bar-fill.override { background: var(--emerald); }
@@ -278,6 +279,7 @@ body {
   font-weight: 500;
 }
 .path-tag.FORWARD { background: rgba(192, 98, 58, 0.12); color: var(--amber-dim); }
+.path-tag.RECURSIVE { background: rgba(74, 124, 138, 0.12); color: var(--cyan); }
 .path-tag.CACHED { background: rgba(107, 124, 78, 0.12); color: var(--teal-dim); }
 .path-tag.LOCAL { background: rgba(100, 116, 139, 0.12); color: var(--violet-dim); }
 .path-tag.OVERRIDE { background: rgba(82, 122, 82, 0.12); color: var(--emerald); }
@@ -709,6 +711,7 @@ function formatRemaining(secs) {
 
 const PATH_DEFS = [
   { key: 'forwarded', label: 'Forward', cls: 'forward' },
+  { key: 'recursive', label: 'Recursive', cls: 'recursive' },
   { key: 'cached',    label: 'Cached',  cls: 'cached' },
   { key: 'local',     label: 'Local',   cls: 'local' },
   { key: 'overridden', label: 'Override', cls: 'override' },

@@ -83,6 +83,26 @@ pub async fn handle_query(
             let mut resp = DnsPacket::response_from(&query, ResultCode::NOERROR);
             resp.answers.push(record);
             (resp, QueryPath::Overridden, DnssecStatus::Indeterminate)
+        } else if qname == "localhost" || qname.ends_with(".localhost") {
+            // RFC 6761: .localhost always resolves to loopback
+            let mut resp = DnsPacket::response_from(&query, ResultCode::NOERROR);
+            match qtype {
+                QueryType::AAAA => resp.answers.push(DnsRecord::AAAA {
+                    domain: qname.clone(),
+                    addr: std::net::Ipv6Addr::LOCALHOST,
+                    ttl: 300,
+                }),
+                _ => resp.answers.push(DnsRecord::A {
+                    domain: qname.clone(),
+                    addr: std::net::Ipv4Addr::LOCALHOST,
+                    ttl: 300,
+                }),
+            }
+            (resp, QueryPath::Local, DnssecStatus::Indeterminate)
+        } else if is_special_use_domain(&qname) {
+            // RFC 6761/8880: private PTR, DDR, NAT64 — answer locally
+            let resp = special_use_response(&query, &qname, qtype);
+            (resp, QueryPath::Local, DnssecStatus::Indeterminate)
         } else if !ctx.proxy_tld_suffix.is_empty()
             && (qname.ends_with(&ctx.proxy_tld_suffix) || qname == ctx.proxy_tld)
         {
@@ -314,4 +334,67 @@ fn strip_dnssec_records(pkt: &mut DnsPacket) {
     pkt.answers.retain(|r| !is_dnssec_record(r));
     pkt.authorities.retain(|r| !is_dnssec_record(r));
     pkt.resources.retain(|r| !is_dnssec_record(r));
+}
+
+fn is_special_use_domain(qname: &str) -> bool {
+    if qname.ends_with(".in-addr.arpa") {
+        // RFC 6303: private + loopback + link-local reverse DNS
+        if qname.ends_with(".10.in-addr.arpa")
+            || qname.ends_with(".168.192.in-addr.arpa")
+            || qname.ends_with(".127.in-addr.arpa")
+            || qname.ends_with(".254.169.in-addr.arpa")
+            || qname.ends_with(".0.in-addr.arpa")
+            || qname.contains("_dns-sd._udp")
+        {
+            return true;
+        }
+        // 172.16-31.x.x (RFC 1918) — check each /16 reverse zone
+        for octet in 16..=31u8 {
+            let suffix = format!(".{}.172.in-addr.arpa", octet);
+            if qname.ends_with(&suffix) {
+                return true;
+            }
+        }
+        return false;
+    }
+    // DDR (RFC 9462)
+    if qname == "_dns.resolver.arpa" || qname.ends_with("._dns.resolver.arpa") {
+        return true;
+    }
+    // NAT64 (RFC 8880)
+    qname == "ipv4only.arpa"
+}
+
+fn special_use_response(query: &DnsPacket, qname: &str, qtype: QueryType) -> DnsPacket {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+    if qname == "ipv4only.arpa" {
+        // RFC 8880: well-known NAT64 addresses
+        let mut resp = DnsPacket::response_from(query, ResultCode::NOERROR);
+        let domain = qname.to_string();
+        match qtype {
+            QueryType::A => {
+                resp.answers.push(DnsRecord::A {
+                    domain: domain.clone(),
+                    addr: Ipv4Addr::new(192, 0, 0, 170),
+                    ttl: 300,
+                });
+                resp.answers.push(DnsRecord::A {
+                    domain,
+                    addr: Ipv4Addr::new(192, 0, 0, 171),
+                    ttl: 300,
+                });
+            }
+            QueryType::AAAA => {
+                resp.answers.push(DnsRecord::AAAA {
+                    domain,
+                    addr: Ipv6Addr::new(0x0064, 0xff9b, 0, 0, 0, 0, 0xc000, 0x00aa),
+                    ttl: 300,
+                });
+            }
+            _ => {}
+        }
+        resp
+    } else {
+        DnsPacket::response_from(query, ResultCode::NXDOMAIN)
+    }
 }
