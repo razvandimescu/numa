@@ -117,58 +117,15 @@ pub async fn start_proxy_tls(ctx: Arc<ServerCtx>, port: u16, bind_addr: Ipv4Addr
     }
 }
 
-fn extract_host(req: &Request) -> Option<String> {
-    req.headers()
-        .get(hyper::header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .map(|h| h.split(':').next().unwrap_or(h).to_lowercase())
-}
-
-async fn proxy_handler(State(state): State<ProxyState>, req: Request) -> axum::response::Response {
-    let hostname = match extract_host(&req) {
-        Some(h) => h,
-        None => {
-            return (StatusCode::BAD_REQUEST, "missing Host header").into_response();
-        }
-    };
-
-    let service_name = match hostname.strip_suffix(state.ctx.proxy_tld_suffix.as_str()) {
-        Some(name) => name.to_string(),
-        None => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                format!("not a {} domain: {}", state.ctx.proxy_tld_suffix, hostname),
-            )
-                .into_response()
-        }
-    };
-
-    let request_path = req.uri().path().to_string();
-
-    let (target_host, target_port, rewritten_path) = {
-        let store = state.ctx.services.lock().unwrap();
-        if let Some(entry) = store.lookup(&service_name) {
-            let (port, path) = entry.resolve_route(&request_path);
-            ("localhost".to_string(), port, path)
-        } else {
-            let mut peers = state.ctx.lan_peers.lock().unwrap();
-            match peers.lookup(&service_name) {
-                Some((ip, port)) => (ip.to_string(), port, request_path.clone()),
-                None => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    [(hyper::header::CONTENT_TYPE, "text/html; charset=utf-8")],
-                    format!(
-                        r##"<!DOCTYPE html>
+fn error_page(title: &str, body: &str) -> String {
+    format!(
+        r##"<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>404 — {0}{1}</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=DM+Sans:opsz,wght@9..40,400;9..40,500&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
+<title>{title} — Numa</title>
 <style>
 *,*::before,*::after {{ margin:0;padding:0;box-sizing:border-box }}
 body {{
-  font-family: 'DM Sans', system-ui, sans-serif;
+  font-family: system-ui, -apple-system, sans-serif;
   background: #f5f0e8;
   color: #2c2418;
   min-height: 100vh;
@@ -202,16 +159,24 @@ body::before {{
   from {{ opacity:0; transform:translateY(20px) }}
   to {{ opacity:1; transform:translateY(0) }}
 }}
-.code {{
-  font-family: 'Instrument Serif', Georgia, serif;
+.hero-text {{
+  font-family: Georgia, 'Times New Roman', serif;
   font-size: 6rem;
   line-height: 1;
   color: #c0623a;
   letter-spacing: 0.04em;
   opacity: 0.85;
 }}
+.label {{
+  font-family: ui-monospace, 'SF Mono', monospace;
+  font-size: 0.7rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #b5443a;
+  margin-bottom: 1rem;
+}}
 .domain {{
-  font-family: 'JetBrains Mono', monospace;
+  font-family: ui-monospace, 'SF Mono', monospace;
   font-size: 1.1rem;
   color: #2c2418;
   margin-top: 1rem;
@@ -239,7 +204,7 @@ pre {{
   color: #e8e0d4;
   padding: 1rem 1.2rem;
   border-radius: 8px;
-  font-family: 'JetBrains Mono', monospace;
+  font-family: ui-monospace, 'SF Mono', monospace;
   font-size: 0.78rem;
   line-height: 1.7;
   margin-top: 1.2rem;
@@ -248,9 +213,9 @@ pre {{
 pre .prompt {{ color: #8baa6e }}
 pre .flag {{ color: #8b9fbb }}
 pre .str {{ color: #d48a5a }}
-.lyrics {{
+.aside {{
   margin-top: 2.5rem;
-  font-family: 'Instrument Serif', Georgia, serif;
+  font-family: Georgia, 'Times New Roman', serif;
   font-style: italic;
   font-size: 0.85rem;
   color: #a39888;
@@ -261,19 +226,87 @@ pre .str {{ color: #d48a5a }}
 @keyframes fade {{ to {{ opacity: 1 }} }}
 </style></head><body>
 <div class="container">
-  <div class="code">404</div>
+{body}
+</div>
+</body></html>"##
+    )
+}
+
+fn extract_host(req: &Request) -> Option<String> {
+    req.headers()
+        .get(hyper::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(|h| h.split(':').next().unwrap_or(h).to_lowercase())
+}
+
+async fn proxy_handler(State(state): State<ProxyState>, req: Request) -> axum::response::Response {
+    let hostname = match extract_host(&req) {
+        Some(h) => h,
+        None => {
+            return (StatusCode::BAD_REQUEST, "missing Host header").into_response();
+        }
+    };
+
+    let service_name = match hostname.strip_suffix(state.ctx.proxy_tld_suffix.as_str()) {
+        Some(name) => name.to_string(),
+        None => {
+            // Check if this domain was blocked — show a helpful styled page
+            if state.ctx.blocklist.read().unwrap().is_blocked(&hostname) {
+                let body = format!(
+                    r#"  <div class="hero-text">&#x1f6e1;</div>
+  <div class="label">Blocked by Numa</div>
+  <div class="domain">{0}</div>
+  <p class="message">This domain is on the ad &amp; tracker blocklist.<br>To allow it, use the <a href="http://numa.numa">dashboard</a> or:</p>
+  <pre><span class="prompt">$</span> <span class="str">curl</span> <span class="flag">-X POST</span> localhost:5380/blocking/allowlist \
+    <span class="flag">-d</span> '<span class="str">{{"domain":"{0}"}}</span>'</pre>"#,
+                    hostname
+                );
+                return (
+                    StatusCode::FORBIDDEN,
+                    [(hyper::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                    error_page(&format!("Blocked — {}", hostname), &body),
+                )
+                    .into_response();
+            }
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("not a {} domain: {}", state.ctx.proxy_tld_suffix, hostname),
+            )
+                .into_response();
+        }
+    };
+
+    let request_path = req.uri().path().to_string();
+
+    let (target_host, target_port, rewritten_path) = {
+        let store = state.ctx.services.lock().unwrap();
+        if let Some(entry) = store.lookup(&service_name) {
+            let (port, path) = entry.resolve_route(&request_path);
+            ("localhost".to_string(), port, path)
+        } else {
+            let mut peers = state.ctx.lan_peers.lock().unwrap();
+            match peers.lookup(&service_name) {
+                Some((ip, port)) => (ip.to_string(), port, request_path.clone()),
+                None => {
+                    let body = format!(
+                        r#"  <div class="hero-text">404</div>
   <div class="domain">{0}{1}</div>
   <p class="message">This service isn't registered yet.<br>Add it from the <a href="http://numa.numa">dashboard</a> or:</p>
   <pre><span class="prompt">$</span> <span class="str">curl</span> <span class="flag">-X POST</span> numa.numa:5380/services \
     <span class="flag">-H</span> 'Content-Type: application/json' \
     <span class="flag">-d</span> '<span class="str">{{"name":"{0}","target_port":3000}}</span>'</pre>
-  <div class="lyrics">ma-ia hii, ma-ia huu, ma-ia haa, ma-ia ha-ha</div>
-</div>
-</body></html>"##,
+  <div class="aside">ma-ia hii, ma-ia huu, ma-ia haa, ma-ia ha-ha</div>"#,
                         service_name, state.ctx.proxy_tld_suffix
-                    ),
-                )
-                    .into_response()
+                    );
+                    return (
+                        StatusCode::NOT_FOUND,
+                        [(hyper::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                        error_page(
+                            &format!("404 — {}{}", service_name, state.ctx.proxy_tld_suffix),
+                            &body,
+                        ),
+                    )
+                        .into_response();
                 }
             }
         }

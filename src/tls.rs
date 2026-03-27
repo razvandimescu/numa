@@ -112,8 +112,15 @@ fn generate_service_cert(
         .distinguished_name
         .push(DnType::CommonName, format!("Numa .{} services", tld));
 
-    // Add each service as an explicit SAN: numa.numa, peekm.numa, api.numa, etc.
+    // Add a wildcard SAN so any .numa domain gets a valid cert (including
+    // unregistered services — lets the proxy show a styled 404 over HTTPS).
+    // Also add each service explicitly for clients that don't match wildcards.
     let mut sans = Vec::new();
+    let wildcard = format!("*.{}", tld);
+    match wildcard.clone().try_into() {
+        Ok(ia5) => sans.push(SanType::DnsName(ia5)),
+        Err(e) => warn!("invalid wildcard SAN {}: {}", wildcard, e),
+    }
     for name in service_names {
         let fqdn = format!("{}.{}", name, tld);
         match fqdn.clone().try_into() {

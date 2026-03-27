@@ -7,9 +7,7 @@
 <meta name="description" content="How DNS actually works at the wire
 level — label compression, TTL tricks, DoH, and what surprised me
 building a resolver with zero DNS libraries.">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/fonts/fonts.css">
 <style>
 *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -75,7 +73,7 @@ body::before {
 .blog-nav .wordmark {
   font-family: var(--font-display);
   font-size: 1.4rem;
-  font-weight: 700;
+  font-weight: 400;
   color: var(--text-primary);
   text-decoration: none;
   letter-spacing: -0.02em;
@@ -103,7 +101,7 @@ body::before {
 
 .article-header h1 {
   font-family: var(--font-display);
-  font-weight: 600;
+  font-weight: 400;
   font-size: clamp(2rem, 5vw, 3rem);
   line-height: 1.15;
   margin-bottom: 1rem;
@@ -522,24 +520,10 @@ class="sourceCode rust"><code class="sourceCode rust"><span id="cb12-1"><a href=
 <span id="cb12-17"><a href="#cb12-17" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
 <p>No background thread. No timer. Entries expire lazily. The cache
 stays consistent because every consumer sees the adjusted TTL.</p>
-<h2 id="async-per-query-with-tokio">Async per-query with tokio</h2>
-<p>Each incoming UDP packet spawns a tokio task. The main loop never
-blocks:</p>
-<div class="sourceCode" id="cb13"><pre
-class="sourceCode rust"><code class="sourceCode rust"><span id="cb13-1"><a href="#cb13-1" aria-hidden="true" tabindex="-1"></a><span class="cf">loop</span> <span class="op">{</span></span>
-<span id="cb13-2"><a href="#cb13-2" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> <span class="kw">mut</span> buffer <span class="op">=</span> <span class="pp">BytePacketBuffer::</span>new()<span class="op">;</span></span>
-<span id="cb13-3"><a href="#cb13-3" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> (_<span class="op">,</span> src_addr) <span class="op">=</span> socket<span class="op">.</span>recv_from(<span class="op">&amp;</span><span class="kw">mut</span> buffer<span class="op">.</span>buf)<span class="op">.</span><span class="kw">await</span><span class="op">?;</span></span>
-<span id="cb13-4"><a href="#cb13-4" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb13-5"><a href="#cb13-5" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> ctx <span class="op">=</span> <span class="pp">Arc::</span>clone(<span class="op">&amp;</span>ctx)<span class="op">;</span></span>
-<span id="cb13-6"><a href="#cb13-6" aria-hidden="true" tabindex="-1"></a>    <span class="pp">tokio::</span>spawn(<span class="kw">async</span> <span class="kw">move</span> <span class="op">{</span></span>
-<span id="cb13-7"><a href="#cb13-7" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> <span class="kw">let</span> <span class="cn">Err</span>(e) <span class="op">=</span> handle_query(buffer<span class="op">,</span> src_addr<span class="op">,</span> <span class="op">&amp;</span>ctx)<span class="op">.</span><span class="kw">await</span> <span class="op">{</span></span>
-<span id="cb13-8"><a href="#cb13-8" aria-hidden="true" tabindex="-1"></a>            <span class="pp">error!</span>(<span class="st">&quot;{} | HANDLER ERROR | {}&quot;</span><span class="op">,</span> src_addr<span class="op">,</span> e)<span class="op">;</span></span>
-<span id="cb13-9"><a href="#cb13-9" aria-hidden="true" tabindex="-1"></a>        <span class="op">}</span></span>
-<span id="cb13-10"><a href="#cb13-10" aria-hidden="true" tabindex="-1"></a>    <span class="op">}</span>)<span class="op">;</span></span>
-<span id="cb13-11"><a href="#cb13-11" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
-<p>Each <code>handle_query</code> walks a pipeline. This is the part
-where “from scratch” pays off — every step is just a function that
-either returns a response or says “not my problem, pass it on”:</p>
+<h2 id="the-resolution-pipeline">The resolution pipeline</h2>
+<p>Each incoming UDP packet spawns a tokio task. Each task walks a
+deterministic pipeline — every step either answers or passes to the
+next:</p>
 <pre><code>                     ┌─────────────────────────────────────────────────────┐
                      │              Numa Resolution Pipeline               │
                      └─────────────────────────────────────────────────────┘
@@ -552,19 +536,12 @@ either returns a response or says “not my problem, pass it on”:</p>
     │      (auto-reverts  (reverse      (ad gone)    (static   (TTL      to upstream
     │       after N min)   proxy+TLS)                 records)  adjusted) (encrypted)
     │
-    └──→ Each step either answers or passes to the next.
-         Adding a feature = inserting a function into this chain.</code></pre>
-<p>Want conditional forwarding for Tailscale? Insert a step before the
-upstream that checks the domain suffix. Want to override
-<code>api.example.com</code> for 5 minutes while debugging? Insert an
-entry in the overrides step — it auto-expires and the domain goes back
-to resolving normally. A DNS library would have hidden this pipeline
-behind an opaque <code>resolve()</code> call.</p>
-<p>This is one of those cases where Rust + tokio makes things almost
-embarrassingly simple. In a synchronous resolver, you’d need a thread
-pool or hand-rolled event loop. Here, each query is a lightweight
-future. A slow upstream query doesn’t block anything — other queries
-keep flowing.</p>
+    └──→ Each step either answers or passes to the next.</code></pre>
+<p>This is where “from scratch” pays off. Want conditional forwarding
+for Tailscale? Insert a step before the upstream. Want to override
+<code>api.example.com</code> for 5 minutes while debugging? Add an entry
+in the overrides step — it auto-expires. A DNS library would have hidden
+this pipeline behind an opaque <code>resolve()</code> call.</p>
 <h2 id="dns-over-https-the-wait-thats-it-moment">DNS-over-HTTPS: the
 “wait, that’s it?” moment</h2>
 <p>The most recent addition, and honestly the one that surprised me with
@@ -573,28 +550,28 @@ the exact same DNS wire-format packet you’d send over UDP, POST it to an
 HTTPS endpoint with <code>Content-Type: application/dns-message</code>,
 and parse the response the same way. Same bytes, different
 transport.</p>
-<div class="sourceCode" id="cb15"><pre
-class="sourceCode rust"><code class="sourceCode rust"><span id="cb15-1"><a href="#cb15-1" aria-hidden="true" tabindex="-1"></a><span class="kw">async</span> <span class="kw">fn</span> forward_doh(</span>
-<span id="cb15-2"><a href="#cb15-2" aria-hidden="true" tabindex="-1"></a>    query<span class="op">:</span> <span class="op">&amp;</span>DnsPacket<span class="op">,</span></span>
-<span id="cb15-3"><a href="#cb15-3" aria-hidden="true" tabindex="-1"></a>    url<span class="op">:</span> <span class="op">&amp;</span><span class="dt">str</span><span class="op">,</span></span>
-<span id="cb15-4"><a href="#cb15-4" aria-hidden="true" tabindex="-1"></a>    client<span class="op">:</span> <span class="op">&amp;</span><span class="pp">reqwest::</span>Client<span class="op">,</span></span>
-<span id="cb15-5"><a href="#cb15-5" aria-hidden="true" tabindex="-1"></a>    timeout_duration<span class="op">:</span> Duration<span class="op">,</span></span>
-<span id="cb15-6"><a href="#cb15-6" aria-hidden="true" tabindex="-1"></a>) <span class="op">-&gt;</span> <span class="dt">Result</span><span class="op">&lt;</span>DnsPacket<span class="op">&gt;</span> <span class="op">{</span></span>
-<span id="cb15-7"><a href="#cb15-7" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> <span class="kw">mut</span> send_buffer <span class="op">=</span> <span class="pp">BytePacketBuffer::</span>new()<span class="op">;</span></span>
-<span id="cb15-8"><a href="#cb15-8" aria-hidden="true" tabindex="-1"></a>    query<span class="op">.</span>write(<span class="op">&amp;</span><span class="kw">mut</span> send_buffer)<span class="op">?;</span></span>
-<span id="cb15-9"><a href="#cb15-9" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb15-10"><a href="#cb15-10" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> resp <span class="op">=</span> timeout(timeout_duration<span class="op">,</span> client</span>
-<span id="cb15-11"><a href="#cb15-11" aria-hidden="true" tabindex="-1"></a>        <span class="op">.</span>post(url)</span>
-<span id="cb15-12"><a href="#cb15-12" aria-hidden="true" tabindex="-1"></a>        <span class="op">.</span>header(<span class="st">&quot;content-type&quot;</span><span class="op">,</span> <span class="st">&quot;application/dns-message&quot;</span>)</span>
-<span id="cb15-13"><a href="#cb15-13" aria-hidden="true" tabindex="-1"></a>        <span class="op">.</span>header(<span class="st">&quot;accept&quot;</span><span class="op">,</span> <span class="st">&quot;application/dns-message&quot;</span>)</span>
-<span id="cb15-14"><a href="#cb15-14" aria-hidden="true" tabindex="-1"></a>        <span class="op">.</span>body(send_buffer<span class="op">.</span>filled()<span class="op">.</span>to_vec())</span>
-<span id="cb15-15"><a href="#cb15-15" aria-hidden="true" tabindex="-1"></a>        <span class="op">.</span>send())</span>
-<span id="cb15-16"><a href="#cb15-16" aria-hidden="true" tabindex="-1"></a>    <span class="op">.</span><span class="kw">await</span><span class="op">??.</span>error_for_status()<span class="op">?;</span></span>
-<span id="cb15-17"><a href="#cb15-17" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb15-18"><a href="#cb15-18" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> bytes <span class="op">=</span> resp<span class="op">.</span>bytes()<span class="op">.</span><span class="kw">await</span><span class="op">?;</span></span>
-<span id="cb15-19"><a href="#cb15-19" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> <span class="kw">mut</span> recv_buffer <span class="op">=</span> <span class="pp">BytePacketBuffer::</span>from_bytes(<span class="op">&amp;</span>bytes)<span class="op">;</span></span>
-<span id="cb15-20"><a href="#cb15-20" aria-hidden="true" tabindex="-1"></a>    <span class="pp">DnsPacket::</span>from_buffer(<span class="op">&amp;</span><span class="kw">mut</span> recv_buffer)</span>
-<span id="cb15-21"><a href="#cb15-21" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
+<div class="sourceCode" id="cb14"><pre
+class="sourceCode rust"><code class="sourceCode rust"><span id="cb14-1"><a href="#cb14-1" aria-hidden="true" tabindex="-1"></a><span class="kw">async</span> <span class="kw">fn</span> forward_doh(</span>
+<span id="cb14-2"><a href="#cb14-2" aria-hidden="true" tabindex="-1"></a>    query<span class="op">:</span> <span class="op">&amp;</span>DnsPacket<span class="op">,</span></span>
+<span id="cb14-3"><a href="#cb14-3" aria-hidden="true" tabindex="-1"></a>    url<span class="op">:</span> <span class="op">&amp;</span><span class="dt">str</span><span class="op">,</span></span>
+<span id="cb14-4"><a href="#cb14-4" aria-hidden="true" tabindex="-1"></a>    client<span class="op">:</span> <span class="op">&amp;</span><span class="pp">reqwest::</span>Client<span class="op">,</span></span>
+<span id="cb14-5"><a href="#cb14-5" aria-hidden="true" tabindex="-1"></a>    timeout_duration<span class="op">:</span> Duration<span class="op">,</span></span>
+<span id="cb14-6"><a href="#cb14-6" aria-hidden="true" tabindex="-1"></a>) <span class="op">-&gt;</span> <span class="dt">Result</span><span class="op">&lt;</span>DnsPacket<span class="op">&gt;</span> <span class="op">{</span></span>
+<span id="cb14-7"><a href="#cb14-7" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> <span class="kw">mut</span> send_buffer <span class="op">=</span> <span class="pp">BytePacketBuffer::</span>new()<span class="op">;</span></span>
+<span id="cb14-8"><a href="#cb14-8" aria-hidden="true" tabindex="-1"></a>    query<span class="op">.</span>write(<span class="op">&amp;</span><span class="kw">mut</span> send_buffer)<span class="op">?;</span></span>
+<span id="cb14-9"><a href="#cb14-9" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb14-10"><a href="#cb14-10" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> resp <span class="op">=</span> timeout(timeout_duration<span class="op">,</span> client</span>
+<span id="cb14-11"><a href="#cb14-11" aria-hidden="true" tabindex="-1"></a>        <span class="op">.</span>post(url)</span>
+<span id="cb14-12"><a href="#cb14-12" aria-hidden="true" tabindex="-1"></a>        <span class="op">.</span>header(<span class="st">&quot;content-type&quot;</span><span class="op">,</span> <span class="st">&quot;application/dns-message&quot;</span>)</span>
+<span id="cb14-13"><a href="#cb14-13" aria-hidden="true" tabindex="-1"></a>        <span class="op">.</span>header(<span class="st">&quot;accept&quot;</span><span class="op">,</span> <span class="st">&quot;application/dns-message&quot;</span>)</span>
+<span id="cb14-14"><a href="#cb14-14" aria-hidden="true" tabindex="-1"></a>        <span class="op">.</span>body(send_buffer<span class="op">.</span>filled()<span class="op">.</span>to_vec())</span>
+<span id="cb14-15"><a href="#cb14-15" aria-hidden="true" tabindex="-1"></a>        <span class="op">.</span>send())</span>
+<span id="cb14-16"><a href="#cb14-16" aria-hidden="true" tabindex="-1"></a>    <span class="op">.</span><span class="kw">await</span><span class="op">??.</span>error_for_status()<span class="op">?;</span></span>
+<span id="cb14-17"><a href="#cb14-17" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb14-18"><a href="#cb14-18" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> bytes <span class="op">=</span> resp<span class="op">.</span>bytes()<span class="op">.</span><span class="kw">await</span><span class="op">?;</span></span>
+<span id="cb14-19"><a href="#cb14-19" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> <span class="kw">mut</span> recv_buffer <span class="op">=</span> <span class="pp">BytePacketBuffer::</span>from_bytes(<span class="op">&amp;</span>bytes)<span class="op">;</span></span>
+<span id="cb14-20"><a href="#cb14-20" aria-hidden="true" tabindex="-1"></a>    <span class="pp">DnsPacket::</span>from_buffer(<span class="op">&amp;</span><span class="kw">mut</span> recv_buffer)</span>
+<span id="cb14-21"><a href="#cb14-21" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
 <p>The one gotcha that cost me an hour: Quad9 and other DoH providers
 require HTTP/2. My first attempt used HTTP/1.1 and got a cryptic 400 Bad
 Request. Adding the <code>http2</code> feature to reqwest fixed it. The
@@ -603,59 +580,25 @@ the TLS session — ~16ms vs ~50ms for the first query. Free
 performance.</p>
 <p>The <code>Upstream</code> enum dispatches between UDP and DoH based
 on the URL scheme:</p>
-<div class="sourceCode" id="cb16"><pre
-class="sourceCode rust"><code class="sourceCode rust"><span id="cb16-1"><a href="#cb16-1" aria-hidden="true" tabindex="-1"></a><span class="kw">pub</span> <span class="kw">enum</span> Upstream <span class="op">{</span></span>
-<span id="cb16-2"><a href="#cb16-2" aria-hidden="true" tabindex="-1"></a>    Udp(SocketAddr)<span class="op">,</span></span>
-<span id="cb16-3"><a href="#cb16-3" aria-hidden="true" tabindex="-1"></a>    Doh <span class="op">{</span> url<span class="op">:</span> <span class="dt">String</span><span class="op">,</span> client<span class="op">:</span> <span class="pp">reqwest::</span>Client <span class="op">},</span></span>
-<span id="cb16-4"><a href="#cb16-4" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
+<div class="sourceCode" id="cb15"><pre
+class="sourceCode rust"><code class="sourceCode rust"><span id="cb15-1"><a href="#cb15-1" aria-hidden="true" tabindex="-1"></a><span class="kw">pub</span> <span class="kw">enum</span> Upstream <span class="op">{</span></span>
+<span id="cb15-2"><a href="#cb15-2" aria-hidden="true" tabindex="-1"></a>    Udp(SocketAddr)<span class="op">,</span></span>
+<span id="cb15-3"><a href="#cb15-3" aria-hidden="true" tabindex="-1"></a>    Doh <span class="op">{</span> url<span class="op">:</span> <span class="dt">String</span><span class="op">,</span> client<span class="op">:</span> <span class="pp">reqwest::</span>Client <span class="op">},</span></span>
+<span id="cb15-4"><a href="#cb15-4" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
 <p>If the configured address starts with <code>https://</code>, it’s
 DoH. Otherwise, plain UDP. Simple, no toggles.</p>
 <h2 id="why-not-just-use-dnsmasq-nginx-mkcert">“Why not just use dnsmasq
 + nginx + mkcert?”</h2>
-<p>Fair question — I got this a lot when I first <a
-href="https://www.reddit.com/r/programare/">posted about Numa</a>. And
-the answer is: you absolutely can. Those are mature, battle-tested
-tools.</p>
-<p>The difference is integration. With dnsmasq + nginx + mkcert, you’re
-configuring three tools: DNS resolution, reverse proxy rules, and
-certificate generation. Each has its own config format, its own
-lifecycle, its own failure modes. Numa puts the DNS record, the reverse
-proxy, and the TLS cert behind a single API call:</p>
-<div class="sourceCode" id="cb17"><pre
-class="sourceCode bash"><code class="sourceCode bash"><span id="cb17-1"><a href="#cb17-1" aria-hidden="true" tabindex="-1"></a><span class="ex">curl</span> <span class="at">-X</span> POST localhost:5380/services <span class="at">-d</span> <span class="st">&#39;{&quot;name&quot;:&quot;frontend&quot;,&quot;target_port&quot;:5173}&#39;</span></span></code></pre></div>
-<p>That creates the DNS entry, generates a TLS certificate with the
-correct SAN, and starts proxying — including WebSocket upgrade for Vite
-HMR. One command, no config files.</p>
-<p>There’s also a distinction people miss: <strong>mkcert and certbot
-solve different problems.</strong> Certbot issues certificates for
-public domains via Let’s Encrypt — it needs DNS validation or an open
-port 80. Numa generates certificates for <code>.numa</code> domains that
-don’t exist publicly. You can’t get a Let’s Encrypt cert for
-<code>frontend.numa</code>. They’re complementary, not alternatives.</p>
-<p>Someone on Reddit told me the real value is “TLS termination +
-reverse proxy, simple to install, for developers — stop there.”
-Honestly, they might be right about focus. But DNS is the foundation the
-proxy sits on, and having full control over the resolution pipeline is
-what makes auto-revert overrides and LAN discovery possible. Sometimes
-the “unnecessary” part is what makes the interesting part work.</p>
-<h2 id="the-blocklist-memory-problem">The blocklist memory problem</h2>
-<p>Numa’s ad blocking loads the <a
-href="https://github.com/hagezi/dns-blocklists">Hagezi Pro</a> list at
-startup — ~385,000 domains stored in a
-<code>HashSet&lt;String&gt;</code>. This works, but it consumes ~30MB of
-memory. For a laptop DNS proxy, that’s fine. For embedded devices or a
-future where you want to run Numa on a router, it’s too much.</p>
-<p>The obvious optimization is a <strong>Bloom filter</strong> — a
-probabilistic data structure that can tell you “definitely not in the
-set” or “probably in the set” using a fraction of the memory. A Bloom
-filter for 385K domains with a 0.1% false positive rate would use ~700KB
-instead of 30MB. The false positives (0.1% of queries hitting domains
-not in the list) would be blocked unnecessarily, which is acceptable for
-ad blocking.</p>
-<p>I haven’t implemented this yet — the <code>HashSet</code> is simple,
-correct, and 30MB is nothing on a laptop. But if Numa ever needs to run
-on a router or a Raspberry Pi, this is the first optimization I’d reach
-for.</p>
+<p>You absolutely can — those are mature, battle-tested tools. The
+difference is integration: with dnsmasq + nginx + mkcert, you’re
+configuring three tools with three config formats. Numa puts the DNS
+record, reverse proxy, and TLS cert behind one API call:</p>
+<div class="sourceCode" id="cb16"><pre
+class="sourceCode bash"><code class="sourceCode bash"><span id="cb16-1"><a href="#cb16-1" aria-hidden="true" tabindex="-1"></a><span class="ex">curl</span> <span class="at">-X</span> POST localhost:5380/services <span class="at">-d</span> <span class="st">&#39;{&quot;name&quot;:&quot;frontend&quot;,&quot;target_port&quot;:5173}&#39;</span></span></code></pre></div>
+<p>That creates the DNS entry, generates a TLS certificate, and starts
+proxying — including WebSocket upgrade for Vite HMR. One command, no
+config files. Having full control over the resolution pipeline is what
+makes auto-revert overrides and LAN discovery possible.</p>
 <h2 id="what-i-learned">What I learned</h2>
 <p><strong>DNS is a 40-year-old protocol that works remarkably
 well.</strong> The wire format is tight, the caching model is elegant,
@@ -663,27 +606,18 @@ and the hierarchical delegation system has scaled to billions of queries
 per day. The things people complain about (DNSSEC complexity, lack of
 encryption) are extensions bolted on decades later, not flaws in the
 original design.</p>
-<p><strong>“From scratch” gives you full control.</strong> When I wanted
-to add ephemeral overrides that auto-revert, it was trivial — just a new
-step in the resolution pipeline. Conditional forwarding for
-Tailscale/VPN? Another step. Every feature is a function that takes a
-query and returns either a response or “pass to the next stage.” A DNS
-library would have hidden this pipeline.</p>
 <p><strong>The hard parts aren’t where you’d expect.</strong> Parsing
 the wire protocol was straightforward (RFC 1035 is well-written). The
 hard parts were: browsers rejecting wildcard certs under single-label
-TLDs (<code>*.numa</code> fails — you need per-service SANs), macOS
-resolver quirks (scutil vs /etc/resolv.conf), and getting multiple
-processes to bind the same multicast port (<code>SO_REUSEPORT</code> on
-macOS, <code>SO_REUSEADDR</code> on Linux).</p>
-<p><strong>Terminology will get you roasted.</strong> I initially called
-Numa a “DNS resolver” and got corrected on Reddit — it’s a forwarding
-resolver (DNS proxy). It doesn’t walk the delegation chain from root
-servers; it forwards to an upstream. The distinction matters to people
-who work with DNS for a living, and being sloppy about it cost me
-credibility in my first community posts. If you’re building in a domain
-with established terminology, learn the vocabulary before you show
-up.</p>
+TLDs, macOS resolver quirks (<code>scutil</code> vs
+<code>/etc/resolv.conf</code>), and getting multiple processes to bind
+the same multicast port (<code>SO_REUSEPORT</code> on macOS,
+<code>SO_REUSEADDR</code> on Linux).</p>
+<p><strong>Learn the vocabulary before you show up.</strong> I initially
+called Numa a “DNS resolver” and got corrected — it’s a forwarding
+resolver. The distinction matters to people who work with DNS
+professionally, and being sloppy about it cost me credibility in my
+first community posts.</p>
 <h2 id="whats-next">What’s next</h2>
 <p>Numa is at v0.5.0 with DNS forwarding, caching, ad blocking,
 DNS-over-HTTPS, .numa local domains with auto TLS, and LAN service

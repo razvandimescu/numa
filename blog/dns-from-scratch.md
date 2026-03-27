@@ -232,25 +232,9 @@ pub fn lookup(&mut self, domain: &str, qtype: QueryType) -> Option<DnsPacket> {
 
 No background thread. No timer. Entries expire lazily. The cache stays consistent because every consumer sees the adjusted TTL.
 
-## Async per-query with tokio
+## The resolution pipeline
 
-Each incoming UDP packet spawns a tokio task. The main loop never blocks:
-
-```rust
-loop {
-    let mut buffer = BytePacketBuffer::new();
-    let (_, src_addr) = socket.recv_from(&mut buffer.buf).await?;
-
-    let ctx = Arc::clone(&ctx);
-    tokio::spawn(async move {
-        if let Err(e) = handle_query(buffer, src_addr, &ctx).await {
-            error!("{} | HANDLER ERROR | {}", src_addr, e);
-        }
-    });
-}
-```
-
-Each `handle_query` walks a pipeline. This is the part where "from scratch" pays off — every step is just a function that either returns a response or says "not my problem, pass it on":
+Each incoming UDP packet spawns a tokio task. Each task walks a deterministic pipeline — every step either answers or passes to the next:
 
 ```
                      ┌─────────────────────────────────────────────────────┐
@@ -266,12 +250,9 @@ Each `handle_query` walks a pipeline. This is the part where "from scratch" pays
     │       after N min)   proxy+TLS)                 records)  adjusted) (encrypted)
     │
     └──→ Each step either answers or passes to the next.
-         Adding a feature = inserting a function into this chain.
 ```
 
-Want conditional forwarding for Tailscale? Insert a step before the upstream that checks the domain suffix. Want to override `api.example.com` for 5 minutes while debugging? Insert an entry in the overrides step — it auto-expires and the domain goes back to resolving normally. A DNS library would have hidden this pipeline behind an opaque `resolve()` call.
-
-This is one of those cases where Rust + tokio makes things almost embarrassingly simple. In a synchronous resolver, you'd need a thread pool or hand-rolled event loop. Here, each query is a lightweight future. A slow upstream query doesn't block anything — other queries keep flowing.
+This is where "from scratch" pays off. Want conditional forwarding for Tailscale? Insert a step before the upstream. Want to override `api.example.com` for 5 minutes while debugging? Add an entry in the overrides step — it auto-expires. A DNS library would have hidden this pipeline behind an opaque `resolve()` call.
 
 ## DNS-over-HTTPS: the "wait, that's it?" moment
 
@@ -316,37 +297,21 @@ If the configured address starts with `https://`, it's DoH. Otherwise, plain UDP
 
 ## "Why not just use dnsmasq + nginx + mkcert?"
 
-Fair question — I got this a lot when I first [posted about Numa](https://www.reddit.com/r/programare/). And the answer is: you absolutely can. Those are mature, battle-tested tools.
-
-The difference is integration. With dnsmasq + nginx + mkcert, you're configuring three tools: DNS resolution, reverse proxy rules, and certificate generation. Each has its own config format, its own lifecycle, its own failure modes. Numa puts the DNS record, the reverse proxy, and the TLS cert behind a single API call:
+You absolutely can — those are mature, battle-tested tools. The difference is integration: with dnsmasq + nginx + mkcert, you're configuring three tools with three config formats. Numa puts the DNS record, reverse proxy, and TLS cert behind one API call:
 
 ```bash
 curl -X POST localhost:5380/services -d '{"name":"frontend","target_port":5173}'
 ```
 
-That creates the DNS entry, generates a TLS certificate with the correct SAN, and starts proxying — including WebSocket upgrade for Vite HMR. One command, no config files.
-
-There's also a distinction people miss: **mkcert and certbot solve different problems.** Certbot issues certificates for public domains via Let's Encrypt — it needs DNS validation or an open port 80. Numa generates certificates for `.numa` domains that don't exist publicly. You can't get a Let's Encrypt cert for `frontend.numa`. They're complementary, not alternatives.
-
-Someone on Reddit told me the real value is "TLS termination + reverse proxy, simple to install, for developers — stop there." Honestly, they might be right about focus. But DNS is the foundation the proxy sits on, and having full control over the resolution pipeline is what makes auto-revert overrides and LAN discovery possible. Sometimes the "unnecessary" part is what makes the interesting part work.
-
-## The blocklist memory problem
-
-Numa's ad blocking loads the [Hagezi Pro](https://github.com/hagezi/dns-blocklists) list at startup — ~385,000 domains stored in a `HashSet<String>`. This works, but it consumes ~30MB of memory. For a laptop DNS proxy, that's fine. For embedded devices or a future where you want to run Numa on a router, it's too much.
-
-The obvious optimization is a **Bloom filter** — a probabilistic data structure that can tell you "definitely not in the set" or "probably in the set" using a fraction of the memory. A Bloom filter for 385K domains with a 0.1% false positive rate would use ~700KB instead of 30MB. The false positives (0.1% of queries hitting domains not in the list) would be blocked unnecessarily, which is acceptable for ad blocking.
-
-I haven't implemented this yet — the `HashSet` is simple, correct, and 30MB is nothing on a laptop. But if Numa ever needs to run on a router or a Raspberry Pi, this is the first optimization I'd reach for.
+That creates the DNS entry, generates a TLS certificate, and starts proxying — including WebSocket upgrade for Vite HMR. One command, no config files. Having full control over the resolution pipeline is what makes auto-revert overrides and LAN discovery possible.
 
 ## What I learned
 
 **DNS is a 40-year-old protocol that works remarkably well.** The wire format is tight, the caching model is elegant, and the hierarchical delegation system has scaled to billions of queries per day. The things people complain about (DNSSEC complexity, lack of encryption) are extensions bolted on decades later, not flaws in the original design.
 
-**"From scratch" gives you full control.** When I wanted to add ephemeral overrides that auto-revert, it was trivial — just a new step in the resolution pipeline. Conditional forwarding for Tailscale/VPN? Another step. Every feature is a function that takes a query and returns either a response or "pass to the next stage." A DNS library would have hidden this pipeline.
+**The hard parts aren't where you'd expect.** Parsing the wire protocol was straightforward (RFC 1035 is well-written). The hard parts were: browsers rejecting wildcard certs under single-label TLDs, macOS resolver quirks (`scutil` vs `/etc/resolv.conf`), and getting multiple processes to bind the same multicast port (`SO_REUSEPORT` on macOS, `SO_REUSEADDR` on Linux).
 
-**The hard parts aren't where you'd expect.** Parsing the wire protocol was straightforward (RFC 1035 is well-written). The hard parts were: browsers rejecting wildcard certs under single-label TLDs (`*.numa` fails — you need per-service SANs), macOS resolver quirks (scutil vs /etc/resolv.conf), and getting multiple processes to bind the same multicast port (`SO_REUSEPORT` on macOS, `SO_REUSEADDR` on Linux).
-
-**Terminology will get you roasted.** I initially called Numa a "DNS resolver" and got corrected on Reddit — it's a forwarding resolver (DNS proxy). It doesn't walk the delegation chain from root servers; it forwards to an upstream. The distinction matters to people who work with DNS for a living, and being sloppy about it cost me credibility in my first community posts. If you're building in a domain with established terminology, learn the vocabulary before you show up.
+**Learn the vocabulary before you show up.** I initially called Numa a "DNS resolver" and got corrected — it's a forwarding resolver. The distinction matters to people who work with DNS professionally, and being sloppy about it cost me credibility in my first community posts.
 
 ## What's next
 
