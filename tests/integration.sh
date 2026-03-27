@@ -202,6 +202,24 @@ check "EDNS DO bit echoed" \
     "flags: do" \
     "$($DIG cloudflare.com A +dnssec 2>&1 | grep 'EDNS:')"
 
+echo ""
+echo "=== TCP wire format (real servers) ==="
+
+# Microsoft's Azure DNS servers require length+message in a single TCP segment.
+# This test catches the split-write bug that caused early-eof SERVFAILs.
+check "Microsoft domain (update.code.visualstudio.com)" \
+    "NOERROR" \
+    "$($DIG update.code.visualstudio.com A 2>&1 | grep status:)"
+
+check "Office domain (ecs.office.com)" \
+    "NOERROR" \
+    "$($DIG ecs.office.com A 2>&1 | grep status:)"
+
+# Azure Application Insights — another strict TCP server
+check "Azure telemetry (eastus2-3.in.applicationinsights.azure.com)" \
+    "." \
+    "$($DIG eastus2-3.in.applicationinsights.azure.com A +short 2>/dev/null || echo 'timeout')"
+
 kill "$NUMA_PID" 2>/dev/null || true
 wait "$NUMA_PID" 2>/dev/null || true
 sleep 1

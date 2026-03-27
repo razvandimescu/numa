@@ -89,9 +89,11 @@ pub(crate) async fn forward_tcp(
 
     let mut stream = timeout(timeout_duration, TcpStream::connect(upstream)).await??;
 
-    // Write length-prefixed message
-    stream.write_all(&(msg.len() as u16).to_be_bytes()).await?;
-    stream.write_all(msg).await?;
+    // Single write: Microsoft/Azure DNS servers close TCP connections on split segments
+    let mut outbuf = Vec::with_capacity(2 + msg.len());
+    outbuf.extend_from_slice(&(msg.len() as u16).to_be_bytes());
+    outbuf.extend_from_slice(msg);
+    stream.write_all(&outbuf).await?;
 
     // Read length-prefixed response
     let mut len_buf = [0u8; 2];

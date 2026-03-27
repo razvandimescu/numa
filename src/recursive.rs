@@ -868,10 +868,10 @@ mod tests {
                         return;
                     }
                     let resp_bytes = resp_buf.filled();
-                    let _ = stream
-                        .write_all(&(resp_bytes.len() as u16).to_be_bytes())
-                        .await;
-                    let _ = stream.write_all(resp_bytes).await;
+                    let mut out = Vec::with_capacity(2 + resp_bytes.len());
+                    out.extend_from_slice(&(resp_bytes.len() as u16).to_be_bytes());
+                    out.extend_from_slice(resp_bytes);
+                    let _ = stream.write_all(&out).await;
                 });
             }
         });
@@ -993,5 +993,103 @@ mod tests {
 
         assert!(!UDP_DISABLED.load(Ordering::Relaxed));
         assert_eq!(UDP_FAILURES.load(Ordering::Relaxed), 0);
+    }
+
+    /// Test forward_tcp directly — verifies the length-prefixed wire format.
+    #[tokio::test]
+    async fn forward_tcp_wire_format() {
+        let server_addr = spawn_tcp_dns_server(|query| {
+            let mut resp = DnsPacket::response_from(query, ResultCode::NOERROR);
+            resp.header.authoritative_answer = true;
+            if let Some(q) = query.questions.first() {
+                resp.answers.push(DnsRecord::A {
+                    domain: q.name.clone(),
+                    addr: Ipv4Addr::new(1, 2, 3, 4),
+                    ttl: 60,
+                });
+            }
+            resp
+        })
+        .await;
+
+        let mut query = DnsPacket::new();
+        query.header.id = 0xBEEF;
+        query
+            .questions
+            .push(DnsQuestion::new("test.com".to_string(), QueryType::A));
+
+        let resp = crate::forward::forward_tcp(&query, server_addr, Duration::from_secs(2))
+            .await
+            .expect("forward_tcp should succeed");
+
+        assert_eq!(resp.header.id, 0xBEEF);
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+        assert!(!resp.answers.is_empty());
+    }
+
+    /// Strict server: reads with a single read() call, rejecting split writes.
+    /// Simulates Microsoft Azure DNS behavior that caused the early-eof bug.
+    #[tokio::test]
+    async fn forward_tcp_single_segment_write() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+
+            // Single read — if length prefix arrives separately, this gets
+            // only 2 bytes and the parse fails (simulating the Microsoft bug).
+            let mut buf = vec![0u8; 4096];
+            let n = tokio::io::AsyncReadExt::read(&mut stream, &mut buf)
+                .await
+                .unwrap();
+
+            assert!(
+                n >= 2 + 12, // length prefix + DNS header minimum
+                "got only {} bytes in first read — split write bug",
+                n
+            );
+
+            let msg_len = u16::from_be_bytes([buf[0], buf[1]]) as usize;
+            assert_eq!(msg_len, n - 2, "length prefix doesn't match payload");
+
+            // Parse and respond
+            let mut pkt_buf = BytePacketBuffer::from_bytes(&buf[2..n]);
+            let query = DnsPacket::from_buffer(&mut pkt_buf).unwrap();
+
+            let mut resp = DnsPacket::response_from(&query, ResultCode::NOERROR);
+            resp.answers.push(DnsRecord::A {
+                domain: query.questions[0].name.clone(),
+                addr: Ipv4Addr::new(5, 6, 7, 8),
+                ttl: 60,
+            });
+
+            let mut resp_buf = BytePacketBuffer::new();
+            resp.write(&mut resp_buf).unwrap();
+            let resp_bytes = resp_buf.filled();
+
+            let mut out = Vec::with_capacity(2 + resp_bytes.len());
+            out.extend_from_slice(&(resp_bytes.len() as u16).to_be_bytes());
+            out.extend_from_slice(resp_bytes);
+            tokio::io::AsyncWriteExt::write_all(&mut stream, &out)
+                .await
+                .unwrap();
+        });
+
+        let mut query = DnsPacket::new();
+        query.header.id = 0xCAFE;
+        query
+            .questions
+            .push(DnsQuestion::new("strict.test".to_string(), QueryType::A));
+
+        let resp = crate::forward::forward_tcp(&query, addr, Duration::from_secs(2))
+            .await
+            .expect("forward_tcp must send length+message in single segment");
+
+        assert_eq!(resp.header.id, 0xCAFE);
+        match &resp.answers[0] {
+            DnsRecord::A { addr, .. } => assert_eq!(*addr, Ipv4Addr::new(5, 6, 7, 8)),
+            other => panic!("expected A, got {:?}", other),
+        }
     }
 }
