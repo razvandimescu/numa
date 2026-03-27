@@ -4,7 +4,7 @@ description: Recursive resolution from root hints, chain-of-trust validation, NS
 date: March 2026
 ---
 
-In the [previous post](/blog/dns-from-scratch.html) I covered how DNS works at the wire level — packet format, label compression, TTL caching, DoH. Numa was a forwarding resolver: it parsed packets, did useful things locally, and relayed the rest to Cloudflare or Quad9.
+In the [previous post](/blog/posts/dns-from-scratch.html) I covered how DNS works at the wire level — packet format, label compression, TTL caching, DoH. Numa was a forwarding resolver: it parsed packets, did useful things locally, and relayed the rest to Cloudflare or Quad9.
 
 That post ended with "recursive resolution and DNSSEC are on the roadmap." This post is about building both.
 

@@ -8,7 +8,7 @@ I wanted to understand how DNS actually works. Not the "it translates domain nam
 
 So I built one from scratch in Rust. No `hickory-dns`, no `trust-dns`, no `simple-dns`. The entire RFC 1035 wire protocol — headers, labels, compression pointers, record types — parsed and serialized by hand. It started as a weekend learning project, became a side project I kept coming back to over 6 years, and eventually turned into [Numa](https://github.com/razvandimescu/numa) — which I now use as my actual system DNS.
 
-A note on terminology: Numa supports two resolution modes. *Forward* mode relays queries to an upstream (Quad9, Cloudflare, or any DoH provider). *Recursive* mode walks the delegation chain from root servers itself — iterative queries to root, TLD, and authoritative nameservers, with full DNSSEC validation. In both modes, Numa does useful things with your DNS traffic locally (caching, ad blocking, overrides, local service domains) before resolving what it can't answer. This post covers the wire protocol and forwarding path; [the next post](/blog/dnssec-from-scratch.html) covers recursive resolution and DNSSEC.
+A note on terminology: Numa supports two resolution modes. *Forward* mode relays queries to an upstream (Quad9, Cloudflare, or any DoH provider). *Recursive* mode walks the delegation chain from root servers itself — iterative queries to root, TLD, and authoritative nameservers, with full DNSSEC validation. In both modes, Numa does useful things with your DNS traffic locally (caching, ad blocking, overrides, local service domains) before resolving what it can't answer. This post covers the wire protocol and forwarding path; [the next post](/blog/posts/dnssec-from-scratch.html) covers recursive resolution and DNSSEC.
 
 Here's what surprised me along the way.
 
@@ -317,7 +317,7 @@ That creates the DNS entry, generates a TLS certificate, and starts proxying —
 
 **Update (March 2026):** Recursive resolution and DNSSEC validation are now shipped. Numa resolves from root nameservers with full chain-of-trust verification (RSA/SHA-256, ECDSA P-256, Ed25519) and NSEC/NSEC3 authenticated denial of existence.
 
-**[Read the follow-up: Implementing DNSSEC from Scratch in Rust →](/blog/dnssec-from-scratch.html)**
+**[Read the follow-up: Implementing DNSSEC from Scratch in Rust →](/blog/posts/dnssec-from-scratch.html)**
 
 Still on the roadmap:
 

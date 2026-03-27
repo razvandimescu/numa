@@ -31,6 +31,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Install pandoc
+        run: sudo apt-get install -y pandoc
+      - name: Generate blog HTML
+        run: make blog
       - name: Setup Pages
         uses: actions/configure-pages@v5
       - name: Upload artifact

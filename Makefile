@@ -23,11 +23,11 @@ bench:
 	cargo bench
 
 blog:
-	@mkdir -p site/blog
+	@mkdir -p site/blog/posts
 	@for f in blog/*.md; do \
 		name=$$(basename "$$f" .md); \
-		pandoc "$$f" --template=site/blog-template.html -o "site/blog/$$name.html"; \
-		echo "  $$f → site/blog/$$name.html"; \
+		pandoc "$$f" --template=site/blog-template.html -o "site/blog/posts/$$name.html"; \
+		echo "  $$f → site/blog/posts/$$name.html"; \
 	done
 
 clean:
