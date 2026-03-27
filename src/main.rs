@@ -480,6 +480,11 @@ async fn network_watch_loop(ctx: Arc<numa::ctx::ServerCtx>) {
             ctx.lan_peers.lock().unwrap().clear();
             info!("flushed LAN peers after network change");
         }
+
+        // Re-probe UDP every 5 minutes when disabled
+        if tick.is_multiple_of(60) {
+            numa::recursive::probe_udp(&ctx.root_hints).await;
+        }
     }
 }
 

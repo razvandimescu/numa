@@ -79,9 +79,7 @@ const ROOT_KSK_PUBLIC_KEY: &[u8] = &[
 ];
 ```
 
-When IANA rolls this key (rare — the previous key lasted from 2010 to 2018), every DNSSEC validator on the internet needs updating. For Numa, that means a binary update. Something to watch.
-
-Every DNSKEY has a key tag — a 16-bit checksum over its RDATA (RFC 4034 Appendix B). The first test I wrote: compute the root KSK's key tag and assert it equals 20326. Instant confidence that the RDATA encoding is correct.
+When IANA rolls this key (rare — the previous key lasted from 2010 to 2018), every DNSSEC validator on the internet needs updating. For Numa, that means a binary update. Something to watch. Every DNSKEY also has a key tag — a 16-bit checksum over its RDATA. The first test I wrote: compute the root KSK's key tag and assert it equals 20326. Instant confidence that the encoding is correct.
 
 ## The crypto
 

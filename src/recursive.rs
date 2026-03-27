@@ -35,6 +35,29 @@ pub fn reset_udp_state() {
     UDP_FAILURES.store(0, Ordering::Relaxed);
 }
 
+/// Probe whether UDP works again. Called periodically from the network watch loop.
+pub async fn probe_udp(root_hints: &[SocketAddr]) {
+    if !UDP_DISABLED.load(Ordering::Relaxed) {
+        return;
+    }
+    let hint = match root_hints.first() {
+        Some(h) => *h,
+        None => return,
+    };
+    let mut probe = DnsPacket::new();
+    probe.header.id = next_id();
+    probe
+        .questions
+        .push(DnsQuestion::new(".".to_string(), QueryType::NS));
+    if forward_udp(&probe, hint, Duration::from_millis(1500))
+        .await
+        .is_ok()
+    {
+        info!("UDP probe succeeded — re-enabling UDP");
+        reset_udp_state();
+    }
+}
+
 pub async fn prime_tld_cache(cache: &RwLock<DnsCache>, root_hints: &[SocketAddr], tlds: &[String]) {
     if root_hints.is_empty() || tlds.is_empty() {
         return;
@@ -315,7 +338,16 @@ fn find_closest_ns(
         let zone = &qname[pos..];
         if let Some(cached) = guard.lookup(zone, QueryType::NS) {
             let mut addrs = Vec::new();
-            for ns_rec in &cached.answers {
+            let ns_records = if cached
+                .answers
+                .iter()
+                .any(|r| matches!(r, DnsRecord::NS { .. }))
+            {
+                &cached.answers
+            } else {
+                &cached.authorities
+            };
+            for ns_rec in ns_records {
                 if let DnsRecord::NS { host, .. } = ns_rec {
                     for qt in [QueryType::A, QueryType::AAAA] {
                         if let Some(resp) = guard.lookup(host, qt) {
@@ -717,6 +749,48 @@ mod tests {
         let (zone, addrs) = find_closest_ns("example.com", &cache, &hints);
         assert_eq!(zone, ".");
         assert_eq!(addrs, hints);
+    }
+
+    #[test]
+    fn find_closest_ns_uses_authority_ns_records() {
+        // Simulate what TLD priming does: cache a referral response where
+        // NS records are in authorities (not answers), with glue in resources.
+        let cache = RwLock::new(DnsCache::new(100, 60, 86400));
+        let hints = vec![dns_addr(Ipv4Addr::new(198, 41, 0, 4))];
+
+        // Build a referral-style response (NS in authorities, glue in resources)
+        let mut referral = DnsPacket::new();
+        referral.header.response = true;
+        referral.authorities.push(DnsRecord::NS {
+            domain: "com".into(),
+            host: "ns1.com".into(),
+            ttl: 3600,
+        });
+        referral.resources.push(DnsRecord::A {
+            domain: "ns1.com".into(),
+            addr: Ipv4Addr::new(192, 5, 6, 30),
+            ttl: 3600,
+        });
+
+        // Cache the referral under "com" NS (same as prime_tld_cache does)
+        {
+            let mut c = cache.write().unwrap();
+            c.insert("com", QueryType::NS, &referral);
+            // Cache glue separately (as prime_tld_cache does)
+            let mut glue_pkt = DnsPacket::new();
+            glue_pkt.header.response = true;
+            glue_pkt.answers.push(DnsRecord::A {
+                domain: "ns1.com".into(),
+                addr: Ipv4Addr::new(192, 5, 6, 30),
+                ttl: 3600,
+            });
+            c.insert("ns1.com", QueryType::A, &glue_pkt);
+        }
+
+        // find_closest_ns should find "com" zone from authority NS records
+        let (zone, addrs) = find_closest_ns("www.example.com", &cache, &hints);
+        assert_eq!(zone, "com");
+        assert_eq!(addrs, vec![dns_addr(Ipv4Addr::new(192, 5, 6, 30))]);
     }
 
     #[test]
