@@ -62,6 +62,12 @@ cloudflare.com A 104.16.132.229
   verified with → DNSKEY (., key_tag=20326)  ← root trust anchor (hardcoded)
 ```
 
+### How keys get there
+
+The domain owner generates the DNSKEY keypair — typically their DNS provider (Cloudflare, etc.) does this. The owner then submits the DS record (a hash of their DNSKEY) to their registrar (Namecheap, GoDaddy), who passes it to the registry (Verisign for `.com`). The registry signs it into the TLD zone, and IANA signs the TLD's DS into the root. Trust flows up; keys flow down.
+
+The irony: you "own" your DNSSEC keys, but your registrar controls whether the DS record gets published. If they remove it — by mistake, by policy, or by court order — your DNSSEC chain breaks silently.
+
 ### The trust anchor
 
 IANA's root KSK (Key Signing Key) has key tag 20326, algorithm 8 (RSA/SHA-256), and a 256-byte public key. It was last rolled in 2018. I hardcode it as a `const` array — this is the one thing in the entire system that requires out-of-band trust.
@@ -75,30 +81,7 @@ const ROOT_KSK_PUBLIC_KEY: &[u8] = &[
 
 When IANA rolls this key (rare — the previous key lasted from 2010 to 2018), every DNSSEC validator on the internet needs updating. For Numa, that means a binary update. Something to watch.
 
-### Key tag computation
-
-Every DNSKEY has a key tag — a 16-bit identifier computed per RFC 4034 Appendix B. It's a simple checksum over the DNSKEY RDATA (flags + protocol + algorithm + public key), summing 16-bit words with carry:
-
-```rust
-pub fn compute_key_tag(flags: u16, protocol: u8, algorithm: u8, public_key: &[u8]) -> u16 {
-    let mut rdata = Vec::with_capacity(4 + public_key.len());
-    rdata.push((flags >> 8) as u8);
-    rdata.push((flags & 0xFF) as u8);
-    rdata.push(protocol);
-    rdata.push(algorithm);
-    rdata.extend_from_slice(public_key);
-
-    let mut ac: u32 = 0;
-    for (i, &byte) in rdata.iter().enumerate() {
-        if i % 2 == 0 { ac += (byte as u32) << 8; }
-        else { ac += byte as u32; }
-    }
-    ac += (ac >> 16) & 0xFFFF;
-    (ac & 0xFFFF) as u16
-}
-```
-
-The first test I wrote: compute the root KSK's key tag and assert it equals 20326. Instant confidence that the RDATA encoding is correct.
+Every DNSKEY has a key tag — a 16-bit checksum over its RDATA (RFC 4034 Appendix B). The first test I wrote: compute the root KSK's key tag and assert it equals 20326. Instant confidence that the RDATA encoding is correct.
 
 ## The crypto
 
@@ -112,28 +95,7 @@ Numa uses `ring` for all cryptographic operations. Three algorithms cover the va
 
 ### RSA key format conversion
 
-DNS stores RSA public keys in RFC 3110 format: exponent length (1 or 3 bytes), exponent, modulus. `ring` expects PKCS#1 DER (ASN.1 encoded). Converting between them means writing a minimal ASN.1 encoder:
-
-```rust
-fn rsa_dnskey_to_der(public_key: &[u8]) -> Option<Vec<u8>> {
-    // Parse RFC 3110: [exp_len] [exponent] [modulus]
-    let (exp_len, exp_start) = if public_key[0] == 0 {
-        let len = u16::from_be_bytes([public_key[1], public_key[2]]) as usize;
-        (len, 3)
-    } else {
-        (public_key[0] as usize, 1)
-    };
-    let exponent = &public_key[exp_start..exp_start + exp_len];
-    let modulus = &public_key[exp_start + exp_len..];
-
-    // Build ASN.1 DER: SEQUENCE { INTEGER modulus, INTEGER exponent }
-    let mod_der = asn1_integer(modulus);
-    let exp_der = asn1_integer(exponent);
-    // ... wrap in SEQUENCE tag + length
-}
-```
-
-The `asn1_integer` function handles leading-zero stripping (DER integers must be minimal) and sign-bit padding (high bit set means negative in ASN.1, so positive numbers need a `0x00` prefix). Getting this wrong produces keys that `ring` silently rejects — one of the harder bugs to track down.
+DNS stores RSA public keys in RFC 3110 format (exponent length, exponent, modulus). `ring` expects PKCS#1 DER (ASN.1 encoded). Converting between them means writing a minimal ASN.1 encoder with leading-zero stripping and sign-bit padding. Getting this wrong produces keys that `ring` silently rejects — one of the harder bugs to track down.
 
 ### ECDSA is simpler
 
@@ -176,29 +138,7 @@ The canonical DNS name ordering (RFC 4034 §6.1) compares labels right-to-left, 
 
 NSEC3 solves NSEC's zone enumeration problem — with NSEC, you can walk the chain and discover every name in the zone. NSEC3 hashes the names first (iterated SHA-1 with a salt), so the NSEC3 chain reveals hashes, not names.
 
-The proof is a 3-part closest encloser proof (RFC 5155 §8.4):
-1. **Closest encloser** — find an ancestor of the queried name whose hash exactly matches an NSEC3 owner
-2. **Next closer** — the name one label longer than the closest encloser must fall within an NSEC3 hash range (proving it doesn't exist)
-3. **Wildcard denial** — the wildcard at the closest encloser (`*.closest_encloser`) must also fall within an NSEC3 hash range
-
-```rust
-// Pre-compute hashes for all ancestors
-for i in 0..labels.len() {
-    let name: String = labels[i..].join(".");
-    ancestor_hashes.push(nsec3_hash(&name, algorithm, iterations, salt));
-}
-
-// Walk from longest candidate: is this the closest encloser?
-for i in 1..labels.len() {
-    let ce_hash = &ancestor_hashes[i];
-    if !decoded.iter().any(|(oh, _)| oh == ce_hash) { continue; }  // (1)
-    let nc_hash = &ancestor_hashes[i - 1];
-    if !nsec3_any_covers(&decoded, nc_hash) { continue; }          // (2)
-    let wc = format!("*.{}", labels[i..].join("."));
-    let wc_hash = nsec3_hash(&wc, algorithm, iterations, salt)?;
-    if nsec3_any_covers(&decoded, &wc_hash) { proven = true; break; }  // (3)
-}
-```
+The proof is a 3-part closest encloser proof (RFC 5155 §8.4): find an ancestor whose hash matches an NSEC3 owner, prove the next-closer name falls within a hash range gap, and prove the wildcard at the closest encloser also falls within a gap. All three must hold, or the denial is rejected.
 
 I cap NSEC3 iterations at 500 (RFC 9276 recommends 0). Higher iteration counts are a DoS vector — each verification requires `iterations + 1` SHA-1 hashes.
 
@@ -225,6 +165,26 @@ Result: a cold-cache query for `cloudflare.com` with full DNSSEC validation take
 
 The network fetch dominates. The crypto is noise.
 
+## Surviving hostile networks
+
+I deployed Numa as my system DNS and switched to a different network. Everything broke. Every query: SERVFAIL, 3-second timeout.
+
+The network probe told the story: the ISP blocks outbound UDP port 53 to all servers except a handful of whitelisted public resolvers (Google, Cloudflare). Root servers, TLD servers, authoritative servers — all unreachable over UDP. The ISP forces you onto their DNS or a blessed upstream. Recursive resolution is impossible.
+
+Except TCP port 53 worked fine. And every DNS server is required to support TCP (RFC 1035 section 4.2.2). The ISP apparently only filters UDP.
+
+The fix has three parts:
+
+**TCP fallback.** Every outbound query tries UDP first (800ms timeout). If UDP fails or the response is truncated, retry immediately over TCP. TCP uses a 2-byte length prefix before the DNS message — trivial to implement, and it handles DNSSEC responses that exceed the UDP payload limit.
+
+**UDP auto-disable.** After 3 consecutive UDP failures, flip a global `AtomicBool` and skip UDP entirely — go TCP-first for all queries. This avoids burning 800ms per hop on a network where UDP will never work. The flag resets when the network changes (detected via LAN IP monitoring).
+
+**Query minimization (RFC 7816).** When querying root servers, send only the TLD — `com` instead of `secret-project.example.com`. Root servers handle trillions of queries and are operated by 12 organizations. Minimization reduces what they learn from yours.
+
+The result: on a network that blocks UDP:53, Numa detects the block within the first 3 queries, switches to TCP, and resolves normally at 300-500ms per cold query. Cached queries remain 0ms. No manual config change needed — switch networks and it adapts.
+
+I wouldn't have found this without dogfooding. The code worked perfectly on my home network. It took a real hostile network to expose the assumption that UDP always works.
+
 ## What I learned
 
 **DNSSEC is a verification system, not an encryption system.** It proves authenticity — this record was signed by the zone owner. It doesn't hide what you're querying. For privacy, you still need encrypted transport (DoH/DoT) or recursive resolution (no single upstream).
@@ -237,10 +197,7 @@ The network fetch dominates. The crypto is noise.
 
 ## What's next
 
-Numa now has 13 feature layers, from basic DNS forwarding through full recursive DNSSEC resolution. The immediate roadmap:
-
+- **[pkarr](https://github.com/pubky/pkarr) integration** — self-sovereign DNS via the Mainline BitTorrent DHT. Your Ed25519 key is your domain. No registrar, no ICANN.
 - **DoT (DNS-over-TLS)** — the last encrypted transport we don't support
-- **[pkarr](https://github.com/pubky/pkarr) integration** — self-sovereign DNS via the Mainline BitTorrent DHT. Ed25519-signed DNS records published without a registrar.
-- **Global `.numa` names** — human-readable names backed by DHT, not ICANN
 
-The code is at [github.com/razvandimescu/numa](https://github.com/razvandimescu/numa). MIT license. The entire DNSSEC implementation is in [`src/dnssec.rs`](https://github.com/razvandimescu/numa/blob/main/src/dnssec.rs) (~1,600 lines) and [`src/recursive.rs`](https://github.com/razvandimescu/numa/blob/main/src/recursive.rs) (~600 lines).
+The code is at [github.com/razvandimescu/numa](https://github.com/razvandimescu/numa) — the DNSSEC validation is in [`src/dnssec.rs`](https://github.com/razvandimescu/numa/blob/main/src/dnssec.rs) and the recursive resolver in [`src/recursive.rs`](https://github.com/razvandimescu/numa/blob/main/src/recursive.rs). MIT license.

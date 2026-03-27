@@ -153,6 +153,7 @@ struct QueryLogResponse {
     path: String,
     rescode: String,
     latency_ms: f64,
+    dnssec: String,
 }
 
 #[derive(Serialize)]
@@ -461,6 +462,7 @@ async fn query_log(
                     path: e.path.as_str().to_string(),
                     rescode: e.rescode.as_str().to_string(),
                     latency_ms: e.latency_us as f64 / 1000.0,
+                    dnssec: e.dnssec.as_str().to_string(),
                 }
             })
             .collect()

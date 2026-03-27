@@ -14,6 +14,17 @@ pub enum DnssecStatus {
     Indeterminate,
 }
 
+impl DnssecStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DnssecStatus::Secure => "secure",
+            DnssecStatus::Insecure => "insecure",
+            DnssecStatus::Bogus => "bogus",
+            DnssecStatus::Indeterminate => "indeterminate",
+        }
+    }
+}
+
 struct CacheEntry {
     packet: DnsPacket,
     inserted_at: Instant,

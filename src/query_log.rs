@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::time::SystemTime;
 
+use crate::cache::DnssecStatus;
 use crate::header::ResultCode;
 use crate::question::QueryType;
 use crate::stats::QueryPath;
@@ -14,6 +15,7 @@ pub struct QueryLogEntry {
     pub path: QueryPath,
     pub rescode: ResultCode,
     pub latency_us: u64,
+    pub dnssec: DnssecStatus,
 }
 
 pub struct QueryLog {

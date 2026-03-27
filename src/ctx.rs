@@ -10,7 +10,7 @@ use tokio::net::UdpSocket;
 
 use crate::blocklist::BlocklistStore;
 use crate::buffer::BytePacketBuffer;
-use crate::cache::DnsCache;
+use crate::cache::{DnsCache, DnssecStatus};
 use crate::config::{UpstreamMode, ZoneMap};
 use crate::forward::{forward_query, Upstream};
 use crate::header::ResultCode;
@@ -77,12 +77,12 @@ pub async fn handle_query(
 
     // Pipeline: overrides -> .tld interception -> blocklist -> local zones -> cache -> upstream
     // Each lock is scoped to avoid holding MutexGuard across await points.
-    let (response, path) = {
+    let (response, path, dnssec) = {
         let override_record = ctx.overrides.read().unwrap().lookup(&qname);
         if let Some(record) = override_record {
             let mut resp = DnsPacket::response_from(&query, ResultCode::NOERROR);
             resp.answers.push(record);
-            (resp, QueryPath::Overridden)
+            (resp, QueryPath::Overridden, DnssecStatus::Indeterminate)
         } else if !ctx.proxy_tld_suffix.is_empty()
             && (qname.ends_with(&ctx.proxy_tld_suffix) || qname == ctx.proxy_tld)
         {
@@ -120,7 +120,7 @@ pub async fn handle_query(
                     ttl: 300,
                 }),
             }
-            (resp, QueryPath::Local)
+            (resp, QueryPath::Local, DnssecStatus::Indeterminate)
         } else if ctx.blocklist.read().unwrap().is_blocked(&qname) {
             let mut resp = DnsPacket::response_from(&query, ResultCode::NOERROR);
             match qtype {
@@ -135,20 +135,20 @@ pub async fn handle_query(
                     ttl: 60,
                 }),
             }
-            (resp, QueryPath::Blocked)
+            (resp, QueryPath::Blocked, DnssecStatus::Indeterminate)
         } else if let Some(records) = ctx.zone_map.get(qname.as_str()).and_then(|m| m.get(&qtype)) {
             let mut resp = DnsPacket::response_from(&query, ResultCode::NOERROR);
             resp.answers = records.clone();
-            (resp, QueryPath::Local)
+            (resp, QueryPath::Local, DnssecStatus::Indeterminate)
         } else {
             let cached = ctx.cache.read().unwrap().lookup_with_status(&qname, qtype);
             if let Some((cached, cached_dnssec)) = cached {
                 let mut resp = cached;
                 resp.header.id = query.header.id;
-                if cached_dnssec == crate::cache::DnssecStatus::Secure {
+                if cached_dnssec == DnssecStatus::Secure {
                     resp.header.authed_data = true;
                 }
-                (resp, QueryPath::Cached)
+                (resp, QueryPath::Cached, cached_dnssec)
             } else if ctx.upstream_mode == UpstreamMode::Recursive {
                 match crate::recursive::resolve_recursive(
                     &qname,
@@ -159,7 +159,7 @@ pub async fn handle_query(
                 )
                 .await
                 {
-                    Ok(resp) => (resp, QueryPath::Recursive),
+                    Ok(resp) => (resp, QueryPath::Recursive, DnssecStatus::Indeterminate),
                     Err(e) => {
                         error!(
                             "{} | {:?} {} | RECURSIVE ERROR | {}",
@@ -168,6 +168,7 @@ pub async fn handle_query(
                         (
                             DnsPacket::response_from(&query, ResultCode::SERVFAIL),
                             QueryPath::UpstreamError,
+                            DnssecStatus::Indeterminate,
                         )
                     }
                 }
@@ -180,7 +181,7 @@ pub async fn handle_query(
                 match forward_query(&query, &upstream, ctx.timeout).await {
                     Ok(resp) => {
                         ctx.cache.write().unwrap().insert(&qname, qtype, &resp);
-                        (resp, QueryPath::Forwarded)
+                        (resp, QueryPath::Forwarded, DnssecStatus::Indeterminate)
                     }
                     Err(e) => {
                         error!(
@@ -190,6 +191,7 @@ pub async fn handle_query(
                         (
                             DnsPacket::response_from(&query, ResultCode::SERVFAIL),
                             QueryPath::UpstreamError,
+                            DnssecStatus::Indeterminate,
                         )
                     }
                 }
@@ -201,6 +203,7 @@ pub async fn handle_query(
     let mut response = response;
 
     // DNSSEC validation (recursive/forwarded responses only)
+    let mut dnssec = dnssec;
     if ctx.dnssec_enabled && path == QueryPath::Recursive {
         let (status, vstats) =
             crate::dnssec::validate_response(&response, &ctx.cache, &ctx.root_hints).await;
@@ -216,11 +219,13 @@ pub async fn handle_query(
             vstats.ds_fetches,
         );
 
-        if status == crate::cache::DnssecStatus::Secure {
+        dnssec = status;
+
+        if status == DnssecStatus::Secure {
             response.header.authed_data = true;
         }
 
-        if status == crate::cache::DnssecStatus::Bogus && ctx.dnssec_strict {
+        if status == DnssecStatus::Bogus && ctx.dnssec_strict {
             response = DnsPacket::response_from(&query, ResultCode::SERVFAIL);
         }
 
@@ -292,6 +297,7 @@ pub async fn handle_query(
         path,
         rescode: response.header.rescode,
         latency_us: elapsed.as_micros() as u64,
+        dnssec,
     });
 
     Ok(())
