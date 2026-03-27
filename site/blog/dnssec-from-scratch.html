@@ -378,6 +378,16 @@ IANA publishes and the entire internet agrees on.</p>
   vouched for by → DS (at root, key_tag=30909)
   signed by → RRSIG (signer=.)
   verified with → DNSKEY (., key_tag=20326)  ← root trust anchor (hardcoded)</code></pre>
+<h3 id="how-keys-get-there">How keys get there</h3>
+<p>The domain owner generates the DNSKEY keypair — typically their DNS
+provider (Cloudflare, etc.) does this. The owner then submits the DS
+record (a hash of their DNSKEY) to their registrar (Namecheap, GoDaddy),
+who passes it to the registry (Verisign for <code>.com</code>). The
+registry signs it into the TLD zone, and IANA signs the TLD’s DS into
+the root. Trust flows up; keys flow down.</p>
+<p>The irony: you “own” your DNSSEC keys, but your registrar controls
+whether the DS record gets published. If they remove it — by mistake, by
+policy, or by court order — your DNSSEC chain breaks silently.</p>
 <h3 id="the-trust-anchor">The trust anchor</h3>
 <p>IANA’s root KSK (Key Signing Key) has key tag 20326, algorithm 8
 (RSA/SHA-256), and a 256-byte public key. It was last rolled in 2018. I
@@ -391,29 +401,10 @@ class="sourceCode rust"><code class="sourceCode rust"><span id="cb3-1"><a href="
 <p>When IANA rolls this key (rare — the previous key lasted from 2010 to
 2018), every DNSSEC validator on the internet needs updating. For Numa,
 that means a binary update. Something to watch.</p>
-<h3 id="key-tag-computation">Key tag computation</h3>
-<p>Every DNSKEY has a key tag — a 16-bit identifier computed per RFC
-4034 Appendix B. It’s a simple checksum over the DNSKEY RDATA (flags +
-protocol + algorithm + public key), summing 16-bit words with carry:</p>
-<div class="sourceCode" id="cb4"><pre
-class="sourceCode rust"><code class="sourceCode rust"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="kw">pub</span> <span class="kw">fn</span> compute_key_tag(flags<span class="op">:</span> <span class="dt">u16</span><span class="op">,</span> protocol<span class="op">:</span> <span class="dt">u8</span><span class="op">,</span> algorithm<span class="op">:</span> <span class="dt">u8</span><span class="op">,</span> public_key<span class="op">:</span> <span class="op">&amp;</span>[<span class="dt">u8</span>]) <span class="op">-&gt;</span> <span class="dt">u16</span> <span class="op">{</span></span>
-<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> <span class="kw">mut</span> rdata <span class="op">=</span> <span class="dt">Vec</span><span class="pp">::</span>with_capacity(<span class="dv">4</span> <span class="op">+</span> public_key<span class="op">.</span>len())<span class="op">;</span></span>
-<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a>    rdata<span class="op">.</span>push((flags <span class="op">&gt;&gt;</span> <span class="dv">8</span>) <span class="kw">as</span> <span class="dt">u8</span>)<span class="op">;</span></span>
-<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a>    rdata<span class="op">.</span>push((flags <span class="op">&amp;</span> <span class="dv">0xFF</span>) <span class="kw">as</span> <span class="dt">u8</span>)<span class="op">;</span></span>
-<span id="cb4-5"><a href="#cb4-5" aria-hidden="true" tabindex="-1"></a>    rdata<span class="op">.</span>push(protocol)<span class="op">;</span></span>
-<span id="cb4-6"><a href="#cb4-6" aria-hidden="true" tabindex="-1"></a>    rdata<span class="op">.</span>push(algorithm)<span class="op">;</span></span>
-<span id="cb4-7"><a href="#cb4-7" aria-hidden="true" tabindex="-1"></a>    rdata<span class="op">.</span>extend_from_slice(public_key)<span class="op">;</span></span>
-<span id="cb4-8"><a href="#cb4-8" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-9"><a href="#cb4-9" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> <span class="kw">mut</span> ac<span class="op">:</span> <span class="dt">u32</span> <span class="op">=</span> <span class="dv">0</span><span class="op">;</span></span>
-<span id="cb4-10"><a href="#cb4-10" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> (i<span class="op">,</span> <span class="op">&amp;</span>byte) <span class="kw">in</span> rdata<span class="op">.</span>iter()<span class="op">.</span>enumerate() <span class="op">{</span></span>
-<span id="cb4-11"><a href="#cb4-11" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> i <span class="op">%</span> <span class="dv">2</span> <span class="op">==</span> <span class="dv">0</span> <span class="op">{</span> ac <span class="op">+=</span> (byte <span class="kw">as</span> <span class="dt">u32</span>) <span class="op">&lt;&lt;</span> <span class="dv">8</span><span class="op">;</span> <span class="op">}</span></span>
-<span id="cb4-12"><a href="#cb4-12" aria-hidden="true" tabindex="-1"></a>        <span class="cf">else</span> <span class="op">{</span> ac <span class="op">+=</span> byte <span class="kw">as</span> <span class="dt">u32</span><span class="op">;</span> <span class="op">}</span></span>
-<span id="cb4-13"><a href="#cb4-13" aria-hidden="true" tabindex="-1"></a>    <span class="op">}</span></span>
-<span id="cb4-14"><a href="#cb4-14" aria-hidden="true" tabindex="-1"></a>    ac <span class="op">+=</span> (ac <span class="op">&gt;&gt;</span> <span class="dv">16</span>) <span class="op">&amp;</span> <span class="dv">0xFFFF</span><span class="op">;</span></span>
-<span id="cb4-15"><a href="#cb4-15" aria-hidden="true" tabindex="-1"></a>    (ac <span class="op">&amp;</span> <span class="dv">0xFFFF</span>) <span class="kw">as</span> <span class="dt">u16</span></span>
-<span id="cb4-16"><a href="#cb4-16" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
-<p>The first test I wrote: compute the root KSK’s key tag and assert it
-equals 20326. Instant confidence that the RDATA encoding is correct.</p>
+<p>Every DNSKEY has a key tag — a 16-bit checksum over its RDATA (RFC
+4034 Appendix B). The first test I wrote: compute the root KSK’s key tag
+and assert it equals 20326. Instant confidence that the RDATA encoding
+is correct.</p>
 <h2 id="the-crypto">The crypto</h2>
 <p>Numa uses <code>ring</code> for all cryptographic operations. Three
 algorithms cover the vast majority of signed zones:</p>
@@ -448,40 +439,20 @@ algorithms cover the vast majority of signed zones:</p>
 </tbody>
 </table>
 <h3 id="rsa-key-format-conversion">RSA key format conversion</h3>
-<p>DNS stores RSA public keys in RFC 3110 format: exponent length (1 or
-3 bytes), exponent, modulus. <code>ring</code> expects PKCS#1 DER (ASN.1
-encoded). Converting between them means writing a minimal ASN.1
-encoder:</p>
-<div class="sourceCode" id="cb5"><pre
-class="sourceCode rust"><code class="sourceCode rust"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="kw">fn</span> rsa_dnskey_to_der(public_key<span class="op">:</span> <span class="op">&amp;</span>[<span class="dt">u8</span>]) <span class="op">-&gt;</span> <span class="dt">Option</span><span class="op">&lt;</span><span class="dt">Vec</span><span class="op">&lt;</span><span class="dt">u8</span><span class="op">&gt;&gt;</span> <span class="op">{</span></span>
-<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a>    <span class="co">// Parse RFC 3110: [exp_len] [exponent] [modulus]</span></span>
-<span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> (exp_len<span class="op">,</span> exp_start) <span class="op">=</span> <span class="cf">if</span> public_key[<span class="dv">0</span>] <span class="op">==</span> <span class="dv">0</span> <span class="op">{</span></span>
-<span id="cb5-4"><a href="#cb5-4" aria-hidden="true" tabindex="-1"></a>        <span class="kw">let</span> len <span class="op">=</span> <span class="dt">u16</span><span class="pp">::</span>from_be_bytes([public_key[<span class="dv">1</span>]<span class="op">,</span> public_key[<span class="dv">2</span>]]) <span class="kw">as</span> <span class="dt">usize</span><span class="op">;</span></span>
-<span id="cb5-5"><a href="#cb5-5" aria-hidden="true" tabindex="-1"></a>        (len<span class="op">,</span> <span class="dv">3</span>)</span>
-<span id="cb5-6"><a href="#cb5-6" aria-hidden="true" tabindex="-1"></a>    <span class="op">}</span> <span class="cf">else</span> <span class="op">{</span></span>
-<span id="cb5-7"><a href="#cb5-7" aria-hidden="true" tabindex="-1"></a>        (public_key[<span class="dv">0</span>] <span class="kw">as</span> <span class="dt">usize</span><span class="op">,</span> <span class="dv">1</span>)</span>
-<span id="cb5-8"><a href="#cb5-8" aria-hidden="true" tabindex="-1"></a>    <span class="op">};</span></span>
-<span id="cb5-9"><a href="#cb5-9" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> exponent <span class="op">=</span> <span class="op">&amp;</span>public_key[exp_start<span class="op">..</span>exp_start <span class="op">+</span> exp_len]<span class="op">;</span></span>
-<span id="cb5-10"><a href="#cb5-10" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> modulus <span class="op">=</span> <span class="op">&amp;</span>public_key[exp_start <span class="op">+</span> exp_len<span class="op">..</span>]<span class="op">;</span></span>
-<span id="cb5-11"><a href="#cb5-11" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-12"><a href="#cb5-12" aria-hidden="true" tabindex="-1"></a>    <span class="co">// Build ASN.1 DER: SEQUENCE { INTEGER modulus, INTEGER exponent }</span></span>
-<span id="cb5-13"><a href="#cb5-13" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> mod_der <span class="op">=</span> asn1_integer(modulus)<span class="op">;</span></span>
-<span id="cb5-14"><a href="#cb5-14" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> exp_der <span class="op">=</span> asn1_integer(exponent)<span class="op">;</span></span>
-<span id="cb5-15"><a href="#cb5-15" aria-hidden="true" tabindex="-1"></a>    <span class="co">// ... wrap in SEQUENCE tag + length</span></span>
-<span id="cb5-16"><a href="#cb5-16" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
-<p>The <code>asn1_integer</code> function handles leading-zero stripping
-(DER integers must be minimal) and sign-bit padding (high bit set means
-negative in ASN.1, so positive numbers need a <code>0x00</code> prefix).
-Getting this wrong produces keys that <code>ring</code> silently rejects
-— one of the harder bugs to track down.</p>
+<p>DNS stores RSA public keys in RFC 3110 format (exponent length,
+exponent, modulus). <code>ring</code> expects PKCS#1 DER (ASN.1
+encoded). Converting between them means writing a minimal ASN.1 encoder
+with leading-zero stripping and sign-bit padding. Getting this wrong
+produces keys that <code>ring</code> silently rejects — one of the
+harder bugs to track down.</p>
 <h3 id="ecdsa-is-simpler">ECDSA is simpler</h3>
 <p>ECDSA P-256 keys in DNS are 64 bytes (x + y coordinates).
 <code>ring</code> expects uncompressed point format: <code>0x04</code>
 prefix + 64 bytes. One line:</p>
-<div class="sourceCode" id="cb6"><pre
-class="sourceCode rust"><code class="sourceCode rust"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> <span class="kw">mut</span> uncompressed <span class="op">=</span> <span class="dt">Vec</span><span class="pp">::</span>with_capacity(<span class="dv">65</span>)<span class="op">;</span></span>
-<span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a>uncompressed<span class="op">.</span>push(<span class="dv">0x04</span>)<span class="op">;</span></span>
-<span id="cb6-3"><a href="#cb6-3" aria-hidden="true" tabindex="-1"></a>uncompressed<span class="op">.</span>extend_from_slice(public_key)<span class="op">;</span>  <span class="co">// 64 bytes from DNS</span></span></code></pre></div>
+<div class="sourceCode" id="cb4"><pre
+class="sourceCode rust"><code class="sourceCode rust"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> <span class="kw">mut</span> uncompressed <span class="op">=</span> <span class="dt">Vec</span><span class="pp">::</span>with_capacity(<span class="dv">65</span>)<span class="op">;</span></span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a>uncompressed<span class="op">.</span>push(<span class="dv">0x04</span>)<span class="op">;</span></span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a>uncompressed<span class="op">.</span>extend_from_slice(public_key)<span class="op">;</span>  <span class="co">// 64 bytes from DNS</span></span></code></pre></div>
 <p>Signatures are also 64 bytes (r + s), used directly. No format
 conversion needed.</p>
 <h3 id="building-the-signed-data">Building the signed data</h3>
@@ -531,31 +502,11 @@ they’re equal, then <code>a</code> &lt; <code>b</code>. But
 walk the chain and discover every name in the zone. NSEC3 hashes the
 names first (iterated SHA-1 with a salt), so the NSEC3 chain reveals
 hashes, not names.</p>
-<p>The proof is a 3-part closest encloser proof (RFC 5155 §8.4): 1.
-<strong>Closest encloser</strong> — find an ancestor of the queried name
-whose hash exactly matches an NSEC3 owner 2. <strong>Next
-closer</strong> — the name one label longer than the closest encloser
-must fall within an NSEC3 hash range (proving it doesn’t exist) 3.
-<strong>Wildcard denial</strong> — the wildcard at the closest encloser
-(<code>*.closest_encloser</code>) must also fall within an NSEC3 hash
-range</p>
-<div class="sourceCode" id="cb7"><pre
-class="sourceCode rust"><code class="sourceCode rust"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a><span class="co">// Pre-compute hashes for all ancestors</span></span>
-<span id="cb7-2"><a href="#cb7-2" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> i <span class="kw">in</span> <span class="dv">0</span><span class="op">..</span>labels<span class="op">.</span>len() <span class="op">{</span></span>
-<span id="cb7-3"><a href="#cb7-3" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> name<span class="op">:</span> <span class="dt">String</span> <span class="op">=</span> labels[i<span class="op">..</span>]<span class="op">.</span>join(<span class="st">&quot;.&quot;</span>)<span class="op">;</span></span>
-<span id="cb7-4"><a href="#cb7-4" aria-hidden="true" tabindex="-1"></a>    ancestor_hashes<span class="op">.</span>push(nsec3_hash(<span class="op">&amp;</span>name<span class="op">,</span> algorithm<span class="op">,</span> iterations<span class="op">,</span> salt))<span class="op">;</span></span>
-<span id="cb7-5"><a href="#cb7-5" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span>
-<span id="cb7-6"><a href="#cb7-6" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb7-7"><a href="#cb7-7" aria-hidden="true" tabindex="-1"></a><span class="co">// Walk from longest candidate: is this the closest encloser?</span></span>
-<span id="cb7-8"><a href="#cb7-8" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> i <span class="kw">in</span> <span class="dv">1</span><span class="op">..</span>labels<span class="op">.</span>len() <span class="op">{</span></span>
-<span id="cb7-9"><a href="#cb7-9" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> ce_hash <span class="op">=</span> <span class="op">&amp;</span>ancestor_hashes[i]<span class="op">;</span></span>
-<span id="cb7-10"><a href="#cb7-10" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> <span class="op">!</span>decoded<span class="op">.</span>iter()<span class="op">.</span>any(<span class="op">|</span>(oh<span class="op">,</span> _)<span class="op">|</span> oh <span class="op">==</span> ce_hash) <span class="op">{</span> <span class="cf">continue</span><span class="op">;</span> <span class="op">}</span>  <span class="co">// (1)</span></span>
-<span id="cb7-11"><a href="#cb7-11" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> nc_hash <span class="op">=</span> <span class="op">&amp;</span>ancestor_hashes[i <span class="op">-</span> <span class="dv">1</span>]<span class="op">;</span></span>
-<span id="cb7-12"><a href="#cb7-12" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> <span class="op">!</span>nsec3_any_covers(<span class="op">&amp;</span>decoded<span class="op">,</span> nc_hash) <span class="op">{</span> <span class="cf">continue</span><span class="op">;</span> <span class="op">}</span>          <span class="co">// (2)</span></span>
-<span id="cb7-13"><a href="#cb7-13" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> wc <span class="op">=</span> <span class="pp">format!</span>(<span class="st">&quot;*.{}&quot;</span><span class="op">,</span> labels[i<span class="op">..</span>]<span class="op">.</span>join(<span class="st">&quot;.&quot;</span>))<span class="op">;</span></span>
-<span id="cb7-14"><a href="#cb7-14" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> wc_hash <span class="op">=</span> nsec3_hash(<span class="op">&amp;</span>wc<span class="op">,</span> algorithm<span class="op">,</span> iterations<span class="op">,</span> salt)<span class="op">?;</span></span>
-<span id="cb7-15"><a href="#cb7-15" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> nsec3_any_covers(<span class="op">&amp;</span>decoded<span class="op">,</span> <span class="op">&amp;</span>wc_hash) <span class="op">{</span> proven <span class="op">=</span> <span class="cn">true</span><span class="op">;</span> <span class="cf">break</span><span class="op">;</span> <span class="op">}</span>  <span class="co">// (3)</span></span>
-<span id="cb7-16"><a href="#cb7-16" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
+<p>The proof is a 3-part closest encloser proof (RFC 5155 §8.4): find an
+ancestor whose hash matches an NSEC3 owner, prove the next-closer name
+falls within a hash range gap, and prove the wildcard at the closest
+encloser also falls within a gap. All three must hold, or the denial is
+rejected.</p>
 <p>I cap NSEC3 iterations at 500 (RFC 9276 recommends 0). Higher
 iteration counts are a DoS vector — each verification requires
 <code>iterations + 1</code> SHA-1 hashes.</p>
@@ -611,6 +562,40 @@ DNSKEY fetch is needed (for <code>cloudflare.com</code> itself).</p>
 </tbody>
 </table>
 <p>The network fetch dominates. The crypto is noise.</p>
+<h2 id="surviving-hostile-networks">Surviving hostile networks</h2>
+<p>I deployed Numa as my system DNS and switched to a different network.
+Everything broke. Every query: SERVFAIL, 3-second timeout.</p>
+<p>The network probe told the story: the ISP blocks outbound UDP port 53
+to all servers except a handful of whitelisted public resolvers (Google,
+Cloudflare). Root servers, TLD servers, authoritative servers — all
+unreachable over UDP. The ISP forces you onto their DNS or a blessed
+upstream. Recursive resolution is impossible.</p>
+<p>Except TCP port 53 worked fine. And every DNS server is required to
+support TCP (RFC 1035 section 4.2.2). The ISP apparently only filters
+UDP.</p>
+<p>The fix has three parts:</p>
+<p><strong>TCP fallback.</strong> Every outbound query tries UDP first
+(800ms timeout). If UDP fails or the response is truncated, retry
+immediately over TCP. TCP uses a 2-byte length prefix before the DNS
+message — trivial to implement, and it handles DNSSEC responses that
+exceed the UDP payload limit.</p>
+<p><strong>UDP auto-disable.</strong> After 3 consecutive UDP failures,
+flip a global <code>AtomicBool</code> and skip UDP entirely — go
+TCP-first for all queries. This avoids burning 800ms per hop on a
+network where UDP will never work. The flag resets when the network
+changes (detected via LAN IP monitoring).</p>
+<p><strong>Query minimization (RFC 7816).</strong> When querying root
+servers, send only the TLD — <code>com</code> instead of
+<code>secret-project.example.com</code>. Root servers handle trillions
+of queries and are operated by 12 organizations. Minimization reduces
+what they learn from yours.</p>
+<p>The result: on a network that blocks UDP:53, Numa detects the block
+within the first 3 queries, switches to TCP, and resolves normally at
+300-500ms per cold query. Cached queries remain 0ms. No manual config
+change needed — switch networks and it adapts.</p>
+<p>I wouldn’t have found this without dogfooding. The code worked
+perfectly on my home network. It took a real hostile network to expose
+the assumption that UDP always works.</p>
 <h2 id="what-i-learned">What I learned</h2>
 <p><strong>DNSSEC is a verification system, not an encryption
 system.</strong> It proves authenticity — this record was signed by the
@@ -635,24 +620,20 @@ network fetch takes tens of milliseconds. Every optimization that
 matters — TLD priming, DS piggybacking, DNSKEY prefetch — is about
 eliminating a round trip, not speeding up a hash.</p>
 <h2 id="whats-next">What’s next</h2>
-<p>Numa now has 13 feature layers, from basic DNS forwarding through
-full recursive DNSSEC resolution. The immediate roadmap:</p>
 <ul>
-<li><strong>DoT (DNS-over-TLS)</strong> — the last encrypted transport
-we don’t support</li>
 <li><strong><a href="https://github.com/pubky/pkarr">pkarr</a>
 integration</strong> — self-sovereign DNS via the Mainline BitTorrent
-DHT. Ed25519-signed DNS records published without a registrar.</li>
-<li><strong>Global <code>.numa</code> names</strong> — human-readable
-names backed by DHT, not ICANN</li>
+DHT. Your Ed25519 key is your domain. No registrar, no ICANN.</li>
+<li><strong>DoT (DNS-over-TLS)</strong> — the last encrypted transport
+we don’t support</li>
 </ul>
 <p>The code is at <a
-href="https://github.com/razvandimescu/numa">github.com/razvandimescu/numa</a>.
-MIT license. The entire DNSSEC implementation is in <a
+href="https://github.com/razvandimescu/numa">github.com/razvandimescu/numa</a>
+— the DNSSEC validation is in <a
 href="https://github.com/razvandimescu/numa/blob/main/src/dnssec.rs"><code>src/dnssec.rs</code></a>
-(~1,600 lines) and <a
-href="https://github.com/razvandimescu/numa/blob/main/src/recursive.rs"><code>src/recursive.rs</code></a>
-(~600 lines).</p>
+and the recursive resolver in <a
+href="https://github.com/razvandimescu/numa/blob/main/src/recursive.rs"><code>src/recursive.rs</code></a>.
+MIT license.</p>
 </article>
 
 <footer class="blog-footer">

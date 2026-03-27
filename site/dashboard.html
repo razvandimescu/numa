@@ -766,7 +766,7 @@ function applyLogFilter() {
       <td>${e.query_type}</td>
       <td class="domain-cell" title="${e.domain}">${e.domain}${allowBtn}</td>
       <td><span class="path-tag ${e.path}">${e.path}</span></td>
-      <td>${e.dnssec === 'secure' ? '<span title="DNSSEC verified" style="color:var(--emerald);cursor:default;font-size:0.7rem;">&#x2714;</span> ' : ''}${e.rescode}</td>
+      <td>${e.dnssec === 'secure' ? '<svg title="DNSSEC verified" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--emerald)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>' : ''}${e.rescode}</td>
       <td>${e.latency_ms.toFixed(1)}ms</td>
     </tr>`;
   }).join('');
