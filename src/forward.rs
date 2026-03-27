@@ -74,6 +74,37 @@ pub(crate) async fn forward_udp(
     DnsPacket::from_buffer(&mut recv_buffer)
 }
 
+/// DNS over TCP (RFC 1035 §4.2.2): 2-byte length prefix, then the DNS message.
+pub(crate) async fn forward_tcp(
+    query: &DnsPacket,
+    upstream: SocketAddr,
+    timeout_duration: Duration,
+) -> Result<DnsPacket> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    let mut send_buffer = BytePacketBuffer::new();
+    query.write(&mut send_buffer)?;
+    let msg = send_buffer.filled();
+
+    let mut stream = timeout(timeout_duration, TcpStream::connect(upstream)).await??;
+
+    // Write length-prefixed message
+    stream.write_all(&(msg.len() as u16).to_be_bytes()).await?;
+    stream.write_all(msg).await?;
+
+    // Read length-prefixed response
+    let mut len_buf = [0u8; 2];
+    timeout(timeout_duration, stream.read_exact(&mut len_buf)).await??;
+    let resp_len = u16::from_be_bytes(len_buf) as usize;
+
+    let mut data = vec![0u8; resp_len];
+    timeout(timeout_duration, stream.read_exact(&mut data)).await??;
+
+    let mut recv_buffer = BytePacketBuffer::from_bytes(&data);
+    DnsPacket::from_buffer(&mut recv_buffer)
+}
+
 async fn forward_doh(
     query: &DnsPacket,
     url: &str,

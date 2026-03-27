@@ -154,7 +154,6 @@ pub async fn handle_query(
                     &qname,
                     qtype,
                     &ctx.cache,
-                    ctx.timeout,
                     &query,
                     &ctx.root_hints,
                 )
@@ -162,28 +161,14 @@ pub async fn handle_query(
                 {
                     Ok(resp) => (resp, QueryPath::Recursive),
                     Err(e) => {
-                        // Auto-fallback: retry via forward upstream if configured
-                        let upstream = ctx.upstream.lock().unwrap().clone();
-                        match forward_query(&query, &upstream, ctx.timeout).await {
-                            Ok(resp) => {
-                                debug!(
-                                    "{} | {:?} {} | RECURSIVE FALLBACK → FORWARD | {}",
-                                    src_addr, qtype, qname, e
-                                );
-                                ctx.cache.write().unwrap().insert(&qname, qtype, &resp);
-                                (resp, QueryPath::Forwarded)
-                            }
-                            Err(e2) => {
-                                error!(
-                                    "{} | {:?} {} | RECURSIVE+FORWARD FAILED | recursive: {} | forward: {}",
-                                    src_addr, qtype, qname, e, e2
-                                );
-                                (
-                                    DnsPacket::response_from(&query, ResultCode::SERVFAIL),
-                                    QueryPath::UpstreamError,
-                                )
-                            }
-                        }
+                        error!(
+                            "{} | {:?} {} | RECURSIVE ERROR | {}",
+                            src_addr, qtype, qname, e
+                        );
+                        (
+                            DnsPacket::response_from(&query, ResultCode::SERVFAIL),
+                            QueryPath::UpstreamError,
+                        )
                     }
                 }
             } else {

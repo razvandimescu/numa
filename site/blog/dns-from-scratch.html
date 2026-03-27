@@ -301,15 +301,16 @@ parsed and serialized by hand. It started as a weekend learning project,
 became a side project I kept coming back to over 6 years, and eventually
 turned into <a href="https://github.com/razvandimescu/numa">Numa</a> —
 which I now use as my actual system DNS.</p>
-<p>A note on terminology before we go further: Numa is currently a
-<em>forwarding</em> resolver — it parses and caches DNS packets, but
-forwards queries to an upstream (Quad9, Cloudflare, or any DoH provider)
-rather than walking the delegation chain from root servers itself. Think
-of it as a smart proxy that does useful things with your DNS traffic
-locally (caching, ad blocking, overrides, local service domains) before
-forwarding what it can’t answer. Full recursive resolution — where Numa
-talks directly to root and authoritative nameservers — is on the
-roadmap, along with DNSSEC validation.</p>
+<p>A note on terminology: Numa supports two resolution modes.
+<em>Forward</em> mode relays queries to an upstream (Quad9, Cloudflare,
+or any DoH provider). <em>Recursive</em> mode walks the delegation chain
+from root servers itself — iterative queries to root, TLD, and
+authoritative nameservers, with full DNSSEC validation. In both modes,
+Numa does useful things with your DNS traffic locally (caching, ad
+blocking, overrides, local service domains) before resolving what it
+can’t answer. This post covers the wire protocol and forwarding path; <a
+href="/blog/dnssec-from-scratch.html">the next post</a> covers recursive
+resolution and DNSSEC.</p>
 <p>Here’s what surprised me along the way.</p>
 <h2 id="what-does-a-dns-packet-actually-look-like">What does a DNS
 packet actually look like?</h2>
@@ -619,24 +620,23 @@ resolver. The distinction matters to people who work with DNS
 professionally, and being sloppy about it cost me credibility in my
 first community posts.</p>
 <h2 id="whats-next">What’s next</h2>
-<p>Numa is at v0.5.0 with DNS forwarding, caching, ad blocking,
-DNS-over-HTTPS, .numa local domains with auto TLS, and LAN service
-discovery.</p>
-<p>On the roadmap:</p>
+<p><strong>Update (March 2026):</strong> Recursive resolution and DNSSEC
+validation are now shipped. Numa resolves from root nameservers with
+full chain-of-trust verification (RSA/SHA-256, ECDSA P-256, Ed25519) and
+NSEC/NSEC3 authenticated denial of existence.</p>
+<p><strong><a href="/blog/dnssec-from-scratch.html">Read the follow-up:
+Implementing DNSSEC from Scratch in Rust →</a></strong></p>
+<p>Still on the roadmap:</p>
 <ul>
 <li><strong>DoT (DNS-over-TLS)</strong> — DoH was first because it
 passes through captive portals and corporate firewalls (port 443 vs
 853). DoT has less framing overhead, so it’s faster. Both will be
 available.</li>
-<li><strong>Recursive resolution</strong> — walk the delegation chain
-from root servers instead of forwarding. Combined with DNSSEC
-validation, this removes the need to trust any upstream resolver.</li>
 <li><strong><a href="https://github.com/pubky/pkarr">pkarr</a>
 integration</strong> — self-sovereign DNS via the Mainline BitTorrent
 DHT. Publish DNS records signed with your Ed25519 key, no registrar
 needed.</li>
 </ul>
-<p>But those are rabbit holes for future posts.</p>
 <p><a
 href="https://github.com/razvandimescu/numa">github.com/razvandimescu/numa</a></p>
 </article>

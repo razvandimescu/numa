@@ -1300,7 +1300,9 @@ footer .closing {
         <span class="pipeline-arrow">&rarr;</span>
         <div class="pipeline-node"><div class="pipeline-box">Cache</div></div>
         <span class="pipeline-arrow">&rarr;</span>
-        <div class="pipeline-node"><div class="pipeline-box hl-violet">DoH Upstream</div></div>
+        <div class="pipeline-node"><div class="pipeline-box hl-violet">Recursive / Forward (DoH)</div></div>
+        <span class="pipeline-arrow">&rarr;</span>
+        <div class="pipeline-node"><div class="pipeline-box highlight">DNSSEC Validate</div></div>
         <span class="pipeline-arrow">&rarr;</span>
         <div class="pipeline-node"><div class="pipeline-box hl-emerald">Respond</div></div>
       </div>
@@ -1525,6 +1527,14 @@ footer .closing {
           <div class="perf-stat-value amber">0 allocations</div>
           <div class="perf-stat-label">Heap allocations in the I/O path &mdash; 4KB stack buffers, inline serialization</div>
         </div>
+        <div class="perf-stat">
+          <div class="perf-stat-value teal">174 ns</div>
+          <div class="perf-stat-label">ECDSA P-256 signature verification (DNSSEC). RSA/SHA-256: 10.9&micro;s. DS digest: 257ns.</div>
+        </div>
+        <div class="perf-stat">
+          <div class="perf-stat-value emerald">~90 ms</div>
+          <div class="perf-stat-label">Cold-cache DNSSEC validation &mdash; only 1 network fetch needed (TLD chain pre-warmed on startup)</div>
+        </div>
 
         <p class="perf-note">
           Cold queries match system resolver speed &mdash; the bottleneck is upstream RTT, not Numa. We don't claim to be faster when the network is the limit.
@@ -1554,17 +1564,20 @@ footer .closing {
         <dt>DNS Libraries</dt>
         <dd>Zero &mdash; wire protocol parsed from scratch</dd>
 
+        <dt>Resolution Modes</dt>
+        <dd>Recursive (iterative from root hints, CNAME chasing, glue extraction) or Forward (DoH / plain UDP)</dd>
+
+        <dt>DNSSEC</dt>
+        <dd>Chain-of-trust via ring &mdash; RSA/SHA-256, ECDSA P-256, Ed25519. NSEC/NSEC3 denial proofs. EDNS0 DO bit, 1232-byte payload (DNS Flag Day 2020).</dd>
+
         <dt>Dependencies</dt>
-        <dd>18 runtime crates &mdash; tokio, axum, hyper, reqwest (DoH), rcgen + rustls (TLS), socket2 (multicast), serde, and more</dd>
+        <dd>19 runtime crates &mdash; tokio, axum, hyper, ring (DNSSEC), reqwest (DoH), rcgen + rustls (TLS), socket2 (multicast), serde, and more</dd>
 
         <dt>Packet Format</dt>
-        <dd>RFC 1035 compliant, 4096-byte UDP (EDNS)</dd>
+        <dd>RFC 1035 compliant. EDNS0 OPT pseudo-record. Parses A, AAAA, NS, CNAME, MX, SOA, SRV, HTTPS, DNSKEY, DS, RRSIG, NSEC, NSEC3.</dd>
 
         <dt>Concurrency</dt>
         <dd>Arc&lt;ServerCtx&gt; + RwLock for reads, Mutex for writes (never across .await)</dd>
-
-        <dt>Upstream</dt>
-        <dd>DNS-over-HTTPS (DoH) via reqwest + http2 + rustls</dd>
       </dl>
       <div class="code-block reveal reveal-delay-2">
 <span class="comment"># Install (pick one)</span>

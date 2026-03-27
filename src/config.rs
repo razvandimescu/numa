@@ -176,7 +176,7 @@ fn default_upstream_port() -> u16 {
     53
 }
 fn default_timeout_ms() -> u64 {
-    3000
+    5000
 }
 
 #[derive(Deserialize)]

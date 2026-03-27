@@ -447,6 +447,7 @@ async fn network_watch_loop(ctx: Arc<numa::ctx::ServerCtx>) {
                 info!("LAN IP changed: {} → {}", current_ip, new_ip);
                 *current_ip = new_ip;
                 changed = true;
+                numa::recursive::reset_udp_state();
             }
         }
 
