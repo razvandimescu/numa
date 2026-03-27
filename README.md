@@ -4,7 +4,7 @@
 [![crates.io](https://img.shields.io/crates/v/numa.svg)](https://crates.io/crates/numa)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**DNS you own. Everywhere you go.**
+**DNS you own. Everywhere you go.** — [numa.rs](https://numa.rs)
 
 A portable DNS resolver in a single binary. Block ads on any network, name your local services (`frontend.numa`), and override any hostname with auto-revert — all from your laptop, no cloud account or Raspberry Pi required.
 
@@ -42,12 +42,12 @@ sudo ./target/release/numa
 - **Local service proxy** — `https://frontend.numa` instead of `localhost:5173`. Auto-generated TLS certs, WebSocket support for HMR. Like `/etc/hosts` but with auto TLS, a REST API, LAN discovery, and auto-revert.
 - **Path-based routing** — `app.numa/api → :5001`, `app.numa/auth → :5002`. Route URL paths to different backends with optional prefix stripping. Like nginx location blocks, zero config files.
 - **LAN service discovery** — Numa instances on the same network find each other automatically via mDNS. Access a teammate's `api.numa` from your machine. Opt-in via `[lan] enabled = true`.
-- **Developer overrides** — point any hostname to any IP, auto-reverts after N minutes. REST API with 25+ endpoints. Built-in diagnostics: `curl localhost:5380/diagnose/example.com` tells you exactly how any domain resolves.
+- **Developer overrides** — point any hostname to any IP, auto-reverts after N minutes. Full REST API for scripting. Built-in diagnostics: `curl localhost:5380/diagnose/example.com` tells you exactly how any domain resolves.
 - **DNS-over-HTTPS** — upstream queries encrypted via DoH. Your ISP sees HTTPS traffic, not DNS queries. Set `address = "https://9.9.9.9/dns-query"` in `[upstream]` or any DoH provider.
 - **Ad blocking that travels with you** — 385K+ domains blocked via [Hagezi Pro](https://github.com/hagezi/dns-blocklists). Works on any network: coffee shops, hotels, airports.
-- **Sub-millisecond caching** — cached lookups in 0ms. Faster than any public resolver.
+- **Sub-microsecond caching** — 691ns cached round-trip, ~2.0M queries/sec throughput, zero heap allocations in the I/O path. [Benchmarks](bench/).
 - **Live dashboard** — real-time stats, query log, blocking controls, service management. LAN accessibility badges show which services are reachable from other devices.
-- **macOS + Linux** — `numa install` configures system DNS, `numa service start` runs as launchd/systemd service.
+- **macOS, Linux, and Windows** — `numa install` configures system DNS, `numa service start` runs as launchd/systemd service.
 
 ## Local Service Proxy
 
