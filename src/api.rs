@@ -15,6 +15,13 @@ use crate::question::QueryType;
 use crate::stats::QueryPath;
 
 const DASHBOARD_HTML: &str = include_str!("../site/dashboard.html");
+const FONTS_CSS: &str = include_str!("../site/fonts/fonts.css");
+const FONT_DM_SANS: &[u8] = include_bytes!("../site/fonts/dm-sans-latin.woff2");
+const FONT_DM_SANS_ITALIC: &[u8] = include_bytes!("../site/fonts/dm-sans-italic-latin.woff2");
+const FONT_INSTRUMENT: &[u8] = include_bytes!("../site/fonts/instrument-serif-latin.woff2");
+const FONT_INSTRUMENT_ITALIC: &[u8] =
+    include_bytes!("../site/fonts/instrument-serif-italic-latin.woff2");
+const FONT_JETBRAINS: &[u8] = include_bytes!("../site/fonts/jetbrains-mono-latin.woff2");
 
 pub fn router(ctx: Arc<ServerCtx>) -> Router {
     Router::new()
@@ -50,6 +57,27 @@ pub fn router(ctx: Arc<ServerCtx>) -> Router {
         .route("/services/{name}/routes", post(add_route))
         .route("/services/{name}/routes", delete(remove_route))
         .route("/ca.pem", get(serve_ca))
+        .route("/fonts/fonts.css", get(serve_fonts_css))
+        .route(
+            "/fonts/dm-sans-latin.woff2",
+            get(|| async { serve_font(FONT_DM_SANS) }),
+        )
+        .route(
+            "/fonts/dm-sans-italic-latin.woff2",
+            get(|| async { serve_font(FONT_DM_SANS_ITALIC) }),
+        )
+        .route(
+            "/fonts/instrument-serif-latin.woff2",
+            get(|| async { serve_font(FONT_INSTRUMENT) }),
+        )
+        .route(
+            "/fonts/instrument-serif-italic-latin.woff2",
+            get(|| async { serve_font(FONT_INSTRUMENT_ITALIC) }),
+        )
+        .route(
+            "/fonts/jetbrains-mono-latin.woff2",
+            get(|| async { serve_font(FONT_JETBRAINS) }),
+        )
         .with_state(ctx)
 }
 
@@ -842,6 +870,26 @@ async fn serve_ca(State(ctx): State<Arc<ServerCtx>>) -> Result<impl IntoResponse
         ],
         bytes,
     ))
+}
+
+async fn serve_fonts_css() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/css"),
+            (header::CACHE_CONTROL, "public, max-age=31536000"),
+        ],
+        FONTS_CSS,
+    )
+}
+
+fn serve_font(data: &'static [u8]) -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "font/woff2"),
+            (header::CACHE_CONTROL, "public, max-age=31536000"),
+        ],
+        data,
+    )
 }
 
 async fn check_tcp(addr: std::net::SocketAddr) -> bool {
