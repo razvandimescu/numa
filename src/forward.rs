@@ -48,7 +48,7 @@ pub async fn forward_query(
     }
 }
 
-async fn forward_udp(
+pub(crate) async fn forward_udp(
     query: &DnsPacket,
     upstream: SocketAddr,
     timeout_duration: Duration,

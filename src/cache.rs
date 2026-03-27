@@ -5,10 +5,20 @@ use crate::packet::DnsPacket;
 use crate::question::QueryType;
 use crate::record::DnsRecord;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DnssecStatus {
+    Secure,
+    Insecure,
+    Bogus,
+    #[default]
+    Indeterminate,
+}
+
 struct CacheEntry {
     packet: DnsPacket,
     inserted_at: Instant,
     ttl: Duration,
+    dnssec_status: DnssecStatus,
 }
 
 /// DNS cache using a two-level map (domain -> query_type -> entry) so that
@@ -34,6 +44,14 @@ impl DnsCache {
 
     /// Read-only lookup — expired entries are left in place (cleaned up on insert).
     pub fn lookup(&self, domain: &str, qtype: QueryType) -> Option<DnsPacket> {
+        self.lookup_with_status(domain, qtype).map(|(pkt, _)| pkt)
+    }
+
+    pub fn lookup_with_status(
+        &self,
+        domain: &str,
+        qtype: QueryType,
+    ) -> Option<(DnsPacket, DnssecStatus)> {
         let type_map = self.entries.get(domain)?;
         let entry = type_map.get(&qtype)?;
 
@@ -50,10 +68,20 @@ impl DnsCache {
         adjust_ttls(&mut packet.authorities, remaining);
         adjust_ttls(&mut packet.resources, remaining);
 
-        Some(packet)
+        Some((packet, entry.dnssec_status))
     }
 
     pub fn insert(&mut self, domain: &str, qtype: QueryType, packet: &DnsPacket) {
+        self.insert_with_status(domain, qtype, packet, DnssecStatus::Indeterminate);
+    }
+
+    pub fn insert_with_status(
+        &mut self,
+        domain: &str,
+        qtype: QueryType,
+        packet: &DnsPacket,
+        dnssec_status: DnssecStatus,
+    ) {
         if self.entry_count >= self.max_entries {
             self.evict_expired();
             if self.entry_count >= self.max_entries {
@@ -81,6 +109,7 @@ impl DnsCache {
                 packet: packet.clone(),
                 inserted_at: Instant::now(),
                 ttl: Duration::from_secs(min_ttl as u64),
+                dnssec_status,
             },
         );
     }

@@ -178,6 +178,7 @@ struct LanStatsResponse {
 struct QueriesStats {
     total: u64,
     forwarded: u64,
+    recursive: u64,
     cached: u64,
     local: u64,
     overridden: u64,
@@ -477,7 +478,11 @@ async fn stats(State(ctx): State<Arc<ServerCtx>>) -> Json<StatsResponse> {
     let override_count = ctx.overrides.read().unwrap().active_count();
     let bl_stats = ctx.blocklist.read().unwrap().stats();
 
-    let upstream = ctx.upstream.lock().unwrap().to_string();
+    let upstream = if ctx.upstream_mode == crate::config::UpstreamMode::Recursive {
+        "recursive (root hints)".to_string()
+    } else {
+        ctx.upstream.lock().unwrap().to_string()
+    };
 
     Json(StatsResponse {
         uptime_secs: snap.uptime_secs,
@@ -487,6 +492,7 @@ async fn stats(State(ctx): State<Arc<ServerCtx>>) -> Json<StatsResponse> {
         queries: QueriesStats {
             total: snap.total,
             forwarded: snap.forwarded,
+            recursive: snap.recursive,
             cached: snap.cached,
             local: snap.local,
             overridden: snap.overridden,

@@ -8,7 +8,7 @@
 
 A portable DNS resolver in a single binary. Block ads on any network, name your local services (`frontend.numa`), and override any hostname with auto-revert — all from your laptop, no cloud account or Raspberry Pi required.
 
-Built from scratch in Rust. Zero DNS libraries. RFC 1035 wire protocol parsed by hand. One ~8MB binary, no PHP, no web server, no database — everything is embedded.
+Built from scratch in Rust. Zero DNS libraries. RFC 1035 wire protocol parsed by hand. Recursive resolution from root nameservers with full DNSSEC validation (chain-of-trust + NSEC/NSEC3 denial proofs). One ~8MB binary, no PHP, no web server, no database — everything is embedded.
 
 ![Numa dashboard](assets/hero-demo.gif)
 
@@ -135,6 +135,7 @@ bind_addr = "0.0.0.0:53"
 | Path-based routing | No | No | No | No | Prefix match + strip |
 | LAN service discovery | No | No | No | No | mDNS, opt-in |
 | Developer overrides | No | No | No | No | REST API + auto-expiry |
+| Recursive resolver | No | No | Cloud only | Cloud only | From root hints, DNSSEC |
 | Encrypted upstream (DoH) | No (needs cloudflared) | Yes | Cloud only | Cloud only | Native, single binary |
 | Portable (travels with laptop) | No (appliance) | No (appliance) | Cloud only | Cloud only | Single binary |
 | Zero config | Complex | Docker/setup | Yes | Yes | Works out of the box |
@@ -144,8 +145,10 @@ bind_addr = "0.0.0.0:53"
 ## How It Works
 
 ```
-Query → Overrides → .numa TLD → Blocklist → Local Zones → Cache → Upstream
+Query → Overrides → .numa TLD → Blocklist → Local Zones → Cache → Recursive/Forward
 ```
+
+Two resolution modes: **forward** (relay to upstream like Quad9/Cloudflare) or **recursive** (resolve from root nameservers — no upstream dependency). Set `mode = "recursive"` in `[upstream]` to resolve independently.
 
 No DNS libraries — no `hickory-dns`, no `trust-dns`. The wire protocol — headers, labels, compression pointers, record types — is parsed and serialized by hand. Runs on `tokio` + `axum`, async per-query task spawning.
 
@@ -161,6 +164,8 @@ No DNS libraries — no `hickory-dns`, no `trust-dns`. The wire protocol — hea
 - [x] Path-based routing — URL prefix routing with optional strip, REST API
 - [x] LAN service discovery — mDNS auto-discovery (opt-in), cross-machine DNS + proxy
 - [x] DNS-over-HTTPS — encrypted upstream via DoH (Quad9, Cloudflare, any provider)
+- [x] Recursive resolution — resolve from root nameservers, no upstream dependency
+- [x] DNSSEC validation — chain-of-trust, NSEC/NSEC3 denial proofs, AD bit (RSA, ECDSA, Ed25519)
 - [ ] pkarr integration — self-sovereign DNS via Mainline DHT (15M nodes)
 - [ ] Global `.numa` names — self-publish, DHT-backed, first-come-first-served
 

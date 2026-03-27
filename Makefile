@@ -1,6 +1,6 @@
 .PHONY: all build lint fmt check audit test bench clean deploy blog
 
-all: lint build
+all: lint build test
 
 build:
 	cargo build

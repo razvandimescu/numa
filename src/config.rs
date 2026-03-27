@@ -27,6 +27,8 @@ pub struct Config {
     pub services: Vec<ServiceConfig>,
     #[serde(default)]
     pub lan: LanConfig,
+    #[serde(default)]
+    pub dnssec: DnssecConfig,
 }
 
 #[derive(Deserialize)]
@@ -61,24 +63,110 @@ fn default_api_port() -> u16 {
     5380
 }
 
+#[derive(Deserialize, Default, PartialEq, Eq, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+pub enum UpstreamMode {
+    #[default]
+    Forward,
+    Recursive,
+}
+
 #[derive(Deserialize)]
 pub struct UpstreamConfig {
+    #[serde(default)]
+    pub mode: UpstreamMode,
     #[serde(default = "default_upstream_addr")]
     pub address: String,
     #[serde(default = "default_upstream_port")]
     pub port: u16,
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
+    #[serde(default = "default_root_hints")]
+    pub root_hints: Vec<String>,
+    #[serde(default = "default_prime_tlds")]
+    pub prime_tlds: Vec<String>,
 }
 
 impl Default for UpstreamConfig {
     fn default() -> Self {
         UpstreamConfig {
+            mode: UpstreamMode::default(),
             address: default_upstream_addr(),
             port: default_upstream_port(),
             timeout_ms: default_timeout_ms(),
+            root_hints: default_root_hints(),
+            prime_tlds: default_prime_tlds(),
         }
     }
+}
+
+fn default_prime_tlds() -> Vec<String> {
+    vec![
+        // gTLDs
+        "com".into(),
+        "net".into(),
+        "org".into(),
+        "info".into(),
+        "io".into(),
+        "dev".into(),
+        "app".into(),
+        "xyz".into(),
+        "me".into(),
+        // EU + European ccTLDs
+        "eu".into(),
+        "uk".into(),
+        "de".into(),
+        "fr".into(),
+        "nl".into(),
+        "it".into(),
+        "es".into(),
+        "pl".into(),
+        "se".into(),
+        "no".into(),
+        "dk".into(),
+        "fi".into(),
+        "at".into(),
+        "be".into(),
+        "ie".into(),
+        "pt".into(),
+        "cz".into(),
+        "ro".into(),
+        "gr".into(),
+        "hu".into(),
+        "bg".into(),
+        "hr".into(),
+        "sk".into(),
+        "si".into(),
+        "lt".into(),
+        "lv".into(),
+        "ee".into(),
+        "ch".into(),
+        "is".into(),
+        // Other major ccTLDs
+        "co".into(),
+        "br".into(),
+        "au".into(),
+        "ca".into(),
+        "jp".into(),
+    ]
+}
+
+fn default_root_hints() -> Vec<String> {
+    vec![
+        "198.41.0.4".into(),     // a.root-servers.net
+        "199.9.14.201".into(),   // b.root-servers.net
+        "192.33.4.12".into(),    // c.root-servers.net
+        "199.7.91.13".into(),    // d.root-servers.net
+        "192.203.230.10".into(), // e.root-servers.net
+        "192.5.5.241".into(),    // f.root-servers.net
+        "192.112.36.4".into(),   // g.root-servers.net
+        "198.97.190.53".into(),  // h.root-servers.net
+        "192.36.148.17".into(),  // i.root-servers.net
+        "192.58.128.30".into(),  // j.root-servers.net
+        "193.0.14.129".into(),   // k.root-servers.net
+        "199.7.83.42".into(),    // l.root-servers.net
+        "202.12.27.33".into(),   // m.root-servers.net
+    ]
 }
 
 fn default_upstream_addr() -> String {
@@ -248,6 +336,14 @@ fn default_lan_broadcast_interval() -> u64 {
 }
 fn default_lan_peer_timeout() -> u64 {
     90
+}
+
+#[derive(Deserialize, Clone, Default)]
+pub struct DnssecConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub strict: bool,
 }
 
 #[cfg(test)]

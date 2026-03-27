@@ -4,12 +4,39 @@ api_port = 5380
 # api_bind_addr = "127.0.0.1"  # default; set to "0.0.0.0" for LAN dashboard access
 
 # [upstream]
-# address = ""                                  # auto-detect from system resolver (default)
+# mode = "forward"                              # "forward" (default) — relay to upstream
+#                                               # "recursive" — resolve from root hints (no address needed)
 # address = "https://dns.quad9.net/dns-query"   # DNS-over-HTTPS (encrypted)
 # address = "https://cloudflare-dns.com/dns-query"  # Cloudflare DoH
 # address = "9.9.9.9"                           # plain UDP
-# port = 53                                     # only used for plain UDP
+# port = 53                                     # only for forward mode, plain UDP
 # timeout_ms = 3000
+# root_hints = [                                # only used in recursive mode
+#     "198.41.0.4",      # a.root-servers.net (Verisign)
+#     "199.9.14.201",    # b.root-servers.net (USC-ISI)
+#     "192.33.4.12",     # c.root-servers.net (Cogent)
+#     "199.7.91.13",     # d.root-servers.net (UMD)
+#     "192.203.230.10",  # e.root-servers.net (NASA)
+#     "192.5.5.241",     # f.root-servers.net (ISC)
+#     "192.112.36.4",    # g.root-servers.net (US DoD)
+#     "198.97.190.53",   # h.root-servers.net (US Army)
+#     "192.36.148.17",   # i.root-servers.net (Netnod)
+#     "192.58.128.30",   # j.root-servers.net (Verisign)
+#     "193.0.14.129",    # k.root-servers.net (RIPE NCC)
+#     "199.7.83.42",     # l.root-servers.net (ICANN)
+#     "202.12.27.33",    # m.root-servers.net (WIDE)
+# ]
+# prime_tlds = [                                # TLDs to pre-warm on startup (recursive mode)
+#     "com", "net", "org", "info",              # gTLDs
+#     "io", "dev", "app", "xyz", "me",
+#     "eu", "uk", "de", "fr", "nl",             # EU + European ccTLDs
+#     "it", "es", "pl", "se", "no",
+#     "dk", "fi", "at", "be", "ie",
+#     "pt", "cz", "ro", "gr", "hu",
+#     "bg", "hr", "sk", "si", "lt",
+#     "lv", "ee", "ch", "is",
+#     "co", "br", "au", "ca", "jp",             # other major ccTLDs
+# ]
 
 # [blocking]
 # enabled = true               # set to false to disable ad blocking
@@ -50,6 +77,11 @@ tld = "numa"
 # record_type = "A"
 # value = "127.0.0.1"
 # ttl = 60
+
+# DNSSEC signature validation (requires mode = "recursive")
+# [dnssec]
+# enabled = false             # opt-in: verify chain of trust from root KSK
+# strict = false              # true = SERVFAIL on bogus signatures
 
 # LAN service discovery via mDNS (disabled by default — no network traffic unless enabled)
 # [lan]

@@ -11,7 +11,7 @@ use tokio::net::UdpSocket;
 use crate::blocklist::BlocklistStore;
 use crate::buffer::BytePacketBuffer;
 use crate::cache::DnsCache;
-use crate::config::ZoneMap;
+use crate::config::{UpstreamMode, ZoneMap};
 use crate::forward::{forward_query, Upstream};
 use crate::header::ResultCode;
 use crate::lan::PeerStore;
@@ -27,6 +27,7 @@ use crate::system_dns::ForwardingRule;
 pub struct ServerCtx {
     pub socket: UdpSocket,
     pub zone_map: ZoneMap,
+    /// std::sync::RwLock (not tokio) — locks must never be held across .await points.
     pub cache: RwLock<DnsCache>,
     pub stats: Mutex<ServerStats>,
     pub overrides: RwLock<OverrideStore>,
@@ -48,6 +49,10 @@ pub struct ServerCtx {
     pub config_dir: PathBuf,
     pub data_dir: PathBuf,
     pub tls_config: Option<ArcSwap<ServerConfig>>,
+    pub upstream_mode: UpstreamMode,
+    pub root_hints: Vec<SocketAddr>,
+    pub dnssec_enabled: bool,
+    pub dnssec_strict: bool,
 }
 
 pub async fn handle_query(
@@ -136,11 +141,51 @@ pub async fn handle_query(
             resp.answers = records.clone();
             (resp, QueryPath::Local)
         } else {
-            let cached = ctx.cache.read().unwrap().lookup(&qname, qtype);
-            if let Some(cached) = cached {
+            let cached = ctx.cache.read().unwrap().lookup_with_status(&qname, qtype);
+            if let Some((cached, cached_dnssec)) = cached {
                 let mut resp = cached;
                 resp.header.id = query.header.id;
+                if cached_dnssec == crate::cache::DnssecStatus::Secure {
+                    resp.header.authed_data = true;
+                }
                 (resp, QueryPath::Cached)
+            } else if ctx.upstream_mode == UpstreamMode::Recursive {
+                match crate::recursive::resolve_recursive(
+                    &qname,
+                    qtype,
+                    &ctx.cache,
+                    ctx.timeout,
+                    &query,
+                    &ctx.root_hints,
+                )
+                .await
+                {
+                    Ok(resp) => (resp, QueryPath::Recursive),
+                    Err(e) => {
+                        // Auto-fallback: retry via forward upstream if configured
+                        let upstream = ctx.upstream.lock().unwrap().clone();
+                        match forward_query(&query, &upstream, ctx.timeout).await {
+                            Ok(resp) => {
+                                debug!(
+                                    "{} | {:?} {} | RECURSIVE FALLBACK → FORWARD | {}",
+                                    src_addr, qtype, qname, e
+                                );
+                                ctx.cache.write().unwrap().insert(&qname, qtype, &resp);
+                                (resp, QueryPath::Forwarded)
+                            }
+                            Err(e2) => {
+                                error!(
+                                    "{} | {:?} {} | RECURSIVE+FORWARD FAILED | recursive: {} | forward: {}",
+                                    src_addr, qtype, qname, e, e2
+                                );
+                                (
+                                    DnsPacket::response_from(&query, ResultCode::SERVFAIL),
+                                    QueryPath::UpstreamError,
+                                )
+                            }
+                        }
+                    }
+                }
             } else {
                 let upstream =
                     match crate::system_dns::match_forwarding_rule(&qname, &ctx.forwarding_rules) {
@@ -166,6 +211,52 @@ pub async fn handle_query(
             }
         }
     };
+
+    let client_do = query.edns.as_ref().is_some_and(|e| e.do_bit);
+    let mut response = response;
+
+    // DNSSEC validation (recursive/forwarded responses only)
+    if ctx.dnssec_enabled && path == QueryPath::Recursive {
+        let (status, vstats) =
+            crate::dnssec::validate_response(&response, &ctx.cache, &ctx.root_hints).await;
+
+        debug!(
+            "DNSSEC | {} | {:?} | {}ms | dnskey_hit={} dnskey_fetch={} ds_hit={} ds_fetch={}",
+            qname,
+            status,
+            vstats.elapsed_ms,
+            vstats.dnskey_cache_hits,
+            vstats.dnskey_fetches,
+            vstats.ds_cache_hits,
+            vstats.ds_fetches,
+        );
+
+        if status == crate::cache::DnssecStatus::Secure {
+            response.header.authed_data = true;
+        }
+
+        if status == crate::cache::DnssecStatus::Bogus && ctx.dnssec_strict {
+            response = DnsPacket::response_from(&query, ResultCode::SERVFAIL);
+        }
+
+        ctx.cache
+            .write()
+            .unwrap()
+            .insert_with_status(&qname, qtype, &response, status);
+    }
+
+    // Strip DNSSEC records if client didn't set DO bit
+    if !client_do {
+        strip_dnssec_records(&mut response);
+    }
+
+    // Echo EDNS back if client sent it
+    if query.edns.is_some() {
+        response.edns = Some(crate::packet::EdnsOpt {
+            do_bit: client_do,
+            ..Default::default()
+        });
+    }
 
     let elapsed = start.elapsed();
 
@@ -219,4 +310,17 @@ pub async fn handle_query(
     });
 
     Ok(())
+}
+
+fn is_dnssec_record(r: &DnsRecord) -> bool {
+    matches!(
+        r.query_type(),
+        QueryType::RRSIG | QueryType::DNSKEY | QueryType::DS | QueryType::NSEC | QueryType::NSEC3
+    )
+}
+
+fn strip_dnssec_records(pkt: &mut DnsPacket) {
+    pkt.answers.retain(|r| !is_dnssec_record(r));
+    pkt.authorities.retain(|r| !is_dnssec_record(r));
+    pkt.resources.retain(|r| !is_dnssec_record(r));
 }

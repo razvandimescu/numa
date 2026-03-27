@@ -1154,6 +1154,7 @@ dependencies = [
  "log",
  "rcgen",
  "reqwest",
+ "ring",
  "rustls",
  "serde",
  "serde_json",

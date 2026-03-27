@@ -4,10 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Numa — DNS you own. Everywhere you go.</title>
-<meta name="description" content="DNS you own. Block ads, override DNS for development, name your local services with .numa domains, cache for speed. A single portable binary built from scratch in Rust.">
+<meta name="description" content="DNS you own. Recursive resolver with full DNSSEC validation, ad blocking, .numa local domains, developer overrides. A single portable binary built from scratch in Rust.">
 <link rel="canonical" href="https://numa.rs">
 <meta property="og:title" content="Numa — DNS you own. Everywhere you go.">
-<meta property="og:description" content="Portable DNS resolver with ad blocking, encrypted upstream, .numa local domains, and developer overrides. Built from scratch in Rust.">
+<meta property="og:description" content="Recursive DNS resolver with full DNSSEC validation, ad blocking, .numa local domains, and developer overrides. Built from scratch in Rust.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://numa.rs">
 <link rel="stylesheet" href="/fonts/fonts.css">
@@ -1232,18 +1232,19 @@ footer .closing {
     <div class="reveal">
       <div class="section-label">How It Works</div>
       <h2>What it does today</h2>
-      <p class="lead">A portable DNS proxy with ad blocking, encrypted upstream, local service domains, and a REST API. Everything runs in a single binary.</p>
+      <p class="lead">A recursive DNS resolver with DNSSEC validation, ad blocking, local service domains, and a REST API. Everything runs in a single binary.</p>
     </div>
     <div class="layers-grid">
       <div class="layer-card reveal reveal-delay-1">
         <div class="layer-badge">Layer 1</div>
-        <h3>Block &amp; Protect</h3>
+        <h3>Resolve &amp; Protect</h3>
         <ul>
+          <li>Recursive resolution &mdash; resolve from root nameservers, no upstream needed</li>
+          <li>DNSSEC validation &mdash; chain-of-trust + NSEC/NSEC3 denial proofs (RSA, ECDSA, Ed25519)</li>
           <li>Ad &amp; tracker blocking &mdash; 385K+ domains, zero config</li>
-          <li>DNS-over-HTTPS &mdash; encrypted upstream (Quad9, Cloudflare, any provider)</li>
+          <li>DNS-over-HTTPS &mdash; encrypted upstream as alternative to recursive mode</li>
           <li>TTL-aware caching (sub-ms lookups)</li>
-          <li>Single binary, portable &mdash; your DNS travels with you</li>
-          <li>macOS, Linux, and Windows</li>
+          <li>Single binary, portable &mdash; macOS, Linux, and Windows</li>
         </ul>
       </div>
       <div class="layer-card reveal reveal-delay-2">
@@ -1331,6 +1332,14 @@ footer .closing {
           </tr>
         </thead>
         <tbody>
+          <tr>
+            <td>Recursive resolver</td>
+            <td class="cross">No (needs Unbound)</td>
+            <td class="cross">Cloud only</td>
+            <td class="cross">Cloud only</td>
+            <td class="cross">No</td>
+            <td class="check">Root hints + full DNSSEC</td>
+          </tr>
           <tr>
             <td>Ad &amp; tracker blocking</td>
             <td class="check">Yes</td>
@@ -1609,16 +1618,24 @@ footer .closing {
         <span class="phase">Phase 5</span>
         <span class="phase-desc">DNS-over-HTTPS &mdash; encrypted upstream, HTTP/2 connection pooling</span>
       </div>
-      <div class="roadmap-item phase-teal">
+      <div class="roadmap-item done">
         <span class="phase">Phase 6</span>
-        <span class="phase-desc">pkarr integration &mdash; self-sovereign DNS via Mainline DHT, no registrar needed</span>
+        <span class="phase-desc">Recursive resolution &mdash; resolve from root nameservers, no upstream dependency</span>
       </div>
-      <div class="roadmap-item phase-teal">
+      <div class="roadmap-item done">
         <span class="phase">Phase 7</span>
-        <span class="phase-desc">Global .numa names &mdash; self-publish, DHT-backed, first-come-first-served</span>
+        <span class="phase-desc">DNSSEC validation &mdash; chain-of-trust, NSEC/NSEC3 denial proofs, RSA + ECDSA + Ed25519</span>
       </div>
       <div class="roadmap-item phase-teal">
         <span class="phase">Phase 8</span>
+        <span class="phase-desc">pkarr integration &mdash; self-sovereign DNS via Mainline DHT, no registrar needed</span>
+      </div>
+      <div class="roadmap-item phase-teal">
+        <span class="phase">Phase 9</span>
+        <span class="phase-desc">Global .numa names &mdash; self-publish, DHT-backed, first-come-first-served</span>
+      </div>
+      <div class="roadmap-item phase-teal">
+        <span class="phase">Phase 10</span>
         <span class="phase-desc">.onion bridge &mdash; human-readable Tor naming via Ed25519 same-key binding</span>
       </div>
     </div>
