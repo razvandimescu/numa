@@ -64,6 +64,9 @@ impl OverrideStore {
         ttl: u32,
         duration_secs: Option<u64>,
     ) -> Result<QueryType> {
+        // Clean up expired entries on write
+        self.entries.retain(|_, e| !e.is_expired());
+
         let domain_lower = domain.to_lowercase();
         let (qtype, record) = parse_target(&domain_lower, target, ttl)?;
 
@@ -84,10 +87,10 @@ impl OverrideStore {
     }
 
     /// Hot path: assumes `domain` is already lowercased (the parser does this).
-    pub fn lookup(&mut self, domain: &str) -> Option<DnsRecord> {
+    /// Read-only — expired entries are left in place (cleaned up on write operations).
+    pub fn lookup(&self, domain: &str) -> Option<DnsRecord> {
         let entry = self.entries.get(domain)?;
         if entry.is_expired() {
-            self.entries.remove(domain);
             return None;
         }
         Some(entry.record.clone())

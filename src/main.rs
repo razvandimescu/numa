@@ -1,5 +1,5 @@
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
@@ -170,14 +170,14 @@ async fn main() -> numa::Result<()> {
     let ctx = Arc::new(ServerCtx {
         socket: UdpSocket::bind(&config.server.bind_addr).await?,
         zone_map: build_zone_map(&config.zones)?,
-        cache: Mutex::new(DnsCache::new(
+        cache: RwLock::new(DnsCache::new(
             config.cache.max_entries,
             config.cache.min_ttl,
             config.cache.max_ttl,
         )),
         stats: Mutex::new(ServerStats::new()),
-        overrides: Mutex::new(OverrideStore::new()),
-        blocklist: Mutex::new(blocklist),
+        overrides: RwLock::new(OverrideStore::new()),
+        blocklist: RwLock::new(blocklist),
         query_log: Mutex::new(QueryLog::new(1000)),
         services: Mutex::new(service_store),
         lan_peers: Mutex::new(numa::lan::PeerStore::new(config.lan.peer_timeout_secs)),
@@ -541,7 +541,7 @@ async fn load_blocklists(ctx: &ServerCtx, lists: &[String]) {
 
     // Swap under lock — sub-microsecond
     ctx.blocklist
-        .lock()
+        .write()
         .unwrap()
         .swap_domains(all_domains, sources);
     info!(

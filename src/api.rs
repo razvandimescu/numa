@@ -220,7 +220,7 @@ async fn create_overrides(
         })
         .collect::<Result<Vec<_>, (StatusCode, String)>>()?;
 
-    let mut store = ctx.overrides.lock().unwrap();
+    let mut store = ctx.overrides.write().unwrap();
     let mut responses = Vec::with_capacity(parsed.len());
 
     for (domain, target, ttl, duration_secs) in parsed {
@@ -241,7 +241,7 @@ async fn create_overrides(
 }
 
 async fn list_overrides(State(ctx): State<Arc<ServerCtx>>) -> Json<Vec<OverrideResponse>> {
-    let store = ctx.overrides.lock().unwrap();
+    let store = ctx.overrides.read().unwrap();
     let entries: Vec<OverrideResponse> = store
         .list()
         .into_iter()
@@ -254,7 +254,7 @@ async fn get_override(
     State(ctx): State<Arc<ServerCtx>>,
     Path(domain): Path<String>,
 ) -> Result<Json<OverrideResponse>, StatusCode> {
-    let store = ctx.overrides.lock().unwrap();
+    let store = ctx.overrides.read().unwrap();
     let entry = store.get(&domain).ok_or(StatusCode::NOT_FOUND)?;
     Ok(Json(OverrideResponse::from(entry)))
 }
@@ -263,7 +263,7 @@ async fn remove_override(
     State(ctx): State<Arc<ServerCtx>>,
     Path(domain): Path<String>,
 ) -> StatusCode {
-    let mut store = ctx.overrides.lock().unwrap();
+    let mut store = ctx.overrides.write().unwrap();
     if store.remove(&domain) {
         StatusCode::NO_CONTENT
     } else {
@@ -272,7 +272,7 @@ async fn remove_override(
 }
 
 async fn clear_overrides(State(ctx): State<Arc<ServerCtx>>) -> StatusCode {
-    ctx.overrides.lock().unwrap().clear();
+    ctx.overrides.write().unwrap().clear();
     StatusCode::NO_CONTENT
 }
 
@@ -280,7 +280,7 @@ async fn load_environment(
     State(ctx): State<Arc<ServerCtx>>,
     Json(req): Json<EnvironmentRequest>,
 ) -> Result<(StatusCode, Json<EnvironmentResponse>), (StatusCode, String)> {
-    let mut store = ctx.overrides.lock().unwrap();
+    let mut store = ctx.overrides.write().unwrap();
 
     for entry in &req.overrides {
         let duration = entry.duration_secs.or(req.duration_secs);
@@ -307,7 +307,7 @@ async fn diagnose(
 
     // Check overrides
     {
-        let store = ctx.overrides.lock().unwrap();
+        let store = ctx.overrides.read().unwrap();
         let entry = store.get(&domain_lower);
         steps.push(DiagnoseStep {
             source: "override".to_string(),
@@ -319,7 +319,7 @@ async fn diagnose(
 
     // Check blocklist
     {
-        let bl = ctx.blocklist.lock().unwrap();
+        let bl = ctx.blocklist.read().unwrap();
         let blocked = bl.is_blocked(&domain_lower);
         steps.push(DiagnoseStep {
             source: "blocklist".to_string(),
@@ -345,7 +345,7 @@ async fn diagnose(
 
     // Check cache
     {
-        let mut cache = ctx.cache.lock().unwrap();
+        let cache = ctx.cache.read().unwrap();
         let cached = cache.lookup(&domain_lower, qtype);
         steps.push(DiagnoseStep {
             source: "cache".to_string(),
@@ -443,11 +443,11 @@ async fn query_log(
 async fn stats(State(ctx): State<Arc<ServerCtx>>) -> Json<StatsResponse> {
     let snap = ctx.stats.lock().unwrap().snapshot();
     let (cache_len, cache_max) = {
-        let cache = ctx.cache.lock().unwrap();
+        let cache = ctx.cache.read().unwrap();
         (cache.len(), cache.max_entries())
     };
-    let override_count = ctx.overrides.lock().unwrap().active_count();
-    let bl_stats = ctx.blocklist.lock().unwrap().stats();
+    let override_count = ctx.overrides.read().unwrap().active_count();
+    let bl_stats = ctx.blocklist.read().unwrap().stats();
 
     let upstream = ctx.upstream.lock().unwrap().to_string();
 
@@ -486,7 +486,7 @@ async fn stats(State(ctx): State<Arc<ServerCtx>>) -> Json<StatsResponse> {
 }
 
 async fn list_cache(State(ctx): State<Arc<ServerCtx>>) -> Json<Vec<CacheEntryResponse>> {
-    let cache = ctx.cache.lock().unwrap();
+    let cache = ctx.cache.read().unwrap();
     let entries: Vec<CacheEntryResponse> = cache
         .list()
         .into_iter()
@@ -500,7 +500,7 @@ async fn list_cache(State(ctx): State<Arc<ServerCtx>>) -> Json<Vec<CacheEntryRes
 }
 
 async fn flush_cache(State(ctx): State<Arc<ServerCtx>>) -> StatusCode {
-    ctx.cache.lock().unwrap().clear();
+    ctx.cache.write().unwrap().clear();
     StatusCode::NO_CONTENT
 }
 
@@ -508,7 +508,7 @@ async fn flush_cache_domain(
     State(ctx): State<Arc<ServerCtx>>,
     Path(domain): Path<String>,
 ) -> StatusCode {
-    ctx.cache.lock().unwrap().remove(&domain);
+    ctx.cache.write().unwrap().remove(&domain);
     StatusCode::NO_CONTENT
 }
 
@@ -519,7 +519,7 @@ async fn health() -> Json<serde_json::Value> {
 // --- Blocking handlers ---
 
 async fn blocking_stats(State(ctx): State<Arc<ServerCtx>>) -> Json<serde_json::Value> {
-    let stats = ctx.blocklist.lock().unwrap().stats();
+    let stats = ctx.blocklist.read().unwrap().stats();
     Json(serde_json::json!({
         "enabled": stats.enabled,
         "paused": stats.paused,
@@ -539,7 +539,7 @@ async fn blocking_toggle(
     State(ctx): State<Arc<ServerCtx>>,
     Json(req): Json<BlockingToggleRequest>,
 ) -> Json<serde_json::Value> {
-    ctx.blocklist.lock().unwrap().set_enabled(req.enabled);
+    ctx.blocklist.write().unwrap().set_enabled(req.enabled);
     Json(serde_json::json!({ "enabled": req.enabled }))
 }
 
@@ -557,12 +557,12 @@ async fn blocking_pause(
     State(ctx): State<Arc<ServerCtx>>,
     Json(req): Json<BlockingPauseRequest>,
 ) -> Json<serde_json::Value> {
-    ctx.blocklist.lock().unwrap().pause(req.minutes * 60);
+    ctx.blocklist.write().unwrap().pause(req.minutes * 60);
     Json(serde_json::json!({ "paused_minutes": req.minutes }))
 }
 
 async fn blocking_unpause(State(ctx): State<Arc<ServerCtx>>) -> Json<serde_json::Value> {
-    ctx.blocklist.lock().unwrap().unpause();
+    ctx.blocklist.write().unwrap().unpause();
     Json(serde_json::json!({ "paused": false }))
 }
 
@@ -570,12 +570,12 @@ async fn blocking_check(
     State(ctx): State<Arc<ServerCtx>>,
     Path(domain): Path<String>,
 ) -> Json<crate::blocklist::BlockCheckResult> {
-    let result = ctx.blocklist.lock().unwrap().check(&domain);
+    let result = ctx.blocklist.read().unwrap().check(&domain);
     Json(result)
 }
 
 async fn blocking_allowlist(State(ctx): State<Arc<ServerCtx>>) -> Json<Vec<String>> {
-    let list = ctx.blocklist.lock().unwrap().allowlist();
+    let list = ctx.blocklist.read().unwrap().allowlist();
     Json(list)
 }
 
@@ -588,7 +588,7 @@ async fn blocking_allowlist_add(
     State(ctx): State<Arc<ServerCtx>>,
     Json(req): Json<AllowlistRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    ctx.blocklist.lock().unwrap().add_to_allowlist(&req.domain);
+    ctx.blocklist.write().unwrap().add_to_allowlist(&req.domain);
     (
         StatusCode::CREATED,
         Json(serde_json::json!({ "allowed": req.domain })),
@@ -599,7 +599,12 @@ async fn blocking_allowlist_remove(
     State(ctx): State<Arc<ServerCtx>>,
     Path(domain): Path<String>,
 ) -> StatusCode {
-    if ctx.blocklist.lock().unwrap().remove_from_allowlist(&domain) {
+    if ctx
+        .blocklist
+        .write()
+        .unwrap()
+        .remove_from_allowlist(&domain)
+    {
         StatusCode::NO_CONTENT
     } else {
         StatusCode::NOT_FOUND

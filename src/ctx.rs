@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use arc_swap::ArcSwap;
@@ -27,10 +27,10 @@ use crate::system_dns::ForwardingRule;
 pub struct ServerCtx {
     pub socket: UdpSocket,
     pub zone_map: ZoneMap,
-    pub cache: Mutex<DnsCache>,
+    pub cache: RwLock<DnsCache>,
     pub stats: Mutex<ServerStats>,
-    pub overrides: Mutex<OverrideStore>,
-    pub blocklist: Mutex<BlocklistStore>,
+    pub overrides: RwLock<OverrideStore>,
+    pub blocklist: RwLock<BlocklistStore>,
     pub query_log: Mutex<QueryLog>,
     pub services: Mutex<ServiceStore>,
     pub lan_peers: Mutex<PeerStore>,
@@ -73,7 +73,7 @@ pub async fn handle_query(
     // Pipeline: overrides -> .tld interception -> blocklist -> local zones -> cache -> upstream
     // Each lock is scoped to avoid holding MutexGuard across await points.
     let (response, path) = {
-        let override_record = ctx.overrides.lock().unwrap().lookup(&qname);
+        let override_record = ctx.overrides.read().unwrap().lookup(&qname);
         if let Some(record) = override_record {
             let mut resp = DnsPacket::response_from(&query, ResultCode::NOERROR);
             resp.answers.push(record);
@@ -116,7 +116,7 @@ pub async fn handle_query(
                 }),
             }
             (resp, QueryPath::Local)
-        } else if ctx.blocklist.lock().unwrap().is_blocked(&qname) {
+        } else if ctx.blocklist.read().unwrap().is_blocked(&qname) {
             let mut resp = DnsPacket::response_from(&query, ResultCode::NOERROR);
             match qtype {
                 QueryType::AAAA => resp.answers.push(DnsRecord::AAAA {
@@ -136,7 +136,7 @@ pub async fn handle_query(
             resp.answers = records.clone();
             (resp, QueryPath::Local)
         } else {
-            let cached = ctx.cache.lock().unwrap().lookup(&qname, qtype);
+            let cached = ctx.cache.read().unwrap().lookup(&qname, qtype);
             if let Some(cached) = cached {
                 let mut resp = cached;
                 resp.header.id = query.header.id;
@@ -149,7 +149,7 @@ pub async fn handle_query(
                     };
                 match forward_query(&query, &upstream, ctx.timeout).await {
                     Ok(resp) => {
-                        ctx.cache.lock().unwrap().insert(&qname, qtype, &resp);
+                        ctx.cache.write().unwrap().insert(&qname, qtype, &resp);
                         (resp, QueryPath::Forwarded)
                     }
                     Err(e) => {
