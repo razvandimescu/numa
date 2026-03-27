@@ -46,7 +46,7 @@ impl DnsPacket {
         result.header.read(buffer)?;
 
         for _ in 0..result.header.questions {
-            let mut question = DnsQuestion::new("".to_string(), QueryType::UNKNOWN(0));
+            let mut question = DnsQuestion::new(String::with_capacity(64), QueryType::UNKNOWN(0));
             question.read(buffer)?;
             result.questions.push(question);
         }
@@ -68,34 +68,36 @@ impl DnsPacket {
     }
 
     pub fn write(&self, buffer: &mut BytePacketBuffer) -> Result<()> {
-        // Filter out UNKNOWN records (e.g. EDNS OPT) that we can't re-serialize
-        let answers: Vec<_> = self.answers.iter().filter(|r| !r.is_unknown()).collect();
-        let authorities: Vec<_> = self
-            .authorities
-            .iter()
-            .filter(|r| !r.is_unknown())
-            .collect();
-        let resources: Vec<_> = self.resources.iter().filter(|r| !r.is_unknown()).collect();
+        // Count known records without allocating filter Vecs
+        let answer_count = self.answers.iter().filter(|r| !r.is_unknown()).count() as u16;
+        let auth_count = self.authorities.iter().filter(|r| !r.is_unknown()).count() as u16;
+        let res_count = self.resources.iter().filter(|r| !r.is_unknown()).count() as u16;
 
         let mut header = self.header.clone();
         header.questions = self.questions.len() as u16;
-        header.answers = answers.len() as u16;
-        header.authoritative_entries = authorities.len() as u16;
-        header.resource_entries = resources.len() as u16;
+        header.answers = answer_count;
+        header.authoritative_entries = auth_count;
+        header.resource_entries = res_count;
 
         header.write(buffer)?;
 
         for question in &self.questions {
             question.write(buffer)?;
         }
-        for rec in answers {
-            rec.write(buffer)?;
+        for rec in &self.answers {
+            if !rec.is_unknown() {
+                rec.write(buffer)?;
+            }
         }
-        for rec in authorities {
-            rec.write(buffer)?;
+        for rec in &self.authorities {
+            if !rec.is_unknown() {
+                rec.write(buffer)?;
+            }
         }
-        for rec in resources {
-            rec.write(buffer)?;
+        for rec in &self.resources {
+            if !rec.is_unknown() {
+                rec.write(buffer)?;
+            }
         }
 
         Ok(())
