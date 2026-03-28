@@ -79,6 +79,28 @@ wait_for_api() {
   done
 }
 
+wait_for_priming() {
+  echo -n "Waiting for TLD priming..."
+  local prev=0
+  local stable=0
+  for _ in $(seq 1 60); do
+    local entries
+    entries=$(curl -s "$API/stats" | python3 -c "import sys,json; print(json.load(sys.stdin)['cache']['entries'])" 2>/dev/null || echo 0)
+    if [ "$entries" -gt 0 ] && [ "$entries" = "$prev" ]; then
+      stable=$((stable + 1))
+      if [ $stable -ge 3 ]; then
+        echo " done ($entries cache entries)."
+        return
+      fi
+    else
+      stable=0
+    fi
+    prev="$entries"
+    sleep 1
+  done
+  echo " timeout (cache: $prev entries)."
+}
+
 # restart_numa <config_toml_body>
 # Writes config to a temp file, stops numa (launchd or manual), starts with that config.
 restart_numa() {
@@ -101,7 +123,7 @@ restart_numa() {
 
   sudo "$NUMA_BIN" "$tmpconf" &
   wait_for_api
-  sleep 4  # let TLD priming finish
+  wait_for_priming
   echo "numa ready (pid $(pgrep numa | head -1), config: $tmpconf)."
 }
 
@@ -269,6 +291,7 @@ TOML
     echo "--- Full benchmark (cold → warm → SRTT-only) ---"
     echo
 
+    wait_for_priming
     flush_cache
     sleep 0.5
     query_all "Pass 1: Cold SRTT + Cold cache"

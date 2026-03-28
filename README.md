@@ -30,11 +30,34 @@ dig @127.0.0.1 ads.google.com       # ✗ blocked → 0.0.0.0
 
 Open the dashboard: **http://numa.numa** (or `http://localhost:5380`)
 
-Or build from source:
+### Set as system resolver
+
+```bash
+# Point your system DNS to Numa (saves originals for uninstall)
+sudo numa install
+
+# Run as a persistent service (auto-starts on boot, restarts if killed)
+sudo numa service start
+```
+
+To uninstall: `sudo numa service stop` removes the service, `sudo numa uninstall` restores your original DNS.
+
+### Upgrade
+
+```bash
+# From Homebrew
+brew upgrade numa
+
+# From source
+make deploy    # builds release, copies binary, re-signs, restarts service
+```
+
+### Build from source
+
 ```bash
 git clone https://github.com/razvandimescu/numa.git && cd numa
 cargo build --release
-sudo ./target/release/numa
+sudo cp target/release/numa /usr/local/bin/numa
 ```
 
 ## Why Numa
