@@ -889,11 +889,15 @@ fn group_rrsets(records: &[DnsRecord]) -> Vec<(String, QueryType, Vec<&DnsRecord
 }
 
 fn is_rrsig_time_valid(expiration: u32, inception: u32) -> bool {
+    const FUDGE: u32 = 300; // 5-minute clock skew tolerance (BIND uses 300s)
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as u32;
-    now >= inception && now <= expiration
+    // RFC 4034 §3.1.5: use serial number arithmetic for wrap-safe comparison
+    let inception_ok = now.wrapping_sub(inception) < (1u32 << 31);
+    let expiration_ok = expiration.wrapping_sub(now) < (1u32 << 31);
+    (inception_ok || now.wrapping_add(FUDGE) >= inception) && expiration_ok
 }
 
 // -- NSEC/NSEC3 denial of existence --

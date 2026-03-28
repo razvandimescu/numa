@@ -348,11 +348,15 @@ fn is_special_use_domain(qname: &str) -> bool {
         {
             return true;
         }
-        // 172.16-31.x.x (RFC 1918) — check each /16 reverse zone
-        for octet in 16..=31u8 {
-            let suffix = format!(".{}.172.in-addr.arpa", octet);
-            if qname.ends_with(&suffix) {
-                return true;
+        // 172.16-31.x.x (RFC 1918) — extract second octet from reverse name
+        if qname.ends_with(".172.in-addr.arpa") {
+            if let Some(octet_str) = qname
+                .strip_suffix(".172.in-addr.arpa")
+                .and_then(|s| s.rsplit('.').next())
+            {
+                if let Ok(octet) = octet_str.parse::<u8>() {
+                    return (16..=31).contains(&octet);
+                }
             }
         }
         return false;

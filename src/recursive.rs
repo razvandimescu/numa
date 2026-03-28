@@ -31,13 +31,13 @@ fn dns_addr(ip: impl Into<IpAddr>) -> SocketAddr {
 }
 
 pub fn reset_udp_state() {
-    UDP_DISABLED.store(false, Ordering::Relaxed);
-    UDP_FAILURES.store(0, Ordering::Relaxed);
+    UDP_DISABLED.store(false, Ordering::Release);
+    UDP_FAILURES.store(0, Ordering::Release);
 }
 
 /// Probe whether UDP works again. Called periodically from the network watch loop.
 pub async fn probe_udp(root_hints: &[SocketAddr]) {
-    if !UDP_DISABLED.load(Ordering::Relaxed) {
+    if !UDP_DISABLED.load(Ordering::Acquire) {
         return;
     }
     let hint = match root_hints.first() {
@@ -405,18 +405,11 @@ fn resolve_ns_addrs_from_glue(
         cache_glue(&mut cache_w, response, ns_names);
     }
     for ns_name in ns_names {
-        let glue = glue_addrs_for(response, ns_name);
-        if !glue.is_empty() {
-            addrs.extend_from_slice(&glue);
-            break;
-        }
+        addrs.extend_from_slice(&glue_addrs_for(response, ns_name));
     }
     if addrs.is_empty() {
         for ns_name in ns_names {
             addrs.extend(addrs_from_cache(cache, ns_name));
-            if !addrs.is_empty() {
-                break;
-            }
         }
     }
     addrs
@@ -586,7 +579,7 @@ async fn send_query(qname: &str, qtype: QueryType, server: SocketAddr) -> crate:
     }
 
     // If UDP has been detected as blocked, go TCP-first
-    if UDP_DISABLED.load(Ordering::Relaxed) {
+    if UDP_DISABLED.load(Ordering::Acquire) {
         return crate::forward::forward_tcp(&query, server, TCP_TIMEOUT).await;
     }
 
@@ -597,13 +590,13 @@ async fn send_query(qname: &str, qtype: QueryType, server: SocketAddr) -> crate:
         }
         Ok(resp) => {
             // UDP works — reset failure counter
-            UDP_FAILURES.store(0, Ordering::Relaxed);
+            UDP_FAILURES.store(0, Ordering::Release);
             Ok(resp)
         }
         Err(e) => {
-            let fails = UDP_FAILURES.fetch_add(1, Ordering::Relaxed) + 1;
-            if fails >= UDP_FAIL_THRESHOLD && !UDP_DISABLED.load(Ordering::Relaxed) {
-                UDP_DISABLED.store(true, Ordering::Relaxed);
+            let fails = UDP_FAILURES.fetch_add(1, Ordering::AcqRel) + 1;
+            if fails >= UDP_FAIL_THRESHOLD && !UDP_DISABLED.load(Ordering::Acquire) {
+                UDP_DISABLED.store(true, Ordering::Release);
                 info!(
                     "send_query: {} consecutive UDP failures — switching to TCP-first",
                     fails
@@ -883,7 +876,7 @@ mod tests {
     #[tokio::test]
     async fn tcp_fallback_resolves_when_udp_blocked() {
         UDP_DISABLED.store(false, Ordering::Relaxed);
-        UDP_FAILURES.store(0, Ordering::Relaxed);
+        UDP_FAILURES.store(0, Ordering::Release);
 
         let server_addr = spawn_tcp_dns_server(|query| {
             let mut resp = DnsPacket::response_from(query, ResultCode::NOERROR);
@@ -916,7 +909,7 @@ mod tests {
     /// The mock plays both roles (returns referral for NS queries, answer for A queries).
     #[tokio::test]
     async fn tcp_only_iterative_resolution() {
-        UDP_DISABLED.store(true, Ordering::Relaxed); // Skip UDP entirely for speed
+        UDP_DISABLED.store(true, Ordering::Release); // Skip UDP entirely for speed
 
         let server_addr = spawn_tcp_dns_server(|query| {
             let q = match query.questions.first() {
@@ -964,7 +957,7 @@ mod tests {
     #[tokio::test]
     async fn tcp_fallback_handles_nxdomain() {
         UDP_DISABLED.store(false, Ordering::Relaxed);
-        UDP_FAILURES.store(0, Ordering::Relaxed);
+        UDP_FAILURES.store(0, Ordering::Release);
 
         let server_addr = spawn_tcp_dns_server(|query| {
             let mut resp = DnsPacket::response_from(query, ResultCode::NXDOMAIN);
@@ -986,12 +979,12 @@ mod tests {
 
     #[tokio::test]
     async fn udp_auto_disable_resets() {
-        UDP_DISABLED.store(true, Ordering::Relaxed);
+        UDP_DISABLED.store(true, Ordering::Release);
         UDP_FAILURES.store(5, Ordering::Relaxed);
 
         reset_udp_state();
 
-        assert!(!UDP_DISABLED.load(Ordering::Relaxed));
+        assert!(!UDP_DISABLED.load(Ordering::Acquire));
         assert_eq!(UDP_FAILURES.load(Ordering::Relaxed), 0);
     }
 
