@@ -366,7 +366,11 @@ fn is_special_use_domain(qname: &str) -> bool {
         return true;
     }
     // NAT64 (RFC 8880)
-    qname == "ipv4only.arpa"
+    if qname == "ipv4only.arpa" {
+        return true;
+    }
+    // RFC 6762: .local is reserved for mDNS — never forward to upstream
+    qname == "local" || qname.ends_with(".local")
 }
 
 fn special_use_response(query: &DnsPacket, qname: &str, qtype: QueryType) -> DnsPacket {
