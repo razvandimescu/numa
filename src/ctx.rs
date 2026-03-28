@@ -21,6 +21,7 @@ use crate::query_log::{QueryLog, QueryLogEntry};
 use crate::question::QueryType;
 use crate::record::DnsRecord;
 use crate::service_store::ServiceStore;
+use crate::srtt::SrttCache;
 use crate::stats::{QueryPath, ServerStats};
 use crate::system_dns::ForwardingRule;
 
@@ -51,6 +52,7 @@ pub struct ServerCtx {
     pub tls_config: Option<ArcSwap<ServerConfig>>,
     pub upstream_mode: UpstreamMode,
     pub root_hints: Vec<SocketAddr>,
+    pub srtt: RwLock<SrttCache>,
     pub dnssec_enabled: bool,
     pub dnssec_strict: bool,
 }
@@ -176,6 +178,7 @@ pub async fn handle_query(
                     &ctx.cache,
                     &query,
                     &ctx.root_hints,
+                    &ctx.srtt,
                 )
                 .await
                 {
@@ -226,7 +229,8 @@ pub async fn handle_query(
     let mut dnssec = dnssec;
     if ctx.dnssec_enabled && path == QueryPath::Recursive {
         let (status, vstats) =
-            crate::dnssec::validate_response(&response, &ctx.cache, &ctx.root_hints).await;
+            crate::dnssec::validate_response(&response, &ctx.cache, &ctx.root_hints, &ctx.srtt)
+                .await;
 
         debug!(
             "DNSSEC | {} | {:?} | {}ms | dnskey_hit={} dnskey_fetch={} ds_hit={} ds_fetch={}",

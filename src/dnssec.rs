@@ -9,6 +9,7 @@ use crate::cache::{DnsCache, DnssecStatus};
 use crate::packet::DnsPacket;
 use crate::question::QueryType;
 use crate::record::DnsRecord;
+use crate::srtt::SrttCache;
 
 #[derive(Debug, Default)]
 pub struct ValidationStats {
@@ -64,6 +65,7 @@ pub async fn validate_response(
     response: &DnsPacket,
     cache: &RwLock<DnsCache>,
     root_hints: &[std::net::SocketAddr],
+    srtt: &RwLock<SrttCache>,
 ) -> (DnssecStatus, ValidationStats) {
     let start = Instant::now();
     let stats = Mutex::new(ValidationStats::default());
@@ -95,7 +97,7 @@ pub async fn validate_response(
         }
     }
     for zone in &signer_zones {
-        fetch_dnskeys(zone, cache, root_hints, &stats).await;
+        fetch_dnskeys(zone, cache, root_hints, srtt, &stats).await;
     }
 
     // Group answer records into RRsets (by domain + type, excluding RRSIGs)
@@ -132,7 +134,8 @@ pub async fn validate_response(
                 ..
             } = rrsig
             {
-                let dnskey_response = fetch_dnskeys(signer_name, cache, root_hints, &stats).await;
+                let dnskey_response =
+                    fetch_dnskeys(signer_name, cache, root_hints, srtt, &stats).await;
                 let dnskeys: Vec<&DnsRecord> = dnskey_response
                     .iter()
                     .filter(|r| matches!(r, DnsRecord::DNSKEY { .. }))
@@ -206,6 +209,7 @@ pub async fn validate_response(
                                     &dnskey_response,
                                     cache,
                                     root_hints,
+                                    srtt,
                                     trust_anchors,
                                     0,
                                     &stats,
@@ -276,11 +280,13 @@ pub async fn validate_response(
 
 /// Walk the chain of trust from zone DNSKEY up to root trust anchor.
 /// `zone_records` contains both DNSKEY and RRSIG records from the DNSKEY response.
+#[allow(clippy::too_many_arguments)]
 fn validate_chain<'a>(
     zone: &'a str,
     zone_records: &'a [DnsRecord],
     cache: &'a RwLock<DnsCache>,
     root_hints: &'a [std::net::SocketAddr],
+    srtt: &'a RwLock<SrttCache>,
     trust_anchors: &'a [DnsRecord],
     depth: u8,
     stats: &'a Mutex<ValidationStats>,
@@ -343,7 +349,7 @@ fn validate_chain<'a>(
             return DnssecStatus::Indeterminate;
         }
         let parent = parent_zone(zone);
-        let ds_records = fetch_ds(zone, cache, root_hints, stats).await;
+        let ds_records = fetch_ds(zone, cache, root_hints, srtt, stats).await;
 
         if ds_records.is_empty() {
             debug!("dnssec: no DS for zone '{}' at parent '{}'", zone, parent);
@@ -377,7 +383,7 @@ fn validate_chain<'a>(
 
         // Walk up: validate the parent's DNSKEY
         trace!("dnssec: fetching parent DNSKEY for '{}'", parent);
-        let parent_records = fetch_dnskeys(&parent, cache, root_hints, stats).await;
+        let parent_records = fetch_dnskeys(&parent, cache, root_hints, srtt, stats).await;
         if parent_records.is_empty() {
             debug!("dnssec: no parent DNSKEY for '{}' — Indeterminate", parent);
             return DnssecStatus::Indeterminate;
@@ -388,6 +394,7 @@ fn validate_chain<'a>(
             &parent_records,
             cache,
             root_hints,
+            srtt,
             trust_anchors,
             depth + 1,
             stats,
@@ -460,6 +467,7 @@ async fn fetch_dnskeys(
     zone: &str,
     cache: &RwLock<DnsCache>,
     root_hints: &[std::net::SocketAddr],
+    srtt: &RwLock<SrttCache>,
     stats: &Mutex<ValidationStats>,
 ) -> Vec<DnsRecord> {
     if let Some(pkt) = cache.read().unwrap().lookup(zone, QueryType::DNSKEY) {
@@ -475,7 +483,8 @@ async fn fetch_dnskeys(
     trace!("dnssec: fetch_dnskeys('{}') cache miss — resolving", zone);
     stats.lock().unwrap().dnskey_fetches += 1;
     if let Ok(pkt) =
-        crate::recursive::resolve_iterative(zone, QueryType::DNSKEY, cache, root_hints, 0, 0).await
+        crate::recursive::resolve_iterative(zone, QueryType::DNSKEY, cache, root_hints, srtt, 0, 0)
+            .await
     {
         cache.write().unwrap().insert(zone, QueryType::DNSKEY, &pkt);
         return pkt.answers;
@@ -488,6 +497,7 @@ async fn fetch_ds(
     child: &str,
     cache: &RwLock<DnsCache>,
     root_hints: &[std::net::SocketAddr],
+    srtt: &RwLock<SrttCache>,
     stats: &Mutex<ValidationStats>,
 ) -> Vec<DnsRecord> {
     if let Some(pkt) = cache.read().unwrap().lookup(child, QueryType::DS) {
@@ -501,7 +511,8 @@ async fn fetch_ds(
 
     stats.lock().unwrap().ds_fetches += 1;
     if let Ok(pkt) =
-        crate::recursive::resolve_iterative(child, QueryType::DS, cache, root_hints, 0, 0).await
+        crate::recursive::resolve_iterative(child, QueryType::DS, cache, root_hints, srtt, 0, 0)
+            .await
     {
         cache.write().unwrap().insert(child, QueryType::DS, &pkt);
         return pkt

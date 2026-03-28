@@ -1,7 +1,7 @@
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::RwLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use log::{debug, info};
 
@@ -11,6 +11,7 @@ use crate::header::ResultCode;
 use crate::packet::DnsPacket;
 use crate::question::{DnsQuestion, QueryType};
 use crate::record::DnsRecord;
+use crate::srtt::SrttCache;
 
 const MAX_REFERRAL_DEPTH: u8 = 10;
 const MAX_CNAME_DEPTH: u8 = 8;
@@ -58,7 +59,12 @@ pub async fn probe_udp(root_hints: &[SocketAddr]) {
     }
 }
 
-pub async fn prime_tld_cache(cache: &RwLock<DnsCache>, root_hints: &[SocketAddr], tlds: &[String]) {
+pub async fn prime_tld_cache(
+    cache: &RwLock<DnsCache>,
+    root_hints: &[SocketAddr],
+    tlds: &[String],
+    srtt: &RwLock<SrttCache>,
+) {
     if root_hints.is_empty() || tlds.is_empty() {
         return;
     }
@@ -66,7 +72,7 @@ pub async fn prime_tld_cache(cache: &RwLock<DnsCache>, root_hints: &[SocketAddr]
     let mut root_addr = root_hints[0];
     for hint in root_hints {
         info!("prime: probing root {}", hint);
-        match send_query(".", QueryType::NS, *hint).await {
+        match send_query(".", QueryType::NS, *hint, srtt).await {
             Ok(_) => {
                 info!("prime: root {} reachable", hint);
                 root_addr = *hint;
@@ -79,7 +85,7 @@ pub async fn prime_tld_cache(cache: &RwLock<DnsCache>, root_hints: &[SocketAddr]
     }
 
     // Fetch root DNSKEY (needed for DNSSEC chain-of-trust terminus)
-    if let Ok(root_dnskey) = send_query(".", QueryType::DNSKEY, root_addr).await {
+    if let Ok(root_dnskey) = send_query(".", QueryType::DNSKEY, root_addr, srtt).await {
         cache
             .write()
             .unwrap()
@@ -91,7 +97,7 @@ pub async fn prime_tld_cache(cache: &RwLock<DnsCache>, root_hints: &[SocketAddr]
 
     for tld in tlds {
         // Fetch NS referral (includes DS in authority section from root)
-        let response = match send_query(tld, QueryType::NS, root_addr).await {
+        let response = match send_query(tld, QueryType::NS, root_addr, srtt).await {
             Ok(r) => r,
             Err(e) => {
                 debug!("prime: failed to query NS for .{}: {}", tld, e);
@@ -108,7 +114,6 @@ pub async fn prime_tld_cache(cache: &RwLock<DnsCache>, root_hints: &[SocketAddr]
             let mut cache_w = cache.write().unwrap();
             cache_w.insert(tld, QueryType::NS, &response);
             cache_glue(&mut cache_w, &response, &ns_names);
-            // Cache DS records from referral authority section
             cache_ds_from_authority(&mut cache_w, &response);
         }
 
@@ -116,7 +121,7 @@ pub async fn prime_tld_cache(cache: &RwLock<DnsCache>, root_hints: &[SocketAddr]
         let first_ns_name = ns_names.first().map(|s| s.as_str()).unwrap_or("");
         let first_ns = glue_addrs_for(&response, first_ns_name);
         if let Some(ns_addr) = first_ns.first() {
-            if let Ok(dnskey_resp) = send_query(tld, QueryType::DNSKEY, *ns_addr).await {
+            if let Ok(dnskey_resp) = send_query(tld, QueryType::DNSKEY, *ns_addr, srtt).await {
                 cache
                     .write()
                     .unwrap()
@@ -140,10 +145,11 @@ pub async fn resolve_recursive(
     cache: &RwLock<DnsCache>,
     original_query: &DnsPacket,
     root_hints: &[SocketAddr],
+    srtt: &RwLock<SrttCache>,
 ) -> crate::Result<DnsPacket> {
     // No overall timeout — each hop is bounded by NS_QUERY_TIMEOUT (UDP + TCP fallback),
     // and MAX_REFERRAL_DEPTH caps the chain length.
-    let mut resp = resolve_iterative(qname, qtype, cache, root_hints, 0, 0).await?;
+    let mut resp = resolve_iterative(qname, qtype, cache, root_hints, srtt, 0, 0).await?;
 
     resp.header.id = original_query.header.id;
     resp.header.recursion_available = true;
@@ -157,6 +163,7 @@ pub(crate) fn resolve_iterative<'a>(
     qtype: QueryType,
     cache: &'a RwLock<DnsCache>,
     root_hints: &'a [SocketAddr],
+    srtt: &'a RwLock<SrttCache>,
     referral_depth: u8,
     cname_depth: u8,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = crate::Result<DnsPacket>> + Send + 'a>> {
@@ -170,6 +177,7 @@ pub(crate) fn resolve_iterative<'a>(
         }
 
         let (mut current_zone, mut ns_addrs) = find_closest_ns(qname, cache, root_hints);
+        srtt.read().unwrap().sort_by_rtt(&mut ns_addrs);
         let mut ns_idx = 0;
 
         for _ in 0..MAX_REFERRAL_DEPTH {
@@ -185,7 +193,7 @@ pub(crate) fn resolve_iterative<'a>(
                 ns_addr, q_type, q_name, current_zone, referral_depth
             );
 
-            let response = match send_query(q_name, q_type, ns_addr).await {
+            let response = match send_query(q_name, q_type, ns_addr, srtt).await {
                 Ok(r) => r,
                 Err(e) => {
                     debug!("recursive: NS {} failed: {}", ns_addr, e);
@@ -194,7 +202,6 @@ pub(crate) fn resolve_iterative<'a>(
                 }
             };
 
-            // Minimized query response — treat as referral, not final answer
             if (q_type != qtype || !q_name.eq_ignore_ascii_case(qname))
                 && (!response.authorities.is_empty() || !response.answers.is_empty())
             {
@@ -205,8 +212,9 @@ pub(crate) fn resolve_iterative<'a>(
                 if all_ns.is_empty() {
                     all_ns = extract_ns_names(&response);
                 }
-                let new_addrs = resolve_ns_addrs_from_glue(&response, &all_ns, cache);
+                let mut new_addrs = resolve_ns_addrs_from_glue(&response, &all_ns, cache);
                 if !new_addrs.is_empty() {
+                    srtt.read().unwrap().sort_by_rtt(&mut new_addrs);
                     ns_addrs = new_addrs;
                     ns_idx = 0;
                     continue;
@@ -233,6 +241,7 @@ pub(crate) fn resolve_iterative<'a>(
                         qtype,
                         cache,
                         root_hints,
+                        srtt,
                         0,
                         cname_depth + 1,
                     )
@@ -256,8 +265,6 @@ pub(crate) fn resolve_iterative<'a>(
                 return Ok(response);
             }
 
-            // Referral — extract NS + glue, cache glue, resolve NS addresses
-            // Update zone for query minimization
             if let Some(zone) = referral_zone(&response) {
                 current_zone = zone;
             }
@@ -276,13 +283,13 @@ pub(crate) fn resolve_iterative<'a>(
                 for ns_name in &ns_names {
                     if referral_depth < MAX_REFERRAL_DEPTH {
                         debug!("recursive: resolving glue-less NS {}", ns_name);
-                        // Try A first, then AAAA
                         for qt in [QueryType::A, QueryType::AAAA] {
                             if let Ok(ns_resp) = resolve_iterative(
                                 ns_name,
                                 qt,
                                 cache,
                                 root_hints,
+                                srtt,
                                 referral_depth + 1,
                                 cname_depth,
                             )
@@ -316,6 +323,7 @@ pub(crate) fn resolve_iterative<'a>(
                 return Err(format!("could not resolve any NS for {}", qname).into());
             }
 
+            srtt.read().unwrap().sort_by_rtt(&mut new_ns_addrs);
             ns_addrs = new_ns_addrs;
             ns_idx = 0;
         }
@@ -561,7 +569,32 @@ fn make_glue_packet() -> DnsPacket {
     pkt
 }
 
-async fn send_query(qname: &str, qtype: QueryType, server: SocketAddr) -> crate::Result<DnsPacket> {
+async fn tcp_with_srtt(
+    query: &DnsPacket,
+    server: SocketAddr,
+    srtt: &RwLock<SrttCache>,
+    start: Instant,
+) -> crate::Result<DnsPacket> {
+    match crate::forward::forward_tcp(query, server, TCP_TIMEOUT).await {
+        Ok(resp) => {
+            srtt.write()
+                .unwrap()
+                .record_rtt(server.ip(), start.elapsed().as_millis() as u64, true);
+            Ok(resp)
+        }
+        Err(e) => {
+            srtt.write().unwrap().record_failure(server.ip());
+            Err(e)
+        }
+    }
+}
+
+async fn send_query(
+    qname: &str,
+    qtype: QueryType,
+    server: SocketAddr,
+    srtt: &RwLock<SrttCache>,
+) -> crate::Result<DnsPacket> {
     let mut query = DnsPacket::new();
     query.header.id = next_id();
     query.header.recursion_desired = false;
@@ -573,24 +606,30 @@ async fn send_query(qname: &str, qtype: QueryType, server: SocketAddr) -> crate:
         ..Default::default()
     });
 
-    // Skip IPv6 if the socket can't handle it (bound to 0.0.0.0)
+    let start = Instant::now();
+
+    // IPv6 forced to TCP — our UDP socket is bound to 0.0.0.0
     if server.is_ipv6() {
-        return crate::forward::forward_tcp(&query, server, TCP_TIMEOUT).await;
+        return tcp_with_srtt(&query, server, srtt, start).await;
     }
 
-    // If UDP has been detected as blocked, go TCP-first
+    // UDP detected as blocked — go TCP-first
     if UDP_DISABLED.load(Ordering::Acquire) {
-        return crate::forward::forward_tcp(&query, server, TCP_TIMEOUT).await;
+        return tcp_with_srtt(&query, server, srtt, start).await;
     }
 
     match forward_udp(&query, server, NS_QUERY_TIMEOUT).await {
         Ok(resp) if resp.header.truncated_message => {
             debug!("send_query: truncated from {}, retrying TCP", server);
-            crate::forward::forward_tcp(&query, server, TCP_TIMEOUT).await
+            tcp_with_srtt(&query, server, srtt, start).await
         }
         Ok(resp) => {
-            // UDP works — reset failure counter
             UDP_FAILURES.store(0, Ordering::Release);
+            srtt.write().unwrap().record_rtt(
+                server.ip(),
+                start.elapsed().as_millis() as u64,
+                false,
+            );
             Ok(resp)
         }
         Err(e) => {
@@ -603,7 +642,7 @@ async fn send_query(qname: &str, qtype: QueryType, server: SocketAddr) -> crate:
                 );
             }
             debug!("send_query: UDP failed for {}: {}, trying TCP", server, e);
-            crate::forward::forward_tcp(&query, server, TCP_TIMEOUT).await
+            tcp_with_srtt(&query, server, srtt, start).await
         }
     }
 }
@@ -894,7 +933,8 @@ mod tests {
         })
         .await;
 
-        let result = send_query("test.example.com", QueryType::A, server_addr).await;
+        let srtt = RwLock::new(SrttCache::new(true));
+        let result = send_query("test.example.com", QueryType::A, server_addr, &srtt).await;
 
         let resp = result.expect("should resolve via TCP fallback");
         assert_eq!(resp.header.rescode, ResultCode::NOERROR);
@@ -945,7 +985,8 @@ mod tests {
         })
         .await;
 
-        let result = send_query("hello.example.com", QueryType::A, server_addr).await;
+        let srtt = RwLock::new(SrttCache::new(true));
+        let result = send_query("hello.example.com", QueryType::A, server_addr, &srtt).await;
         let resp = result.expect("TCP-only send_query should work");
         assert_eq!(resp.header.rescode, ResultCode::NOERROR);
         match &resp.answers[0] {
@@ -967,10 +1008,19 @@ mod tests {
         .await;
 
         let cache = RwLock::new(DnsCache::new(100, 60, 86400));
+        let srtt = RwLock::new(SrttCache::new(true));
         let root_hints = vec![server_addr];
 
-        let result =
-            resolve_iterative("nonexistent.test", QueryType::A, &cache, &root_hints, 0, 0).await;
+        let result = resolve_iterative(
+            "nonexistent.test",
+            QueryType::A,
+            &cache,
+            &root_hints,
+            &srtt,
+            0,
+            0,
+        )
+        .await;
 
         let resp = result.expect("NXDOMAIN should still return a response");
         assert_eq!(resp.header.rescode, ResultCode::NXDOMAIN);
