@@ -40,21 +40,23 @@ impl SrttCache {
     /// Get current SRTT for an IP, applying decay if stale. Returns INITIAL for unknown.
     pub fn get(&self, ip: IpAddr) -> u64 {
         match self.entries.get(&ip) {
-            Some(entry) => {
-                let age_secs = entry.updated_at.elapsed().as_secs();
-                if age_secs > DECAY_AFTER_SECS {
-                    // Each decay period halves the distance to INITIAL_SRTT_MS
-                    let periods = (age_secs / DECAY_AFTER_SECS).min(8);
-                    let mut srtt = entry.srtt_ms;
-                    for _ in 0..periods {
-                        srtt = (srtt + INITIAL_SRTT_MS) / 2;
-                    }
-                    srtt
-                } else {
-                    entry.srtt_ms
-                }
-            }
+            Some(entry) => Self::decayed_srtt(entry),
             None => INITIAL_SRTT_MS,
+        }
+    }
+
+    /// Apply time-based decay: each DECAY_AFTER_SECS period halves distance to INITIAL.
+    fn decayed_srtt(entry: &SrttEntry) -> u64 {
+        let age_secs = entry.updated_at.elapsed().as_secs();
+        if age_secs > DECAY_AFTER_SECS {
+            let periods = (age_secs / DECAY_AFTER_SECS).min(8);
+            let mut srtt = entry.srtt_ms;
+            for _ in 0..periods {
+                srtt = (srtt + INITIAL_SRTT_MS) / 2;
+            }
+            srtt
+        } else {
+            entry.srtt_ms
         }
     }
 
@@ -69,8 +71,10 @@ impl SrttCache {
             srtt_ms: effective,
             updated_at: Instant::now(),
         });
+        // Apply decay before EWMA so recovered servers aren't stuck at stale penalties
+        let base = Self::decayed_srtt(entry);
         // BIND EWMA: new = (old * 7 + sample) / 8
-        entry.srtt_ms = (entry.srtt_ms * 7 + effective) / 8;
+        entry.srtt_ms = (base * 7 + effective) / 8;
         entry.updated_at = Instant::now();
     }
 

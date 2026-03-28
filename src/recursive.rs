@@ -147,6 +147,8 @@ pub async fn resolve_recursive(
     root_hints: &[SocketAddr],
     srtt: &RwLock<SrttCache>,
 ) -> crate::Result<DnsPacket> {
+    // No overall timeout — each hop is bounded by NS_QUERY_TIMEOUT (UDP + TCP fallback),
+    // and MAX_REFERRAL_DEPTH caps the chain length.
     let mut resp = resolve_iterative(qname, qtype, cache, root_hints, srtt, 0, 0).await?;
 
     resp.header.id = original_query.header.id;
@@ -606,10 +608,12 @@ async fn send_query(
 
     let start = Instant::now();
 
+    // IPv6 forced to TCP — our UDP socket is bound to 0.0.0.0
     if server.is_ipv6() {
         return tcp_with_srtt(&query, server, srtt, start).await;
     }
 
+    // UDP detected as blocked — go TCP-first
     if UDP_DISABLED.load(Ordering::Acquire) {
         return tcp_with_srtt(&query, server, srtt, start).await;
     }
