@@ -1,4 +1,4 @@
-.PHONY: all build lint fmt check audit test bench clean deploy blog
+.PHONY: all build lint fmt check audit test coverage bench clean deploy blog
 
 all: lint build test
 
@@ -18,6 +18,9 @@ audit:
 
 test:
 	cargo test
+
+coverage:
+	cargo tarpaulin --skip-clean --out stdout
 
 bench:
 	cargo bench
