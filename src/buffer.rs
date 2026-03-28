@@ -164,8 +164,16 @@ impl BytePacketBuffer {
     }
 
     pub fn write_qname(&mut self, qname: &str) -> Result<()> {
+        if qname.is_empty() || qname == "." {
+            self.write_u8(0)?;
+            return Ok(());
+        }
+
         for label in qname.split('.') {
             let len = label.len();
+            if len == 0 {
+                continue; // skip empty labels from trailing dot
+            }
             if len > 0x3f {
                 return Err("Single label exceeds 63 characters of length".into());
             }
@@ -177,6 +185,16 @@ impl BytePacketBuffer {
         }
 
         self.write_u8(0)?;
+        Ok(())
+    }
+
+    pub fn write_bytes(&mut self, data: &[u8]) -> Result<()> {
+        let end = self.pos + data.len();
+        if end > BUF_SIZE {
+            return Err("End of buffer".into());
+        }
+        self.buf[self.pos..end].copy_from_slice(data);
+        self.pos = end;
         Ok(())
     }
 

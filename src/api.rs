@@ -153,6 +153,7 @@ struct QueryLogResponse {
     path: String,
     rescode: String,
     latency_ms: f64,
+    dnssec: String,
 }
 
 #[derive(Serialize)]
@@ -178,6 +179,7 @@ struct LanStatsResponse {
 struct QueriesStats {
     total: u64,
     forwarded: u64,
+    recursive: u64,
     cached: u64,
     local: u64,
     overridden: u64,
@@ -460,6 +462,7 @@ async fn query_log(
                     path: e.path.as_str().to_string(),
                     rescode: e.rescode.as_str().to_string(),
                     latency_ms: e.latency_us as f64 / 1000.0,
+                    dnssec: e.dnssec.as_str().to_string(),
                 }
             })
             .collect()
@@ -477,7 +480,11 @@ async fn stats(State(ctx): State<Arc<ServerCtx>>) -> Json<StatsResponse> {
     let override_count = ctx.overrides.read().unwrap().active_count();
     let bl_stats = ctx.blocklist.read().unwrap().stats();
 
-    let upstream = ctx.upstream.lock().unwrap().to_string();
+    let upstream = if ctx.upstream_mode == crate::config::UpstreamMode::Recursive {
+        "recursive (root hints)".to_string()
+    } else {
+        ctx.upstream.lock().unwrap().to_string()
+    };
 
     Json(StatsResponse {
         uptime_secs: snap.uptime_secs,
@@ -487,6 +494,7 @@ async fn stats(State(ctx): State<Arc<ServerCtx>>) -> Json<StatsResponse> {
         queries: QueriesStats {
             total: snap.total,
             forwarded: snap.forwarded,
+            recursive: snap.recursive,
             cached: snap.cached,
             local: snap.local,
             overridden: snap.overridden,
@@ -900,4 +908,253 @@ async fn check_tcp(addr: std::net::SocketAddr) -> bool {
     .await
     .map(|r| r.is_ok())
     .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use http::Request;
+    use std::sync::{Mutex, RwLock};
+    use tower::ServiceExt;
+
+    async fn test_ctx() -> Arc<ServerCtx> {
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        Arc::new(ServerCtx {
+            socket,
+            zone_map: std::collections::HashMap::new(),
+            cache: RwLock::new(crate::cache::DnsCache::new(100, 60, 86400)),
+            stats: Mutex::new(crate::stats::ServerStats::new()),
+            overrides: RwLock::new(crate::override_store::OverrideStore::new()),
+            blocklist: RwLock::new(crate::blocklist::BlocklistStore::new()),
+            query_log: Mutex::new(crate::query_log::QueryLog::new(100)),
+            services: Mutex::new(crate::service_store::ServiceStore::new()),
+            lan_peers: Mutex::new(crate::lan::PeerStore::new(90)),
+            forwarding_rules: Vec::new(),
+            upstream: Mutex::new(crate::forward::Upstream::Udp(
+                "127.0.0.1:53".parse().unwrap(),
+            )),
+            upstream_auto: false,
+            upstream_port: 53,
+            lan_ip: Mutex::new(std::net::Ipv4Addr::LOCALHOST),
+            timeout: std::time::Duration::from_secs(3),
+            proxy_tld: "numa".to_string(),
+            proxy_tld_suffix: ".numa".to_string(),
+            lan_enabled: false,
+            config_path: "/tmp/test-numa.toml".to_string(),
+            config_found: false,
+            config_dir: std::path::PathBuf::from("/tmp"),
+            data_dir: std::path::PathBuf::from("/tmp"),
+            tls_config: None,
+            upstream_mode: crate::config::UpstreamMode::Forward,
+            root_hints: Vec::new(),
+            dnssec_enabled: false,
+            dnssec_strict: false,
+        })
+    }
+
+    #[tokio::test]
+    async fn health_returns_ok() {
+        let ctx = test_ctx().await;
+        let resp = router(ctx)
+            .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = axum::body::to_bytes(resp.into_body(), 1000).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn stats_returns_json() {
+        let ctx = test_ctx().await;
+        let resp = router(ctx)
+            .oneshot(Request::get("/stats").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = axum::body::to_bytes(resp.into_body(), 10000).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["uptime_secs"].is_number());
+        assert!(json["queries"]["total"].is_number());
+    }
+
+    #[tokio::test]
+    async fn query_log_empty() {
+        let ctx = test_ctx().await;
+        let resp = router(ctx)
+            .oneshot(
+                Request::get("/query-log?limit=10")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = axum::body::to_bytes(resp.into_body(), 10000).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json.as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn overrides_crud() {
+        let ctx = test_ctx().await;
+        let a = router(ctx.clone());
+
+        // Create
+        let resp = a
+            .clone()
+            .oneshot(
+                Request::post("/overrides")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"domain":"test.dev","target":"1.2.3.4","duration_secs":60}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(resp.status().is_success());
+
+        // List
+        let resp = a
+            .clone()
+            .oneshot(Request::get("/overrides").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 10000).await.unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("test.dev"));
+
+        // Get
+        let resp = a
+            .clone()
+            .oneshot(
+                Request::get("/overrides/test.dev")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        // Delete
+        let resp = a
+            .clone()
+            .oneshot(
+                Request::delete("/overrides/test.dev")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(resp.status().is_success());
+
+        // Verify deleted
+        let resp = a
+            .oneshot(
+                Request::get("/overrides/test.dev")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+    }
+
+    #[tokio::test]
+    async fn cache_list_and_flush() {
+        let ctx = test_ctx().await;
+        let a = router(ctx.clone());
+
+        // List (empty)
+        let resp = a
+            .clone()
+            .oneshot(Request::get("/cache").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        // Flush
+        let resp = a
+            .oneshot(Request::delete("/cache").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert!(resp.status().is_success());
+    }
+
+    #[tokio::test]
+    async fn blocking_stats_returns_json() {
+        let ctx = test_ctx().await;
+        let resp = router(ctx)
+            .oneshot(Request::get("/blocking/stats").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = axum::body::to_bytes(resp.into_body(), 10000).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["enabled"].is_boolean());
+    }
+
+    #[tokio::test]
+    async fn services_crud() {
+        let ctx = test_ctx().await;
+        let a = router(ctx);
+
+        // Add service
+        let resp = a
+            .clone()
+            .oneshot(
+                Request::post("/services")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name":"testapp","target_port":3000}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(resp.status().is_success());
+
+        // List
+        let resp = a
+            .clone()
+            .oneshot(Request::get("/services").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 10000).await.unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("testapp"));
+
+        // Delete
+        let resp = a
+            .clone()
+            .oneshot(
+                Request::delete("/services/testapp")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(resp.status().is_success());
+
+        // Verify deleted
+        let resp = a
+            .oneshot(Request::get("/services").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 10000).await.unwrap();
+        assert!(!String::from_utf8_lossy(&body).contains("testapp"));
+    }
+
+    #[tokio::test]
+    async fn dashboard_returns_html() {
+        let ctx = test_ctx().await;
+        let resp = router(ctx)
+            .oneshot(Request::get("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = axum::body::to_bytes(resp.into_body(), 100000)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("Numa"));
+    }
 }

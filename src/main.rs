@@ -199,6 +199,10 @@ async fn main() -> numa::Result<()> {
         config_dir: numa::config_dir(),
         data_dir: numa::data_dir(),
         tls_config: initial_tls,
+        upstream_mode: config.upstream.mode,
+        root_hints: numa::recursive::parse_root_hints(&config.upstream.root_hints),
+        dnssec_enabled: config.dnssec.enabled,
+        dnssec_strict: config.dnssec.strict,
     });
 
     let zone_count: usize = ctx.zone_map.values().map(|m| m.len()).sum();
@@ -276,7 +280,15 @@ async fn main() -> numa::Result<()> {
     row("DNS", g, &config.server.bind_addr);
     row("API", g, &api_url);
     row("Dashboard", g, &api_url);
-    row("Upstream", g, &upstream_label);
+    row(
+        "Upstream",
+        g,
+        if ctx.upstream_mode == numa::config::UpstreamMode::Recursive {
+            "recursive (root hints)"
+        } else {
+            &upstream_label
+        },
+    );
     row("Zones", g, &format!("{} records", zone_count));
     row(
         "Cache",
@@ -333,6 +345,16 @@ async fn main() -> numa::Result<()> {
                 info!("refreshing blocklists...");
                 load_blocklists(&bl_ctx, &bl_lists).await;
             }
+        });
+    }
+
+    // Prime TLD cache (recursive mode only)
+    if ctx.upstream_mode == numa::config::UpstreamMode::Recursive {
+        let prime_ctx = Arc::clone(&ctx);
+        let prime_tlds = config.upstream.prime_tlds;
+        tokio::spawn(async move {
+            numa::recursive::prime_tld_cache(&prime_ctx.cache, &prime_ctx.root_hints, &prime_tlds)
+                .await;
         });
     }
 
@@ -425,6 +447,7 @@ async fn network_watch_loop(ctx: Arc<numa::ctx::ServerCtx>) {
                 info!("LAN IP changed: {} → {}", current_ip, new_ip);
                 *current_ip = new_ip;
                 changed = true;
+                numa::recursive::reset_udp_state();
             }
         }
 
@@ -456,6 +479,11 @@ async fn network_watch_loop(ctx: Arc<numa::ctx::ServerCtx>) {
         if changed {
             ctx.lan_peers.lock().unwrap().clear();
             info!("flushed LAN peers after network change");
+        }
+
+        // Re-probe UDP every 5 minutes when disabled
+        if tick.is_multiple_of(60) {
+            numa::recursive::probe_udp(&ctx.root_hints).await;
         }
     }
 }

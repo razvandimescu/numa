@@ -1148,12 +1148,14 @@ dependencies = [
  "criterion",
  "env_logger",
  "futures",
+ "http",
  "http-body-util",
  "hyper",
  "hyper-util",
  "log",
  "rcgen",
  "reqwest",
+ "ring",
  "rustls",
  "serde",
  "serde_json",
@@ -1162,6 +1164,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "toml",
+ "tower",
 ]
 
 [[package]]

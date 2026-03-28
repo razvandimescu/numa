@@ -28,9 +28,12 @@ time = "0.3"
 rustls = "0.23"
 tokio-rustls = "0.26"
 arc-swap = "1"
+ring = "0.17"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
+tower = { version = "0.5", features = ["util"] }
+http = "1"
 
 [[bench]]
 name = "hot_path"
@@ -38,4 +41,8 @@ harness = false
 
 [[bench]]
 name = "throughput"
+harness = false
+
+[[bench]]
+name = "dnssec"
 harness = false
