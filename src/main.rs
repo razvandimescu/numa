@@ -201,6 +201,7 @@ async fn main() -> numa::Result<()> {
         tls_config: initial_tls,
         upstream_mode: config.upstream.mode,
         root_hints: numa::recursive::parse_root_hints(&config.upstream.root_hints),
+        srtt: std::sync::RwLock::new(numa::srtt::SrttCache::new(config.upstream.srtt)),
         dnssec_enabled: config.dnssec.enabled,
         dnssec_strict: config.dnssec.strict,
     });
@@ -353,8 +354,13 @@ async fn main() -> numa::Result<()> {
         let prime_ctx = Arc::clone(&ctx);
         let prime_tlds = config.upstream.prime_tlds;
         tokio::spawn(async move {
-            numa::recursive::prime_tld_cache(&prime_ctx.cache, &prime_ctx.root_hints, &prime_tlds)
-                .await;
+            numa::recursive::prime_tld_cache(
+                &prime_ctx.cache,
+                &prime_ctx.root_hints,
+                &prime_tlds,
+                &prime_ctx.srtt,
+            )
+            .await;
         });
     }
 

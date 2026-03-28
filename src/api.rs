@@ -948,6 +948,7 @@ mod tests {
             tls_config: None,
             upstream_mode: crate::config::UpstreamMode::Forward,
             root_hints: Vec::new(),
+            srtt: RwLock::new(crate::srtt::SrttCache::new(true)),
             dnssec_enabled: false,
             dnssec_strict: false,
         })

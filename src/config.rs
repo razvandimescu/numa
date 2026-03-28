@@ -85,6 +85,8 @@ pub struct UpstreamConfig {
     pub root_hints: Vec<String>,
     #[serde(default = "default_prime_tlds")]
     pub prime_tlds: Vec<String>,
+    #[serde(default = "default_srtt")]
+    pub srtt: bool,
 }
 
 impl Default for UpstreamConfig {
@@ -96,8 +98,13 @@ impl Default for UpstreamConfig {
             timeout_ms: default_timeout_ms(),
             root_hints: default_root_hints(),
             prime_tlds: default_prime_tlds(),
+            srtt: default_srtt(),
         }
     }
+}
+
+fn default_srtt() -> bool {
+    true
 }
 
 fn default_prime_tlds() -> Vec<String> {
