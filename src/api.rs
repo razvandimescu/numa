@@ -162,6 +162,8 @@ struct StatsResponse {
     upstream: String,
     config_path: String,
     data_dir: String,
+    dnssec: bool,
+    srtt: bool,
     queries: QueriesStats,
     cache: CacheStats,
     overrides: OverrideStats,
@@ -491,6 +493,8 @@ async fn stats(State(ctx): State<Arc<ServerCtx>>) -> Json<StatsResponse> {
         upstream,
         config_path: ctx.config_path.clone(),
         data_dir: ctx.data_dir.to_string_lossy().to_string(),
+        dnssec: ctx.dnssec_enabled,
+        srtt: ctx.srtt.read().unwrap().is_enabled(),
         queries: QueriesStats {
             total: snap.total,
             forwarded: snap.forwarded,
