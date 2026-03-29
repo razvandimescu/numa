@@ -100,6 +100,10 @@ impl SrttCache {
         addrs.sort_by_key(|a| self.get(a.ip()));
     }
 
+    pub fn heap_bytes(&self) -> usize {
+        self.entries.capacity() * (std::mem::size_of::<IpAddr>() + std::mem::size_of::<SrttEntry>())
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }

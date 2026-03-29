@@ -142,6 +142,18 @@ impl DnsCache {
         self.entry_count = 0;
     }
 
+    pub fn heap_bytes(&self) -> usize {
+        let mut total = 0;
+        for (domain, type_map) in &self.entries {
+            total += domain.capacity() + std::mem::size_of::<String>();
+            for entry in type_map.values() {
+                total += std::mem::size_of::<CacheEntry>();
+                total += entry.packet.heap_bytes();
+            }
+        }
+        total
+    }
+
     pub fn remove(&mut self, domain: &str) {
         let domain_lower = domain.to_lowercase();
         if let Some(type_map) = self.entries.remove(&domain_lower) {

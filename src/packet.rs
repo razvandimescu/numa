@@ -66,6 +66,25 @@ impl DnsPacket {
         pkt
     }
 
+    pub fn heap_bytes(&self) -> usize {
+        fn records_heap(records: &[DnsRecord]) -> usize {
+            records
+                .iter()
+                .map(|r| std::mem::size_of::<DnsRecord>() + r.heap_bytes())
+                .sum::<usize>()
+        }
+        let questions: usize = self
+            .questions
+            .iter()
+            .map(|q| std::mem::size_of::<DnsQuestion>() + q.name.capacity())
+            .sum();
+        questions
+            + records_heap(&self.answers)
+            + records_heap(&self.authorities)
+            + records_heap(&self.resources)
+            + self.edns.as_ref().map_or(0, |e| e.options.capacity())
+    }
+
     pub fn response_from(query: &DnsPacket, rescode: crate::header::ResultCode) -> DnsPacket {
         let mut resp = DnsPacket::new();
         resp.header.id = query.header.id;

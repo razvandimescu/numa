@@ -170,6 +170,7 @@ struct StatsResponse {
     overrides: OverrideStats,
     blocking: BlockingStatsResponse,
     lan: LanStatsResponse,
+    memory: MemoryStats,
 }
 
 #[derive(Serialize)]
@@ -208,6 +209,19 @@ struct BlockingStatsResponse {
     paused: bool,
     domains_loaded: usize,
     allowlist_size: usize,
+}
+
+#[derive(Serialize)]
+struct MemoryStats {
+    cache_bytes: usize,
+    blocklist_bytes: usize,
+    query_log_bytes: usize,
+    query_log_entries: usize,
+    srtt_bytes: usize,
+    srtt_entries: usize,
+    overrides_bytes: usize,
+    total_estimated_bytes: usize,
+    process_rss_bytes: usize,
 }
 
 #[derive(Serialize)]
@@ -471,12 +485,29 @@ async fn query_log(
 
 async fn stats(State(ctx): State<Arc<ServerCtx>>) -> Json<StatsResponse> {
     let snap = ctx.stats.lock().unwrap().snapshot();
-    let (cache_len, cache_max) = {
+    let (cache_len, cache_max, cache_bytes) = {
         let cache = ctx.cache.read().unwrap();
-        (cache.len(), cache.max_entries())
+        (cache.len(), cache.max_entries(), cache.heap_bytes())
     };
-    let override_count = ctx.overrides.read().unwrap().active_count();
-    let bl_stats = ctx.blocklist.read().unwrap().stats();
+    let (override_count, overrides_bytes) = {
+        let ov = ctx.overrides.read().unwrap();
+        (ov.active_count(), ov.heap_bytes())
+    };
+    let (bl_stats, blocklist_bytes) = {
+        let bl = ctx.blocklist.read().unwrap();
+        (bl.stats(), bl.heap_bytes())
+    };
+    let (query_log_bytes, query_log_entries) = {
+        let log = ctx.query_log.lock().unwrap();
+        (log.heap_bytes(), log.len())
+    };
+    let (srtt_bytes, srtt_entries, srtt_enabled) = {
+        let s = ctx.srtt.read().unwrap();
+        (s.heap_bytes(), s.len(), s.is_enabled())
+    };
+
+    let total_estimated =
+        cache_bytes + blocklist_bytes + query_log_bytes + srtt_bytes + overrides_bytes;
 
     let upstream = if ctx.upstream_mode == crate::config::UpstreamMode::Recursive {
         "recursive (root hints)".to_string()
@@ -491,7 +522,7 @@ async fn stats(State(ctx): State<Arc<ServerCtx>>) -> Json<StatsResponse> {
         config_path: ctx.config_path.clone(),
         data_dir: ctx.data_dir.to_string_lossy().to_string(),
         dnssec: ctx.dnssec_enabled,
-        srtt: ctx.srtt.read().unwrap().is_enabled(),
+        srtt: srtt_enabled,
         queries: QueriesStats {
             total: snap.total,
             forwarded: snap.forwarded,
@@ -519,6 +550,17 @@ async fn stats(State(ctx): State<Arc<ServerCtx>>) -> Json<StatsResponse> {
         lan: LanStatsResponse {
             enabled: ctx.lan_enabled,
             peers: ctx.lan_peers.lock().unwrap().list().len(),
+        },
+        memory: MemoryStats {
+            cache_bytes,
+            blocklist_bytes,
+            query_log_bytes,
+            query_log_entries,
+            srtt_bytes,
+            srtt_entries,
+            overrides_bytes,
+            total_estimated_bytes: total_estimated,
+            process_rss_bytes: crate::stats::process_rss_bytes(),
         },
     })
 }

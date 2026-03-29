@@ -101,7 +101,7 @@ body {
 /* Stat cards row */
 .stats-row {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(6, 1fr);
   gap: 1rem;
 }
 .stat-card {
@@ -125,6 +125,8 @@ body {
 .stat-card.blocked::before { background: var(--rose); }
 .stat-card.overrides::before { background: var(--violet); }
 .stat-card.uptime::before { background: var(--cyan); }
+.stat-card.memory::before { background: var(--text-dim); }
+.stat-card.memory .stat-value { color: var(--text-secondary); }
 
 .stat-label {
   font-size: 0.7rem;
@@ -468,9 +470,73 @@ body {
   display: none;
 }
 
+/* Memory sidebar panel */
+.memory-bar {
+  display: flex;
+  height: 18px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--bg-surface);
+  margin-bottom: 0.8rem;
+}
+.memory-bar-seg {
+  height: 100%;
+  min-width: 2px;
+  transition: width 0.6s ease;
+}
+.memory-bar-seg.cache { background: var(--teal); }
+.memory-bar-seg.blocklist { background: var(--rose); }
+.memory-bar-seg.querylog { background: var(--amber); }
+.memory-bar-seg.srtt { background: var(--cyan); }
+.memory-bar-seg.overrides { background: var(--violet); }
+.memory-row {
+  display: flex;
+  align-items: center;
+  padding: 0.3rem 0;
+  border-bottom: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+}
+.memory-row:last-child { border-bottom: none; }
+.memory-row-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  flex-shrink: 0;
+  margin-right: 0.5rem;
+}
+.memory-row-label {
+  flex: 1;
+  color: var(--text-secondary);
+}
+.memory-row-size {
+  width: 65px;
+  text-align: right;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+.memory-row-entries {
+  width: 90px;
+  text-align: right;
+  color: var(--text-dim);
+}
+.memory-rss {
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--text-dim);
+}
+
 /* Responsive */
 @media (max-width: 1100px) {
   .main-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 900px) {
+  .stats-row { grid-template-columns: repeat(3, 1fr); }
 }
 @media (max-width: 700px) {
   .stats-row { grid-template-columns: repeat(2, 1fr); }
@@ -523,6 +589,11 @@ body {
       <div class="stat-label">Uptime</div>
       <div class="stat-value" id="uptime">—</div>
       <div class="stat-sub" id="uptimeSub">&nbsp;</div>
+    </div>
+    <div class="stat-card memory">
+      <div class="stat-label">Memory</div>
+      <div class="stat-value" id="memoryRss">—</div>
+      <div class="stat-sub" id="memorySub">&nbsp;</div>
     </div>
   </div>
 
@@ -648,6 +719,17 @@ body {
         </div>
       </div>
 
+      <!-- Memory breakdown -->
+      <div class="panel" id="memoryPanel">
+        <div class="panel-header">
+          <span class="panel-title">Memory</span>
+          <span class="panel-title" id="memoryTotal" style="color: var(--text-dim)"></span>
+        </div>
+        <div class="panel-body" id="memoryBody">
+          <div class="empty-state">No memory data</div>
+        </div>
+      </div>
+
       <!-- Cache entries -->
       <div class="panel">
         <div class="panel-header">
@@ -710,6 +792,70 @@ function formatRemaining(secs) {
   if (secs < 60) return `${secs}s left`;
   if (secs < 3600) return `${Math.floor(secs / 60)}m ${secs % 60}s left`;
   return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m left`;
+}
+
+function formatBytes(bytes) {
+  if (bytes === 0) return '0 B';
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+  if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + ' MB';
+  return (bytes / 1073741824).toFixed(1) + ' GB';
+}
+
+const MEMORY_COMPONENTS = [
+  { key: 'cache',     label: 'Cache',     cls: 'cache',     color: 'var(--teal)' },
+  { key: 'blocklist', label: 'Blocklist',  cls: 'blocklist', color: 'var(--rose)' },
+  { key: 'query_log', label: 'Query Log',  cls: 'querylog',  color: 'var(--amber)' },
+  { key: 'srtt',      label: 'SRTT',       cls: 'srtt',      color: 'var(--cyan)' },
+  { key: 'overrides', label: 'Overrides',  cls: 'overrides', color: 'var(--violet)' },
+];
+
+function renderMemory(mem, stats) {
+  if (!mem) return;
+
+  // Stat card
+  document.getElementById('memoryRss').textContent = formatBytes(mem.process_rss_bytes);
+  document.getElementById('memorySub').textContent = 'est. ' + formatBytes(mem.total_estimated_bytes);
+
+  // Entry counts from sibling stats objects (avoid duplication in memory payload)
+  const entryCounts = {
+    cache: stats.cache.entries,
+    blocklist: stats.blocking.domains_loaded,
+    query_log: mem.query_log_entries,
+    srtt: mem.srtt_entries,
+    overrides: stats.overrides.active,
+  };
+
+  // Sidebar panel
+  const total = mem.total_estimated_bytes || 1;
+  document.getElementById('memoryTotal').textContent = formatBytes(total);
+
+  const barSegments = MEMORY_COMPONENTS.map(c => {
+    const bytes = mem[c.key + '_bytes'] || 0;
+    const pct = ((bytes / total) * 100).toFixed(1);
+    return `<div class="memory-bar-seg ${c.cls}" style="width:${pct}%" title="${c.label}: ${formatBytes(bytes)} (${pct}%)"></div>`;
+  }).join('');
+
+  const rows = MEMORY_COMPONENTS.map(c => {
+    const bytes = mem[c.key + '_bytes'] || 0;
+    const entries = entryCounts[c.key] || 0;
+    return `
+      <div class="memory-row">
+        <div class="memory-row-dot" style="background:${c.color}"></div>
+        <span class="memory-row-label">${c.label}</span>
+        <span class="memory-row-size">${formatBytes(bytes)}</span>
+        <span class="memory-row-entries">${formatNumber(entries)} entries</span>
+      </div>`;
+  }).join('');
+
+  document.getElementById('memoryBody').innerHTML = `
+    <div class="memory-bar">${barSegments}</div>
+    ${rows}
+    <div class="memory-rss">
+      <span>Process RSS</span>
+      <span>${formatBytes(mem.process_rss_bytes)}</span>
+    </div>
+  `;
 }
 
 const PATH_DEFS = [
@@ -960,6 +1106,7 @@ async function refresh() {
     renderServices(services);
     renderBlockingInfo(blockingInfo);
     renderAllowlist(allowlist);
+    renderMemory(stats.memory, stats);
 
   } catch (err) {
     document.getElementById('statusDot').className = 'status-dot error';

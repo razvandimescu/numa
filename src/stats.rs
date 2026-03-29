@@ -1,5 +1,84 @@
 use std::time::Instant;
 
+/// Returns the process resident set size in bytes, or 0 if unavailable.
+pub fn process_rss_bytes() -> usize {
+    #[cfg(target_os = "macos")]
+    {
+        macos_rss()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux_rss()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        0
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_rss() -> usize {
+    use std::mem;
+    extern "C" {
+        fn mach_task_self() -> u32;
+        fn task_info(
+            target_task: u32,
+            flavor: u32,
+            task_info_out: *mut libc_task_basic_info,
+            task_info_count: *mut u32,
+        ) -> i32;
+    }
+    #[repr(C)]
+    struct libc_task_basic_info {
+        virtual_size: u64,
+        resident_size: u64,
+        resident_size_max: u64,
+        user_time: [u32; 2],
+        system_time: [u32; 2],
+        policy: i32,
+        suspend_count: i32,
+    }
+    const MACH_TASK_BASIC_INFO: u32 = 20;
+    let mut info: libc_task_basic_info = unsafe { mem::zeroed() };
+    let mut count = (mem::size_of::<libc_task_basic_info>() / mem::size_of::<u32>()) as u32;
+    let kr = unsafe {
+        task_info(
+            mach_task_self(),
+            MACH_TASK_BASIC_INFO,
+            &mut info,
+            &mut count,
+        )
+    };
+    if kr == 0 {
+        info.resident_size as usize
+    } else {
+        0
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_rss() -> usize {
+    extern "C" {
+        fn sysconf(name: i32) -> i64;
+    }
+    const SC_PAGESIZE: i32 = 30;
+    let page_size = unsafe { sysconf(SC_PAGESIZE) };
+    let page_size = if page_size > 0 {
+        page_size as usize
+    } else {
+        4096
+    };
+
+    if let Ok(statm) = std::fs::read_to_string("/proc/self/statm") {
+        if let Some(rss_pages) = statm.split_whitespace().nth(1) {
+            if let Ok(pages) = rss_pages.parse::<usize>() {
+                return pages * page_size;
+            }
+        }
+    }
+    0
+}
+
 pub struct ServerStats {
     queries_total: u64,
     queries_forwarded: u64,

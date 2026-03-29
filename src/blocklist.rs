@@ -183,6 +183,20 @@ impl BlocklistStore {
         self.allowlist.iter().cloned().collect()
     }
 
+    pub fn heap_bytes(&self) -> usize {
+        let domains: usize = self
+            .domains
+            .iter()
+            .map(|d| std::mem::size_of::<String>() + d.capacity())
+            .sum();
+        let allow: usize = self
+            .allowlist
+            .iter()
+            .map(|d| std::mem::size_of::<String>() + d.capacity())
+            .sum();
+        domains + allow
+    }
+
     pub fn stats(&self) -> BlocklistStats {
         BlocklistStats {
             enabled: self.is_enabled(),

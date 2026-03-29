@@ -136,6 +136,46 @@ impl DnsRecord {
         }
     }
 
+    pub fn heap_bytes(&self) -> usize {
+        match self {
+            DnsRecord::A { domain, .. } => domain.capacity(),
+            DnsRecord::NS { domain, host, .. } | DnsRecord::CNAME { domain, host, .. } => {
+                domain.capacity() + host.capacity()
+            }
+            DnsRecord::MX { domain, host, .. } => domain.capacity() + host.capacity(),
+            DnsRecord::AAAA { domain, .. } => domain.capacity(),
+            DnsRecord::DNSKEY {
+                domain, public_key, ..
+            } => domain.capacity() + public_key.capacity(),
+            DnsRecord::DS { domain, digest, .. } => domain.capacity() + digest.capacity(),
+            DnsRecord::RRSIG {
+                domain,
+                signer_name,
+                signature,
+                ..
+            } => domain.capacity() + signer_name.capacity() + signature.capacity(),
+            DnsRecord::NSEC {
+                domain,
+                next_domain,
+                type_bitmap,
+                ..
+            } => domain.capacity() + next_domain.capacity() + type_bitmap.capacity(),
+            DnsRecord::NSEC3 {
+                domain,
+                salt,
+                next_hashed_owner,
+                type_bitmap,
+                ..
+            } => {
+                domain.capacity()
+                    + salt.capacity()
+                    + next_hashed_owner.capacity()
+                    + type_bitmap.capacity()
+            }
+            DnsRecord::UNKNOWN { domain, data, .. } => domain.capacity() + data.capacity(),
+        }
+    }
+
     pub fn set_ttl(&mut self, new_ttl: u32) {
         match self {
             DnsRecord::A { ttl, .. }

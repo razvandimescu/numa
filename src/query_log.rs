@@ -38,6 +38,21 @@ impl QueryLog {
         self.entries.push_back(entry);
     }
 
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn heap_bytes(&self) -> usize {
+        self.entries
+            .iter()
+            .map(|e| std::mem::size_of::<QueryLogEntry>() + e.domain.capacity())
+            .sum()
+    }
+
     pub fn query(&self, filter: &QueryLogFilter) -> Vec<&QueryLogEntry> {
         self.entries
             .iter()

@@ -117,6 +117,19 @@ impl OverrideStore {
         self.entries.clear();
     }
 
+    pub fn heap_bytes(&self) -> usize {
+        self.entries
+            .iter()
+            .map(|(k, v)| {
+                k.capacity()
+                    + std::mem::size_of::<OverrideEntry>()
+                    + v.domain.capacity()
+                    + v.target.capacity()
+                    + v.record.heap_bytes()
+            })
+            .sum()
+    }
+
     pub fn active_count(&self) -> usize {
         self.entries.values().filter(|e| !e.is_expired()).count()
     }
