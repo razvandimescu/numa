@@ -54,7 +54,7 @@ enabled = true
 port = 80
 tls_port = 443
 tld = "numa"
-# bind_addr = "127.0.0.1"  # default; auto 0.0.0.0 when [lan] enabled
+# bind_addr = "127.0.0.1"  # default; set to "0.0.0.0" for LAN access to .numa services
 
 # Pre-configured services (numa.numa is always added automatically)
 # [[services]]
