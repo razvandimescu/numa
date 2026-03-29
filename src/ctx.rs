@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Mutex, RwLock};
@@ -7,6 +8,9 @@ use arc_swap::ArcSwap;
 use log::{debug, error, info, warn};
 use rustls::ServerConfig;
 use tokio::net::UdpSocket;
+use tokio::sync::broadcast;
+
+type InflightMap = HashMap<(String, QueryType), broadcast::Sender<Option<DnsPacket>>>;
 
 use crate::blocklist::BlocklistStore;
 use crate::buffer::BytePacketBuffer;
@@ -53,6 +57,7 @@ pub struct ServerCtx {
     pub upstream_mode: UpstreamMode,
     pub root_hints: Vec<SocketAddr>,
     pub srtt: RwLock<SrttCache>,
+    pub inflight: Mutex<InflightMap>,
     pub dnssec_enabled: bool,
     pub dnssec_strict: bool,
 }
@@ -172,27 +177,61 @@ pub async fn handle_query(
                 }
                 (resp, QueryPath::Cached, cached_dnssec)
             } else if ctx.upstream_mode == UpstreamMode::Recursive {
-                match crate::recursive::resolve_recursive(
-                    &qname,
-                    qtype,
-                    &ctx.cache,
-                    &query,
-                    &ctx.root_hints,
-                    &ctx.srtt,
-                )
-                .await
-                {
-                    Ok(resp) => (resp, QueryPath::Recursive, DnssecStatus::Indeterminate),
-                    Err(e) => {
-                        error!(
-                            "{} | {:?} {} | RECURSIVE ERROR | {}",
-                            src_addr, qtype, qname, e
-                        );
-                        (
-                            DnsPacket::response_from(&query, ResultCode::SERVFAIL),
-                            QueryPath::UpstreamError,
-                            DnssecStatus::Indeterminate,
+                let key = (qname.clone(), qtype);
+                let disposition = acquire_inflight(&ctx.inflight, key.clone());
+
+                match disposition {
+                    Disposition::Follower(mut rx) => {
+                        debug!("{} | {:?} {} | COALESCED", src_addr, qtype, qname);
+                        match rx.recv().await {
+                            Ok(Some(mut resp)) => {
+                                resp.header.id = query.header.id;
+                                (resp, QueryPath::Coalesced, DnssecStatus::Indeterminate)
+                            }
+                            _ => (
+                                DnsPacket::response_from(&query, ResultCode::SERVFAIL),
+                                QueryPath::UpstreamError,
+                                DnssecStatus::Indeterminate,
+                            ),
+                        }
+                    }
+                    Disposition::Leader(tx) => {
+                        // Drop guard: remove inflight entry even on panic/cancellation
+                        let guard = InflightGuard {
+                            inflight: &ctx.inflight,
+                            key: key.clone(),
+                        };
+
+                        let result = crate::recursive::resolve_recursive(
+                            &qname,
+                            qtype,
+                            &ctx.cache,
+                            &query,
+                            &ctx.root_hints,
+                            &ctx.srtt,
                         )
+                        .await;
+
+                        drop(guard);
+
+                        match result {
+                            Ok(resp) => {
+                                let _ = tx.send(Some(resp.clone()));
+                                (resp, QueryPath::Recursive, DnssecStatus::Indeterminate)
+                            }
+                            Err(e) => {
+                                let _ = tx.send(None);
+                                error!(
+                                    "{} | {:?} {} | RECURSIVE ERROR | {}",
+                                    src_addr, qtype, qname, e
+                                );
+                                (
+                                    DnsPacket::response_from(&query, ResultCode::SERVFAIL),
+                                    QueryPath::UpstreamError,
+                                    DnssecStatus::Indeterminate,
+                                )
+                            }
+                        }
                     }
                 }
             } else {
@@ -377,6 +416,47 @@ fn is_special_use_domain(qname: &str) -> bool {
     qname == "local" || qname.ends_with(".local")
 }
 
+enum Disposition {
+    Leader(broadcast::Sender<Option<DnsPacket>>),
+    Follower(broadcast::Receiver<Option<DnsPacket>>),
+}
+
+fn acquire_inflight(inflight: &Mutex<InflightMap>, key: (String, QueryType)) -> Disposition {
+    let mut map = inflight.lock().unwrap();
+    if let Some(tx) = map.get(&key) {
+        Disposition::Follower(tx.subscribe())
+    } else {
+        let (tx, _) = broadcast::channel::<Option<DnsPacket>>(1);
+        map.insert(key, tx.clone());
+        Disposition::Leader(tx)
+    }
+}
+
+struct InflightGuard<'a> {
+    inflight: &'a Mutex<InflightMap>,
+    key: (String, QueryType),
+}
+
+impl Drop for InflightGuard<'_> {
+    fn drop(&mut self) {
+        self.inflight.lock().unwrap().remove(&self.key);
+    }
+}
+
+/// Build a wire-format DNS query packet for the given domain and type.
+#[cfg(test)]
+fn build_wire_query(id: u16, domain: &str, qtype: QueryType) -> BytePacketBuffer {
+    let mut pkt = DnsPacket::new();
+    pkt.header.id = id;
+    pkt.header.recursion_desired = true;
+    pkt.header.questions = 1;
+    pkt.questions
+        .push(crate::question::DnsQuestion::new(domain.to_string(), qtype));
+    let mut buf = BytePacketBuffer::new();
+    pkt.write(&mut buf).unwrap();
+    BytePacketBuffer::from_bytes(buf.filled())
+}
+
 fn special_use_response(query: &DnsPacket, qname: &str, qtype: QueryType) -> DnsPacket {
     use std::net::{Ipv4Addr, Ipv6Addr};
     if qname == "ipv4only.arpa" {
@@ -408,5 +488,370 @@ fn special_use_response(query: &DnsPacket, qname: &str, qtype: QueryType) -> Dns
         resp
     } else {
         DnsPacket::response_from(query, ResultCode::NXDOMAIN)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::net::{Ipv4Addr, SocketAddr};
+    use std::sync::{Arc, Mutex, RwLock};
+    use tokio::sync::broadcast;
+
+    // ---- InflightGuard unit tests ----
+
+    #[test]
+    fn inflight_guard_removes_key_on_drop() {
+        let map: Mutex<InflightMap> = Mutex::new(HashMap::new());
+        let key = ("example.com".to_string(), QueryType::A);
+        let (tx, _) = broadcast::channel::<Option<DnsPacket>>(1);
+        map.lock().unwrap().insert(key.clone(), tx);
+
+        assert_eq!(map.lock().unwrap().len(), 1);
+        {
+            let _guard = InflightGuard {
+                inflight: &map,
+                key: key.clone(),
+            };
+        } // guard dropped here
+        assert!(map.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn inflight_guard_only_removes_own_key() {
+        let map: Mutex<InflightMap> = Mutex::new(HashMap::new());
+        let key_a = ("a.com".to_string(), QueryType::A);
+        let key_b = ("b.com".to_string(), QueryType::A);
+        let (tx_a, _) = broadcast::channel::<Option<DnsPacket>>(1);
+        let (tx_b, _) = broadcast::channel::<Option<DnsPacket>>(1);
+        map.lock().unwrap().insert(key_a.clone(), tx_a);
+        map.lock().unwrap().insert(key_b.clone(), tx_b);
+
+        {
+            let _guard = InflightGuard {
+                inflight: &map,
+                key: key_a,
+            };
+        }
+        let m = map.lock().unwrap();
+        assert_eq!(m.len(), 1);
+        assert!(m.contains_key(&key_b));
+    }
+
+    #[test]
+    fn inflight_guard_same_domain_different_qtype_independent() {
+        let map: Mutex<InflightMap> = Mutex::new(HashMap::new());
+        let key_a = ("example.com".to_string(), QueryType::A);
+        let key_aaaa = ("example.com".to_string(), QueryType::AAAA);
+        let (tx_a, _) = broadcast::channel::<Option<DnsPacket>>(1);
+        let (tx_aaaa, _) = broadcast::channel::<Option<DnsPacket>>(1);
+        map.lock().unwrap().insert(key_a.clone(), tx_a);
+        map.lock().unwrap().insert(key_aaaa.clone(), tx_aaaa);
+
+        {
+            let _guard = InflightGuard {
+                inflight: &map,
+                key: key_a,
+            };
+        }
+        let m = map.lock().unwrap();
+        assert_eq!(m.len(), 1);
+        assert!(m.contains_key(&key_aaaa));
+    }
+
+    // ---- Coalescing disposition tests (via acquire_inflight) ----
+
+    #[test]
+    fn first_caller_becomes_leader() {
+        let map: Mutex<InflightMap> = Mutex::new(HashMap::new());
+        let key = ("test.com".to_string(), QueryType::A);
+
+        let d = acquire_inflight(&map, key.clone());
+        assert!(matches!(d, Disposition::Leader(_)));
+        assert_eq!(map.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn second_caller_becomes_follower() {
+        let map: Mutex<InflightMap> = Mutex::new(HashMap::new());
+        let key = ("test.com".to_string(), QueryType::A);
+
+        let _leader = acquire_inflight(&map, key.clone());
+        let follower = acquire_inflight(&map, key);
+        assert!(matches!(follower, Disposition::Follower(_)));
+        // Map still has exactly 1 entry — follower subscribes, doesn't insert
+        assert_eq!(map.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn leader_broadcast_reaches_follower() {
+        let map: Mutex<InflightMap> = Mutex::new(HashMap::new());
+        let key = ("test.com".to_string(), QueryType::A);
+
+        let leader = acquire_inflight(&map, key.clone());
+        let follower = acquire_inflight(&map, key);
+
+        let tx = match leader {
+            Disposition::Leader(tx) => tx,
+            _ => panic!("expected leader"),
+        };
+        let mut rx = match follower {
+            Disposition::Follower(rx) => rx,
+            _ => panic!("expected follower"),
+        };
+
+        let mut resp = DnsPacket::new();
+        resp.header.id = 42;
+        resp.answers.push(DnsRecord::A {
+            domain: "test.com".into(),
+            addr: Ipv4Addr::new(1, 2, 3, 4),
+            ttl: 300,
+        });
+        let _ = tx.send(Some(resp));
+
+        let received = rx.recv().await.unwrap().unwrap();
+        assert_eq!(received.header.id, 42);
+        assert_eq!(received.answers.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn leader_none_signals_failure_to_follower() {
+        let map: Mutex<InflightMap> = Mutex::new(HashMap::new());
+        let key = ("test.com".to_string(), QueryType::A);
+
+        let leader = acquire_inflight(&map, key.clone());
+        let follower = acquire_inflight(&map, key);
+
+        let tx = match leader {
+            Disposition::Leader(tx) => tx,
+            _ => panic!("expected leader"),
+        };
+        let mut rx = match follower {
+            Disposition::Follower(rx) => rx,
+            _ => panic!("expected follower"),
+        };
+
+        let _ = tx.send(None);
+        assert!(rx.recv().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn multiple_followers_all_receive_via_acquire() {
+        let map: Mutex<InflightMap> = Mutex::new(HashMap::new());
+        let key = ("multi.com".to_string(), QueryType::A);
+
+        let leader = acquire_inflight(&map, key.clone());
+        let f1 = acquire_inflight(&map, key.clone());
+        let f2 = acquire_inflight(&map, key.clone());
+        let f3 = acquire_inflight(&map, key);
+
+        let tx = match leader {
+            Disposition::Leader(tx) => tx,
+            _ => panic!("expected leader"),
+        };
+
+        let mut resp = DnsPacket::new();
+        resp.answers.push(DnsRecord::A {
+            domain: "multi.com".into(),
+            addr: Ipv4Addr::new(10, 0, 0, 1),
+            ttl: 60,
+        });
+        let _ = tx.send(Some(resp));
+
+        for f in [f1, f2, f3] {
+            let mut rx = match f {
+                Disposition::Follower(rx) => rx,
+                _ => panic!("expected follower"),
+            };
+            let r = rx.recv().await.unwrap().unwrap();
+            assert_eq!(r.answers.len(), 1);
+        }
+    }
+
+    // ---- Integration: concurrent handle_query coalescing ----
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// Spawn a slow TCP DNS server that delays `delay` before responding.
+    /// Returns (addr, query_count) where query_count is an Arc<AtomicU32>
+    /// tracking how many queries were actually resolved (not coalesced).
+    async fn spawn_slow_dns_server(
+        delay: Duration,
+    ) -> (SocketAddr, Arc<std::sync::atomic::AtomicU32>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let count = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let count_clone = count.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = match listener.accept().await {
+                    Ok(c) => c,
+                    Err(_) => break,
+                };
+                let count = count_clone.clone();
+                let delay = delay;
+                tokio::spawn(async move {
+                    let mut len_buf = [0u8; 2];
+                    if stream.read_exact(&mut len_buf).await.is_err() {
+                        return;
+                    }
+                    let len = u16::from_be_bytes(len_buf) as usize;
+                    let mut data = vec![0u8; len];
+                    if stream.read_exact(&mut data).await.is_err() {
+                        return;
+                    }
+
+                    let mut buf = BytePacketBuffer::from_bytes(&data);
+                    let query = match DnsPacket::from_buffer(&mut buf) {
+                        Ok(q) => q,
+                        Err(_) => return,
+                    };
+
+                    count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                    // Deliberate delay to create coalescing window
+                    tokio::time::sleep(delay).await;
+
+                    let mut resp = DnsPacket::response_from(&query, ResultCode::NOERROR);
+                    resp.header.authoritative_answer = true;
+                    if let Some(q) = query.questions.first() {
+                        resp.answers.push(DnsRecord::A {
+                            domain: q.name.clone(),
+                            addr: Ipv4Addr::new(10, 0, 0, 1),
+                            ttl: 300,
+                        });
+                    }
+
+                    let mut resp_buf = BytePacketBuffer::new();
+                    if resp.write(&mut resp_buf).is_err() {
+                        return;
+                    }
+                    let resp_bytes = resp_buf.filled();
+                    let mut out = Vec::with_capacity(2 + resp_bytes.len());
+                    out.extend_from_slice(&(resp_bytes.len() as u16).to_be_bytes());
+                    out.extend_from_slice(resp_bytes);
+                    let _ = stream.write_all(&out).await;
+                });
+            }
+        });
+        (addr, count)
+    }
+
+    async fn test_recursive_ctx(root_hint: SocketAddr) -> Arc<ServerCtx> {
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        Arc::new(ServerCtx {
+            socket,
+            zone_map: HashMap::new(),
+            cache: RwLock::new(crate::cache::DnsCache::new(100, 60, 86400)),
+            stats: Mutex::new(crate::stats::ServerStats::new()),
+            overrides: RwLock::new(crate::override_store::OverrideStore::new()),
+            blocklist: RwLock::new(crate::blocklist::BlocklistStore::new()),
+            query_log: Mutex::new(crate::query_log::QueryLog::new(100)),
+            services: Mutex::new(crate::service_store::ServiceStore::new()),
+            lan_peers: Mutex::new(crate::lan::PeerStore::new(90)),
+            forwarding_rules: Vec::new(),
+            upstream: Mutex::new(crate::forward::Upstream::Udp(
+                "127.0.0.1:53".parse().unwrap(),
+            )),
+            upstream_auto: false,
+            upstream_port: 53,
+            lan_ip: Mutex::new(Ipv4Addr::LOCALHOST),
+            timeout: Duration::from_secs(3),
+            proxy_tld: "numa".to_string(),
+            proxy_tld_suffix: ".numa".to_string(),
+            lan_enabled: false,
+            config_path: "/tmp/test-numa.toml".to_string(),
+            config_found: false,
+            config_dir: std::path::PathBuf::from("/tmp"),
+            data_dir: std::path::PathBuf::from("/tmp"),
+            tls_config: None,
+            upstream_mode: crate::config::UpstreamMode::Recursive,
+            root_hints: vec![root_hint],
+            srtt: RwLock::new(crate::srtt::SrttCache::new(true)),
+            inflight: Mutex::new(HashMap::new()),
+            dnssec_enabled: false,
+            dnssec_strict: false,
+        })
+    }
+
+    #[tokio::test]
+    async fn concurrent_queries_coalesce_to_single_resolution() {
+        // Force TCP-only so mock server works
+        crate::recursive::UDP_DISABLED.store(true, std::sync::atomic::Ordering::Release);
+
+        let (server_addr, query_count) = spawn_slow_dns_server(Duration::from_millis(200)).await;
+        let ctx = test_recursive_ctx(server_addr).await;
+        let src: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+
+        // Fire 5 concurrent queries for the same (domain, A)
+        let mut handles = Vec::new();
+        for i in 0..5u16 {
+            let ctx = ctx.clone();
+            let buf = build_wire_query(100 + i, "coalesce-test.example.com", QueryType::A);
+            handles.push(tokio::spawn(
+                async move { handle_query(buf, src, &ctx).await },
+            ));
+        }
+
+        for h in handles {
+            h.await.unwrap().unwrap();
+        }
+
+        // Only 1 resolution should have reached the upstream server
+        let actual = query_count.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(actual, 1, "expected 1 upstream query, got {}", actual);
+
+        // Inflight map must be empty after all queries complete
+        assert!(ctx.inflight.lock().unwrap().is_empty());
+
+        crate::recursive::reset_udp_state();
+    }
+
+    #[tokio::test]
+    async fn different_qtypes_not_coalesced() {
+        crate::recursive::UDP_DISABLED.store(true, std::sync::atomic::Ordering::Release);
+
+        let (server_addr, query_count) = spawn_slow_dns_server(Duration::from_millis(100)).await;
+        let ctx = test_recursive_ctx(server_addr).await;
+        let src: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+
+        // Fire A and AAAA concurrently — should NOT coalesce
+        let ctx_ref = ctx.clone();
+        let ctx_ref2 = ctx.clone();
+        let buf_a = build_wire_query(200, "different-qt.example.com", QueryType::A);
+        let buf_aaaa = build_wire_query(201, "different-qt.example.com", QueryType::AAAA);
+
+        let h1 = tokio::spawn(async move { handle_query(buf_a, src, &ctx_ref).await });
+        let h2 = tokio::spawn(async move { handle_query(buf_aaaa, src, &ctx_ref2).await });
+
+        h1.await.unwrap().unwrap();
+        h2.await.unwrap().unwrap();
+
+        let actual = query_count.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            actual >= 2,
+            "A and AAAA should resolve independently, got {}",
+            actual
+        );
+        assert!(ctx.inflight.lock().unwrap().is_empty());
+
+        crate::recursive::reset_udp_state();
+    }
+
+    #[tokio::test]
+    async fn inflight_map_cleaned_after_upstream_error() {
+        // Server that rejects everything — no server running at all
+        let bogus_addr: SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let ctx = test_recursive_ctx(bogus_addr).await;
+        let src: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+
+        let buf = build_wire_query(300, "will-fail.example.com", QueryType::A);
+        let _ = handle_query(buf, src, &ctx).await;
+
+        // Map must be clean even after error
+        assert!(ctx.inflight.lock().unwrap().is_empty());
     }
 }

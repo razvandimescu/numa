@@ -182,6 +182,7 @@ struct QueriesStats {
     total: u64,
     forwarded: u64,
     recursive: u64,
+    coalesced: u64,
     cached: u64,
     local: u64,
     overridden: u64,
@@ -499,6 +500,7 @@ async fn stats(State(ctx): State<Arc<ServerCtx>>) -> Json<StatsResponse> {
             total: snap.total,
             forwarded: snap.forwarded,
             recursive: snap.recursive,
+            coalesced: snap.coalesced,
             cached: snap.cached,
             local: snap.local,
             overridden: snap.overridden,
@@ -953,6 +955,7 @@ mod tests {
             upstream_mode: crate::config::UpstreamMode::Forward,
             root_hints: Vec::new(),
             srtt: RwLock::new(crate::srtt::SrttCache::new(true)),
+            inflight: Mutex::new(std::collections::HashMap::new()),
             dnssec_enabled: false,
             dnssec_strict: false,
         })
