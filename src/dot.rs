@@ -175,6 +175,7 @@ where
                 resp.header.rescode = ResultCode::SERVFAIL;
                 let mut buf = BytePacketBuffer::new();
                 if resp.write(&mut buf).is_err() {
+                    debug!("DoT: failed to serialize SERVFAIL for {}", remote_addr);
                     break;
                 }
                 buf
