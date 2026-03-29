@@ -1,6 +1,6 @@
 [package]
 name = "numa"
-version = "0.7.2"
+version = "0.7.3"
 authors = ["razvandimescu <razvan@dimescu.com>"]
 edition = "2021"
 description = "Portable DNS resolver in Rust — .numa local domains, ad blocking, developer overrides, DNS-over-HTTPS"
