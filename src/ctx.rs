@@ -760,9 +760,9 @@ mod tests {
         for i in 0..5u16 {
             let ctx = ctx.clone();
             let buf = build_wire_query(100 + i, "coalesce-test.example.com", QueryType::A);
-            handles.push(tokio::spawn(async move {
-                handle_query(buf, src, &ctx).await
-            }));
+            handles.push(tokio::spawn(
+                async move { handle_query(buf, src, &ctx).await },
+            ));
         }
 
         for h in handles {
@@ -800,7 +800,11 @@ mod tests {
         h2.await.unwrap().unwrap();
 
         let actual = query_count.load(std::sync::atomic::Ordering::Relaxed);
-        assert!(actual >= 2, "A and AAAA should resolve independently, got {}", actual);
+        assert!(
+            actual >= 2,
+            "A and AAAA should resolve independently, got {}",
+            actual
+        );
         assert!(ctx.inflight.lock().unwrap().is_empty());
 
         crate::recursive::reset_udp_state();

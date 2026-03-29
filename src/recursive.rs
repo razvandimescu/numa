@@ -21,7 +21,8 @@ const UDP_FAIL_THRESHOLD: u8 = 3;
 
 static QUERY_ID: AtomicU16 = AtomicU16::new(1);
 static UDP_FAILURES: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
-pub(crate) static UDP_DISABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub(crate) static UDP_DISABLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 fn next_id() -> u16 {
     QUERY_ID.fetch_add(1, Ordering::Relaxed)
