@@ -13,7 +13,7 @@ pub struct ServerStats {
     started_at: Instant,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QueryPath {
     Local,
     Cached,
