@@ -208,6 +208,7 @@ async fn main() -> numa::Result<()> {
     });
 
     let zone_count: usize = ctx.zone_map.values().map(|m| m.len()).sum();
+    let dns_is_public = config.server.bind_addr.starts_with("0.0.0.0");
 
     // Build banner rows, then size the box to fit the longest value
     let api_url = format!("http://localhost:{}", api_port);
@@ -308,6 +309,17 @@ async fn main() -> numa::Result<()> {
     );
     if let Some(ref label) = proxy_label {
         row("Proxy", g, label);
+        if !config.lan.enabled && !dns_is_public && config.proxy.bind_addr == "127.0.0.1" {
+            let y = "\x1b[38;2;204;176;59m"; // yellow
+            row(
+                "",
+                y,
+                &format!(
+                    "⚠ proxy on 127.0.0.1 — .{} not LAN reachable",
+                    config.proxy.tld
+                ),
+            );
+        }
     }
     if config.lan.enabled {
         row("LAN", g, "mDNS (_numa._tcp.local)");
@@ -375,8 +387,8 @@ async fn main() -> numa::Result<()> {
         axum::serve(listener, app).await.unwrap();
     });
 
-    // Proxy binds 0.0.0.0 when LAN is enabled (cross-machine access), otherwise config value
-    let proxy_bind: std::net::Ipv4Addr = if config.lan.enabled {
+    // Proxy binds 0.0.0.0 when LAN is enabled or DNS is already on 0.0.0.0 (cross-machine access)
+    let proxy_bind: std::net::Ipv4Addr = if config.lan.enabled || dns_is_public {
         std::net::Ipv4Addr::UNSPECIFIED
     } else {
         config
