@@ -10,6 +10,8 @@ use rustls::ServerConfig;
 use tokio::net::UdpSocket;
 use tokio::sync::broadcast;
 
+type InflightMap = HashMap<(String, QueryType), broadcast::Sender<Option<DnsPacket>>>;
+
 use crate::blocklist::BlocklistStore;
 use crate::buffer::BytePacketBuffer;
 use crate::cache::{DnsCache, DnssecStatus};
@@ -55,7 +57,7 @@ pub struct ServerCtx {
     pub upstream_mode: UpstreamMode,
     pub root_hints: Vec<SocketAddr>,
     pub srtt: RwLock<SrttCache>,
-    pub inflight: Mutex<HashMap<(String, QueryType), broadcast::Sender<Option<DnsPacket>>>>,
+    pub inflight: Mutex<InflightMap>,
     pub dnssec_enabled: bool,
     pub dnssec_strict: bool,
 }
@@ -430,7 +432,7 @@ fn is_special_use_domain(qname: &str) -> bool {
 }
 
 struct InflightGuard<'a> {
-    inflight: &'a Mutex<HashMap<(String, QueryType), broadcast::Sender<Option<DnsPacket>>>>,
+    inflight: &'a Mutex<InflightMap>,
     key: (String, QueryType),
 }
 
