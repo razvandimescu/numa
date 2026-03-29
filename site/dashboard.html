@@ -945,7 +945,7 @@ async function refresh() {
     prevTime = now;
 
     // Cache hit rate
-    const answered = q.cached + q.forwarded + q.local + q.overridden;
+    const answered = q.cached + q.forwarded + q.recursive + q.coalesced + q.local + q.overridden;
     const hitRate = answered > 0 ? ((q.cached / answered) * 100).toFixed(1) : '0.0';
     document.getElementById('cacheRate').textContent = hitRate + '%';
 
