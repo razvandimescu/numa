@@ -1,4 +1,4 @@
-.PHONY: all build lint fmt check audit test coverage bench clean deploy blog
+.PHONY: all build lint fmt check audit test coverage bench clean deploy blog release
 
 all: lint build test
 
@@ -32,6 +32,12 @@ blog:
 		pandoc "$$f" --template=site/blog-template.html -o "site/blog/posts/$$name.html"; \
 		echo "  $$f → site/blog/posts/$$name.html"; \
 	done
+
+release:
+ifndef VERSION
+	$(error Usage: make release VERSION=0.8.0)
+endif
+	./scripts/release.sh $(VERSION)
 
 clean:
 	cargo clean
