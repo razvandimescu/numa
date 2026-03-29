@@ -1,0 +1,136 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 680" font-family="'DM Sans', system-ui, sans-serif" font-size="13">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b"/>
+    </marker>
+    <marker id="arr-amber" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#c0623a"/>
+    </marker>
+    <marker id="arr-teal" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#6b7c4e"/>
+    </marker>
+    <filter id="s" x="-3%" y="-3%" width="106%" height="106%">
+      <feDropShadow dx="0" dy="1" stdDeviation="2" flood-opacity="0.06"/>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="720" height="680" rx="8" fill="#faf7f2"/>
+
+  <!-- Title -->
+  <text x="360" y="36" text-anchor="middle" font-size="15" font-weight="600" fill="#2c2418" font-family="'Instrument Serif', Georgia, serif" letter-spacing="-0.02em">DNSSEC Chain of Trust</text>
+  <text x="360" y="54" text-anchor="middle" font-size="11" fill="#a39888">Verifying cloudflare.com — from answer to root trust anchor</text>
+
+  <!-- Legend -->
+  <g transform="translate(28, 72)">
+    <rect width="14" height="14" rx="3" fill="#c0623a" opacity="0.15" stroke="#c0623a" stroke-width="1"/>
+    <text x="20" y="12" font-size="11" fill="#6b5e4f">Verify signature (RRSIG → DNSKEY)</text>
+    <rect x="230" width="14" height="14" rx="3" fill="#6b7c4e" opacity="0.15" stroke="#6b7c4e" stroke-width="1"/>
+    <text x="250" y="12" font-size="11" fill="#6b5e4f">Vouch for key (DS → parent DNSKEY)</text>
+    <rect x="478" width="14" height="14" rx="3" fill="#2c2418" opacity="0.08" stroke="#2c2418" stroke-opacity="0.15" stroke-width="1"/>
+    <text x="498" y="12" font-size="11" fill="#6b5e4f">DNS record / key</text>
+  </g>
+
+  <!-- ═══ ZONE: cloudflare.com ═══ -->
+  <rect x="40" y="104" width="640" height="152" rx="8" fill="none" stroke="rgba(0,0,0,0.06)" stroke-dasharray="4,3"/>
+  <text x="56" y="122" font-size="10" font-weight="600" fill="#a39888" letter-spacing="0.08em" font-family="'JetBrains Mono', monospace">CLOUDFLARE.COM ZONE</text>
+
+  <!-- A record -->
+  <rect x="80" y="138" width="320" height="38" rx="6" fill="white" stroke="rgba(0,0,0,0.08)" filter="url(#s)"/>
+  <text x="96" y="157" font-size="12" font-weight="600" fill="#2c2418" font-family="'JetBrains Mono', monospace">cloudflare.com  A  104.16.132.229</text>
+  <text x="96" y="170" font-size="10" fill="#a39888">The answer we want to verify</text>
+
+  <!-- RRSIG -->
+  <line x1="400" y1="157" x2="440" y2="157" stroke="#c0623a" stroke-width="1.5" marker-end="url(#arr-amber)"/>
+  <text x="412" y="149" font-size="9" fill="#c0623a" font-weight="600">signed by</text>
+
+  <rect x="445" y="138" width="220" height="38" rx="6" fill="rgba(192,98,58,0.06)" stroke="rgba(192,98,58,0.2)" filter="url(#s)"/>
+  <text x="461" y="155" font-size="11" font-weight="600" fill="#9e4e2d" font-family="'JetBrains Mono', monospace">RRSIG</text>
+  <text x="505" y="155" font-size="11" fill="#6b5e4f">tag=34505, algo=13</text>
+  <text x="461" y="170" font-size="10" fill="#a39888">signer: cloudflare.com</text>
+
+  <!-- DNSKEY -->
+  <rect x="80" y="192" width="320" height="50" rx="6" fill="white" stroke="rgba(0,0,0,0.08)" filter="url(#s)"/>
+  <text x="96" y="211" font-size="11" font-weight="600" fill="#2c2418" font-family="'JetBrains Mono', monospace">DNSKEY</text>
+  <text x="156" y="211" font-size="11" fill="#6b5e4f">cloudflare.com, tag=34505</text>
+  <text x="96" y="228" font-size="11" fill="#6b7c4e" font-weight="500">ECDSA P-256</text>
+  <text x="194" y="228" font-size="10" fill="#a39888">— 174ns to verify</text>
+
+  <!-- RRSIG → DNSKEY arrow -->
+  <path d="M 555 176 L 555 192 L 400 192 L 400 200" stroke="#c0623a" stroke-width="1.5" fill="none" marker-end="url(#arr-amber)"/>
+  <text x="460" y="189" font-size="9" fill="#c0623a" font-weight="600">verified with</text>
+
+  <!-- ═══ ZONE: .com ═══ -->
+  <rect x="40" y="270" width="640" height="132" rx="8" fill="none" stroke="rgba(0,0,0,0.06)" stroke-dasharray="4,3"/>
+  <text x="56" y="288" font-size="10" font-weight="600" fill="#a39888" letter-spacing="0.08em" font-family="'JetBrains Mono', monospace">.COM TLD ZONE</text>
+
+  <!-- DS connecting zones -->
+  <line x1="240" y1="242" x2="240" y2="302" stroke="#6b7c4e" stroke-width="1.5" marker-end="url(#arr-teal)"/>
+  <text x="252" y="276" font-size="9" fill="#6b7c4e" font-weight="600">vouched for by</text>
+
+  <!-- DS record at .com -->
+  <rect x="80" y="304" width="320" height="38" rx="6" fill="rgba(107,124,78,0.06)" stroke="rgba(107,124,78,0.2)" filter="url(#s)"/>
+  <text x="96" y="321" font-size="11" font-weight="600" fill="#566540" font-family="'JetBrains Mono', monospace">DS</text>
+  <text x="118" y="321" font-size="11" fill="#6b5e4f">tag=2371, digest=SHA-256</text>
+  <text x="96" y="336" font-size="10" fill="#a39888">hash of cloudflare.com DNSKEY</text>
+
+  <!-- DS signed by RRSIG -->
+  <line x1="400" y1="323" x2="440" y2="323" stroke="#c0623a" stroke-width="1.5" marker-end="url(#arr-amber)"/>
+  <text x="412" y="315" font-size="9" fill="#c0623a" font-weight="600">signed by</text>
+
+  <rect x="445" y="304" width="220" height="38" rx="6" fill="rgba(192,98,58,0.06)" stroke="rgba(192,98,58,0.2)" filter="url(#s)"/>
+  <text x="461" y="321" font-size="11" font-weight="600" fill="#9e4e2d" font-family="'JetBrains Mono', monospace">RRSIG</text>
+  <text x="505" y="321" font-size="11" fill="#6b5e4f">tag=19718, signer=com</text>
+
+  <!-- .com DNSKEY -->
+  <rect x="80" y="356" width="320" height="32" rx="6" fill="white" stroke="rgba(0,0,0,0.08)" filter="url(#s)"/>
+  <text x="96" y="377" font-size="11" font-weight="600" fill="#2c2418" font-family="'JetBrains Mono', monospace">DNSKEY</text>
+  <text x="156" y="377" font-size="11" fill="#6b5e4f">com, tag=19718</text>
+
+  <!-- RRSIG → .com DNSKEY -->
+  <path d="M 555 342 L 555 356 L 400 356 L 400 366" stroke="#c0623a" stroke-width="1.5" fill="none" marker-end="url(#arr-amber)"/>
+  <text x="460" y="353" font-size="9" fill="#c0623a" font-weight="600">verified with</text>
+
+  <!-- ═══ ZONE: root ═══ -->
+  <rect x="40" y="404" width="640" height="132" rx="8" fill="none" stroke="rgba(0,0,0,0.06)" stroke-dasharray="4,3"/>
+  <text x="56" y="422" font-size="10" font-weight="600" fill="#a39888" letter-spacing="0.08em" font-family="'JetBrains Mono', monospace">ROOT ZONE (.)</text>
+
+  <!-- DS connecting .com → root -->
+  <line x1="240" y1="388" x2="240" y2="436" stroke="#6b7c4e" stroke-width="1.5" marker-end="url(#arr-teal)"/>
+  <text x="252" y="416" font-size="9" fill="#6b7c4e" font-weight="600">vouched for by</text>
+
+  <!-- DS at root -->
+  <rect x="80" y="438" width="320" height="38" rx="6" fill="rgba(107,124,78,0.06)" stroke="rgba(107,124,78,0.2)" filter="url(#s)"/>
+  <text x="96" y="455" font-size="11" font-weight="600" fill="#566540" font-family="'JetBrains Mono', monospace">DS</text>
+  <text x="118" y="455" font-size="11" fill="#6b5e4f">tag=30909, digest=SHA-256</text>
+  <text x="96" y="470" font-size="10" fill="#a39888">hash of com DNSKEY</text>
+
+  <!-- DS signed by root RRSIG -->
+  <line x1="400" y1="457" x2="440" y2="457" stroke="#c0623a" stroke-width="1.5" marker-end="url(#arr-amber)"/>
+  <text x="412" y="449" font-size="9" fill="#c0623a" font-weight="600">signed by</text>
+
+  <rect x="445" y="438" width="220" height="38" rx="6" fill="rgba(192,98,58,0.06)" stroke="rgba(192,98,58,0.2)" filter="url(#s)"/>
+  <text x="461" y="455" font-size="11" font-weight="600" fill="#9e4e2d" font-family="'JetBrains Mono', monospace">RRSIG</text>
+  <text x="505" y="455" font-size="11" fill="#6b5e4f">signer=.</text>
+
+  <!-- Root DNSKEY -->
+  <rect x="80" y="490" width="320" height="32" rx="6" fill="white" stroke="rgba(0,0,0,0.08)" filter="url(#s)"/>
+  <text x="96" y="511" font-size="11" font-weight="600" fill="#2c2418" font-family="'JetBrains Mono', monospace">DNSKEY</text>
+  <text x="156" y="511" font-size="11" fill="#6b5e4f">root (.), tag=20326, RSA/SHA-256</text>
+
+  <!-- RRSIG → root DNSKEY -->
+  <path d="M 555 476 L 555 490 L 400 490 L 400 500" stroke="#c0623a" stroke-width="1.5" fill="none" marker-end="url(#arr-amber)"/>
+  <text x="460" y="487" font-size="9" fill="#c0623a" font-weight="600">verified with</text>
+
+  <!-- ═══ TRUST ANCHOR ═══ -->
+  <line x1="240" y1="522" x2="240" y2="558" stroke="#2c2418" stroke-width="2" stroke-dasharray="4,3"/>
+
+  <rect x="120" y="560" width="480" height="52" rx="8" fill="#2c2418" filter="url(#s)"/>
+  <text x="360" y="582" text-anchor="middle" font-size="12" font-weight="600" fill="#faf7f2" font-family="'JetBrains Mono', monospace">ROOT TRUST ANCHOR</text>
+  <text x="360" y="600" text-anchor="middle" font-size="11" fill="#a39888">IANA KSK, key_tag=20326 — hardcoded in Numa as const [u8; 256]</text>
+
+  <!-- Flow summary -->
+  <text x="360" y="646" text-anchor="middle" font-size="12" fill="#6b5e4f" font-style="italic">Trust flows up (DS records). Keys flow down (DNSKEY → RRSIG).</text>
+  <text x="360" y="664" text-anchor="middle" font-size="11" fill="#a39888">If any link breaks — wrong signature, missing DS, expired RRSIG — Numa rejects the response.</text>
+
+</svg>

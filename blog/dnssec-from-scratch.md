@@ -50,17 +50,7 @@ TLD priming solves this. On startup, Numa queries root for NS records of 34 comm
 
 DNSSEC doesn't encrypt DNS traffic. It *signs* it. Every DNS record can have an accompanying RRSIG (signature) record. The resolver verifies the signature against the zone's DNSKEY, then verifies that DNSKEY against the parent zone's DS (delegation signer) record, walking up until it reaches the root trust anchor — a hardcoded public key that IANA publishes and the entire internet agrees on.
 
-```
-cloudflare.com A 104.16.132.229
-  signed by → RRSIG (key_tag=34505, algo=13, signer=cloudflare.com)
-  verified with → DNSKEY (cloudflare.com, key_tag=34505, ECDSA P-256)
-  vouched for by → DS (at .com, key_tag=2371, digest=SHA-256 of cloudflare's DNSKEY)
-  signed by → RRSIG (key_tag=19718, signer=com)
-  verified with → DNSKEY (com, key_tag=19718)
-  vouched for by → DS (at root, key_tag=30909)
-  signed by → RRSIG (signer=.)
-  verified with → DNSKEY (., key_tag=20326)  ← root trust anchor (hardcoded)
-```
+<img src="../dnssec-chain.svg" alt="DNSSEC chain of trust diagram — verifying cloudflare.com from answer through .com TLD to root trust anchor">
 
 ### How keys get there
 
@@ -165,11 +155,9 @@ The network fetch dominates. The crypto is noise.
 
 ## Surviving hostile networks
 
-I deployed Numa as my system DNS and switched to a different network. Everything broke. Every query: SERVFAIL, 3-second timeout.
+I deployed Numa as my system DNS and switched networks. Everything broke — every query SERVFAIL, 3-second timeout. The ISP blocks outbound UDP port 53 to everything except whitelisted public resolvers. Root servers, TLD servers, authoritative servers — all unreachable over UDP.
 
-The network probe told the story: the ISP blocks outbound UDP port 53 to all servers except a handful of whitelisted public resolvers (Google, Cloudflare). Root servers, TLD servers, authoritative servers — all unreachable over UDP. The ISP forces you onto their DNS or a blessed upstream. Recursive resolution is impossible.
-
-Except TCP port 53 worked fine. And every DNS server is required to support TCP (RFC 1035 section 4.2.2). The ISP apparently only filters UDP.
+But TCP port 53 worked. Every DNS server is required to support TCP (RFC 1035 section 4.2.2). The ISP only filters UDP.
 
 The fix has three parts:
 
