@@ -15,7 +15,10 @@ Built from scratch in Rust. Zero DNS libraries. RFC 1035 wire protocol parsed by
 ## Quick Start
 
 ```bash
-brew install razvandimescu/tap/numa    # or: cargo install numa
+brew install razvandimescu/tap/numa
+# or: cargo install numa
+# or: curl -fsSL https://raw.githubusercontent.com/razvandimescu/numa/main/install.sh | sh
+
 sudo numa                              # port 53 requires root
 ```
 
