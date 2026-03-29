@@ -310,6 +310,8 @@ pub async fn resolve_query(
     );
 
     // Serialize response
+    // TODO: TC bit is UDP-specific; DoT connections could carry up to 65535 bytes.
+    // Once BytePacketBuffer supports larger buffers, skip truncation for TCP/TLS.
     let mut resp_buffer = BytePacketBuffer::new();
     if response.write(&mut resp_buffer).is_err() {
         // Response too large — set TC bit and send header + question only
