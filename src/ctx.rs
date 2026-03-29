@@ -93,18 +93,13 @@ pub async fn handle_query(
         } else if qname == "localhost" || qname.ends_with(".localhost") {
             // RFC 6761: .localhost always resolves to loopback
             let mut resp = DnsPacket::response_from(&query, ResultCode::NOERROR);
-            match qtype {
-                QueryType::AAAA => resp.answers.push(DnsRecord::AAAA {
-                    domain: qname.clone(),
-                    addr: std::net::Ipv6Addr::LOCALHOST,
-                    ttl: 300,
-                }),
-                _ => resp.answers.push(DnsRecord::A {
-                    domain: qname.clone(),
-                    addr: std::net::Ipv4Addr::LOCALHOST,
-                    ttl: 300,
-                }),
-            }
+            resp.answers.push(sinkhole_record(
+                &qname,
+                qtype,
+                std::net::Ipv4Addr::LOCALHOST,
+                std::net::Ipv6Addr::LOCALHOST,
+                300,
+            ));
             (resp, QueryPath::Local, DnssecStatus::Indeterminate)
         } else if is_special_use_domain(&qname) {
             // RFC 6761/8880: private PTR, DDR, NAT64 — answer locally
@@ -130,38 +125,24 @@ pub async fn handle_query(
                         .unwrap_or(std::net::Ipv4Addr::LOCALHOST)
                 }
             };
+            let v6 = if resolve_ip == std::net::Ipv4Addr::LOCALHOST {
+                std::net::Ipv6Addr::LOCALHOST
+            } else {
+                resolve_ip.to_ipv6_mapped()
+            };
             let mut resp = DnsPacket::response_from(&query, ResultCode::NOERROR);
-            match qtype {
-                QueryType::AAAA => resp.answers.push(DnsRecord::AAAA {
-                    domain: qname.clone(),
-                    addr: if resolve_ip == std::net::Ipv4Addr::LOCALHOST {
-                        std::net::Ipv6Addr::LOCALHOST
-                    } else {
-                        resolve_ip.to_ipv6_mapped()
-                    },
-                    ttl: 300,
-                }),
-                _ => resp.answers.push(DnsRecord::A {
-                    domain: qname.clone(),
-                    addr: resolve_ip,
-                    ttl: 300,
-                }),
-            }
+            resp.answers
+                .push(sinkhole_record(&qname, qtype, resolve_ip, v6, 300));
             (resp, QueryPath::Local, DnssecStatus::Indeterminate)
         } else if ctx.blocklist.read().unwrap().is_blocked(&qname) {
             let mut resp = DnsPacket::response_from(&query, ResultCode::NOERROR);
-            match qtype {
-                QueryType::AAAA => resp.answers.push(DnsRecord::AAAA {
-                    domain: qname.clone(),
-                    addr: std::net::Ipv6Addr::UNSPECIFIED,
-                    ttl: 60,
-                }),
-                _ => resp.answers.push(DnsRecord::A {
-                    domain: qname.clone(),
-                    addr: std::net::Ipv4Addr::UNSPECIFIED,
-                    ttl: 60,
-                }),
-            }
+            resp.answers.push(sinkhole_record(
+                &qname,
+                qtype,
+                std::net::Ipv4Addr::UNSPECIFIED,
+                std::net::Ipv6Addr::UNSPECIFIED,
+                60,
+            ));
             (resp, QueryPath::Blocked, DnssecStatus::Indeterminate)
         } else if let Some(records) = ctx.zone_map.get(qname.as_str()).and_then(|m| m.get(&qtype)) {
             let mut resp = DnsPacket::response_from(&query, ResultCode::NOERROR);
@@ -381,6 +362,27 @@ fn is_special_use_domain(qname: &str) -> bool {
     }
     // RFC 6762: .local is reserved for mDNS — never forward to upstream
     qname == "local" || qname.ends_with(".local")
+}
+
+fn sinkhole_record(
+    domain: &str,
+    qtype: QueryType,
+    v4: std::net::Ipv4Addr,
+    v6: std::net::Ipv6Addr,
+    ttl: u32,
+) -> DnsRecord {
+    match qtype {
+        QueryType::AAAA => DnsRecord::AAAA {
+            domain: domain.to_string(),
+            addr: v6,
+            ttl,
+        },
+        _ => DnsRecord::A {
+            domain: domain.to_string(),
+            addr: v4,
+            ttl,
+        },
+    }
 }
 
 enum Disposition {
@@ -675,15 +677,6 @@ mod tests {
 
     // ---- Integration: resolve_coalesced with mock futures ----
 
-    fn mock_query(id: u16, domain: &str, qtype: QueryType) -> DnsPacket {
-        let mut pkt = DnsPacket::new();
-        pkt.header.id = id;
-        pkt.header.recursion_desired = true;
-        pkt.questions
-            .push(crate::question::DnsQuestion::new(domain.to_string(), qtype));
-        pkt
-    }
-
     fn mock_response(domain: &str) -> DnsPacket {
         let mut resp = DnsPacket::new();
         resp.header.response = true;
@@ -706,7 +699,7 @@ mod tests {
             let count = resolve_count.clone();
             let inf = inflight.clone();
             let key = ("coalesce.test".to_string(), QueryType::A);
-            let query = mock_query(100 + i, "coalesce.test", QueryType::A);
+            let query = DnsPacket::query(100 + i, "coalesce.test", QueryType::A);
             handles.push(tokio::spawn(async move {
                 resolve_coalesced(&inf, key, &query, || async {
                     count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -744,8 +737,8 @@ mod tests {
         let count1 = resolve_count.clone();
         let count2 = resolve_count.clone();
 
-        let query_a = mock_query(200, "same.domain", QueryType::A);
-        let query_aaaa = mock_query(201, "same.domain", QueryType::AAAA);
+        let query_a = DnsPacket::query(200, "same.domain", QueryType::A);
+        let query_aaaa = DnsPacket::query(201, "same.domain", QueryType::AAAA);
 
         let h1 = tokio::spawn(async move {
             resolve_coalesced(
@@ -788,7 +781,7 @@ mod tests {
     #[tokio::test]
     async fn inflight_map_cleaned_after_error() {
         let inflight: Mutex<InflightMap> = Mutex::new(HashMap::new());
-        let query = mock_query(300, "will-fail.test", QueryType::A);
+        let query = DnsPacket::query(300, "will-fail.test", QueryType::A);
 
         let (_, path, _) = resolve_coalesced(
             &inflight,
@@ -809,7 +802,7 @@ mod tests {
         let mut handles = Vec::new();
         for i in 0..3u16 {
             let inf = inflight.clone();
-            let query = mock_query(400 + i, "fail.test", QueryType::A);
+            let query = DnsPacket::query(400 + i, "fail.test", QueryType::A);
             handles.push(tokio::spawn(async move {
                 resolve_coalesced(
                     &inf,
@@ -849,7 +842,7 @@ mod tests {
     #[tokio::test]
     async fn servfail_leader_includes_question_section() {
         let inflight: Mutex<InflightMap> = Mutex::new(HashMap::new());
-        let query = mock_query(500, "question.test", QueryType::A);
+        let query = DnsPacket::query(500, "question.test", QueryType::A);
 
         let (resp, _, _) = resolve_coalesced(
             &inflight,
@@ -873,7 +866,7 @@ mod tests {
     #[tokio::test]
     async fn leader_error_preserves_message() {
         let inflight: Mutex<InflightMap> = Mutex::new(HashMap::new());
-        let query = mock_query(700, "err-msg.test", QueryType::A);
+        let query = DnsPacket::query(700, "err-msg.test", QueryType::A);
 
         let (_, path, err) = resolve_coalesced(
             &inflight,
