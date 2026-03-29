@@ -953,6 +953,7 @@ mod tests {
             upstream_mode: crate::config::UpstreamMode::Forward,
             root_hints: Vec::new(),
             srtt: RwLock::new(crate::srtt::SrttCache::new(true)),
+            inflight: Mutex::new(std::collections::HashMap::new()),
             dnssec_enabled: false,
             dnssec_strict: false,
         })

@@ -202,6 +202,7 @@ async fn main() -> numa::Result<()> {
         upstream_mode: config.upstream.mode,
         root_hints: numa::recursive::parse_root_hints(&config.upstream.root_hints),
         srtt: std::sync::RwLock::new(numa::srtt::SrttCache::new(config.upstream.srtt)),
+        inflight: std::sync::Mutex::new(std::collections::HashMap::new()),
         dnssec_enabled: config.dnssec.enabled,
         dnssec_strict: config.dnssec.strict,
     });
