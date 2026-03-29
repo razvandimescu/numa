@@ -5,6 +5,7 @@ pub mod cache;
 pub mod config;
 pub mod ctx;
 pub mod dnssec;
+pub mod dot;
 pub mod forward;
 pub mod header;
 pub mod lan;
