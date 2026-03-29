@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -29,6 +29,8 @@ pub struct Config {
     pub lan: LanConfig,
     #[serde(default)]
     pub dnssec: DnssecConfig,
+    #[serde(default)]
+    pub dot: DotConfig,
 }
 
 #[derive(Deserialize)]
@@ -368,6 +370,41 @@ pub struct DnssecConfig {
     pub enabled: bool,
     #[serde(default)]
     pub strict: bool,
+}
+
+#[derive(Deserialize, Clone)]
+pub struct DotConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_dot_port")]
+    pub port: u16,
+    #[serde(default = "default_dot_bind_addr")]
+    pub bind_addr: String,
+    /// Path to TLS certificate (PEM). If None, uses self-signed CA.
+    #[serde(default)]
+    pub cert_path: Option<PathBuf>,
+    /// Path to TLS private key (PEM). If None, uses self-signed CA.
+    #[serde(default)]
+    pub key_path: Option<PathBuf>,
+}
+
+impl Default for DotConfig {
+    fn default() -> Self {
+        DotConfig {
+            enabled: false,
+            port: default_dot_port(),
+            bind_addr: default_dot_bind_addr(),
+            cert_path: None,
+            key_path: None,
+        }
+    }
+}
+
+fn default_dot_port() -> u16 {
+    853
+}
+fn default_dot_bind_addr() -> String {
+    "0.0.0.0".to_string()
 }
 
 #[cfg(test)]
