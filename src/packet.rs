@@ -57,6 +57,15 @@ impl DnsPacket {
         }
     }
 
+    pub fn query(id: u16, domain: &str, qtype: crate::question::QueryType) -> DnsPacket {
+        let mut pkt = DnsPacket::new();
+        pkt.header.id = id;
+        pkt.header.recursion_desired = true;
+        pkt.questions
+            .push(crate::question::DnsQuestion::new(domain.to_string(), qtype));
+        pkt
+    }
+
     pub fn response_from(query: &DnsPacket, rescode: crate::header::ResultCode) -> DnsPacket {
         let mut resp = DnsPacket::new();
         resp.header.id = query.header.id;
