@@ -370,6 +370,9 @@ async fn main() -> numa::Result<()> {
             );
         }
     }
+    if config.dot.enabled {
+        row("DoT", g, &format!("tls://:{}", config.dot.port));
+    }
     if config.lan.enabled {
         row("LAN", g, "mDNS (_numa._tcp.local)");
     }
@@ -474,6 +477,15 @@ async fn main() -> numa::Result<()> {
         let lan_config = config.lan.clone();
         tokio::spawn(async move {
             numa::lan::start_lan_discovery(lan_ctx, &lan_config).await;
+        });
+    }
+
+    // Spawn DNS-over-TLS listener (RFC 7858)
+    if config.dot.enabled {
+        let dot_ctx = Arc::clone(&ctx);
+        let dot_config = config.dot.clone();
+        tokio::spawn(async move {
+            numa::dot::start_dot(dot_ctx, &dot_config).await;
         });
     }
 
