@@ -108,12 +108,17 @@ pub async fn handle_query(
         } else if !ctx.proxy_tld_suffix.is_empty()
             && (qname.ends_with(&ctx.proxy_tld_suffix) || qname == ctx.proxy_tld)
         {
-            // Resolve .numa: local services → 127.0.0.1, LAN peers → peer IP
+            // Resolve .numa: remote clients get LAN IP (can't reach 127.0.0.1), local get loopback
             let service_name = qname.strip_suffix(&ctx.proxy_tld_suffix).unwrap_or(&qname);
+            let is_remote = !src_addr.ip().is_loopback();
             let resolve_ip = {
                 let local = ctx.services.lock().unwrap();
                 if local.lookup(service_name).is_some() {
-                    std::net::Ipv4Addr::LOCALHOST
+                    if is_remote {
+                        *ctx.lan_ip.lock().unwrap()
+                    } else {
+                        std::net::Ipv4Addr::LOCALHOST
+                    }
                 } else {
                     let mut peers = ctx.lan_peers.lock().unwrap();
                     peers
