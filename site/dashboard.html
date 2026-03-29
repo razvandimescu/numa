@@ -285,6 +285,7 @@ body {
 .path-tag.OVERRIDE { background: rgba(82, 122, 82, 0.12); color: var(--emerald); }
 .path-tag.SERVFAIL { background: rgba(181, 68, 58, 0.12); color: var(--rose); }
 .path-tag.BLOCKED { background: rgba(163, 152, 136, 0.15); color: var(--text-dim); }
+.path-tag.COALESCED { background: rgba(138, 104, 158, 0.12); color: var(--violet-dim); }
 
 /* Sidebar panels */
 .sidebar {
@@ -547,6 +548,8 @@ body {
           <select id="logFilterPath" onchange="applyLogFilter()"
             style="font-family:var(--font-mono);font-size:0.7rem;padding:0.25rem 0.4rem;border:1px solid var(--border);border-radius:4px;background:var(--bg-surface);color:var(--text-secondary);outline:none;">
             <option value="">all paths</option>
+            <option value="RECURSIVE">recursive</option>
+            <option value="COALESCED">coalesced</option>
             <option value="FORWARD">forward</option>
             <option value="CACHED">cached</option>
             <option value="BLOCKED">blocked</option>
