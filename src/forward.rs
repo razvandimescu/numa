@@ -141,7 +141,7 @@ mod tests {
     use std::future::IntoFuture;
 
     use crate::header::ResultCode;
-    use crate::question::{DnsQuestion, QueryType};
+    use crate::question::QueryType;
     use crate::record::DnsRecord;
 
     #[test]
@@ -160,12 +160,7 @@ mod tests {
     }
 
     fn make_query() -> DnsPacket {
-        let mut q = DnsPacket::new();
-        q.header.id = 0xABCD;
-        q.header.recursion_desired = true;
-        q.questions
-            .push(DnsQuestion::new("example.com".to_string(), QueryType::A));
-        q
+        DnsPacket::query(0xABCD, "example.com", QueryType::A)
     }
 
     fn make_response(query: &DnsPacket) -> DnsPacket {

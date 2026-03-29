@@ -410,14 +410,8 @@ async fn forward_query_for_diagnose(
     timeout: std::time::Duration,
 ) -> (bool, String) {
     use crate::packet::DnsPacket;
-    use crate::question::DnsQuestion;
 
-    let mut query = DnsPacket::new();
-    query.header.id = 0xBEEF;
-    query.header.recursion_desired = true;
-    query
-        .questions
-        .push(DnsQuestion::new(domain.to_string(), QueryType::A));
+    let query = DnsPacket::query(0xBEEF, domain, QueryType::A);
 
     match forward_query(&query, upstream, timeout).await {
         Ok(resp) => (

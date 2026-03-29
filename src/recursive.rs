@@ -9,7 +9,7 @@ use crate::cache::DnsCache;
 use crate::forward::forward_udp;
 use crate::header::ResultCode;
 use crate::packet::DnsPacket;
-use crate::question::{DnsQuestion, QueryType};
+use crate::question::QueryType;
 use crate::record::DnsRecord;
 use crate::srtt::SrttCache;
 
@@ -32,6 +32,14 @@ fn dns_addr(ip: impl Into<IpAddr>) -> SocketAddr {
     SocketAddr::new(ip.into(), 53)
 }
 
+fn record_to_addr(rec: &DnsRecord) -> Option<SocketAddr> {
+    match rec {
+        DnsRecord::A { addr, .. } => Some(dns_addr(*addr)),
+        DnsRecord::AAAA { addr, .. } => Some(dns_addr(*addr)),
+        _ => None,
+    }
+}
+
 pub fn reset_udp_state() {
     UDP_DISABLED.store(false, Ordering::Release);
     UDP_FAILURES.store(0, Ordering::Release);
@@ -46,11 +54,8 @@ pub async fn probe_udp(root_hints: &[SocketAddr]) {
         Some(h) => *h,
         None => return,
     };
-    let mut probe = DnsPacket::new();
-    probe.header.id = next_id();
-    probe
-        .questions
-        .push(DnsQuestion::new(".".to_string(), QueryType::NS));
+    let mut probe = DnsPacket::query(next_id(), ".", QueryType::NS);
+    probe.header.recursion_desired = false;
     if forward_udp(&probe, hint, Duration::from_millis(1500))
         .await
         .is_ok()
@@ -296,17 +301,8 @@ pub(crate) fn resolve_iterative<'a>(
                             )
                             .await
                             {
-                                for rec in &ns_resp.answers {
-                                    match rec {
-                                        DnsRecord::A { addr, .. } => {
-                                            new_ns_addrs.push(dns_addr(*addr));
-                                        }
-                                        DnsRecord::AAAA { addr, .. } => {
-                                            new_ns_addrs.push(dns_addr(*addr));
-                                        }
-                                        _ => {}
-                                    }
-                                }
+                                new_ns_addrs
+                                    .extend(ns_resp.answers.iter().filter_map(record_to_addr));
                             }
                             if !new_ns_addrs.is_empty() {
                                 break;
@@ -360,13 +356,7 @@ fn find_closest_ns(
                 if let DnsRecord::NS { host, .. } = ns_rec {
                     for qt in [QueryType::A, QueryType::AAAA] {
                         if let Some(resp) = guard.lookup(host, qt) {
-                            for rec in &resp.answers {
-                                match rec {
-                                    DnsRecord::A { addr, .. } => addrs.push(dns_addr(*addr)),
-                                    DnsRecord::AAAA { addr, .. } => addrs.push(dns_addr(*addr)),
-                                    _ => {}
-                                }
-                            }
+                            addrs.extend(resp.answers.iter().filter_map(record_to_addr));
                         }
                     }
                 }
@@ -452,13 +442,7 @@ fn addrs_from_cache(cache: &RwLock<DnsCache>, name: &str) -> Vec<SocketAddr> {
     let mut addrs = Vec::new();
     for qt in [QueryType::A, QueryType::AAAA] {
         if let Some(pkt) = guard.lookup(name, qt) {
-            for rec in &pkt.answers {
-                match rec {
-                    DnsRecord::A { addr, .. } => addrs.push(dns_addr(*addr)),
-                    DnsRecord::AAAA { addr, .. } => addrs.push(dns_addr(*addr)),
-                    _ => {}
-                }
-            }
+            addrs.extend(pkt.answers.iter().filter_map(record_to_addr));
         }
     }
     addrs
@@ -468,15 +452,13 @@ fn glue_addrs_for(response: &DnsPacket, ns_name: &str) -> Vec<SocketAddr> {
     response
         .resources
         .iter()
-        .filter_map(|r| match r {
-            DnsRecord::A { domain, addr, .. } if domain.eq_ignore_ascii_case(ns_name) => {
-                Some(dns_addr(*addr))
+        .filter(|r| match r {
+            DnsRecord::A { domain, .. } | DnsRecord::AAAA { domain, .. } => {
+                domain.eq_ignore_ascii_case(ns_name)
             }
-            DnsRecord::AAAA { domain, addr, .. } if domain.eq_ignore_ascii_case(ns_name) => {
-                Some(dns_addr(*addr))
-            }
-            _ => None,
+            _ => false,
         })
+        .filter_map(record_to_addr)
         .collect()
 }
 
@@ -596,12 +578,8 @@ async fn send_query(
     server: SocketAddr,
     srtt: &RwLock<SrttCache>,
 ) -> crate::Result<DnsPacket> {
-    let mut query = DnsPacket::new();
-    query.header.id = next_id();
+    let mut query = DnsPacket::query(next_id(), qname, qtype);
     query.header.recursion_desired = false;
-    query
-        .questions
-        .push(DnsQuestion::new(qname.to_string(), qtype));
     query.edns = Some(crate::packet::EdnsOpt {
         do_bit: true,
         ..Default::default()
@@ -1056,11 +1034,7 @@ mod tests {
         })
         .await;
 
-        let mut query = DnsPacket::new();
-        query.header.id = 0xBEEF;
-        query
-            .questions
-            .push(DnsQuestion::new("test.com".to_string(), QueryType::A));
+        let query = DnsPacket::query(0xBEEF, "test.com", QueryType::A);
 
         let resp = crate::forward::forward_tcp(&query, server_addr, Duration::from_secs(2))
             .await
@@ -1120,11 +1094,7 @@ mod tests {
                 .unwrap();
         });
 
-        let mut query = DnsPacket::new();
-        query.header.id = 0xCAFE;
-        query
-            .questions
-            .push(DnsQuestion::new("strict.test".to_string(), QueryType::A));
+        let query = DnsPacket::query(0xCAFE, "strict.test", QueryType::A);
 
         let resp = crate::forward::forward_tcp(&query, addr, Duration::from_secs(2))
             .await
