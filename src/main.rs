@@ -208,7 +208,6 @@ async fn main() -> numa::Result<()> {
     });
 
     let zone_count: usize = ctx.zone_map.values().map(|m| m.len()).sum();
-
     // Build banner rows, then size the box to fit the longest value
     let api_url = format!("http://localhost:{}", api_port);
     let proxy_label = if config.proxy.enabled {
@@ -308,6 +307,17 @@ async fn main() -> numa::Result<()> {
     );
     if let Some(ref label) = proxy_label {
         row("Proxy", g, label);
+        if config.proxy.bind_addr == "127.0.0.1" {
+            let y = "\x1b[38;2;204;176;59m"; // yellow
+            row(
+                "",
+                y,
+                &format!(
+                    "⚠ proxy on 127.0.0.1 — .{} not LAN reachable",
+                    config.proxy.tld
+                ),
+            );
+        }
     }
     if config.lan.enabled {
         row("LAN", g, "mDNS (_numa._tcp.local)");
@@ -375,16 +385,11 @@ async fn main() -> numa::Result<()> {
         axum::serve(listener, app).await.unwrap();
     });
 
-    // Proxy binds 0.0.0.0 when LAN is enabled (cross-machine access), otherwise config value
-    let proxy_bind: std::net::Ipv4Addr = if config.lan.enabled {
-        std::net::Ipv4Addr::UNSPECIFIED
-    } else {
-        config
-            .proxy
-            .bind_addr
-            .parse()
-            .unwrap_or(std::net::Ipv4Addr::LOCALHOST)
-    };
+    let proxy_bind: std::net::Ipv4Addr = config
+        .proxy
+        .bind_addr
+        .parse()
+        .unwrap_or(std::net::Ipv4Addr::LOCALHOST);
 
     // Spawn HTTP reverse proxy for .numa domains
     if config.proxy.enabled {
