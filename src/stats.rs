@@ -24,33 +24,40 @@ fn macos_rss() -> usize {
         fn task_info(
             target_task: u32,
             flavor: u32,
-            task_info_out: *mut libc_task_basic_info,
+            task_info_out: *mut TaskVmInfo,
             task_info_count: *mut u32,
         ) -> i32;
     }
+    // Partial task_vm_info_data_t — only fields up to phys_footprint.
     #[repr(C)]
-    struct libc_task_basic_info {
+    struct TaskVmInfo {
         virtual_size: u64,
+        region_count: i32,
+        page_size: i32,
         resident_size: u64,
-        resident_size_max: u64,
-        user_time: [u32; 2],
-        system_time: [u32; 2],
-        policy: i32,
-        suspend_count: i32,
+        resident_size_peak: u64,
+        device: u64,
+        device_peak: u64,
+        internal: u64,
+        internal_peak: u64,
+        external: u64,
+        external_peak: u64,
+        reusable: u64,
+        reusable_peak: u64,
+        purgeable_volatile_pmap: u64,
+        purgeable_volatile_resident: u64,
+        purgeable_volatile_virtual: u64,
+        compressed: u64,
+        compressed_peak: u64,
+        compressed_lifetime: u64,
+        phys_footprint: u64,
     }
-    const MACH_TASK_BASIC_INFO: u32 = 20;
-    let mut info: libc_task_basic_info = unsafe { mem::zeroed() };
-    let mut count = (mem::size_of::<libc_task_basic_info>() / mem::size_of::<u32>()) as u32;
-    let kr = unsafe {
-        task_info(
-            mach_task_self(),
-            MACH_TASK_BASIC_INFO,
-            &mut info,
-            &mut count,
-        )
-    };
+    const TASK_VM_INFO: u32 = 22;
+    let mut info: TaskVmInfo = unsafe { mem::zeroed() };
+    let mut count = (mem::size_of::<TaskVmInfo>() / mem::size_of::<u32>()) as u32;
+    let kr = unsafe { task_info(mach_task_self(), TASK_VM_INFO, &mut info, &mut count) };
     if kr == 0 {
-        info.resident_size as usize
+        info.phys_footprint as usize
     } else {
         0
     }
@@ -61,7 +68,7 @@ fn linux_rss() -> usize {
     extern "C" {
         fn sysconf(name: i32) -> i64;
     }
-    const SC_PAGESIZE: i32 = 30;
+    const SC_PAGESIZE: i32 = 30; // x86_64 + aarch64; differs on mips (28), sparc (29)
     let page_size = unsafe { sysconf(SC_PAGESIZE) };
     let page_size = if page_size > 0 {
         page_size as usize

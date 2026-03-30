@@ -143,11 +143,21 @@ impl DnsCache {
     }
 
     pub fn heap_bytes(&self) -> usize {
-        let mut total = 0;
+        // Outer HashMap<String, HashMap>: (hash, String, HashMap) per slot + control byte
+        let outer_slot = std::mem::size_of::<u64>()
+            + std::mem::size_of::<String>()
+            + std::mem::size_of::<HashMap<QueryType, CacheEntry>>()
+            + 1;
+        let mut total = self.entries.capacity() * outer_slot;
         for (domain, type_map) in &self.entries {
-            total += domain.capacity() + std::mem::size_of::<String>();
+            total += domain.capacity();
+            // Inner HashMap<QueryType, CacheEntry>: (hash, QueryType, CacheEntry) per slot + control byte
+            let inner_slot = std::mem::size_of::<u64>()
+                + std::mem::size_of::<QueryType>()
+                + std::mem::size_of::<CacheEntry>()
+                + 1;
+            total += type_map.capacity() * inner_slot;
             for entry in type_map.values() {
-                total += std::mem::size_of::<CacheEntry>();
                 total += entry.packet.heap_bytes();
             }
         }
@@ -204,5 +214,25 @@ fn extract_min_ttl(records: &[DnsRecord]) -> Option<u32> {
 fn adjust_ttls(records: &mut [DnsRecord], new_ttl: u32) {
     for record in records.iter_mut() {
         record.set_ttl(new_ttl);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::packet::DnsPacket;
+
+    #[test]
+    fn heap_bytes_grows_with_entries() {
+        let mut cache = DnsCache::new(100, 1, 3600);
+        let empty = cache.heap_bytes();
+        let mut pkt = DnsPacket::new();
+        pkt.answers.push(DnsRecord::A {
+            domain: "example.com".into(),
+            addr: "1.2.3.4".parse().unwrap(),
+            ttl: 300,
+        });
+        cache.insert("example.com", QueryType::A, &pkt);
+        assert!(cache.heap_bytes() > empty);
     }
 }

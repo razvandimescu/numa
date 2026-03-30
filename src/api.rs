@@ -214,12 +214,15 @@ struct BlockingStatsResponse {
 #[derive(Serialize)]
 struct MemoryStats {
     cache_bytes: usize,
+    cache_entries: usize,
     blocklist_bytes: usize,
+    blocklist_entries: usize,
     query_log_bytes: usize,
     query_log_entries: usize,
     srtt_bytes: usize,
     srtt_entries: usize,
     overrides_bytes: usize,
+    overrides_entries: usize,
     total_estimated_bytes: usize,
     process_rss_bytes: usize,
 }
@@ -553,12 +556,15 @@ async fn stats(State(ctx): State<Arc<ServerCtx>>) -> Json<StatsResponse> {
         },
         memory: MemoryStats {
             cache_bytes,
+            cache_entries: cache_len,
             blocklist_bytes,
+            blocklist_entries: bl_stats.domains_loaded,
             query_log_bytes,
             query_log_entries,
             srtt_bytes,
             srtt_entries,
             overrides_bytes,
+            overrides_entries: override_count,
             total_estimated_bytes: total_estimated,
             process_rss_bytes: crate::stats::process_rss_bytes(),
         },

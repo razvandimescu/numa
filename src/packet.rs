@@ -610,4 +610,16 @@ mod tests {
             panic!("expected DNSKEY");
         }
     }
+
+    #[test]
+    fn heap_bytes_accounts_for_records() {
+        let mut pkt = DnsPacket::new();
+        let empty = pkt.heap_bytes();
+        pkt.answers.push(DnsRecord::A {
+            domain: "example.com".into(),
+            addr: "1.2.3.4".parse().unwrap(),
+            ttl: 300,
+        });
+        assert!(pkt.heap_bytes() > empty);
+    }
 }

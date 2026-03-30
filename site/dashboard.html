@@ -817,13 +817,12 @@ function renderMemory(mem, stats) {
   document.getElementById('memoryRss').textContent = formatBytes(mem.process_rss_bytes);
   document.getElementById('memorySub').textContent = 'est. ' + formatBytes(mem.total_estimated_bytes);
 
-  // Entry counts from sibling stats objects (avoid duplication in memory payload)
   const entryCounts = {
-    cache: stats.cache.entries,
-    blocklist: stats.blocking.domains_loaded,
+    cache: mem.cache_entries,
+    blocklist: mem.blocklist_entries,
     query_log: mem.query_log_entries,
     srtt: mem.srtt_entries,
-    overrides: stats.overrides.active,
+    overrides: mem.overrides_entries,
   };
 
   // Sidebar panel
@@ -852,7 +851,7 @@ function renderMemory(mem, stats) {
     <div class="memory-bar">${barSegments}</div>
     ${rows}
     <div class="memory-rss">
-      <span>Process RSS</span>
+      <span>Process Footprint</span>
       <span>${formatBytes(mem.process_rss_bytes)}</span>
     </div>
   `;

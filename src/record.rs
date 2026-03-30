@@ -690,4 +690,14 @@ mod tests {
         let parsed = round_trip(&rec);
         assert_eq!(rec, parsed);
     }
+
+    #[test]
+    fn heap_bytes_reflects_string_capacity() {
+        let rec = DnsRecord::CNAME {
+            domain: "a]".repeat(100),
+            host: "b".repeat(200),
+            ttl: 60,
+        };
+        assert!(rec.heap_bytes() >= 300);
+    }
 }

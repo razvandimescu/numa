@@ -118,16 +118,20 @@ impl OverrideStore {
     }
 
     pub fn heap_bytes(&self) -> usize {
-        self.entries
+        // HashMap<String, OverrideEntry>: (hash, String, OverrideEntry) per slot + control byte
+        let per_slot = std::mem::size_of::<u64>()
+            + std::mem::size_of::<String>()
+            + std::mem::size_of::<OverrideEntry>()
+            + 1;
+        let table = self.entries.capacity() * per_slot;
+        let heap: usize = self
+            .entries
             .iter()
             .map(|(k, v)| {
-                k.capacity()
-                    + std::mem::size_of::<OverrideEntry>()
-                    + v.domain.capacity()
-                    + v.target.capacity()
-                    + v.record.heap_bytes()
+                k.capacity() + v.domain.capacity() + v.target.capacity() + v.record.heap_bytes()
             })
-            .sum()
+            .sum();
+        table + heap
     }
 
     pub fn active_count(&self) -> usize {
@@ -166,4 +170,17 @@ fn parse_target(domain: &str, target: &str, ttl: u32) -> Result<(QueryType, DnsR
             ttl,
         },
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn heap_bytes_grows_with_entries() {
+        let mut store = OverrideStore::new();
+        let empty = store.heap_bytes();
+        store.insert("example.com", "1.2.3.4", 300, None).unwrap();
+        assert!(store.heap_bytes() > empty);
+    }
 }

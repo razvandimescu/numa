@@ -101,7 +101,12 @@ impl SrttCache {
     }
 
     pub fn heap_bytes(&self) -> usize {
-        self.entries.capacity() * (std::mem::size_of::<IpAddr>() + std::mem::size_of::<SrttEntry>())
+        // HashMap stores (hash, key, value) per slot + 1 control byte
+        let per_slot = std::mem::size_of::<u64>()
+            + std::mem::size_of::<IpAddr>()
+            + std::mem::size_of::<SrttEntry>()
+            + 1;
+        self.entries.capacity() * per_slot
     }
 
     pub fn len(&self) -> usize {
@@ -305,6 +310,16 @@ mod tests {
         let mut addrs = vec![sock(1), sock(2)];
         cache.sort_by_rtt(&mut addrs);
         assert_eq!(addrs, vec![sock(1), sock(2)]);
+    }
+
+    #[test]
+    fn heap_bytes_grows_with_entries() {
+        let mut cache = SrttCache::new(true);
+        let empty = cache.heap_bytes();
+        for i in 1..=10u8 {
+            cache.record_rtt(ip(i), 100, false);
+        }
+        assert!(cache.heap_bytes() > empty);
     }
 
     #[test]
