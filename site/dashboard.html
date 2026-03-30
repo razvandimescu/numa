@@ -814,15 +814,15 @@ function renderMemory(mem, stats) {
   if (!mem) return;
 
   // Stat card
-  document.getElementById('memoryRss').textContent = formatBytes(mem.process_rss_bytes);
+  document.getElementById('memoryRss').textContent = formatBytes(mem.process_memory_bytes);
   document.getElementById('memorySub').textContent = 'est. ' + formatBytes(mem.total_estimated_bytes);
 
   const entryCounts = {
-    cache: mem.cache_entries,
-    blocklist: mem.blocklist_entries,
+    cache: stats.cache.entries,
+    blocklist: stats.blocking.domains_loaded,
     query_log: mem.query_log_entries,
     srtt: mem.srtt_entries,
-    overrides: mem.overrides_entries,
+    overrides: stats.overrides.active,
   };
 
   // Sidebar panel
@@ -852,7 +852,7 @@ function renderMemory(mem, stats) {
     ${rows}
     <div class="memory-rss">
       <span>Process Footprint</span>
-      <span>${formatBytes(mem.process_rss_bytes)}</span>
+      <span>${formatBytes(mem.process_memory_bytes)}</span>
     </div>
   `;
 }

@@ -1,7 +1,8 @@
 use std::time::Instant;
 
-/// Returns the process resident set size in bytes, or 0 if unavailable.
-pub fn process_rss_bytes() -> usize {
+/// Returns the process memory footprint in bytes, or 0 if unavailable.
+/// macOS: phys_footprint (matches Activity Monitor). Linux: RSS from /proc/self/statm.
+pub fn process_memory_bytes() -> usize {
     #[cfg(target_os = "macos")]
     {
         macos_rss()

@@ -184,7 +184,6 @@ impl BlocklistStore {
     }
 
     pub fn heap_bytes(&self) -> usize {
-        // HashSet<String> stores (hash, String) per slot + 1 control byte
         let per_slot_overhead = std::mem::size_of::<u64>() + std::mem::size_of::<String>() + 1;
         let domains_table = self.domains.capacity() * per_slot_overhead;
         let domains_heap: usize = self.domains.iter().map(|d| d.capacity()).sum();

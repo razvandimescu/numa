@@ -118,7 +118,6 @@ impl OverrideStore {
     }
 
     pub fn heap_bytes(&self) -> usize {
-        // HashMap<String, OverrideEntry>: (hash, String, OverrideEntry) per slot + control byte
         let per_slot = std::mem::size_of::<u64>()
             + std::mem::size_of::<String>()
             + std::mem::size_of::<OverrideEntry>()

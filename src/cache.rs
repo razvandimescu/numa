@@ -143,7 +143,6 @@ impl DnsCache {
     }
 
     pub fn heap_bytes(&self) -> usize {
-        // Outer HashMap<String, HashMap>: (hash, String, HashMap) per slot + control byte
         let outer_slot = std::mem::size_of::<u64>()
             + std::mem::size_of::<String>()
             + std::mem::size_of::<HashMap<QueryType, CacheEntry>>()
@@ -151,7 +150,6 @@ impl DnsCache {
         let mut total = self.entries.capacity() * outer_slot;
         for (domain, type_map) in &self.entries {
             total += domain.capacity();
-            // Inner HashMap<QueryType, CacheEntry>: (hash, QueryType, CacheEntry) per slot + control byte
             let inner_slot = std::mem::size_of::<u64>()
                 + std::mem::size_of::<QueryType>()
                 + std::mem::size_of::<CacheEntry>()

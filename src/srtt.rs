@@ -101,7 +101,6 @@ impl SrttCache {
     }
 
     pub fn heap_bytes(&self) -> usize {
-        // HashMap stores (hash, key, value) per slot + 1 control byte
         let per_slot = std::mem::size_of::<u64>()
             + std::mem::size_of::<IpAddr>()
             + std::mem::size_of::<SrttEntry>()
