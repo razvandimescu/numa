@@ -119,11 +119,6 @@ impl SrttCache {
         self.entries.is_empty()
     }
 
-    #[cfg(test)]
-    fn get_srtt_ms(&self, ip: IpAddr) -> u64 {
-        self.entries.get(&ip).map(|e| e.srtt_ms).unwrap_or(0)
-    }
-
     fn maybe_evict(&mut self) {
         if self.entries.len() < MAX_ENTRIES {
             return;
@@ -217,15 +212,6 @@ mod tests {
         let original = addrs.clone();
         cache.sort_by_rtt(&mut addrs);
         assert_eq!(addrs, original);
-    }
-
-    /// Cache with ip(1) saturated at FAILURE_PENALTY_MS
-    fn saturated_penalty_cache() -> SrttCache {
-        let mut cache = SrttCache::new(true);
-        for _ in 0..30 {
-            cache.record_rtt(ip(1), FAILURE_PENALTY_MS, false);
-        }
-        cache
     }
 
     #[test]

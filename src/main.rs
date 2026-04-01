@@ -14,14 +14,14 @@ use numa::ctx::{handle_query, ServerCtx};
 use numa::forward::Upstream;
 use numa::override_store::OverrideStore;
 use numa::query_log::QueryLog;
-
-const QUAD9_IP: &str = "9.9.9.9";
-const DOH_FALLBACK: &str = "https://9.9.9.9/dns-query";
 use numa::service_store::ServiceStore;
 use numa::stats::ServerStats;
 use numa::system_dns::{
     discover_system_dns, install_service, restart_service, service_status, uninstall_service,
 };
+
+const QUAD9_IP: &str = "9.9.9.9";
+const DOH_FALLBACK: &str = "https://9.9.9.9/dns-query";
 
 #[tokio::main]
 async fn main() -> numa::Result<()> {
