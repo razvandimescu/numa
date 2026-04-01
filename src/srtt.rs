@@ -117,9 +117,31 @@ impl SrttCache {
     }
 
     #[cfg(test)]
-    fn set_updated_at(&mut self, ip: IpAddr, at: Instant) {
+    fn set_age_secs(&mut self, ip: IpAddr, age_secs: u64) {
         if let Some(entry) = self.entries.get_mut(&ip) {
-            entry.updated_at = at;
+            // On Windows, Instant can't go before boot time.
+            // Clamp to the maximum representable past.
+            entry.updated_at = Instant::now()
+                .checked_sub(std::time::Duration::from_secs(age_secs))
+                .unwrap_or_else(|| {
+                    // Subtract 1ms at a time to find the floor — but that's slow.
+                    // Instead, binary search for the max subtractable duration.
+                    let mut lo = 0u64;
+                    let mut hi = age_secs;
+                    let now = Instant::now();
+                    while lo < hi {
+                        let mid = lo + (hi - lo + 1) / 2;
+                        if now
+                            .checked_sub(std::time::Duration::from_secs(mid))
+                            .is_some()
+                        {
+                            lo = mid;
+                        } else {
+                            hi = mid - 1;
+                        }
+                    }
+                    now - std::time::Duration::from_secs(lo)
+                });
         }
     }
 
@@ -218,16 +240,6 @@ mod tests {
         assert_eq!(addrs, original);
     }
 
-    // On Windows, Instant starts near boot time — large subtractions overflow.
-    // Fall back to a fixed reference point created at process start.
-    static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-
-    fn age(secs: u64) -> Instant {
-        Instant::now()
-            .checked_sub(std::time::Duration::from_secs(secs))
-            .unwrap_or(*EPOCH.get_or_init(Instant::now))
-    }
-
     /// Cache with ip(1) saturated at FAILURE_PENALTY_MS
     fn saturated_penalty_cache() -> SrttCache {
         let mut cache = SrttCache::new(true);
@@ -241,7 +253,7 @@ mod tests {
     fn no_decay_within_threshold() {
         let mut cache = SrttCache::new(true);
         cache.record_rtt(ip(1), 5000, false);
-        cache.set_updated_at(ip(1), age(DECAY_AFTER_SECS));
+        cache.set_age_secs(ip(1), DECAY_AFTER_SECS);
         assert_eq!(cache.get(ip(1)), cache.entries[&ip(1)].srtt_ms);
     }
 
@@ -249,7 +261,7 @@ mod tests {
     fn one_decay_period() {
         let mut cache = saturated_penalty_cache();
         let raw = cache.entries[&ip(1)].srtt_ms;
-        cache.set_updated_at(ip(1), age(DECAY_AFTER_SECS + 1));
+        cache.set_age_secs(ip(1), DECAY_AFTER_SECS + 1);
         let expected = (raw + INITIAL_SRTT_MS) / 2;
         assert_eq!(cache.get(ip(1)), expected);
     }
@@ -258,7 +270,7 @@ mod tests {
     fn multiple_decay_periods() {
         let mut cache = saturated_penalty_cache();
         let raw = cache.entries[&ip(1)].srtt_ms;
-        cache.set_updated_at(ip(1), age(DECAY_AFTER_SECS * 4 + 1));
+        cache.set_age_secs(ip(1), DECAY_AFTER_SECS * 4 + 1);
         let mut expected = raw;
         for _ in 0..4 {
             expected = (expected + INITIAL_SRTT_MS) / 2;
@@ -271,15 +283,15 @@ mod tests {
         // 9 periods and 100 periods should produce the same result (capped at 8)
         let mut cache_a = saturated_penalty_cache();
         let mut cache_b = saturated_penalty_cache();
-        cache_a.set_updated_at(ip(1), age(DECAY_AFTER_SECS * 9 + 1));
-        cache_b.set_updated_at(ip(1), age(DECAY_AFTER_SECS * 100));
+        cache_a.set_age_secs(ip(1), DECAY_AFTER_SECS * 9 + 1);
+        cache_b.set_age_secs(ip(1), DECAY_AFTER_SECS * 100);
         assert_eq!(cache_a.get(ip(1)), cache_b.get(ip(1)));
     }
 
     #[test]
     fn decay_converges_toward_initial() {
         let mut cache = saturated_penalty_cache();
-        cache.set_updated_at(ip(1), age(DECAY_AFTER_SECS * 100));
+        cache.set_age_secs(ip(1), DECAY_AFTER_SECS * 100);
         let decayed = cache.get(ip(1));
         let diff = decayed.abs_diff(INITIAL_SRTT_MS);
         assert!(
@@ -293,7 +305,7 @@ mod tests {
     #[test]
     fn record_rtt_applies_decay_before_ewma() {
         let mut cache = saturated_penalty_cache();
-        cache.set_updated_at(ip(1), age(DECAY_AFTER_SECS * 8));
+        cache.set_age_secs(ip(1), DECAY_AFTER_SECS * 8);
         cache.record_rtt(ip(1), 50, false);
         let srtt = cache.get(ip(1));
         // Without decay-before-EWMA, result would be ~(5000*7+50)/8 ≈ 4381
@@ -311,7 +323,7 @@ mod tests {
         assert_eq!(addrs, vec![sock(2), sock(1)]);
 
         // Age server 1 so it decays toward INITIAL (200ms) — below server 2's 300ms
-        cache.set_updated_at(ip(1), age(DECAY_AFTER_SECS * 100));
+        cache.set_age_secs(ip(1), DECAY_AFTER_SECS * 100);
         let mut addrs = vec![sock(1), sock(2)];
         cache.sort_by_rtt(&mut addrs);
         assert_eq!(addrs, vec![sock(1), sock(2)]);
