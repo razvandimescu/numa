@@ -1,5 +1,92 @@
 use std::time::Instant;
 
+/// Returns the process memory footprint in bytes, or 0 if unavailable.
+/// macOS: phys_footprint (matches Activity Monitor). Linux: RSS from /proc/self/statm.
+pub fn process_memory_bytes() -> usize {
+    #[cfg(target_os = "macos")]
+    {
+        macos_rss()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux_rss()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        0
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_rss() -> usize {
+    use std::mem;
+    extern "C" {
+        fn mach_task_self() -> u32;
+        fn task_info(
+            target_task: u32,
+            flavor: u32,
+            task_info_out: *mut TaskVmInfo,
+            task_info_count: *mut u32,
+        ) -> i32;
+    }
+    // Partial task_vm_info_data_t — only fields up to phys_footprint.
+    #[repr(C)]
+    struct TaskVmInfo {
+        virtual_size: u64,
+        region_count: i32,
+        page_size: i32,
+        resident_size: u64,
+        resident_size_peak: u64,
+        device: u64,
+        device_peak: u64,
+        internal: u64,
+        internal_peak: u64,
+        external: u64,
+        external_peak: u64,
+        reusable: u64,
+        reusable_peak: u64,
+        purgeable_volatile_pmap: u64,
+        purgeable_volatile_resident: u64,
+        purgeable_volatile_virtual: u64,
+        compressed: u64,
+        compressed_peak: u64,
+        compressed_lifetime: u64,
+        phys_footprint: u64,
+    }
+    const TASK_VM_INFO: u32 = 22;
+    let mut info: TaskVmInfo = unsafe { mem::zeroed() };
+    let mut count = (mem::size_of::<TaskVmInfo>() / mem::size_of::<u32>()) as u32;
+    let kr = unsafe { task_info(mach_task_self(), TASK_VM_INFO, &mut info, &mut count) };
+    if kr == 0 {
+        info.phys_footprint as usize
+    } else {
+        0
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_rss() -> usize {
+    extern "C" {
+        fn sysconf(name: i32) -> i64;
+    }
+    const SC_PAGESIZE: i32 = 30; // x86_64 + aarch64; differs on mips (28), sparc (29)
+    let page_size = unsafe { sysconf(SC_PAGESIZE) };
+    let page_size = if page_size > 0 {
+        page_size as usize
+    } else {
+        4096
+    };
+
+    if let Ok(statm) = std::fs::read_to_string("/proc/self/statm") {
+        if let Some(rss_pages) = statm.split_whitespace().nth(1) {
+            if let Ok(pages) = rss_pages.parse::<usize>() {
+                return pages * page_size;
+            }
+        }
+    }
+    0
+}
+
 pub struct ServerStats {
     queries_total: u64,
     queries_forwarded: u64,

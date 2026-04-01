@@ -38,6 +38,21 @@ impl QueryLog {
         self.entries.push_back(entry);
     }
 
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn heap_bytes(&self) -> usize {
+        self.entries
+            .iter()
+            .map(|e| std::mem::size_of::<QueryLogEntry>() + e.domain.capacity())
+            .sum()
+    }
+
     pub fn query(&self, filter: &QueryLogFilter) -> Vec<&QueryLogEntry> {
         self.entries
             .iter()
@@ -76,4 +91,26 @@ pub struct QueryLogFilter {
     pub path: Option<QueryPath>,
     pub since: Option<SystemTime>,
     pub limit: Option<usize>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn heap_bytes_grows_with_entries() {
+        let mut log = QueryLog::new(100);
+        let empty = log.heap_bytes();
+        log.push(QueryLogEntry {
+            timestamp: SystemTime::now(),
+            src_addr: "127.0.0.1:1234".parse().unwrap(),
+            domain: "example.com".into(),
+            query_type: QueryType::A,
+            path: QueryPath::Forwarded,
+            rescode: ResultCode::NOERROR,
+            latency_us: 500,
+            dnssec: DnssecStatus::Indeterminate,
+        });
+        assert!(log.heap_bytes() > empty);
+    }
 }

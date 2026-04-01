@@ -183,6 +183,15 @@ impl BlocklistStore {
         self.allowlist.iter().cloned().collect()
     }
 
+    pub fn heap_bytes(&self) -> usize {
+        let per_slot_overhead = std::mem::size_of::<u64>() + std::mem::size_of::<String>() + 1;
+        let domains_table = self.domains.capacity() * per_slot_overhead;
+        let domains_heap: usize = self.domains.iter().map(|d| d.capacity()).sum();
+        let allow_table = self.allowlist.capacity() * per_slot_overhead;
+        let allow_heap: usize = self.allowlist.iter().map(|d| d.capacity()).sum();
+        domains_table + domains_heap + allow_table + allow_heap
+    }
+
     pub fn stats(&self) -> BlocklistStats {
         BlocklistStats {
             enabled: self.is_enabled(),
@@ -232,6 +241,23 @@ pub fn parse_blocklist(text: &str) -> HashSet<String> {
         }
     }
     domains
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn heap_bytes_grows_with_domains() {
+        let mut store = BlocklistStore::new();
+        let empty = store.heap_bytes();
+        let domains: HashSet<String> = ["example.com", "example.org", "test.net"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        store.swap_domains(domains, vec![]);
+        assert!(store.heap_bytes() > empty);
+    }
 }
 
 pub async fn download_blocklists(lists: &[String]) -> Vec<(String, String)> {
