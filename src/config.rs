@@ -59,8 +59,10 @@ fn default_bind_addr() -> String {
     "0.0.0.0:53".to_string()
 }
 
+pub const DEFAULT_API_PORT: u16 = 5380;
+
 fn default_api_port() -> u16 {
-    5380
+    DEFAULT_API_PORT
 }
 
 #[derive(Deserialize, Default, PartialEq, Eq, Clone, Copy)]

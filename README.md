@@ -24,7 +24,7 @@ sudo numa                              # port 53 requires root
 
 Open the dashboard: **http://numa.numa** (or `http://localhost:5380`)
 
-Set as system DNS: `sudo numa install && sudo numa service start`
+Set as system DNS: `sudo numa install`
 
 ## Local Services
 

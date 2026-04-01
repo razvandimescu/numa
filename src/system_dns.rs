@@ -255,7 +255,7 @@ fn resolvectl_dns_server() -> Option<String> {
         if line.contains("DNS Servers") || line.contains("Current DNS Server") {
             if let Some(ip) = line.split(':').next_back() {
                 let ip = ip.trim();
-                if !is_loopback_or_stub(ip) {
+                if ip.parse::<std::net::IpAddr>().is_ok() && !is_loopback_or_stub(ip) {
                     return Some(ip.to_string());
                 }
             }
@@ -632,12 +632,7 @@ fn install_service_macos() -> Result<(), String> {
     std::fs::write(PLIST_DEST, plist)
         .map_err(|e| format!("failed to write {}: {}", PLIST_DEST, e))?;
 
-    // Configure system DNS before starting service
-    if let Err(e) = install_macos() {
-        eprintln!("  warning: failed to configure system DNS: {}", e);
-    }
-
-    // Load the service
+    // Load the service first so numa is listening before DNS redirect
     let status = std::process::Command::new("launchctl")
         .args(["load", "-w", PLIST_DEST])
         .status()
@@ -645,6 +640,27 @@ fn install_service_macos() -> Result<(), String> {
 
     if !status.success() {
         return Err("launchctl load failed".to_string());
+    }
+
+    // Wait for numa to be ready before redirecting DNS
+    let api_up = (0..10).any(|i| {
+        if i > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        std::net::TcpStream::connect(("127.0.0.1", crate::config::DEFAULT_API_PORT)).is_ok()
+    });
+    if !api_up {
+        // Service failed to start — don't redirect DNS to a dead endpoint
+        let _ = std::process::Command::new("launchctl")
+            .args(["unload", PLIST_DEST])
+            .status();
+        return Err(
+            "numa service did not start (port 53 may be in use). Service unloaded.".to_string(),
+        );
+    }
+
+    if let Err(e) = install_macos() {
+        eprintln!("  warning: failed to configure system DNS: {}", e);
     }
 
     eprintln!("  Service installed and started.");

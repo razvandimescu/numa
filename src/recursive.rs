@@ -65,18 +65,19 @@ pub async fn probe_udp(root_hints: &[SocketAddr]) {
     }
 }
 
-/// Probe whether recursive resolution works by querying a root server.
+/// Probe whether recursive resolution works by querying root servers.
+/// Tries up to 3 hints before declaring failure.
 pub async fn probe_recursive(root_hints: &[SocketAddr]) -> bool {
-    let hint = match root_hints.first() {
-        Some(h) => *h,
-        None => return false,
-    };
     let mut probe = DnsPacket::query(next_id(), ".", QueryType::NS);
     probe.header.recursion_desired = false;
-    match forward_udp(&probe, hint, Duration::from_secs(3)).await {
-        Ok(resp) => !resp.answers.is_empty() || !resp.authorities.is_empty(),
-        Err(_) => false,
+    for hint in root_hints.iter().take(3) {
+        if let Ok(resp) = forward_udp(&probe, *hint, Duration::from_secs(3)).await {
+            if !resp.answers.is_empty() || !resp.authorities.is_empty() {
+                return true;
+            }
+        }
     }
+    false
 }
 
 pub async fn prime_tld_cache(
