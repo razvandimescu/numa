@@ -67,8 +67,19 @@ fn default_api_port() -> u16 {
 #[serde(rename_all = "lowercase")]
 pub enum UpstreamMode {
     #[default]
+    Auto,
     Forward,
     Recursive,
+}
+
+impl UpstreamMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            UpstreamMode::Auto => "auto",
+            UpstreamMode::Forward => "forward",
+            UpstreamMode::Recursive => "recursive",
+        }
+    }
 }
 
 #[derive(Deserialize)]

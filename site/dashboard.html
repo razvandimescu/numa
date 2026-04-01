@@ -882,6 +882,9 @@ async function refresh() {
     document.getElementById('footerUpstream').textContent = stats.upstream || '';
     document.getElementById('footerConfig').textContent = stats.config_path || '';
     document.getElementById('footerData').textContent = stats.data_dir || '';
+    const modeEl = document.getElementById('footerMode');
+    modeEl.textContent = stats.mode || '—';
+    modeEl.style.color = stats.mode === 'recursive' ? 'var(--emerald)' : 'var(--amber)';
     document.getElementById('footerDnssec').textContent = stats.dnssec ? 'on' : 'off';
     document.getElementById('footerDnssec').style.color = stats.dnssec ? 'var(--emerald)' : 'var(--text-dim)';
     document.getElementById('footerSrtt').textContent = stats.srtt ? 'on' : 'off';
@@ -1236,6 +1239,7 @@ setInterval(refresh, 2000);
   Config: <span id="footerConfig" style="user-select:all;color:var(--emerald);"></span>
   · Data: <span id="footerData" style="user-select:all;color:var(--emerald);"></span>
   · Upstream: <span id="footerUpstream" style="user-select:all;color:var(--emerald);"></span>
+  · Mode: <span id="footerMode" style="color:var(--text-dim);">—</span>
   · DNSSEC: <span id="footerDnssec" style="color:var(--text-dim);">—</span>
   · SRTT: <span id="footerSrtt" style="color:var(--text-dim);">—</span>
   · Logs: <span style="user-select:all;color:var(--emerald);">macOS: /usr/local/var/log/numa.log · Linux: journalctl -u numa -f</span>

@@ -2,6 +2,10 @@ use std::net::SocketAddr;
 
 use log::info;
 
+fn is_loopback_or_stub(addr: &str) -> bool {
+    matches!(addr, "127.0.0.1" | "127.0.0.53" | "0.0.0.0" | "::1" | "")
+}
+
 /// A conditional forwarding rule: domains matching `suffix` are forwarded to `upstream`.
 #[derive(Debug, Clone)]
 pub struct ForwardingRule {
@@ -102,11 +106,7 @@ fn discover_macos() -> SystemDnsInfo {
                 if ns.parse::<std::net::Ipv4Addr>().is_ok() {
                     current_nameserver = Some(ns.clone());
                     // Capture first non-supplemental, non-loopback nameserver as default upstream
-                    if !is_supplemental
-                        && default_upstream.is_none()
-                        && ns != "127.0.0.1"
-                        && ns != "0.0.0.0"
-                    {
+                    if !is_supplemental && default_upstream.is_none() && !is_loopback_or_stub(&ns) {
                         default_upstream = Some(ns);
                     }
                 }
@@ -196,7 +196,7 @@ fn read_upstream_from_file(path: &str) -> Option<String> {
         let line = line.trim();
         if line.starts_with("nameserver") {
             if let Some(ns) = line.split_whitespace().nth(1) {
-                if ns != "127.0.0.1" && ns != "0.0.0.0" && ns != "::1" {
+                if !is_loopback_or_stub(ns) {
                     return Some(ns.to_string());
                 }
             }
@@ -236,10 +236,7 @@ fn detect_dhcp_dns_macos() -> Option<String> {
                     // Take the first non-loopback DNS server
                     for addr in inner.split(',') {
                         let addr = addr.trim();
-                        if !addr.is_empty()
-                            && addr != "127.0.0.1"
-                            && addr != "0.0.0.0"
-                            && addr.parse::<std::net::Ipv4Addr>().is_ok()
+                        if !is_loopback_or_stub(addr) && addr.parse::<std::net::Ipv4Addr>().is_ok()
                         {
                             log::info!("detected DHCP DNS: {}", addr);
                             return Some(addr.to_string());
@@ -278,7 +275,7 @@ fn discover_windows() -> SystemDnsInfo {
         if trimmed.contains("DNS Servers") || trimmed.contains("DNS-Server") {
             if let Some(ip) = trimmed.split(':').next_back() {
                 let ip = ip.trim();
-                if !ip.is_empty() && ip != "127.0.0.1" && ip != "::1" {
+                if !is_loopback_or_stub(ip) {
                     upstream = Some(ip.to_string());
                     break;
                 }
@@ -315,43 +312,6 @@ pub fn match_forwarding_rule(domain: &str, rules: &[ForwardingRule]) -> Option<S
 }
 
 // --- System DNS configuration (install/uninstall) ---
-
-/// Set the system DNS to 127.0.0.1 so all queries go through Numa.
-/// Saves the original DNS settings for later restoration.
-pub fn install_system_dns() -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    let result = install_macos();
-    #[cfg(target_os = "linux")]
-    let result = install_linux();
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    let result = Err("system DNS configuration not supported on this OS".to_string());
-
-    if result.is_ok() {
-        if let Err(e) = trust_ca() {
-            eprintln!("  warning: could not trust CA: {}", e);
-            eprintln!("  HTTPS proxy will work but browsers will show certificate warnings.\n");
-        }
-    }
-    result
-}
-
-/// Restore the original system DNS settings saved during install.
-pub fn uninstall_system_dns() -> Result<(), String> {
-    let _ = untrust_ca();
-
-    #[cfg(target_os = "macos")]
-    {
-        uninstall_macos()
-    }
-    #[cfg(target_os = "linux")]
-    {
-        uninstall_linux()
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        Err("system DNS configuration not supported on this OS".to_string())
-    }
-}
 
 // --- macOS implementation ---
 
@@ -500,21 +460,25 @@ const SYSTEMD_UNIT: &str = "/etc/systemd/system/numa.service";
 /// Install Numa as a system service that starts on boot and auto-restarts.
 pub fn install_service() -> Result<(), String> {
     #[cfg(target_os = "macos")]
-    {
-        install_service_macos()
-    }
+    let result = install_service_macos();
     #[cfg(target_os = "linux")]
-    {
-        install_service_linux()
-    }
+    let result = install_service_linux();
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        Err("service installation not supported on this OS".to_string())
+    let result = Err::<(), String>("service installation not supported on this OS".to_string());
+
+    if result.is_ok() {
+        if let Err(e) = trust_ca() {
+            eprintln!("  warning: could not trust CA: {}", e);
+            eprintln!("  HTTPS proxy will work but browsers will show certificate warnings.\n");
+        }
     }
+    result
 }
 
 /// Uninstall the Numa system service.
 pub fn uninstall_service() -> Result<(), String> {
+    let _ = untrust_ca();
+
     #[cfg(target_os = "macos")]
     {
         uninstall_service_macos()
@@ -609,6 +573,11 @@ fn install_service_macos() -> Result<(), String> {
     std::fs::write(PLIST_DEST, plist)
         .map_err(|e| format!("failed to write {}: {}", PLIST_DEST, e))?;
 
+    // Configure system DNS before starting service
+    if let Err(e) = install_macos() {
+        eprintln!("  warning: failed to configure system DNS: {}", e);
+    }
+
     // Load the service
     let status = std::process::Command::new("launchctl")
         .args(["load", "-w", PLIST_DEST])
@@ -619,11 +588,7 @@ fn install_service_macos() -> Result<(), String> {
         return Err("launchctl load failed".to_string());
     }
 
-    // Set system DNS to 127.0.0.1 now that the service is running
     eprintln!("  Service installed and started.");
-    if let Err(e) = install_macos() {
-        eprintln!("  warning: failed to configure system DNS: {}", e);
-    }
     eprintln!("  Numa will auto-start on boot and restart if killed.");
     eprintln!("  Logs: /usr/local/var/log/numa.log");
     eprintln!("  Run 'sudo numa service stop' to fully uninstall.\n");
@@ -708,8 +673,11 @@ fn install_linux() -> Result<(), String> {
             .map_err(|e| format!("failed to create {}: {}", resolved_dir.display(), e))?;
 
         let drop_in = resolved_dir.join("numa.conf");
-        std::fs::write(&drop_in, "[Resolve]\nDNS=127.0.0.1\nDomains=~.\n")
-            .map_err(|e| format!("failed to write {}: {}", drop_in.display(), e))?;
+        std::fs::write(
+            &drop_in,
+            "[Resolve]\nDNS=127.0.0.1\nDomains=~.\nDNSStubListener=no\n",
+        )
+        .map_err(|e| format!("failed to write {}: {}", drop_in.display(), e))?;
 
         let _ = run_systemctl(&["restart", "systemd-resolved"]);
         eprintln!("  systemd-resolved detected.");
@@ -802,14 +770,15 @@ fn install_service_linux() -> Result<(), String> {
 
     run_systemctl(&["daemon-reload"])?;
     run_systemctl(&["enable", "numa"])?;
-    run_systemctl(&["start", "numa"])?;
 
-    eprintln!("  Service installed and started.");
-
-    // Set system DNS now that the service is running
+    // Configure system DNS before starting numa so resolved releases port 53 first
     if let Err(e) = install_linux() {
         eprintln!("  warning: failed to configure system DNS: {}", e);
     }
+
+    run_systemctl(&["start", "numa"])?;
+
+    eprintln!("  Service installed and started.");
     eprintln!("  Numa will auto-start on boot and restart if killed.");
     eprintln!("  Logs: journalctl -u numa -f");
     eprintln!("  Run 'sudo numa service stop' to fully uninstall.\n");

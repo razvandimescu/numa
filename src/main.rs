@@ -17,8 +17,7 @@ use numa::query_log::QueryLog;
 use numa::service_store::ServiceStore;
 use numa::stats::ServerStats;
 use numa::system_dns::{
-    discover_system_dns, install_service, install_system_dns, restart_service, service_status,
-    uninstall_service, uninstall_system_dns,
+    discover_system_dns, install_service, restart_service, service_status, uninstall_service,
 };
 
 #[tokio::main]
@@ -31,12 +30,12 @@ async fn main() -> numa::Result<()> {
     let arg1 = std::env::args().nth(1).unwrap_or_default();
     match arg1.as_str() {
         "install" => {
-            eprintln!("\x1b[1;38;2;192;98;58mNuma\x1b[0m — configuring system DNS\n");
-            return install_system_dns().map_err(|e| e.into());
+            eprintln!("\x1b[1;38;2;192;98;58mNuma\x1b[0m — installing\n");
+            return install_service().map_err(|e| e.into());
         }
         "uninstall" => {
-            eprintln!("\x1b[1;38;2;192;98;58mNuma\x1b[0m — restoring system DNS\n");
-            return uninstall_system_dns().map_err(|e| e.into());
+            eprintln!("\x1b[1;38;2;192;98;58mNuma\x1b[0m — uninstalling\n");
+            return uninstall_service().map_err(|e| e.into());
         }
         "service" => {
             let sub = std::env::args().nth(2).unwrap_or_default();
@@ -107,32 +106,63 @@ async fn main() -> numa::Result<()> {
     // Discover system DNS in a single pass (upstream + forwarding rules)
     let system_dns = discover_system_dns();
 
-    let upstream_addr = if config.upstream.address.is_empty() {
-        system_dns
-            .default_upstream
-            .or_else(numa::system_dns::detect_dhcp_dns)
-            .unwrap_or_else(|| {
-                info!("could not detect system DNS, falling back to Quad9 DoH");
-                "https://dns.quad9.net/dns-query".to_string()
-            })
-    } else {
-        config.upstream.address.clone()
-    };
+    let root_hints = numa::recursive::parse_root_hints(&config.upstream.root_hints);
 
-    let upstream: Upstream = if upstream_addr.starts_with("https://") {
-        let client = reqwest::Client::builder()
-            .use_rustls_tls()
-            .build()
-            .unwrap_or_default();
-        Upstream::Doh {
-            url: upstream_addr,
-            client,
+    // Resolve upstream mode + address in one block
+    let resolved_mode;
+    let upstream_auto;
+    let (upstream, upstream_label) = if config.upstream.mode == numa::config::UpstreamMode::Auto {
+        info!("auto mode: probing recursive resolution...");
+        if numa::recursive::probe_recursive(&root_hints).await {
+            info!("recursive probe succeeded — self-sovereign mode");
+            resolved_mode = numa::config::UpstreamMode::Recursive;
+            upstream_auto = false;
+            let dummy_upstream = Upstream::Udp("0.0.0.0:0".parse().unwrap());
+            (dummy_upstream, "recursive (root hints)".to_string())
+        } else {
+            log::warn!("recursive probe failed — falling back to Quad9 DoH");
+            resolved_mode = numa::config::UpstreamMode::Forward;
+            upstream_auto = false;
+            let client = reqwest::Client::builder()
+                .use_rustls_tls()
+                .build()
+                .unwrap_or_default();
+            let url = "https://dns.quad9.net/dns-query".to_string();
+            let label = url.clone();
+            (Upstream::Doh { url, client }, label)
         }
     } else {
-        let addr: SocketAddr = format!("{}:{}", upstream_addr, config.upstream.port).parse()?;
-        Upstream::Udp(addr)
+        resolved_mode = config.upstream.mode;
+        upstream_auto = config.upstream.address.is_empty();
+
+        let upstream_addr = if config.upstream.address.is_empty() {
+            system_dns
+                .default_upstream
+                .or_else(numa::system_dns::detect_dhcp_dns)
+                .unwrap_or_else(|| {
+                    info!("could not detect system DNS, falling back to Quad9 DoH");
+                    "https://dns.quad9.net/dns-query".to_string()
+                })
+        } else {
+            config.upstream.address.clone()
+        };
+
+        let upstream: Upstream = if upstream_addr.starts_with("https://") {
+            let client = reqwest::Client::builder()
+                .use_rustls_tls()
+                .build()
+                .unwrap_or_default();
+            Upstream::Doh {
+                url: upstream_addr,
+                client,
+            }
+        } else {
+            let addr: SocketAddr = format!("{}:{}", upstream_addr, config.upstream.port).parse()?;
+            Upstream::Udp(addr)
+        };
+        let label = upstream.to_string();
+        (upstream, label)
     };
-    let upstream_label = upstream.to_string();
     let api_port = config.server.api_port;
 
     let mut blocklist = BlocklistStore::new();
@@ -183,7 +213,7 @@ async fn main() -> numa::Result<()> {
         lan_peers: Mutex::new(numa::lan::PeerStore::new(config.lan.peer_timeout_secs)),
         forwarding_rules,
         upstream: Mutex::new(upstream),
-        upstream_auto: config.upstream.address.is_empty(),
+        upstream_auto,
         upstream_port: config.upstream.port,
         lan_ip: Mutex::new(numa::lan::detect_lan_ip().unwrap_or(std::net::Ipv4Addr::LOCALHOST)),
         timeout: Duration::from_millis(config.upstream.timeout_ms),
@@ -199,8 +229,8 @@ async fn main() -> numa::Result<()> {
         config_dir: numa::config_dir(),
         data_dir: numa::data_dir(),
         tls_config: initial_tls,
-        upstream_mode: config.upstream.mode,
-        root_hints: numa::recursive::parse_root_hints(&config.upstream.root_hints),
+        upstream_mode: resolved_mode,
+        root_hints,
         srtt: std::sync::RwLock::new(numa::srtt::SrttCache::new(config.upstream.srtt)),
         inflight: std::sync::Mutex::new(std::collections::HashMap::new()),
         dnssec_enabled: config.dnssec.enabled,

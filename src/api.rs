@@ -160,6 +160,7 @@ struct QueryLogResponse {
 struct StatsResponse {
     uptime_secs: u64,
     upstream: String,
+    mode: String,
     config_path: String,
     data_dir: String,
     dnssec: bool,
@@ -486,6 +487,7 @@ async fn stats(State(ctx): State<Arc<ServerCtx>>) -> Json<StatsResponse> {
     Json(StatsResponse {
         uptime_secs: snap.uptime_secs,
         upstream,
+        mode: ctx.upstream_mode.as_str().to_string(),
         config_path: ctx.config_path.clone(),
         data_dir: ctx.data_dir.to_string_lossy().to_string(),
         dnssec: ctx.dnssec_enabled,
