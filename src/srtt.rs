@@ -218,8 +218,14 @@ mod tests {
         assert_eq!(addrs, original);
     }
 
+    // On Windows, Instant starts near boot time — large subtractions overflow.
+    // Fall back to a fixed reference point created at process start.
+    static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
     fn age(secs: u64) -> Instant {
-        Instant::now() - std::time::Duration::from_secs(secs)
+        Instant::now()
+            .checked_sub(std::time::Duration::from_secs(secs))
+            .unwrap_or(*EPOCH.get_or_init(Instant::now))
     }
 
     /// Cache with ip(1) saturated at FAILURE_PENALTY_MS
