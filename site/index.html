@@ -4,10 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Numa — DNS you own. Everywhere you go.</title>
-<meta name="description" content="DNS you own. Recursive resolver with full DNSSEC validation, ad blocking, .numa local domains, developer overrides. A single portable binary built from scratch in Rust.">
+<meta name="description" content="DNS you own. Portable DNS resolver with caching, ad blocking, .numa local domains, developer overrides. Optional recursive resolution with full DNSSEC validation. Built from scratch in Rust.">
 <link rel="canonical" href="https://numa.rs">
 <meta property="og:title" content="Numa — DNS you own. Everywhere you go.">
-<meta property="og:description" content="Recursive DNS resolver with full DNSSEC validation, ad blocking, .numa local domains, and developer overrides. Built from scratch in Rust.">
+<meta property="og:description" content="Portable DNS resolver with caching, ad blocking, .numa local domains, and developer overrides. Optional recursive resolution with full DNSSEC validation. Built from scratch in Rust.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://numa.rs">
 <link rel="stylesheet" href="/fonts/fonts.css">
@@ -1232,17 +1232,17 @@ footer .closing {
     <div class="reveal">
       <div class="section-label">How It Works</div>
       <h2>What it does today</h2>
-      <p class="lead">A recursive DNS resolver with DNSSEC validation, ad blocking, local service domains, and a REST API. Everything runs in a single binary.</p>
+      <p class="lead">A DNS resolver with caching, ad blocking, local service domains, and a REST API. Optional recursive resolution with DNSSEC. Everything runs in a single binary.</p>
     </div>
     <div class="layers-grid">
       <div class="layer-card reveal reveal-delay-1">
         <div class="layer-badge">Layer 1</div>
         <h3>Resolve &amp; Protect</h3>
         <ul>
-          <li>Recursive resolution &mdash; resolve from root nameservers, no upstream needed</li>
-          <li>DNSSEC validation &mdash; chain-of-trust + NSEC/NSEC3 denial proofs (RSA, ECDSA, Ed25519)</li>
+          <li>Forward mode by default &mdash; transparent proxy to your existing DNS, with caching</li>
           <li>Ad &amp; tracker blocking &mdash; 385K+ domains, zero config</li>
-          <li>DNS-over-HTTPS &mdash; encrypted upstream as alternative to recursive mode</li>
+          <li>Recursive resolution &mdash; opt-in, resolve from root nameservers, no upstream needed</li>
+          <li>DNSSEC validation &mdash; chain-of-trust + NSEC/NSEC3 denial proofs (RSA, ECDSA, Ed25519)</li>
           <li>TTL-aware caching (sub-ms lookups)</li>
           <li>Single binary, portable &mdash; macOS, Linux, and Windows</li>
         </ul>
