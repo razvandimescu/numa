@@ -59,16 +59,29 @@ fn default_bind_addr() -> String {
     "0.0.0.0:53".to_string()
 }
 
+pub const DEFAULT_API_PORT: u16 = 5380;
+
 fn default_api_port() -> u16 {
-    5380
+    DEFAULT_API_PORT
 }
 
 #[derive(Deserialize, Default, PartialEq, Eq, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub enum UpstreamMode {
+    Auto,
     #[default]
     Forward,
     Recursive,
+}
+
+impl UpstreamMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            UpstreamMode::Auto => "auto",
+            UpstreamMode::Forward => "forward",
+            UpstreamMode::Recursive => "recursive",
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -103,8 +116,12 @@ impl Default for UpstreamConfig {
     }
 }
 
-fn default_srtt() -> bool {
+fn default_true() -> bool {
     true
+}
+
+fn default_srtt() -> bool {
+    default_true()
 }
 
 fn default_prime_tlds() -> Vec<String> {
