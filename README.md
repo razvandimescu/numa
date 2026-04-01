@@ -43,7 +43,13 @@ Add path-based routing (`app.numa/api → :5001`), share services across machine
 
 385K+ domains blocked via [Hagezi Pro](https://github.com/hagezi/dns-blocklists). Works on any network — coffee shops, hotels, airports. Travels with your laptop.
 
-By default, Numa forwards to your existing system DNS — everything works as before, just with caching and ad blocking on top. For full privacy, set `mode = "recursive"` — Numa resolves directly from root nameservers. No upstream dependency, no single entity sees your full query pattern. DNSSEC validates the full chain of trust: RRSIG signatures, DNSKEY verification, DS delegation, NSEC/NSEC3 denial proofs. [Read how it works →](https://numa.rs/blog/posts/dnssec-from-scratch.html)
+Three resolution modes:
+
+- **`forward`** (default) — transparent proxy to your existing system DNS. Everything works as before, just with caching and ad blocking on top. Captive portals, VPNs, corporate DNS — all respected.
+- **`recursive`** — resolve directly from root nameservers. No upstream dependency, no single entity sees your full query pattern. Add `[dnssec] enabled = true` for full chain-of-trust validation.
+- **`auto`** — probe root servers on startup, recursive if reachable, encrypted DoH fallback if blocked.
+
+DNSSEC validates the full chain of trust: RRSIG signatures, DNSKEY verification, DS delegation, NSEC/NSEC3 denial proofs. [Read how it works →](https://numa.rs/blog/posts/dnssec-from-scratch.html)
 
 ## LAN Discovery
 
