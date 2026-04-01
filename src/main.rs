@@ -20,6 +20,9 @@ use numa::system_dns::{
     discover_system_dns, install_service, restart_service, service_status, uninstall_service,
 };
 
+const QUAD9_IP: &str = "9.9.9.9";
+const DOH_FALLBACK: &str = "https://9.9.9.9/dns-query";
+
 #[tokio::main]
 async fn main() -> numa::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
@@ -126,7 +129,7 @@ async fn main() -> numa::Result<()> {
                     .use_rustls_tls()
                     .build()
                     .unwrap_or_default();
-                let url = "https://dns.quad9.net/dns-query".to_string();
+                let url = DOH_FALLBACK.to_string();
                 let label = url.clone();
                 (
                     numa::config::UpstreamMode::Forward,
@@ -152,7 +155,7 @@ async fn main() -> numa::Result<()> {
                     .or_else(numa::system_dns::detect_dhcp_dns)
                     .unwrap_or_else(|| {
                         info!("could not detect system DNS, falling back to Quad9 DoH");
-                        "https://dns.quad9.net/dns-query".to_string()
+                        DOH_FALLBACK.to_string()
                     })
             } else {
                 config.upstream.address.clone()
@@ -478,7 +481,14 @@ async fn main() -> numa::Result<()> {
     #[allow(clippy::infinite_loop)]
     loop {
         let mut buffer = BytePacketBuffer::new();
-        let (_, src_addr) = ctx.socket.recv_from(&mut buffer.buf).await?;
+        let (_, src_addr) = match ctx.socket.recv_from(&mut buffer.buf).await {
+            Ok(r) => r,
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {
+                // Windows delivers ICMP port-unreachable as ConnectionReset on UDP sockets
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        };
 
         let ctx = Arc::clone(&ctx);
         tokio::spawn(async move {
@@ -521,7 +531,7 @@ async fn network_watch_loop(ctx: Arc<numa::ctx::ServerCtx>) {
             let new_addr = dns_info
                 .default_upstream
                 .or_else(numa::system_dns::detect_dhcp_dns)
-                .unwrap_or_else(|| "9.9.9.9".to_string());
+                .unwrap_or_else(|| QUAD9_IP.to_string());
             if let Ok(new_sock) =
                 format!("{}:{}", new_addr, ctx.upstream_port).parse::<SocketAddr>()
             {

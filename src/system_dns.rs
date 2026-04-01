@@ -334,7 +334,7 @@ fn discover_windows() -> SystemDnsInfo {
         if trimmed.contains("DNS Servers") || trimmed.contains("DNS-Server") {
             if let Some(ip) = trimmed.split(':').next_back() {
                 let ip = ip.trim();
-                if !is_loopback_or_stub(ip) {
+                if ip.parse::<std::net::IpAddr>().is_ok() && !is_loopback_or_stub(ip) {
                     upstream = Some(ip.to_string());
                     break;
                 }
@@ -356,6 +356,339 @@ fn discover_windows() -> SystemDnsInfo {
         default_upstream: upstream,
         forwarding_rules: Vec::new(),
     }
+}
+
+#[cfg(any(windows, test))]
+#[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
+struct WindowsInterfaceDns {
+    dhcp: bool,
+    servers: Vec<String>,
+}
+
+#[cfg(any(windows, test))]
+fn parse_ipconfig_interfaces(text: &str) -> std::collections::HashMap<String, WindowsInterfaceDns> {
+    let mut interfaces = std::collections::HashMap::new();
+    let mut current_adapter: Option<String> = None;
+    let mut current_dhcp = false;
+    let mut current_dns: Vec<String> = Vec::new();
+    let mut in_dns_block = false;
+    let mut disconnected = false;
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+
+        // Adapter section headers start at column 0
+        if !trimmed.is_empty() && !line.starts_with(' ') && !line.starts_with('\t') {
+            if let Some(name) = current_adapter.take() {
+                if !disconnected {
+                    interfaces.insert(
+                        name,
+                        WindowsInterfaceDns {
+                            dhcp: current_dhcp,
+                            servers: std::mem::take(&mut current_dns),
+                        },
+                    );
+                }
+                current_dns.clear();
+            }
+            in_dns_block = false;
+            current_dhcp = false;
+            disconnected = false;
+
+            // "XXX adapter YYY:" (English) / "XXX Adapter YYY:" (German)
+            let lower = trimmed.to_lowercase();
+            if let Some(pos) = lower.find(" adapter ") {
+                let after = &trimmed[pos + " adapter ".len()..];
+                let name = after.trim_end_matches(':').trim();
+                if !name.is_empty() {
+                    current_adapter = Some(name.to_string());
+                }
+            }
+        } else if current_adapter.is_some() {
+            if trimmed.contains("Media disconnected") || trimmed.contains("Medienstatus") {
+                disconnected = true;
+            } else if trimmed.contains("DHCP") && trimmed.contains(". .") {
+                current_dhcp = trimmed
+                    .split(':')
+                    .next_back()
+                    .map(|v| {
+                        let v = v.trim().to_lowercase();
+                        v == "yes" || v == "ja"
+                    })
+                    .unwrap_or(false);
+                in_dns_block = false;
+            } else if trimmed.contains("DNS Servers") || trimmed.contains("DNS-Server") {
+                in_dns_block = true;
+                if let Some(ip) = trimmed.split(':').next_back() {
+                    let ip = ip.trim();
+                    if ip.parse::<std::net::IpAddr>().is_ok() {
+                        current_dns.push(ip.to_string());
+                    }
+                }
+            } else if in_dns_block {
+                if trimmed.parse::<std::net::IpAddr>().is_ok() {
+                    current_dns.push(trimmed.to_string());
+                } else {
+                    in_dns_block = false;
+                }
+            }
+        }
+    }
+
+    if let Some(name) = current_adapter {
+        if !disconnected {
+            interfaces.insert(
+                name,
+                WindowsInterfaceDns {
+                    dhcp: current_dhcp,
+                    servers: current_dns,
+                },
+            );
+        }
+    }
+
+    interfaces
+}
+
+#[cfg(windows)]
+fn get_windows_interfaces() -> Result<std::collections::HashMap<String, WindowsInterfaceDns>, String>
+{
+    let output = std::process::Command::new("ipconfig")
+        .arg("/all")
+        .output()
+        .map_err(|e| format!("failed to run ipconfig /all: {}", e))?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    Ok(parse_ipconfig_interfaces(&text))
+}
+
+#[cfg(windows)]
+fn windows_backup_path() -> std::path::PathBuf {
+    // Use ProgramData (not APPDATA) since install requires admin elevation
+    // and APPDATA differs between user and admin contexts.
+    std::path::PathBuf::from(
+        std::env::var("PROGRAMDATA").unwrap_or_else(|_| "C:\\ProgramData".into()),
+    )
+    .join("numa")
+    .join("original-dns.json")
+}
+
+#[cfg(windows)]
+fn disable_dnscache() -> Result<bool, String> {
+    // Check if Dnscache is running (it holds port 53 at kernel level)
+    let output = std::process::Command::new("sc")
+        .args(["query", "Dnscache"])
+        .output()
+        .map_err(|e| format!("failed to query Dnscache: {}", e))?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    if !text.contains("RUNNING") {
+        return Ok(false);
+    }
+
+    eprintln!("  Disabling DNS Client (Dnscache) to free port 53...");
+    // Dnscache can't be stopped via sc/net stop — must disable via registry
+    let status = std::process::Command::new("reg")
+        .args([
+            "add",
+            "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Dnscache",
+            "/v",
+            "Start",
+            "/t",
+            "REG_DWORD",
+            "/d",
+            "4",
+            "/f",
+        ])
+        .status()
+        .map_err(|e| format!("failed to disable Dnscache: {}", e))?;
+
+    if !status.success() {
+        return Err("failed to disable Dnscache via registry (run as Administrator?)".into());
+    }
+
+    eprintln!("  Dnscache disabled. A reboot is required to free port 53.");
+    Ok(true)
+}
+
+#[cfg(windows)]
+fn enable_dnscache() {
+    let _ = std::process::Command::new("reg")
+        .args([
+            "add",
+            "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Dnscache",
+            "/v",
+            "Start",
+            "/t",
+            "REG_DWORD",
+            "/d",
+            "2",
+            "/f",
+        ])
+        .status();
+}
+
+#[cfg(windows)]
+fn install_windows() -> Result<(), String> {
+    let interfaces = get_windows_interfaces()?;
+    if interfaces.is_empty() {
+        return Err("no active network interfaces found".to_string());
+    }
+
+    let path = windows_backup_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create {}: {}", parent.display(), e))?;
+    }
+    let json = serde_json::to_string_pretty(&interfaces)
+        .map_err(|e| format!("failed to serialize backup: {}", e))?;
+    std::fs::write(&path, json).map_err(|e| format!("failed to write backup: {}", e))?;
+
+    for name in interfaces.keys() {
+        let status = std::process::Command::new("netsh")
+            .args([
+                "interface",
+                "ipv4",
+                "set",
+                "dnsservers",
+                name,
+                "static",
+                "127.0.0.1",
+                "primary",
+            ])
+            .status()
+            .map_err(|e| format!("failed to set DNS for {}: {}", name, e))?;
+
+        if status.success() {
+            eprintln!("  set DNS for \"{}\" -> 127.0.0.1", name);
+        } else {
+            eprintln!(
+                "  warning: failed to set DNS for \"{}\" (run as Administrator?)",
+                name
+            );
+        }
+    }
+
+    let needs_reboot = disable_dnscache()?;
+    register_autostart();
+
+    eprintln!("\n  Original DNS saved to {}", path.display());
+    eprintln!("  Run 'numa uninstall' to restore.\n");
+    if needs_reboot {
+        eprintln!("  *** Reboot required. Numa will start automatically. ***\n");
+    } else {
+        eprintln!("  Numa will start automatically on next boot.\n");
+    }
+    eprintln!("  Want full DNS sovereignty? Add to numa.toml:");
+    eprintln!("    [upstream]");
+    eprintln!("    mode = \"recursive\"\n");
+    Ok(())
+}
+
+/// Register numa to auto-start on boot via registry Run key.
+#[cfg(windows)]
+fn register_autostart() {
+    let exe = std::env::current_exe()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "numa".into());
+    let _ = std::process::Command::new("reg")
+        .args([
+            "add",
+            "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run",
+            "/v",
+            "Numa",
+            "/t",
+            "REG_SZ",
+            "/d",
+            &exe,
+            "/f",
+        ])
+        .status();
+    eprintln!("  Registered auto-start on boot.");
+}
+
+/// Remove numa auto-start registry key.
+#[cfg(windows)]
+fn remove_autostart() {
+    let _ = std::process::Command::new("reg")
+        .args([
+            "delete",
+            "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run",
+            "/v",
+            "Numa",
+            "/f",
+        ])
+        .status();
+}
+
+#[cfg(windows)]
+fn uninstall_windows() -> Result<(), String> {
+    remove_autostart();
+    let path = windows_backup_path();
+    let json = std::fs::read_to_string(&path)
+        .map_err(|e| format!("no backup found at {}: {}", path.display(), e))?;
+    let original: std::collections::HashMap<String, WindowsInterfaceDns> =
+        serde_json::from_str(&json).map_err(|e| format!("invalid backup file: {}", e))?;
+
+    for (name, dns_info) in &original {
+        if dns_info.dhcp || dns_info.servers.is_empty() {
+            let status = std::process::Command::new("netsh")
+                .args(["interface", "ipv4", "set", "dnsservers", name, "dhcp"])
+                .status()
+                .map_err(|e| format!("failed to restore DNS for {}: {}", name, e))?;
+
+            if status.success() {
+                eprintln!("  restored DNS for \"{}\" -> DHCP", name);
+            } else {
+                eprintln!("  warning: failed to restore DNS for \"{}\"", name);
+            }
+        } else {
+            let status = std::process::Command::new("netsh")
+                .args([
+                    "interface",
+                    "ipv4",
+                    "set",
+                    "dnsservers",
+                    name,
+                    "static",
+                    &dns_info.servers[0],
+                    "primary",
+                ])
+                .status()
+                .map_err(|e| format!("failed to restore DNS for {}: {}", name, e))?;
+
+            if !status.success() {
+                eprintln!("  warning: failed to restore primary DNS for \"{}\"", name);
+                continue;
+            }
+
+            for (i, server) in dns_info.servers.iter().skip(1).enumerate() {
+                let _ = std::process::Command::new("netsh")
+                    .args([
+                        "interface",
+                        "ipv4",
+                        "add",
+                        "dnsservers",
+                        name,
+                        server,
+                        &format!("index={}", i + 2),
+                    ])
+                    .status();
+            }
+
+            eprintln!(
+                "  restored DNS for \"{}\" -> {}",
+                name,
+                dns_info.servers.join(", ")
+            );
+        }
+    }
+
+    std::fs::remove_file(&path).ok();
+
+    // Re-enable Dnscache
+    enable_dnscache();
+    eprintln!("\n  System DNS restored. DNS Client re-enabled.");
+    eprintln!("  Reboot to fully restore the DNS Client service.\n");
+    Ok(())
 }
 
 /// Find the upstream for a domain by checking forwarding rules.
@@ -522,7 +855,9 @@ pub fn install_service() -> Result<(), String> {
     let result = install_service_macos();
     #[cfg(target_os = "linux")]
     let result = install_service_linux();
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(windows)]
+    let result = install_windows();
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     let result = Err::<(), String>("service installation not supported on this OS".to_string());
 
     if result.is_ok() {
@@ -546,7 +881,11 @@ pub fn uninstall_service() -> Result<(), String> {
     {
         uninstall_service_linux()
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(windows)]
+    {
+        uninstall_windows()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     {
         Err("service uninstallation not supported on this OS".to_string())
     }
@@ -1026,4 +1365,58 @@ fn untrust_ca() -> Result<(), String> {
 
     let _ = ca_path; // suppress unused warning on other platforms
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_ipconfig_dhcp_and_static() {
+        let sample = "\
+Ethernet adapter Ethernet:
+
+   DHCP Enabled. . . . . . . . . . . : Yes
+   DNS Servers . . . . . . . . . . . : 8.8.8.8
+                                        8.8.4.4
+
+Wireless LAN adapter Wi-Fi:
+
+   DHCP Enabled. . . . . . . . . . . : No
+   DNS Servers . . . . . . . . . . . : 1.1.1.1
+";
+        let result = parse_ipconfig_interfaces(sample);
+        assert_eq!(result.len(), 2);
+        assert_eq!(
+            result["Ethernet"],
+            WindowsInterfaceDns {
+                dhcp: true,
+                servers: vec!["8.8.8.8".into(), "8.8.4.4".into()],
+            }
+        );
+        assert_eq!(
+            result["Wi-Fi"],
+            WindowsInterfaceDns {
+                dhcp: false,
+                servers: vec!["1.1.1.1".into()],
+            }
+        );
+    }
+
+    #[test]
+    fn parse_ipconfig_skips_disconnected() {
+        let sample = "\
+Ethernet adapter Ethernet 2:
+
+   Media State . . . . . . . . . . . : Media disconnected
+
+Wireless LAN adapter Wi-Fi:
+
+   DHCP Enabled. . . . . . . . . . . : Yes
+   DNS Servers . . . . . . . . . . . : 192.168.1.1
+";
+        let result = parse_ipconfig_interfaces(sample);
+        assert_eq!(result.len(), 1);
+        assert!(result.contains_key("Wi-Fi"));
+    }
 }
