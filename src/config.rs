@@ -114,6 +114,10 @@ impl Default for UpstreamConfig {
     }
 }
 
+fn default_true() -> bool {
+    true
+}
+
 fn default_srtt() -> bool {
     true
 }
@@ -356,12 +360,21 @@ fn default_lan_peer_timeout() -> u64 {
     90
 }
 
-#[derive(Deserialize, Clone, Default)]
+#[derive(Deserialize, Clone)]
 pub struct DnssecConfig {
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(default)]
     pub strict: bool,
+}
+
+impl Default for DnssecConfig {
+    fn default() -> Self {
+        DnssecConfig {
+            enabled: true,
+            strict: false,
+        }
+    }
 }
 
 #[cfg(test)]
