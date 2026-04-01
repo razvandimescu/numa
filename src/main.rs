@@ -481,7 +481,14 @@ async fn main() -> numa::Result<()> {
     #[allow(clippy::infinite_loop)]
     loop {
         let mut buffer = BytePacketBuffer::new();
-        let (_, src_addr) = ctx.socket.recv_from(&mut buffer.buf).await?;
+        let (_, src_addr) = match ctx.socket.recv_from(&mut buffer.buf).await {
+            Ok(r) => r,
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {
+                // Windows delivers ICMP port-unreachable as ConnectionReset on UDP sockets
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        };
 
         let ctx = Arc::clone(&ctx);
         tokio::spawn(async move {
