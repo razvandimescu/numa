@@ -39,3 +39,8 @@ jobs:
         run: cargo clippy -- -D warnings
       - name: test
         run: cargo test
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: numa-windows-x86_64
+          path: target/debug/numa.exe
