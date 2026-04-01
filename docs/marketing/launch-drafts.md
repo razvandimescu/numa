@@ -614,5 +614,7 @@ auto-revert. Different audiences: Technitium targets server admins, Numa
 targets developers on laptops.
 
 **"Does it support Windows?"**
-macOS and Linux are the primary targets. Windows has scaffolding in the code
-but is not tested. If there's demand, it's on the list.
+Yes. `numa install` in an admin terminal sets system DNS and auto-starts
+numa on boot. Requires a reboot (Windows DNS Client holds port 53 at kernel
+level). `numa uninstall` restores everything. Native Windows Service
+integration is next.

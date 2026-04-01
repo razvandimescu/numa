@@ -15,16 +15,32 @@ Built from scratch in Rust. Zero DNS libraries. RFC 1035 wire protocol parsed by
 ## Quick Start
 
 ```bash
+# macOS
 brew install razvandimescu/tap/numa
-# or: cargo install numa
-# or: curl -fsSL https://raw.githubusercontent.com/razvandimescu/numa/main/install.sh | sh
 
-sudo numa                              # port 53 requires root
+# Linux
+curl -fsSL https://raw.githubusercontent.com/razvandimescu/numa/main/install.sh | sh
+
+# Windows — download from GitHub Releases
+# All platforms
+cargo install numa
+```
+
+```bash
+sudo numa                              # run in foreground (port 53 requires root/admin)
 ```
 
 Open the dashboard: **http://numa.numa** (or `http://localhost:5380`)
 
-Set as system DNS: `sudo numa install`
+Set as system DNS:
+
+| Platform | Install | Uninstall |
+|----------|---------|-----------|
+| macOS | `sudo numa install` | `sudo numa uninstall` |
+| Linux | `sudo numa install` | `sudo numa uninstall` |
+| Windows | `numa install` (admin) + reboot | `numa uninstall` (admin) + reboot |
+
+On macOS and Linux, numa runs as a system service (launchd/systemd). On Windows, numa auto-starts on login via registry.
 
 ## Local Services
 
@@ -80,7 +96,7 @@ From Machine B: `curl http://api.numa` → proxied to Machine A's port 8000. Ena
 | Ad blocking | Yes | Yes | — | 385K+ domains |
 | Web admin UI | Full | Full | — | Dashboard |
 | Encrypted upstream (DoH) | Needs cloudflared | Yes | — | Native |
-| Portable (laptop) | No (appliance) | No (appliance) | Server | Single binary |
+| Portable (laptop) | No (appliance) | No (appliance) | Server | Single binary, macOS/Linux/Windows |
 | Community maturity | 56K stars, 10 years | 33K stars | 20 years | New |
 
 ## Performance
