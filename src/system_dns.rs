@@ -666,7 +666,10 @@ fn install_service_macos() -> Result<(), String> {
     eprintln!("  Service installed and started.");
     eprintln!("  Numa will auto-start on boot and restart if killed.");
     eprintln!("  Logs: /usr/local/var/log/numa.log");
-    eprintln!("  Run 'sudo numa service stop' to fully uninstall.\n");
+    eprintln!("  Run 'sudo numa uninstall' to restore original DNS.\n");
+    eprintln!("  Want full DNS sovereignty? Add to numa.toml:");
+    eprintln!("    [upstream]");
+    eprintln!("    mode = \"recursive\"\n");
     Ok(())
 }
 
@@ -856,7 +859,10 @@ fn install_service_linux() -> Result<(), String> {
     eprintln!("  Service installed and started.");
     eprintln!("  Numa will auto-start on boot and restart if killed.");
     eprintln!("  Logs: journalctl -u numa -f");
-    eprintln!("  Run 'sudo numa service stop' to fully uninstall.\n");
+    eprintln!("  Run 'sudo numa uninstall' to restore original DNS.\n");
+    eprintln!("  Want full DNS sovereignty? Add to numa.toml:");
+    eprintln!("    [upstream]");
+    eprintln!("    mode = \"recursive\"\n");
     Ok(())
 }
 

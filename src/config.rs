@@ -68,8 +68,8 @@ fn default_api_port() -> u16 {
 #[derive(Deserialize, Default, PartialEq, Eq, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub enum UpstreamMode {
-    #[default]
     Auto,
+    #[default]
     Forward,
     Recursive,
 }
@@ -362,21 +362,12 @@ fn default_lan_peer_timeout() -> u64 {
     90
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Clone, Default)]
 pub struct DnssecConfig {
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
     pub strict: bool,
-}
-
-impl Default for DnssecConfig {
-    fn default() -> Self {
-        DnssecConfig {
-            enabled: true,
-            strict: false,
-        }
-    }
 }
 
 #[cfg(test)]

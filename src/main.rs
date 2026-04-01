@@ -108,59 +108,78 @@ async fn main() -> numa::Result<()> {
 
     let root_hints = numa::recursive::parse_root_hints(&config.upstream.root_hints);
 
-    let resolved_mode;
-    let upstream_auto;
-    let (upstream, upstream_label) = if config.upstream.mode == numa::config::UpstreamMode::Auto {
-        info!("auto mode: probing recursive resolution...");
-        if numa::recursive::probe_recursive(&root_hints).await {
-            info!("recursive probe succeeded — self-sovereign mode");
-            resolved_mode = numa::config::UpstreamMode::Recursive;
-            upstream_auto = false;
-            let dummy_upstream = Upstream::Udp("0.0.0.0:0".parse().unwrap());
-            (dummy_upstream, "recursive (root hints)".to_string())
-        } else {
-            log::warn!("recursive probe failed — falling back to Quad9 DoH");
-            resolved_mode = numa::config::UpstreamMode::Forward;
-            upstream_auto = false;
-            let client = reqwest::Client::builder()
-                .use_rustls_tls()
-                .build()
-                .unwrap_or_default();
-            let url = "https://dns.quad9.net/dns-query".to_string();
-            let label = url.clone();
-            (Upstream::Doh { url, client }, label)
-        }
-    } else {
-        resolved_mode = config.upstream.mode;
-        upstream_auto = config.upstream.address.is_empty();
-
-        let upstream_addr = if config.upstream.address.is_empty() {
-            system_dns
-                .default_upstream
-                .or_else(numa::system_dns::detect_dhcp_dns)
-                .unwrap_or_else(|| {
-                    info!("could not detect system DNS, falling back to Quad9 DoH");
-                    "https://dns.quad9.net/dns-query".to_string()
-                })
-        } else {
-            config.upstream.address.clone()
-        };
-
-        let upstream: Upstream = if upstream_addr.starts_with("https://") {
-            let client = reqwest::Client::builder()
-                .use_rustls_tls()
-                .build()
-                .unwrap_or_default();
-            Upstream::Doh {
-                url: upstream_addr,
-                client,
+    let (resolved_mode, upstream_auto, upstream, upstream_label) = match config.upstream.mode {
+        numa::config::UpstreamMode::Auto => {
+            info!("auto mode: probing recursive resolution...");
+            if numa::recursive::probe_recursive(&root_hints).await {
+                info!("recursive probe succeeded — self-sovereign mode");
+                let dummy = Upstream::Udp("0.0.0.0:0".parse().unwrap());
+                (
+                    numa::config::UpstreamMode::Recursive,
+                    false,
+                    dummy,
+                    "recursive (root hints)".to_string(),
+                )
+            } else {
+                log::warn!("recursive probe failed — falling back to Quad9 DoH");
+                let client = reqwest::Client::builder()
+                    .use_rustls_tls()
+                    .build()
+                    .unwrap_or_default();
+                let url = "https://dns.quad9.net/dns-query".to_string();
+                let label = url.clone();
+                (
+                    numa::config::UpstreamMode::Forward,
+                    false,
+                    Upstream::Doh { url, client },
+                    label,
+                )
             }
-        } else {
-            let addr: SocketAddr = format!("{}:{}", upstream_addr, config.upstream.port).parse()?;
-            Upstream::Udp(addr)
-        };
-        let label = upstream.to_string();
-        (upstream, label)
+        }
+        numa::config::UpstreamMode::Recursive => {
+            let dummy = Upstream::Udp("0.0.0.0:0".parse().unwrap());
+            (
+                numa::config::UpstreamMode::Recursive,
+                false,
+                dummy,
+                "recursive (root hints)".to_string(),
+            )
+        }
+        numa::config::UpstreamMode::Forward => {
+            let upstream_addr = if config.upstream.address.is_empty() {
+                system_dns
+                    .default_upstream
+                    .or_else(numa::system_dns::detect_dhcp_dns)
+                    .unwrap_or_else(|| {
+                        info!("could not detect system DNS, falling back to Quad9 DoH");
+                        "https://dns.quad9.net/dns-query".to_string()
+                    })
+            } else {
+                config.upstream.address.clone()
+            };
+
+            let upstream: Upstream = if upstream_addr.starts_with("https://") {
+                let client = reqwest::Client::builder()
+                    .use_rustls_tls()
+                    .build()
+                    .unwrap_or_default();
+                Upstream::Doh {
+                    url: upstream_addr,
+                    client,
+                }
+            } else {
+                let addr: SocketAddr =
+                    format!("{}:{}", upstream_addr, config.upstream.port).parse()?;
+                Upstream::Udp(addr)
+            };
+            let label = upstream.to_string();
+            (
+                numa::config::UpstreamMode::Forward,
+                config.upstream.address.is_empty(),
+                upstream,
+                label,
+            )
+        }
     };
     let api_port = config.server.api_port;
 
