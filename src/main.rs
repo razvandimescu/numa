@@ -15,6 +15,7 @@ use numa::forward::Upstream;
 use numa::override_store::OverrideStore;
 use numa::query_log::QueryLog;
 
+const QUAD9_IP: &str = "9.9.9.9";
 const DOH_FALLBACK: &str = "https://9.9.9.9/dns-query";
 use numa::service_store::ServiceStore;
 use numa::stats::ServerStats;
@@ -523,7 +524,7 @@ async fn network_watch_loop(ctx: Arc<numa::ctx::ServerCtx>) {
             let new_addr = dns_info
                 .default_upstream
                 .or_else(numa::system_dns::detect_dhcp_dns)
-                .unwrap_or_else(|| "9.9.9.9".to_string());
+                .unwrap_or_else(|| QUAD9_IP.to_string());
             if let Ok(new_sock) =
                 format!("{}:{}", new_addr, ctx.upstream_port).parse::<SocketAddr>()
             {
