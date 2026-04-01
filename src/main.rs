@@ -126,7 +126,7 @@ async fn main() -> numa::Result<()> {
                     .use_rustls_tls()
                     .build()
                     .unwrap_or_default();
-                let url = "https://dns.quad9.net/dns-query".to_string();
+                let url = "https://9.9.9.9/dns-query".to_string();
                 let label = url.clone();
                 (
                     numa::config::UpstreamMode::Forward,
@@ -152,7 +152,7 @@ async fn main() -> numa::Result<()> {
                     .or_else(numa::system_dns::detect_dhcp_dns)
                     .unwrap_or_else(|| {
                         info!("could not detect system DNS, falling back to Quad9 DoH");
-                        "https://dns.quad9.net/dns-query".to_string()
+                        "https://9.9.9.9/dns-query".to_string()
                     })
             } else {
                 config.upstream.address.clone()
