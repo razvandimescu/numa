@@ -153,7 +153,7 @@ fn discover_macos() -> SystemDnsInfo {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn make_rule(domain: &str, nameserver: &str) -> Option<ForwardingRule> {
     let addr: SocketAddr = format!("{}:53", nameserver).parse().ok()?;
     Some(ForwardingRule {
