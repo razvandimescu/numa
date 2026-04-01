@@ -473,6 +473,60 @@ fn windows_backup_path() -> std::path::PathBuf {
 }
 
 #[cfg(windows)]
+fn disable_dnscache() -> Result<bool, String> {
+    // Check if Dnscache is running (it holds port 53 at kernel level)
+    let output = std::process::Command::new("sc")
+        .args(["query", "Dnscache"])
+        .output()
+        .map_err(|e| format!("failed to query Dnscache: {}", e))?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    if !text.contains("RUNNING") {
+        return Ok(false);
+    }
+
+    eprintln!("  Disabling DNS Client (Dnscache) to free port 53...");
+    // Dnscache can't be stopped via sc/net stop — must disable via registry
+    let status = std::process::Command::new("reg")
+        .args([
+            "add",
+            "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Dnscache",
+            "/v",
+            "Start",
+            "/t",
+            "REG_DWORD",
+            "/d",
+            "4",
+            "/f",
+        ])
+        .status()
+        .map_err(|e| format!("failed to disable Dnscache: {}", e))?;
+
+    if !status.success() {
+        return Err("failed to disable Dnscache via registry (run as Administrator?)".into());
+    }
+
+    eprintln!("  Dnscache disabled. A reboot is required to free port 53.");
+    Ok(true)
+}
+
+#[cfg(windows)]
+fn enable_dnscache() {
+    let _ = std::process::Command::new("reg")
+        .args([
+            "add",
+            "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Dnscache",
+            "/v",
+            "Start",
+            "/t",
+            "REG_DWORD",
+            "/d",
+            "2",
+            "/f",
+        ])
+        .status();
+}
+
+#[cfg(windows)]
 fn install_windows() -> Result<(), String> {
     let interfaces = get_windows_interfaces()?;
     if interfaces.is_empty() {
@@ -513,9 +567,15 @@ fn install_windows() -> Result<(), String> {
         }
     }
 
+    let needs_reboot = disable_dnscache()?;
+
     eprintln!("\n  Original DNS saved to {}", path.display());
-    eprintln!("  Run 'numa uninstall' to restore.");
-    eprintln!("  Note: run Numa manually with 'numa' in a terminal.\n");
+    eprintln!("  Run 'numa uninstall' to restore.\n");
+    if needs_reboot {
+        eprintln!("  *** Reboot required, then run 'numa' in an Administrator terminal. ***\n");
+    } else {
+        eprintln!("  Run 'numa' in an Administrator terminal to start.\n");
+    }
     eprintln!("  Want full DNS sovereignty? Add to numa.toml:");
     eprintln!("    [upstream]");
     eprintln!("    mode = \"recursive\"\n");
@@ -585,7 +645,11 @@ fn uninstall_windows() -> Result<(), String> {
     }
 
     std::fs::remove_file(&path).ok();
-    eprintln!("\n  System DNS restored. Backup removed.\n");
+
+    // Re-enable Dnscache
+    enable_dnscache();
+    eprintln!("\n  System DNS restored. DNS Client re-enabled.");
+    eprintln!("  Reboot to fully restore the DNS Client service.\n");
     Ok(())
 }
 
