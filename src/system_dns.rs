@@ -463,7 +463,13 @@ fn get_windows_interfaces() -> Result<std::collections::HashMap<String, WindowsI
 
 #[cfg(windows)]
 fn windows_backup_path() -> std::path::PathBuf {
-    crate::config_dir().join("original-dns.json")
+    // Use ProgramData (not APPDATA) since install requires admin elevation
+    // and APPDATA differs between user and admin contexts.
+    std::path::PathBuf::from(
+        std::env::var("PROGRAMDATA").unwrap_or_else(|_| "C:\\ProgramData".into()),
+    )
+    .join("numa")
+    .join("original-dns.json")
 }
 
 #[cfg(windows)]
