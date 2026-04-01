@@ -568,13 +568,14 @@ fn install_windows() -> Result<(), String> {
     }
 
     let needs_reboot = disable_dnscache()?;
+    register_autostart();
 
     eprintln!("\n  Original DNS saved to {}", path.display());
     eprintln!("  Run 'numa uninstall' to restore.\n");
     if needs_reboot {
-        eprintln!("  *** Reboot required, then run 'numa' in an Administrator terminal. ***\n");
+        eprintln!("  *** Reboot required. Numa will start automatically. ***\n");
     } else {
-        eprintln!("  Run 'numa' in an Administrator terminal to start.\n");
+        eprintln!("  Numa will start automatically on next boot.\n");
     }
     eprintln!("  Want full DNS sovereignty? Add to numa.toml:");
     eprintln!("    [upstream]");
@@ -582,8 +583,45 @@ fn install_windows() -> Result<(), String> {
     Ok(())
 }
 
+/// Register numa to auto-start on boot via registry Run key.
+#[cfg(windows)]
+fn register_autostart() {
+    let exe = std::env::current_exe()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "numa".into());
+    let _ = std::process::Command::new("reg")
+        .args([
+            "add",
+            "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run",
+            "/v",
+            "Numa",
+            "/t",
+            "REG_SZ",
+            "/d",
+            &exe,
+            "/f",
+        ])
+        .status();
+    eprintln!("  Registered auto-start on boot.");
+}
+
+/// Remove numa auto-start registry key.
+#[cfg(windows)]
+fn remove_autostart() {
+    let _ = std::process::Command::new("reg")
+        .args([
+            "delete",
+            "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run",
+            "/v",
+            "Numa",
+            "/f",
+        ])
+        .status();
+}
+
 #[cfg(windows)]
 fn uninstall_windows() -> Result<(), String> {
+    remove_autostart();
     let path = windows_backup_path();
     let json = std::fs::read_to_string(&path)
         .map_err(|e| format!("no backup found at {}: {}", path.display(), e))?;
