@@ -164,110 +164,99 @@ fn make_rule(domain: &str, nameserver: &str) -> Option<ForwardingRule> {
 }
 
 #[cfg(target_os = "linux")]
-fn discover_linux() -> SystemDnsInfo {
-    let upstream = detect_upstream_linux_or_backup();
+const CLOUD_VPC_RESOLVER: &str = "169.254.169.253";
 
-    // Parse search domains and create forwarding rules to the original nameserver.
-    // On cloud VMs (AWS/GCP), internal domains need to reach the VPC resolver.
-    let forwarding_rules = detect_search_domain_rules();
-    if !forwarding_rules.is_empty() {
-        info!(
-            "detected {} search domain forwarding rules",
-            forwarding_rules.len()
-        );
-    }
+#[cfg(target_os = "linux")]
+fn discover_linux() -> SystemDnsInfo {
+    // Parse resolv.conf once for both upstream and search domains
+    let (upstream, search_domains) = parse_resolv_conf("/etc/resolv.conf");
+
+    let default_upstream = if let Some(ns) = upstream {
+        info!("detected system upstream: {}", ns);
+        Some(ns)
+    } else {
+        // Fallback to backup from a previous `numa install`
+        let backup = {
+            let home = std::env::var("HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| std::path::PathBuf::from("/root"));
+            home.join(".numa").join("original-resolv.conf")
+        };
+        let (ns, _) = parse_resolv_conf(backup.to_str().unwrap_or(""));
+        if let Some(ref ns) = ns {
+            info!("detected original upstream from backup: {}", ns);
+        }
+        ns
+    };
+
+    // On cloud VMs (AWS/GCP), internal domains need to reach the VPC resolver
+    let forwarding_rules = if search_domains.is_empty() {
+        Vec::new()
+    } else {
+        let forwarder = resolvectl_dns_server().unwrap_or_else(|| CLOUD_VPC_RESOLVER.to_string());
+        let rules: Vec<_> = search_domains
+            .iter()
+            .filter_map(|domain| {
+                let rule = make_rule(domain, &forwarder)?;
+                info!("forwarding .{} to {}", domain, forwarder);
+                Some(rule)
+            })
+            .collect();
+        if !rules.is_empty() {
+            info!("detected {} search domain forwarding rules", rules.len());
+        }
+        rules
+    };
 
     SystemDnsInfo {
-        default_upstream: upstream,
+        default_upstream,
         forwarding_rules,
     }
 }
 
-/// Parse search domains from resolv.conf and create forwarding rules to the
-/// original nameserver or the AWS VPC resolver (169.254.169.253).
+/// Parse resolv.conf in a single pass, extracting both the first non-loopback
+/// nameserver and all search domains.
 #[cfg(target_os = "linux")]
-fn detect_search_domain_rules() -> Vec<ForwardingRule> {
-    let mut rules = Vec::new();
-
-    // Find the original nameserver to forward internal domains to
-    let forwarder = find_original_nameserver().unwrap_or_else(|| "169.254.169.253".to_string());
-
-    // Parse search domains from resolv.conf
-    for path in &["/etc/resolv.conf"] {
-        if let Ok(text) = std::fs::read_to_string(path) {
-            for line in text.lines() {
-                let line = line.trim();
-                if line.starts_with("search") || line.starts_with("domain") {
-                    for domain in line.split_whitespace().skip(1) {
-                        if let Some(rule) = make_rule(domain, &forwarder) {
-                            info!("forwarding .{} to {}", domain, forwarder);
-                            rules.push(rule);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    rules
-}
-
-/// Find the original (non-loopback) nameserver from resolv.conf or systemd-resolved config.
-#[cfg(target_os = "linux")]
-fn find_original_nameserver() -> Option<String> {
-    // Try resolv.conf for a real nameserver
-    if let Some(ns) = read_upstream_from_file("/etc/resolv.conf") {
-        return Some(ns);
-    }
-    // Try systemd-resolved's actual upstream
-    if let Ok(output) = std::process::Command::new("resolvectl")
-        .args(["status", "--no-pager"])
-        .output()
-    {
-        let text = String::from_utf8_lossy(&output.stdout);
-        for line in text.lines() {
-            if line.contains("DNS Servers") || line.contains("Current DNS Server") {
-                if let Some(ip) = line.split(':').next_back() {
-                    let ip = ip.trim();
-                    if !is_loopback_or_stub(ip) && !ip.is_empty() {
-                        return Some(ip.to_string());
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
-#[cfg(target_os = "linux")]
-fn detect_upstream_linux_or_backup() -> Option<String> {
-    // Try /etc/resolv.conf first
-    if let Some(ns) = read_upstream_from_file("/etc/resolv.conf") {
-        info!("detected system upstream: {}", ns);
-        return Some(ns);
-    }
-    // If resolv.conf only has loopback, check the backup from `numa install`
-    let backup = {
-        let home = std::env::var("HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| std::path::PathBuf::from("/root"));
-        home.join(".numa").join("original-resolv.conf")
+fn parse_resolv_conf(path: &str) -> (Option<String>, Vec<String>) {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(_) => return (None, Vec::new()),
     };
-    if let Some(ns) = read_upstream_from_file(backup.to_str().unwrap_or("")) {
-        info!("detected original upstream from backup: {}", ns);
-        return Some(ns);
-    }
-    None
-}
-
-#[cfg(target_os = "linux")]
-fn read_upstream_from_file(path: &str) -> Option<String> {
-    let text = std::fs::read_to_string(path).ok()?;
+    let mut upstream = None;
+    let mut search_domains = Vec::new();
     for line in text.lines() {
         let line = line.trim();
         if line.starts_with("nameserver") {
-            if let Some(ns) = line.split_whitespace().nth(1) {
-                if !is_loopback_or_stub(ns) {
-                    return Some(ns.to_string());
+            if upstream.is_none() {
+                if let Some(ns) = line.split_whitespace().nth(1) {
+                    if !is_loopback_or_stub(ns) {
+                        upstream = Some(ns.to_string());
+                    }
+                }
+            }
+        } else if line.starts_with("search") || line.starts_with("domain") {
+            for domain in line.split_whitespace().skip(1) {
+                search_domains.push(domain.to_string());
+            }
+        }
+    }
+    (upstream, search_domains)
+}
+
+/// Query resolvectl for the real upstream DNS server (e.g. VPC resolver on AWS).
+#[cfg(target_os = "linux")]
+fn resolvectl_dns_server() -> Option<String> {
+    let output = std::process::Command::new("resolvectl")
+        .args(["status", "--no-pager"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    for line in text.lines() {
+        if line.contains("DNS Servers") || line.contains("Current DNS Server") {
+            if let Some(ip) = line.split(':').next_back() {
+                let ip = ip.trim();
+                if !is_loopback_or_stub(ip) {
+                    return Some(ip.to_string());
                 }
             }
         }

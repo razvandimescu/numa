@@ -108,7 +108,6 @@ async fn main() -> numa::Result<()> {
 
     let root_hints = numa::recursive::parse_root_hints(&config.upstream.root_hints);
 
-    // Resolve upstream mode + address in one block
     let resolved_mode;
     let upstream_auto;
     let (upstream, upstream_label) = if config.upstream.mode == numa::config::UpstreamMode::Auto {

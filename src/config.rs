@@ -119,7 +119,7 @@ fn default_true() -> bool {
 }
 
 fn default_srtt() -> bool {
-    true
+    default_true()
 }
 
 fn default_prime_tlds() -> Vec<String> {
