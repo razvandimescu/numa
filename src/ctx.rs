@@ -162,6 +162,29 @@ pub async fn handle_query(
                     resp.header.authed_data = true;
                 }
                 (resp, QueryPath::Cached, cached_dnssec)
+            } else if let Some(fwd_addr) =
+                crate::system_dns::match_forwarding_rule(&qname, &ctx.forwarding_rules)
+            {
+                // Conditional forwarding takes priority over recursive mode
+                // (e.g. Tailscale .ts.net, VPC private zones)
+                let upstream = Upstream::Udp(fwd_addr);
+                match forward_query(&query, &upstream, ctx.timeout).await {
+                    Ok(resp) => {
+                        ctx.cache.write().unwrap().insert(&qname, qtype, &resp);
+                        (resp, QueryPath::Forwarded, DnssecStatus::Indeterminate)
+                    }
+                    Err(e) => {
+                        error!(
+                            "{} | {:?} {} | FORWARD ERROR | {}",
+                            src_addr, qtype, qname, e
+                        );
+                        (
+                            DnsPacket::response_from(&query, ResultCode::SERVFAIL),
+                            QueryPath::UpstreamError,
+                            DnssecStatus::Indeterminate,
+                        )
+                    }
+                }
             } else if ctx.upstream_mode == UpstreamMode::Recursive {
                 let key = (qname.clone(), qtype);
                 let (resp, path, err) = resolve_coalesced(&ctx.inflight, key, &query, || {
