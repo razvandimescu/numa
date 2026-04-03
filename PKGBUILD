@@ -24,6 +24,8 @@ pkgver() {
 
 prepare() {
   cd "$srcdir/$_pkgname"
+  # Patch hardcoded paths to match Arch Linux standard (/usr/bin)
+  sed -i 's|/usr/local/bin/numa|/usr/bin/numa|g' src/system_dns.rs
   export RUSTUP_TOOLCHAIN=stable
   cargo fetch --locked
 }
