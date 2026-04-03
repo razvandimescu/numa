@@ -46,7 +46,9 @@ pub async fn start_proxy(ctx: Arc<ServerCtx>, port: u16, bind_addr: Ipv4Addr) {
 
     let app = Router::new().fallback(any(proxy_handler)).with_state(state);
 
-    axum::serve(listener, app).await.unwrap();
+    if let Err(e) = axum::serve(listener, app).await {
+        error!("HTTP proxy server error: {}", e);
+    }
 }
 
 pub async fn start_proxy_tls(ctx: Arc<ServerCtx>, port: u16, bind_addr: Ipv4Addr) {
@@ -88,9 +90,21 @@ pub async fn start_proxy_tls(ctx: Arc<ServerCtx>, port: u16, bind_addr: Ipv4Addr
         };
 
         // Load the latest TLS config on each connection (picks up new service certs)
-        // unwrap safe: guarded by is_none() check above
-        let acceptor =
-            TlsAcceptor::from(Arc::clone(&*tls_holder.tls_config.as_ref().unwrap().load()));
+        // Get the config safely - skip this connection if config is not available
+        let tls_config = match tls_holder.tls_config.as_ref() {
+            Some(tls_lock) => match tls_lock.get() {
+                Some(config) => Arc::clone(config),
+                None => {
+                    debug!("TLS config not initialized, skipping connection");
+                    continue;
+                }
+            },
+            None => {
+                debug!("TLS config disabled, skipping connection");
+                continue;
+            }
+        };
+        let acceptor = TlsAcceptor::from(tls_config);
         let app = app.clone();
 
         tokio::spawn(async move {
@@ -239,7 +253,7 @@ fn extract_host(req: &Request) -> Option<String> {
         .map(|h| h.split(':').next().unwrap_or(h).to_lowercase())
 }
 
-async fn proxy_handler(State(state): State<ProxyState>, req: Request) -> axum::response::Response {
+    async fn proxy_handler(State(state): State<ProxyState>, req: Request) -> axum::response::Response {
     let hostname = match extract_host(&req) {
         Some(h) => h,
         None => {
@@ -251,7 +265,8 @@ async fn proxy_handler(State(state): State<ProxyState>, req: Request) -> axum::r
         Some(name) => name.to_string(),
         None => {
             // Check if this domain was blocked — show a helpful styled page
-            if state.ctx.blocklist.read().unwrap().is_blocked(&hostname) {
+            let blocklist = state.ctx.blocklist.read().expect("blocklist lock poisoned");
+            if blocklist.is_blocked(&hostname) {
                 let body = format!(
                     r#"  <div class="hero-text">&#x1f6e1;</div>
   <div class="label">Blocked by Numa</div>
@@ -279,12 +294,12 @@ async fn proxy_handler(State(state): State<ProxyState>, req: Request) -> axum::r
     let request_path = req.uri().path().to_string();
 
     let (target_host, target_port, rewritten_path) = {
-        let store = state.ctx.services.lock().unwrap();
+        let store = state.ctx.services.lock().expect("services lock poisoned");
         if let Some(entry) = store.lookup(&service_name) {
             let (port, path) = entry.resolve_route(&request_path);
             ("localhost".to_string(), port, path)
         } else {
-            let mut peers = state.ctx.lan_peers.lock().unwrap();
+            let mut peers = state.ctx.lan_peers.lock().expect("lan_peers lock poisoned");
             match peers.lookup(&service_name) {
                 Some((ip, port)) => (ip.to_string(), port, request_path.clone()),
                 None => {
@@ -317,12 +332,21 @@ async fn proxy_handler(State(state): State<ProxyState>, req: Request) -> axum::r
         .query()
         .map(|q| format!("?{}", q))
         .unwrap_or_default();
-    let target_uri: hyper::Uri = format!(
+    let target_uri: hyper::Uri = match format!(
         "http://{}:{}{}{}",
         target_host, target_port, rewritten_path, query_string
     )
     .parse()
-    .unwrap();
+    {
+        Ok(uri) => uri,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("invalid target URI: {}", e),
+            )
+                .into_response();
+        }
+    };
 
     // Check for upgrade request (WebSocket, etc.)
     let is_upgrade = req.headers().get(hyper::header::UPGRADE).is_some();
@@ -400,5 +424,8 @@ async fn handle_upgrade(
     for (key, value) in &resp_headers {
         resp = resp.header(key, value);
     }
-    resp.body(Body::empty()).unwrap()
+    match resp.body(Body::empty()) {
+        Ok(r) => r,
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("response build failed: {}", e)).into_response(),
+    }
 }
