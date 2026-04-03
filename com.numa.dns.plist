@@ -6,7 +6,7 @@
     <string>com.numa.dns</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/local/bin/numa</string>
+        <string>{{exe_path}}</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
