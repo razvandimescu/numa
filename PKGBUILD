@@ -15,34 +15,37 @@ source=("$_pkgname::git+$url.git")
 sha256sums=('SKIP')
 
 pkgver() {
-  cd "$_pkgname"
-  git describe --long --tags | sed 's/\([^-]*-g\)/r\1/;s/-/./g' | sed 's/^v//'
+  cd "$srcdir/$_pkgname"
+  ( set -o pipefail
+    git describe --long --tags 2>/dev/null | sed 's/\([^-]*-g\)/r\1/;s/-/./g' ||
+    printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+  ) | sed 's/^v//'
 }
 
 prepare() {
-  cd "$_pkgname"
+  cd "$srcdir/$_pkgname"
   export RUSTUP_TOOLCHAIN=stable
   cargo fetch --locked
 }
 
 build() {
-  cd "$_pkgname"
+  cd "$srcdir/$_pkgname"
   export RUSTUP_TOOLCHAIN=stable
   cargo build --frozen --release
 }
 
 check() {
-  cd "$_pkgname"
+  cd "$srcdir/$_pkgname"
   export RUSTUP_TOOLCHAIN=stable
   cargo test --frozen
 }
 
 package() {
-  cd "$_pkgname"
+  cd "$srcdir/$_pkgname"
   install -Dm755 "target/release/$_pkgname" "$pkgdir/usr/bin/$_pkgname"
   
   # Install service file with patched path
-  sed 's|/usr/local/bin/numa|/usr/bin/numa|g' numa.service > numa.service.patched
+  sed 's|ExecStart=/usr/local/bin/numa|ExecStart=/usr/bin/numa /etc/numa.toml|g' numa.service > numa.service.patched
   install -Dm644 "numa.service.patched" "$pkgdir/usr/lib/systemd/system/numa.service"
   
   install -Dm644 "numa.toml" "$pkgdir/etc/numa.toml"

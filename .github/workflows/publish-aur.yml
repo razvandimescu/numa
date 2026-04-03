@@ -128,13 +128,15 @@ jobs:
 
           # METADATA GENERATION:
           # '.SRCINFO' is a machine-readable version of the PKGBUILD.
-          # The AUR website uses this file to display package details like dependencies and version.
-          # We generate it inside an Arch container to ensure 'makepkg' is available.
+          # We must run this as a non-root user ('builduser') inside the container.
           docker run --rm -v $(pwd):/pkg archlinux:latest /bin/bash -c "
-            pacman -Syu --noconfirm --needed binutils git
+            pacman -Syu --noconfirm --needed binutils git sudo
+            useradd -m builduser
+            chown -R builduser:builduser /pkg
             cd /pkg
-            git config --global --add safe.directory '*'
-            makepkg --printsrcinfo > .SRCINFO
+            sudo -u builduser git config --global --add safe.directory '*'
+            # "makepkg -od" fetches the source first so pkgver() can calculate the version.
+            sudo -u builduser makepkg -od && sudo -u builduser makepkg --printsrcinfo > .SRCINFO
           "
 
           # Set the commit identity using secrets for security and auditability.
