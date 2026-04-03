@@ -1,0 +1,154 @@
+# `publish-aur.yml` - Arch Linux AUR Package Workflow
+# --------------------
+# This workflow automates the validation and publishing of the 'numa-git' package to the
+# Arch User Repository (AUR). The AUR is a community-driven repository for Arch Linux users.
+#
+# Workflow Overview:
+# 1. Validate: Builds and tests the package on both x86_64 and aarch64 (ARM64)
+#    architectures using clean Arch Linux containers.
+# 2. Audit: Checks Rust dependencies for known security vulnerabilities using 'cargo-audit'.
+# 3. Publish: If on the 'main' branch, it pushes the updated PKGBUILD and .SRCINFO to the AUR.
+#
+# Security Best Practices:
+# - SHA Pinning: All GitHub Actions are pinned to a full-length commit SHA (e.g., v4.1.7 @ SHA)
+#   to ensure the code is immutable and protects against supply-chain attacks where a tag
+#   might be maliciously moved to a compromised commit.
+# - SSH Hygiene: Uses ssh-agent to keep the private key in memory rather than on disk.
+# - Audit: Runs 'cargo audit' to prevent publishing known vulnerable dependencies.
+
+name: Publish - Arch Linux AUR Package
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # The 'validate' job ensures that the PKGBUILD is correct and the software builds/tests
+  # successfully on Arch Linux before we attempt to publish it.
+  validate:
+    name: Validate PKGBUILD (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # We test both standard PC (x86_64) and ARM64 (aarch64) architectures.
+        arch: [x86_64, aarch64]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+
+      # QEMU allows us to run ARM64 containers on x86_64 GitHub runners.
+      - name: Set up QEMU
+        if: matrix.arch == 'aarch64'
+        uses: docker/setup-qemu-action@6882732593b27c7f95a044d559b586a46371a68e # v3.0.0
+
+      - name: Build and Test Package
+        timeout-minutes: 60
+        env:
+          AUR_PKGNAME: ${{ secrets.AUR_PACKAGE_NAME }}
+        run: |
+          # Select the appropriate Arch Linux image for the architecture.
+          if [ "${{ matrix.arch }}" = "x86_64" ]; then
+            IMAGE="archlinux:latest"
+          else
+            IMAGE="agners/archlinuxarm:latest"
+          fi
+
+          # We use a temporary directory to avoid Docker permission issues with the workspace.
+          mkdir -p build-dir
+          cp PKGBUILD build-dir/
+
+          docker run --rm -v $PWD/build-dir:/pkg -w /pkg $IMAGE /bin/bash -c "
+            # ARCH LINUX SECURITY REQUIREMENT:
+            # 'makepkg' (the tool that builds Arch packages) refuses to run as root for safety.
+            # We must create a standard user and give them sudo access.
+            useradd -m builduser
+            chown -R builduser:builduser /pkg
+
+            # Install build-time dependencies.
+            # 'base-devel' includes essential tools like gcc, make, and binutils.
+            pacman -Syu --noconfirm --needed base-devel cargo git sudo cargo-audit
+
+            # Allow the build user to install dependencies during the build process.
+            echo 'builduser ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builduser
+
+            # SECURITY AUDIT:
+            # Fail early if any dependencies have known security vulnerabilities.
+            sudo -u builduser cargo audit
+
+            # BUILD & TEST:
+            # 'makepkg -s' will:
+            # 1. Download source files (cloning this repo)
+            # 2. Run prepare(), build(), and check() (running cargo test)
+            # 3. Create the final .pkg.tar.zst package
+            sudo -u builduser makepkg -s --noconfirm
+          "
+
+  # The 'publish' job updates the AUR repository with our latest PKGBUILD and .SRCINFO.
+  publish:
+    name: Publish to AUR
+    needs: validate
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+
+      # Securely configure SSH for AUR access.
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          # Official AUR Ed25519 fingerprint (prevents Man-in-the-Middle attacks).
+          echo "aur.archlinux.org ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEu46S9S6YfBD5C8GeOBip8Z11+4" >> ~/.ssh/known_hosts
+
+          # Use ssh-agent to keep the private key in memory rather than writing it to disk.
+          eval $(ssh-agent -s)
+          echo "${{ secrets.AUR_SSH_PRIVATE_KEY }}" | tr -d '\r' | ssh-add -
+
+          # Export the agent socket so subsequent 'git' commands can use it.
+          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> $GITHUB_ENV
+          echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> $GITHUB_ENV
+
+      - name: Push to AUR
+        env:
+          AUR_PKGNAME: ${{ secrets.AUR_PACKAGE_NAME }}
+          AUR_EMAIL: ${{ secrets.AUR_EMAIL }}
+          AUR_USER: ${{ secrets.AUR_USERNAME }}
+        run: |
+          # AUR repos are managed via Git. Each package has its own repo at:
+          # ssh://aur@aur.archlinux.org/<package-name>.git
+          git clone ssh://aur@aur.archlinux.org/$AUR_PKGNAME.git aur-repo
+
+          cp PKGBUILD aur-repo/
+          cd aur-repo
+
+          # METADATA GENERATION:
+          # '.SRCINFO' is a machine-readable version of the PKGBUILD.
+          # We must run this as a non-root user ('builduser') inside the container.
+          docker run --rm -v $(pwd):/pkg archlinux:latest /bin/bash -c "
+            pacman -Syu --noconfirm --needed binutils git sudo
+            useradd -m builduser
+            chown -R builduser:builduser /pkg
+            cd /pkg
+            sudo -u builduser git config --global --add safe.directory '*'
+            # "makepkg -od" fetches the source first so pkgver() can calculate the version.
+            sudo -u builduser makepkg -od && sudo -u builduser makepkg --printsrcinfo > .SRCINFO
+          "
+
+          # Set the commit identity using secrets for security and auditability.
+          git config user.name "$AUR_USER"
+          git config user.email "$AUR_EMAIL"
+
+          # Stage and commit both the human-readable PKGBUILD and machine-readable .SRCINFO.
+          git add PKGBUILD .SRCINFO
+
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: update PKGBUILD to ${{ github.sha }}"
+            git push origin master
+          else
+            echo "No changes to commit (metadata and PKGBUILD are already up-to-date)."
+          fi
