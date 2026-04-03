@@ -20,8 +20,8 @@ pub fn regenerate_tls(ctx: &ServerCtx) {
         None => return,
     };
 
-    let mut names: HashSet<String> = ctx.services.lock().unwrap().names().into_iter().collect();
-    names.extend(ctx.lan_peers.lock().unwrap().names());
+    let mut names: HashSet<String> = ctx.services.lock().expect("services lock poisoned").names().into_iter().collect();
+    names.extend(ctx.lan_peers.lock().expect("lan_peers lock poisoned").names());
     let names: Vec<String> = names.into_iter().collect();
 
     match build_tls_config(&ctx.proxy_tld, &names) {

@@ -431,9 +431,17 @@ async fn main() -> numa::Result<()> {
     let api_addr: SocketAddr = format!("{}:{}", config.server.api_bind_addr, api_port).parse()?;
     tokio::spawn(async move {
         let app = numa::api::router(api_ctx);
-        let listener = tokio::net::TcpListener::bind(api_addr).await.unwrap();
+        let listener = match tokio::net::TcpListener::bind(api_addr).await {
+            Ok(l) => l,
+            Err(e) => {
+                error!("Failed to bind HTTP API to {}: {}", api_addr, e);
+                return;
+            }
+        };
         info!("HTTP API listening on {}", api_addr);
-        axum::serve(listener, app).await.unwrap();
+        if let Err(e) = axum::serve(listener, app).await {
+            error!("HTTP API server error: {}", e);
+        }
     });
 
     let proxy_bind: std::net::Ipv4Addr = config
@@ -512,7 +520,7 @@ async fn network_watch_loop(ctx: Arc<numa::ctx::ServerCtx>) {
 
         // Check LAN IP change (every 5s — cheap, one UDP socket call)
         if let Some(new_ip) = numa::lan::detect_lan_ip() {
-            let mut current_ip = ctx.lan_ip.lock().unwrap();
+            let mut current_ip = ctx.lan_ip.lock().expect("lan_ip lock poisoned");
             if new_ip != *current_ip {
                 info!("LAN IP changed: {} → {}", current_ip, new_ip);
                 *current_ip = new_ip;
@@ -524,7 +532,7 @@ async fn network_watch_loop(ctx: Arc<numa::ctx::ServerCtx>) {
         // Re-detect upstream every 30s or on LAN IP change (UDP only —
         // DoH upstreams are explicitly configured via URL, not auto-detected)
         if ctx.upstream_auto
-            && matches!(*ctx.upstream.lock().unwrap(), Upstream::Udp(_))
+            && matches!(*ctx.upstream.lock().expect("upstream lock poisoned"), Upstream::Udp(_))
             && (changed || tick.is_multiple_of(6))
         {
             let dns_info = numa::system_dns::discover_system_dns();
@@ -536,7 +544,7 @@ async fn network_watch_loop(ctx: Arc<numa::ctx::ServerCtx>) {
                 format!("{}:{}", new_addr, ctx.upstream_port).parse::<SocketAddr>()
             {
                 let new_upstream = Upstream::Udp(new_sock);
-                let mut upstream = ctx.upstream.lock().unwrap();
+                let mut upstream = ctx.upstream.lock().expect("upstream lock poisoned");
                 if *upstream != new_upstream {
                     info!("upstream changed: {} → {}", upstream, new_upstream);
                     *upstream = new_upstream;
@@ -547,7 +555,7 @@ async fn network_watch_loop(ctx: Arc<numa::ctx::ServerCtx>) {
 
         // Flush stale LAN peers on any network change
         if changed {
-            ctx.lan_peers.lock().unwrap().clear();
+            ctx.lan_peers.lock().expect("lan_peers lock poisoned").clear();
             info!("flushed LAN peers after network change");
         }
 
@@ -640,7 +648,7 @@ async fn load_blocklists(ctx: &ServerCtx, lists: &[String]) {
     // Swap under lock — sub-microsecond
     ctx.blocklist
         .write()
-        .unwrap()
+        .expect("blocklist lock poisoned")
         .swap_domains(all_domains, sources);
     info!(
         "blocking enabled: {} unique domains from {} lists",
