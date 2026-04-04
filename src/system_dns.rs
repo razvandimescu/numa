@@ -1189,7 +1189,7 @@ fn uninstall_linux() -> Result<(), String> {
 #[cfg(target_os = "linux")]
 fn install_service_linux() -> Result<(), String> {
     let unit = include_str!("../numa.service");
-    let unit = replace_exe_path(plist)?;
+    let unit = replace_exe_path(unit)?;
     std::fs::write(SYSTEMD_UNIT, unit)
         .map_err(|e| format!("failed to write {}: {}", SYSTEMD_UNIT, e))?;
 
