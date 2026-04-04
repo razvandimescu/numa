@@ -903,9 +903,12 @@ pub fn uninstall_service() -> Result<(), String> {
 
 /// Restart the service (kill process, launchd/systemd auto-restarts with new binary).
 pub fn restart_service() -> Result<(), String> {
+    let exe_path =
+        std::env::current_exe().map_err(|e| format!("failed to get current exe: {}", e))?;
+
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     let version = {
-        match std::process::Command::new("/usr/local/bin/numa")
+        match std::process::Command::new(&exe_path)
             .arg("--version")
             .output()
         {
@@ -916,6 +919,7 @@ pub fn restart_service() -> Result<(), String> {
 
     #[cfg(target_os = "macos")]
     {
+        let exe_path = exe_path.to_string_lossy();
         let output = std::process::Command::new("launchctl")
             .args(["list", PLIST_LABEL])
             .output();
@@ -926,11 +930,11 @@ pub fn restart_service() -> Result<(), String> {
                 // This will kill us too (we ARE /usr/local/bin/numa), so
                 // codesign and print output first.
                 let _ = std::process::Command::new("codesign")
-                    .args(["-f", "-s", "-", "/usr/local/bin/numa"])
+                    .args(["-f", "-s", "-", &exe_path])
                     .output(); // use output() to suppress codesign stderr
                 eprintln!("  Service restarting → {}\n", version);
                 let _ = std::process::Command::new("pkill")
-                    .args(["-f", "/usr/local/bin/numa"])
+                    .args(["-f", &exe_path])
                     .status();
                 Ok(())
             }
@@ -965,19 +969,22 @@ pub fn service_status() -> Result<(), String> {
     }
 }
 
+fn replace_exe_path(service: &str) -> Result<String, String> {
+    let exe_path =
+        std::env::current_exe().map_err(|e| format!("failed to get current exe: {}", e))?;
+    Ok(service.replace("{{exe_path}}", &exe_path.to_string_lossy()))
+}
+
 #[cfg(target_os = "macos")]
 fn install_service_macos() -> Result<(), String> {
-    // Check binary exists
-    if !std::path::Path::new("/usr/local/bin/numa").exists() {
-        return Err("numa binary not found at /usr/local/bin/numa. Run: sudo cp target/release/numa /usr/local/bin/numa".to_string());
-    }
-
     // Create log directory
     std::fs::create_dir_all("/usr/local/var/log")
         .map_err(|e| format!("failed to create log dir: {}", e))?;
 
     // Write plist
     let plist = include_str!("../com.numa.dns.plist");
+    let plist = replace_exe_path(plist)?;
+
     std::fs::write(PLIST_DEST, plist)
         .map_err(|e| format!("failed to write {}: {}", PLIST_DEST, e))?;
 
@@ -1180,18 +1187,9 @@ fn uninstall_linux() -> Result<(), String> {
 }
 
 #[cfg(target_os = "linux")]
-fn ensure_binary_installed() -> Result<(), String> {
-    if !std::path::Path::new("/usr/local/bin/numa").exists() {
-        return Err("numa binary not found at /usr/local/bin/numa. Run: sudo cp target/release/numa /usr/local/bin/numa".to_string());
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
 fn install_service_linux() -> Result<(), String> {
-    ensure_binary_installed()?;
-
     let unit = include_str!("../numa.service");
+    let unit = replace_exe_path(unit)?;
     std::fs::write(SYSTEMD_UNIT, unit)
         .map_err(|e| format!("failed to write {}: {}", SYSTEMD_UNIT, e))?;
 

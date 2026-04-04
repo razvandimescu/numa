@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/numa
+ExecStart={{exe_path}}
 Restart=always
 RestartSec=2
 StandardOutput=journal
