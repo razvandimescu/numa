@@ -870,14 +870,25 @@ mod tests {
                 };
                 let handler = handler.clone();
                 tokio::spawn(async move {
+                    let timeout = std::time::Duration::from_secs(5);
                     // Read length-prefixed DNS query
                     let mut len_buf = [0u8; 2];
-                    if stream.read_exact(&mut len_buf).await.is_err() {
+                    if tokio::time::timeout(timeout, stream.read_exact(&mut len_buf))
+                        .await
+                        .ok()
+                        .and_then(|r| r.ok())
+                        .is_none()
+                    {
                         return;
                     }
                     let len = u16::from_be_bytes(len_buf) as usize;
                     let mut data = vec![0u8; len];
-                    if stream.read_exact(&mut data).await.is_err() {
+                    if tokio::time::timeout(timeout, stream.read_exact(&mut data))
+                        .await
+                        .ok()
+                        .and_then(|r| r.ok())
+                        .is_none()
+                    {
                         return;
                     }
 
