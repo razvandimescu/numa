@@ -1420,7 +1420,10 @@ Wireless LAN adapter Wi-Fi:
         let unit = include_str!("../numa.service");
 
         assert!(plist.contains("{{exe_path}}"), "plist missing placeholder");
-        assert!(unit.contains("{{exe_path}}"), "unit file missing placeholder");
+        assert!(
+            unit.contains("{{exe_path}}"),
+            "unit file missing placeholder"
+        );
 
         let result = replace_exe_path(plist).expect("replace_exe_path failed for plist");
         assert!(!result.contains("{{exe_path}}"));
