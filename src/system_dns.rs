@@ -903,6 +903,7 @@ pub fn uninstall_service() -> Result<(), String> {
 
 /// Restart the service (kill process, launchd/systemd auto-restarts with new binary).
 pub fn restart_service() -> Result<(), String> {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     let exe_path =
         std::env::current_exe().map_err(|e| format!("failed to get current exe: {}", e))?;
 
@@ -969,6 +970,7 @@ pub fn service_status() -> Result<(), String> {
     }
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn replace_exe_path(service: &str) -> Result<String, String> {
     let exe_path =
         std::env::current_exe().map_err(|e| format!("failed to get current exe: {}", e))?;
@@ -1409,6 +1411,22 @@ Wireless LAN adapter Wi-Fi:
                 servers: vec!["1.1.1.1".into()],
             }
         );
+    }
+
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn replace_exe_path_substitutes_template() {
+        let plist = include_str!("../com.numa.dns.plist");
+        let unit = include_str!("../numa.service");
+
+        assert!(plist.contains("{{exe_path}}"), "plist missing placeholder");
+        assert!(unit.contains("{{exe_path}}"), "unit file missing placeholder");
+
+        let result = replace_exe_path(plist).expect("replace_exe_path failed for plist");
+        assert!(!result.contains("{{exe_path}}"));
+
+        let result = replace_exe_path(unit).expect("replace_exe_path failed for unit");
+        assert!(!result.contains("{{exe_path}}"));
     }
 
     #[test]
