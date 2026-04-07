@@ -67,7 +67,12 @@ Three resolution modes:
 
 DNSSEC validates the full chain of trust: RRSIG signatures, DNSKEY verification, DS delegation, NSEC/NSEC3 denial proofs. [Read how it works →](https://numa.rs/blog/posts/dnssec-from-scratch.html)
 
-**DNS-over-TLS listener** (RFC 7858) — accept encrypted queries on port 853 from strict clients like iOS Private DNS, systemd-resolved, or stubby. Self-signed CA generated automatically, or bring your own cert via `[dot] cert_path` / `key_path` in `numa.toml`. ALPN `"dot"` is advertised and enforced; a handshake with mismatched ALPN is rejected as a cross-protocol confusion defense.
+**DNS-over-TLS listener** (RFC 7858) — accept encrypted queries on port 853 from strict clients like iOS Private DNS, systemd-resolved, or stubby. Two modes:
+
+- **Self-signed** (default) — numa generates a local CA automatically. Works on any network with zero DNS setup, but clients must manually trust the CA (on macOS/Linux add to the system trust store; on iOS install a `.mobileconfig`).
+- **Bring-your-own cert** — point `[dot] cert_path` / `key_path` at a publicly-trusted cert (e.g., Let's Encrypt via DNS-01 challenge on a domain pointing at your numa instance). Clients connect without any trust-store setup — same UX as AdGuard Home or Cloudflare `1.1.1.1`.
+
+ALPN `"dot"` is advertised and enforced in both modes; a handshake with mismatched ALPN is rejected as a cross-protocol confusion defense.
 
 ## LAN Discovery
 
