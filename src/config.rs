@@ -41,6 +41,10 @@ pub struct ServerConfig {
     pub api_port: u16,
     #[serde(default = "default_api_bind_addr")]
     pub api_bind_addr: String,
+    /// Where numa writes TLS material (CA, leaf certs, regenerated state).
+    /// Defaults to `crate::data_dir()` (platform-specific system path) if unset.
+    #[serde(default)]
+    pub data_dir: Option<PathBuf>,
 }
 
 impl Default for ServerConfig {
@@ -49,6 +53,7 @@ impl Default for ServerConfig {
             bind_addr: default_bind_addr(),
             api_port: default_api_port(),
             api_bind_addr: default_api_bind_addr(),
+            data_dir: None,
         }
     }
 }
