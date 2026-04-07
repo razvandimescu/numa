@@ -186,7 +186,10 @@ where
                 resp.header.id = query_id;
                 resp.header.response = true;
                 resp.header.rescode = ResultCode::FORMERR;
-                if send_response(&mut stream, &resp, remote_addr).await.is_err() {
+                if send_response(&mut stream, &resp, remote_addr)
+                    .await
+                    .is_err()
+                {
                     break;
                 }
                 continue;
@@ -206,7 +209,10 @@ where
                 warn!("{} | RESOLVE ERROR | {}", remote_addr, e);
                 // SERVFAIL that echoes the original question section.
                 let resp = DnsPacket::response_from(&query, ResultCode::SERVFAIL);
-                if send_response(&mut stream, &resp, remote_addr).await.is_err() {
+                if send_response(&mut stream, &resp, remote_addr)
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
