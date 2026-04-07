@@ -67,9 +67,14 @@ fn config_dir_unix() -> std::path::PathBuf {
 }
 
 /// System-wide data directory for TLS certs.
+/// Override with `NUMA_DATA_DIR` env var (useful for containerized
+/// deployments and integration tests that can't write to the default path).
 /// Unix: /usr/local/var/numa
 /// Windows: %PROGRAMDATA%\numa
 pub fn data_dir() -> std::path::PathBuf {
+    if let Ok(dir) = std::env::var("NUMA_DATA_DIR") {
+        return std::path::PathBuf::from(dir);
+    }
     #[cfg(windows)]
     {
         std::path::PathBuf::from(

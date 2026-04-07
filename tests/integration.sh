@@ -526,6 +526,117 @@ CONF
     wait "$NUMA_PID" 2>/dev/null || true
     rm -f "$DOT_CERT" "$DOT_KEY"
 fi
+sleep 1
+
+# ---- Suite 6: Proxy + DoT coexistence ----
+echo ""
+echo "╔══════════════════════════════════════════╗"
+echo "║  Suite 6: Proxy + DoT Coexistence        ║"
+echo "╚══════════════════════════════════════════╝"
+
+if ! command -v kdig >/dev/null 2>&1 || ! command -v openssl >/dev/null 2>&1; then
+    printf "  ${DIM}skipped — needs kdig + openssl${RESET}\n"
+else
+    DOT_PORT=8853
+    PROXY_HTTP_PORT=8080
+    PROXY_HTTPS_PORT=8443
+    NUMA_DATA=/tmp/numa-integration-data
+
+    # Fresh data dir so we generate a fresh CA for this suite — NUMA_DATA_DIR
+    # env var lets numa write under $TMPDIR instead of /usr/local/var/numa.
+    rm -rf "$NUMA_DATA"
+    mkdir -p "$NUMA_DATA"
+
+    cat > "$CONFIG" << CONF
+[server]
+bind_addr = "127.0.0.1:$PORT"
+api_port = $API_PORT
+
+[upstream]
+mode = "forward"
+address = "127.0.0.1"
+port = 65535
+
+[cache]
+max_entries = 10000
+
+[blocking]
+enabled = false
+
+[proxy]
+enabled = true
+port = $PROXY_HTTP_PORT
+tls_port = $PROXY_HTTPS_PORT
+tld = "numa"
+bind_addr = "127.0.0.1"
+
+[dot]
+enabled = true
+port = $DOT_PORT
+bind_addr = "127.0.0.1"
+
+[[zones]]
+domain = "dot-test.example"
+record_type = "A"
+value = "10.0.0.1"
+ttl = 60
+CONF
+
+    NUMA_DATA_DIR="$NUMA_DATA" RUST_LOG=info "$BINARY" "$CONFIG" > "$LOG" 2>&1 &
+    NUMA_PID=$!
+    sleep 4
+
+    if ! kill -0 "$NUMA_PID" 2>/dev/null; then
+        FAILED=$((FAILED + 1))
+        printf "  ${RED}✗${RESET} Startup with proxy + DoT\n"
+        printf "    ${DIM}%s${RESET}\n" "$(tail -5 "$LOG")"
+    else
+        echo ""
+        echo "=== Both listeners ==="
+
+        check "DoT listener bound" \
+            "DoT listening on 127.0.0.1:$DOT_PORT" \
+            "$(grep 'DoT listening' "$LOG")"
+
+        check "HTTPS proxy listener bound" \
+            "HTTPS proxy listening on 127.0.0.1:$PROXY_HTTPS_PORT" \
+            "$(grep 'HTTPS proxy listening' "$LOG")"
+
+        PANIC_COUNT=$(grep -c 'panicked' "$LOG" 2>/dev/null || echo 0)
+        check "No startup panics in log" \
+            "^0$" \
+            "$PANIC_COUNT"
+
+        echo ""
+        echo "=== DoT works with proxy enabled ==="
+
+        # Proxy's build_tls_config runs first and creates the CA in
+        # $NUMA_DATA_DIR. DoT self_signed_tls then loads the same CA and
+        # issues its own leaf cert. One CA trusts both listeners.
+        CA="$NUMA_DATA/ca.pem"
+        KDIG="kdig @127.0.0.1 -p $DOT_PORT +tls +tls-ca=$CA +tls-hostname=numa.numa +time=5 +retry=0"
+
+        check "DoT local zone A (with proxy on)" \
+            "10.0.0.1" \
+            "$($KDIG +short dot-test.example A 2>/dev/null)"
+
+        echo ""
+        echo "=== Proxy TLS works with DoT enabled ==="
+
+        # Proxy cert has SAN numa.numa (auto-added "numa" service). A
+        # successful handshake validates that the proxy's separate
+        # ServerConfig wasn't disturbed by DoT's own cert generation.
+        PROXY_TLS=$(echo "" | openssl s_client -connect "127.0.0.1:$PROXY_HTTPS_PORT" \
+            -servername numa.numa -CAfile "$CA" 2>&1 </dev/null || true)
+        check "Proxy HTTPS TLS handshake succeeds" \
+            "Verify return code: 0 (ok)" \
+            "$PROXY_TLS"
+    fi
+
+    kill "$NUMA_PID" 2>/dev/null || true
+    wait "$NUMA_PID" 2>/dev/null || true
+    rm -rf "$NUMA_DATA"
+fi
 
 # Summary
 echo ""
