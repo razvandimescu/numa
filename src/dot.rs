@@ -47,8 +47,15 @@ fn load_tls_config(cert_path: &Path, key_path: &Path) -> crate::Result<Arc<Serve
 
 /// Build a self-signed DoT TLS config. Can't reuse `ctx.tls_config` (the
 /// proxy's shared config) because DoT needs its own ALPN advertisement.
+///
+/// Pass `proxy_tld` itself as a service name so the cert gets an explicit
+/// `{tld}.{tld}` SAN (e.g. "numa.numa") matching the ServerName that
+/// setup-phone's mobileconfig sends as SNI. The `*.{tld}` wildcard alone
+/// is rejected by strict TLS clients under single-label TLDs (per the
+/// note in tls.rs::generate_service_cert).
 fn self_signed_tls(ctx: &ServerCtx) -> Option<Arc<ServerConfig>> {
-    match crate::tls::build_tls_config(&ctx.proxy_tld, &[], dot_alpn()) {
+    let service_names = [ctx.proxy_tld.clone()];
+    match crate::tls::build_tls_config(&ctx.proxy_tld, &service_names, dot_alpn()) {
         Ok(cfg) => Some(cfg),
         Err(e) => {
             warn!(
@@ -272,12 +279,17 @@ mod tests {
     fn test_tls_configs() -> (Arc<ServerConfig>, Arc<rustls::ClientConfig>) {
         let _ = rustls::crypto::ring::default_provider().install_default();
 
+        // Mirror production self_signed_tls SAN shape: *.numa wildcard plus
+        // explicit numa.numa apex (the ServerName setup-phone uses as SNI).
         let key_pair = KeyPair::generate().unwrap();
         let mut params = CertificateParams::default();
         params
             .distinguished_name
-            .push(DnType::CommonName, "localhost");
-        params.subject_alt_names = vec![rcgen::SanType::DnsName("localhost".try_into().unwrap())];
+            .push(DnType::CommonName, "Numa .numa services");
+        params.subject_alt_names = vec![
+            rcgen::SanType::DnsName("*.numa".try_into().unwrap()),
+            rcgen::SanType::DnsName("numa.numa".try_into().unwrap()),
+        ];
         let cert = params.self_signed(&key_pair).unwrap();
 
         let cert_der = CertificateDer::from(cert.der().to_vec());
@@ -367,6 +379,7 @@ mod tests {
     }
 
     /// Open a TLS connection to the DoT server and return the stream.
+    /// Uses SNI "numa.numa" to mirror what setup-phone's mobileconfig sends.
     async fn dot_connect(
         addr: SocketAddr,
         client_config: &Arc<rustls::ClientConfig>,
@@ -374,7 +387,7 @@ mod tests {
         let connector = tokio_rustls::TlsConnector::from(Arc::clone(client_config));
         let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
         connector
-            .connect(ServerName::try_from("localhost").unwrap(), tcp)
+            .connect(ServerName::try_from("numa.numa").unwrap(), tcp)
             .await
             .unwrap()
     }
