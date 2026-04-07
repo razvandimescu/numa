@@ -24,7 +24,7 @@ pub fn regenerate_tls(ctx: &ServerCtx) {
     names.extend(ctx.lan_peers.lock().unwrap().names());
     let names: Vec<String> = names.into_iter().collect();
 
-    match build_tls_config(&ctx.proxy_tld, &names) {
+    match build_tls_config(&ctx.proxy_tld, &names, Vec::new()) {
         Ok(new_config) => {
             tls.store(new_config);
             info!("TLS cert regenerated for {} services", names.len());
@@ -36,7 +36,13 @@ pub fn regenerate_tls(ctx: &ServerCtx) {
 /// Build a TLS config with a cert covering all provided service names.
 /// Wildcards under single-label TLDs (*.numa) are rejected by browsers,
 /// so we list each service explicitly as a SAN.
-pub fn build_tls_config(tld: &str, service_names: &[String]) -> crate::Result<Arc<ServerConfig>> {
+/// `alpn` is advertised in the TLS ServerHello — pass empty for the proxy
+/// (which accepts any ALPN), or `[b"dot"]` for DoT (RFC 7858 §3.2).
+pub fn build_tls_config(
+    tld: &str,
+    service_names: &[String],
+    alpn: Vec<Vec<u8>>,
+) -> crate::Result<Arc<ServerConfig>> {
     let dir = crate::data_dir();
     let (ca_cert, ca_key) = ensure_ca(&dir)?;
     let (cert_chain, key) = generate_service_cert(&ca_cert, &ca_key, tld, service_names)?;
@@ -44,9 +50,10 @@ pub fn build_tls_config(tld: &str, service_names: &[String]) -> crate::Result<Ar
     // Ensure a crypto provider is installed (rustls needs one)
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let config = ServerConfig::builder()
+    let mut config = ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(cert_chain, key)?;
+    config.alpn_protocols = alpn;
 
     info!(
         "TLS configured for {} .{} domains",

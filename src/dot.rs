@@ -19,9 +19,15 @@ use crate::packet::DnsPacket;
 const MAX_CONNECTIONS: usize = 512;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 // Matches BytePacketBuffer::BUF_SIZE — RFC 7858 allows up to 65535 but our
 // buffer would silently truncate anything larger.
 const MAX_MSG_LEN: usize = 4096;
+
+/// ALPN protocol identifier for DNS-over-TLS (RFC 7858 §3.2).
+fn dot_alpn() -> Vec<Vec<u8>> {
+    vec![b"dot".to_vec()]
+}
 
 /// Build a TLS ServerConfig for DoT from user-provided cert/key PEM files.
 fn load_tls_config(cert_path: &Path, key_path: &Path) -> crate::Result<Arc<ServerConfig>> {
@@ -32,18 +38,18 @@ fn load_tls_config(cert_path: &Path, key_path: &Path) -> crate::Result<Arc<Serve
     let key = rustls_pemfile::private_key(&mut &key_pem[..])?
         .ok_or("no private key found in key file")?;
 
-    let config = ServerConfig::builder()
+    let mut config = ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)?;
+    config.alpn_protocols = dot_alpn();
 
     Ok(Arc::new(config))
 }
 
-fn fallback_tls(ctx: &ServerCtx) -> Option<Arc<ServerConfig>> {
-    if let Some(arc_swap) = ctx.tls_config.as_ref() {
-        return Some(Arc::clone(&*arc_swap.load()));
-    }
-    match crate::tls::build_tls_config(&ctx.proxy_tld, &[]) {
+/// Build a self-signed DoT TLS config. Can't reuse `ctx.tls_config` (the
+/// proxy's shared config) because DoT needs its own ALPN advertisement.
+fn self_signed_tls(ctx: &ServerCtx) -> Option<Arc<ServerConfig>> {
+    match crate::tls::build_tls_config(&ctx.proxy_tld, &[], dot_alpn()) {
         Ok(cfg) => Some(cfg),
         Err(e) => {
             warn!(
@@ -65,7 +71,7 @@ pub async fn start_dot(ctx: Arc<ServerCtx>, config: &DotConfig) {
                 return;
             }
         },
-        _ => match fallback_tls(&ctx) {
+        _ => match self_signed_tls(&ctx) {
             Some(cfg) => cfg,
             None => return,
         },
@@ -228,6 +234,7 @@ where
 }
 
 /// Write a DNS message with its 2-byte length prefix, coalesced into one syscall.
+/// Bounded by WRITE_TIMEOUT so a stalled reader can't indefinitely hold a worker.
 async fn write_framed<S>(stream: &mut S, msg: &[u8]) -> std::io::Result<()>
 where
     S: AsyncWriteExt + Unpin,
@@ -235,9 +242,15 @@ where
     let mut out = Vec::with_capacity(2 + msg.len());
     out.extend_from_slice(&(msg.len() as u16).to_be_bytes());
     out.extend_from_slice(msg);
-    stream.write_all(&out).await?;
-    stream.flush().await?;
-    Ok(())
+    match tokio::time::timeout(WRITE_TIMEOUT, async {
+        stream.write_all(&out).await?;
+        stream.flush().await
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(std::io::Error::other("write timeout")),
+    }
 }
 
 #[cfg(test)]
@@ -271,16 +284,18 @@ mod tests {
         let cert_der = CertificateDer::from(cert.der().to_vec());
         let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_pair.serialize_der()));
 
-        let server_config = ServerConfig::builder()
+        let mut server_config = ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(vec![cert_der.clone()], key_der)
             .unwrap();
+        server_config.alpn_protocols = dot_alpn();
 
         let mut root_store = rustls::RootCertStore::empty();
         root_store.add(cert_der).unwrap();
-        let client_config = rustls::ClientConfig::builder()
+        let mut client_config = rustls::ClientConfig::builder()
             .with_root_certificates(root_store)
             .with_no_client_auth();
+        client_config.alpn_protocols = dot_alpn();
 
         (Arc::new(server_config), Arc::new(client_config))
     }
@@ -441,6 +456,15 @@ mod tests {
         assert_eq!(resp.header.rescode, ResultCode::SERVFAIL);
         assert_eq!(resp.questions.len(), 1);
         assert_eq!(resp.questions[0].name, "nonexistent.test");
+    }
+
+    #[tokio::test]
+    async fn dot_negotiates_alpn() {
+        let (addr, client_config) = spawn_dot_server().await;
+        let stream = dot_connect(addr, &client_config).await;
+        // After handshake, the negotiated ALPN protocol should be "dot" (RFC 7858 §3.2).
+        let (_io, conn) = stream.get_ref();
+        assert_eq!(conn.alpn_protocol(), Some(&b"dot"[..]));
     }
 
     #[tokio::test]

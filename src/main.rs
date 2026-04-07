@@ -207,7 +207,7 @@ async fn main() -> numa::Result<()> {
     // Build initial TLS config before ServerCtx (so ArcSwap is ready at construction)
     let initial_tls = if config.proxy.enabled && config.proxy.tls_port > 0 {
         let service_names = service_store.names();
-        match numa::tls::build_tls_config(&config.proxy.tld, &service_names) {
+        match numa::tls::build_tls_config(&config.proxy.tld, &service_names, Vec::new()) {
             Ok(tls_config) => Some(ArcSwap::from(tls_config)),
             Err(e) => {
                 log::warn!("TLS setup failed, HTTPS proxy disabled: {}", e);
