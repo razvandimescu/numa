@@ -542,8 +542,9 @@ else
     PROXY_HTTPS_PORT=8443
     NUMA_DATA=/tmp/numa-integration-data
 
-    # Fresh data dir so we generate a fresh CA for this suite — NUMA_DATA_DIR
-    # env var lets numa write under $TMPDIR instead of /usr/local/var/numa.
+    # Fresh data dir so we generate a fresh CA for this suite. Path is set
+    # via [server] data_dir in the TOML below, not an env var — numa treats
+    # its config file as the single source of truth for all knobs.
     rm -rf "$NUMA_DATA"
     mkdir -p "$NUMA_DATA"
 
@@ -551,6 +552,7 @@ else
 [server]
 bind_addr = "127.0.0.1:$PORT"
 api_port = $API_PORT
+data_dir = "$NUMA_DATA"
 
 [upstream]
 mode = "forward"
@@ -582,7 +584,7 @@ value = "10.0.0.1"
 ttl = 60
 CONF
 
-    NUMA_DATA_DIR="$NUMA_DATA" RUST_LOG=info "$BINARY" "$CONFIG" > "$LOG" 2>&1 &
+    RUST_LOG=info "$BINARY" "$CONFIG" > "$LOG" 2>&1 &
     NUMA_PID=$!
     sleep 4
 

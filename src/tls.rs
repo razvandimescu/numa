@@ -24,7 +24,7 @@ pub fn regenerate_tls(ctx: &ServerCtx) {
     names.extend(ctx.lan_peers.lock().unwrap().names());
     let names: Vec<String> = names.into_iter().collect();
 
-    match build_tls_config(&ctx.proxy_tld, &names, Vec::new()) {
+    match build_tls_config(&ctx.proxy_tld, &names, Vec::new(), &ctx.data_dir) {
         Ok(new_config) => {
             tls.store(new_config);
             info!("TLS cert regenerated for {} services", names.len());
@@ -38,13 +38,15 @@ pub fn regenerate_tls(ctx: &ServerCtx) {
 /// so we list each service explicitly as a SAN.
 /// `alpn` is advertised in the TLS ServerHello — pass empty for the proxy
 /// (which accepts any ALPN), or `[b"dot"]` for DoT (RFC 7858 §3.2).
+/// `data_dir` is where the CA material is stored — taken from
+/// `[server] data_dir` in numa.toml (defaults to `crate::data_dir()`).
 pub fn build_tls_config(
     tld: &str,
     service_names: &[String],
     alpn: Vec<Vec<u8>>,
+    data_dir: &Path,
 ) -> crate::Result<Arc<ServerConfig>> {
-    let dir = crate::data_dir();
-    let (ca_cert, ca_key) = ensure_ca(&dir)?;
+    let (ca_cert, ca_key) = ensure_ca(data_dir)?;
     let (cert_chain, key) = generate_service_cert(&ca_cert, &ca_key, tld, service_names)?;
 
     // Ensure a crypto provider is installed (rustls needs one)

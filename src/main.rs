@@ -204,10 +204,23 @@ async fn main() -> numa::Result<()> {
 
     let forwarding_rules = system_dns.forwarding_rules;
 
+    // Resolve data_dir from config, falling back to the platform default.
+    // Used for TLS CA storage below and stored on ServerCtx for runtime use.
+    let resolved_data_dir = config
+        .server
+        .data_dir
+        .clone()
+        .unwrap_or_else(numa::data_dir);
+
     // Build initial TLS config before ServerCtx (so ArcSwap is ready at construction)
     let initial_tls = if config.proxy.enabled && config.proxy.tls_port > 0 {
         let service_names = service_store.names();
-        match numa::tls::build_tls_config(&config.proxy.tld, &service_names, Vec::new()) {
+        match numa::tls::build_tls_config(
+            &config.proxy.tld,
+            &service_names,
+            Vec::new(),
+            &resolved_data_dir,
+        ) {
             Ok(tls_config) => Some(ArcSwap::from(tls_config)),
             Err(e) => {
                 log::warn!("TLS setup failed, HTTPS proxy disabled: {}", e);
@@ -248,7 +261,7 @@ async fn main() -> numa::Result<()> {
         config_path: resolved_config_path,
         config_found,
         config_dir: numa::config_dir(),
-        data_dir: numa::data_dir(),
+        data_dir: resolved_data_dir,
         tls_config: initial_tls,
         upstream_mode: resolved_mode,
         root_hints,

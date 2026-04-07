@@ -61,7 +61,7 @@ fn load_tls_config(cert_path: &Path, key_path: &Path) -> crate::Result<Arc<Serve
 /// note in tls.rs::generate_service_cert).
 fn self_signed_tls(ctx: &ServerCtx) -> Option<Arc<ServerConfig>> {
     let service_names = [ctx.proxy_tld.clone()];
-    match crate::tls::build_tls_config(&ctx.proxy_tld, &service_names, dot_alpn()) {
+    match crate::tls::build_tls_config(&ctx.proxy_tld, &service_names, dot_alpn(), &ctx.data_dir) {
         Ok(cfg) => Some(cfg),
         Err(e) => {
             warn!(
