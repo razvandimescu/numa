@@ -54,6 +54,9 @@ async fn main() -> numa::Result<()> {
                 }
             };
         }
+        "setup-phone" => {
+            return numa::setup_phone::run().await.map_err(|e| e.into());
+        }
         "lan" => {
             let sub = std::env::args().nth(2).unwrap_or_default();
             let config_path = std::env::args()
@@ -85,6 +88,7 @@ async fn main() -> numa::Result<()> {
             eprintln!("  service status  Check if the service is running");
             eprintln!("  lan on          Enable LAN service discovery (mDNS)");
             eprintln!("  lan off         Disable LAN service discovery");
+            eprintln!("  setup-phone     Generate a QR code to install Numa DoT on a phone");
             eprintln!("  help            Show this help");
             eprintln!();
             eprintln!("Config path defaults to numa.toml");

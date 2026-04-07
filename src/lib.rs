@@ -17,6 +17,7 @@ pub mod question;
 pub mod record;
 pub mod recursive;
 pub mod service_store;
+pub mod setup_phone;
 pub mod srtt;
 pub mod stats;
 pub mod system_dns;
