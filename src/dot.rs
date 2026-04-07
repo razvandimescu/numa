@@ -30,6 +30,12 @@ fn dot_alpn() -> Vec<Vec<u8>> {
 
 /// Build a TLS ServerConfig for DoT from user-provided cert/key PEM files.
 fn load_tls_config(cert_path: &Path, key_path: &Path) -> crate::Result<Arc<ServerConfig>> {
+    // rustls needs a CryptoProvider installed before ServerConfig::builder().
+    // The proxy's build_tls_config also does this; we repeat it here because
+    // running DoT with user-provided certs while the proxy is disabled would
+    // otherwise panic on first handshake (no default provider).
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let cert_pem = std::fs::read(cert_path)?;
     let key_pem = std::fs::read(key_path)?;
 
