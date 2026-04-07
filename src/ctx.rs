@@ -65,20 +65,14 @@ pub struct ServerCtx {
 /// Transport-agnostic DNS resolution. Runs the full pipeline (overrides, blocklist,
 /// cache, upstream, DNSSEC) and returns the serialized response in a buffer.
 /// Callers use `.filled()` to get the response bytes without heap allocation.
+/// Callers are responsible for parsing the incoming buffer into a `DnsPacket`
+/// (and logging parse errors) before calling this function.
 pub async fn resolve_query(
-    mut buffer: BytePacketBuffer,
+    query: DnsPacket,
     src_addr: SocketAddr,
     ctx: &ServerCtx,
 ) -> crate::Result<BytePacketBuffer> {
     let start = Instant::now();
-
-    let query = match DnsPacket::from_buffer(&mut buffer) {
-        Ok(packet) => packet,
-        Err(e) => {
-            warn!("{} | PARSE ERROR | {}", src_addr, e);
-            return Err(e);
-        }
-    };
 
     let (qname, qtype) = match query.questions.first() {
         Some(q) => (q.name.clone(), q.qtype),
@@ -347,11 +341,18 @@ pub async fn resolve_query(
 
 /// Handle a DNS query received over UDP. Thin wrapper around resolve_query.
 pub async fn handle_query(
-    buffer: BytePacketBuffer,
+    mut buffer: BytePacketBuffer,
     src_addr: SocketAddr,
     ctx: &ServerCtx,
 ) -> crate::Result<()> {
-    match resolve_query(buffer, src_addr, ctx).await {
+    let query = match DnsPacket::from_buffer(&mut buffer) {
+        Ok(packet) => packet,
+        Err(e) => {
+            warn!("{} | PARSE ERROR | {}", src_addr, e);
+            return Ok(());
+        }
+    };
+    match resolve_query(query, src_addr, ctx).await {
         Ok(resp_buffer) => {
             ctx.socket.send_to(resp_buffer.filled(), src_addr).await?;
         }
