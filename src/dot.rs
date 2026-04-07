@@ -60,6 +60,9 @@ fn fallback_tls(ctx: &ServerCtx) -> Option<Arc<ServerConfig>> {
 
 /// Start the DNS-over-TLS listener (RFC 7858).
 pub async fn start_dot(ctx: Arc<ServerCtx>, config: &DotConfig) {
+    if config.cert_path.is_some() != config.key_path.is_some() {
+        warn!("DoT: both cert_path and key_path must be set — ignoring partial config, using self-signed");
+    }
     let tls_config = match (&config.cert_path, &config.key_path) {
         (Some(cert), Some(key)) => match load_tls_config(cert, key) {
             Ok(cfg) => cfg,
@@ -68,14 +71,7 @@ pub async fn start_dot(ctx: Arc<ServerCtx>, config: &DotConfig) {
                 return;
             }
         },
-        (Some(_), None) | (None, Some(_)) => {
-            warn!("DoT: both cert_path and key_path must be set — ignoring partial config, using self-signed");
-            match fallback_tls(&ctx) {
-                Some(cfg) => cfg,
-                None => return,
-            }
-        }
-        (None, None) => match fallback_tls(&ctx) {
+        _ => match fallback_tls(&ctx) {
             Some(cfg) => cfg,
             None => return,
         },
@@ -190,39 +186,53 @@ where
                 resp.header.id = query_id;
                 resp.header.response = true;
                 resp.header.rescode = ResultCode::FORMERR;
-                let mut out_buf = BytePacketBuffer::new();
-                if resp.write(&mut out_buf).is_err() {
-                    debug!("DoT: failed to serialize FORMERR for {}", remote_addr);
-                    break;
-                }
-                if write_framed(&mut stream, out_buf.filled()).await.is_err() {
+                if send_response(&mut stream, &resp, remote_addr).await.is_err() {
                     break;
                 }
                 continue;
             }
         };
 
-        let resp_buffer = match resolve_query(query.clone(), remote_addr, ctx).await {
-            Ok(buf) => buf,
-            Err(e) => {
-                warn!("{} | RESOLVE ERROR | {}", remote_addr, e);
-                // Build SERVFAIL that echoes the original question section.
-                let resp = DnsPacket::response_from(&query, ResultCode::SERVFAIL);
-                let mut out_buf = BytePacketBuffer::new();
-                if resp.write(&mut out_buf).is_err() {
-                    debug!("DoT: failed to serialize SERVFAIL for {}", remote_addr);
+        match resolve_query(query.clone(), remote_addr, ctx).await {
+            Ok(resp_buffer) => {
+                if write_framed(&mut stream, resp_buffer.filled())
+                    .await
+                    .is_err()
+                {
                     break;
                 }
-                out_buf
             }
-        };
-        if write_framed(&mut stream, resp_buffer.filled())
-            .await
-            .is_err()
-        {
-            break;
+            Err(e) => {
+                warn!("{} | RESOLVE ERROR | {}", remote_addr, e);
+                // SERVFAIL that echoes the original question section.
+                let resp = DnsPacket::response_from(&query, ResultCode::SERVFAIL);
+                if send_response(&mut stream, &resp, remote_addr).await.is_err() {
+                    break;
+                }
+            }
         }
     }
+}
+
+/// Serialize a DNS response and send it framed. Logs serialization failures
+/// and returns Err so the caller can tear down the connection.
+async fn send_response<S>(
+    stream: &mut S,
+    resp: &DnsPacket,
+    remote_addr: SocketAddr,
+) -> std::io::Result<()>
+where
+    S: AsyncWriteExt + Unpin,
+{
+    let mut out_buf = BytePacketBuffer::new();
+    if resp.write(&mut out_buf).is_err() {
+        debug!(
+            "DoT: failed to serialize {:?} response for {}",
+            resp.header.rescode, remote_addr
+        );
+        return Err(std::io::Error::other("serialize failed"));
+    }
+    write_framed(stream, out_buf.filled()).await
 }
 
 /// Write a DNS message with its 2-byte length prefix, coalesced into one syscall.
