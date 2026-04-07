@@ -24,7 +24,6 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 // buffer would silently truncate anything larger.
 const MAX_MSG_LEN: usize = 4096;
 
-/// ALPN protocol identifier for DNS-over-TLS (RFC 7858 §3.2).
 fn dot_alpn() -> Vec<Vec<u8>> {
     vec![b"dot".to_vec()]
 }
@@ -462,7 +461,6 @@ mod tests {
     async fn dot_negotiates_alpn() {
         let (addr, client_config) = spawn_dot_server().await;
         let stream = dot_connect(addr, &client_config).await;
-        // After handshake, the negotiated ALPN protocol should be "dot" (RFC 7858 §3.2).
         let (_io, conn) = stream.get_ref();
         assert_eq!(conn.alpn_protocol(), Some(&b"dot"[..]));
     }
