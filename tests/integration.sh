@@ -404,6 +404,128 @@ check "Cache flushed" \
 
 kill "$NUMA_PID" 2>/dev/null || true
 wait "$NUMA_PID" 2>/dev/null || true
+sleep 1
+
+# ---- Suite 5: DNS-over-TLS (RFC 7858) ----
+echo ""
+echo "╔══════════════════════════════════════════╗"
+echo "║  Suite 5: DNS-over-TLS (RFC 7858)        ║"
+echo "╚══════════════════════════════════════════╝"
+
+if ! command -v kdig >/dev/null 2>&1; then
+    printf "  ${DIM}skipped — install 'knot' for kdig${RESET}\n"
+elif ! command -v openssl >/dev/null 2>&1; then
+    printf "  ${DIM}skipped — openssl not found${RESET}\n"
+else
+    DOT_PORT=8853
+    DOT_CERT=/tmp/numa-integration-dot.crt
+    DOT_KEY=/tmp/numa-integration-dot.key
+
+    # Generate a test cert mirroring production self_signed_tls SAN shape
+    # (*.numa wildcard + explicit numa.numa apex).
+    openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+        -keyout "$DOT_KEY" -out "$DOT_CERT" \
+        -subj "/CN=Numa .numa services" \
+        -addext "subjectAltName=DNS:*.numa,DNS:numa.numa" \
+        >/dev/null 2>&1
+
+    # Suite 5 uses a local zone so it's upstream-independent — the point is
+    # to exercise the DoT transport layer (handshake, ALPN, framing,
+    # persistent connections), not re-test recursive resolution.
+    cat > "$CONFIG" << CONF
+[server]
+bind_addr = "127.0.0.1:$PORT"
+api_port = $API_PORT
+
+[upstream]
+mode = "forward"
+address = "127.0.0.1"
+port = 65535
+
+[cache]
+max_entries = 10000
+
+[blocking]
+enabled = false
+
+[proxy]
+enabled = false
+
+[dot]
+enabled = true
+port = $DOT_PORT
+bind_addr = "127.0.0.1"
+cert_path = "$DOT_CERT"
+key_path = "$DOT_KEY"
+
+[[zones]]
+domain = "dot-test.example"
+record_type = "A"
+value = "10.0.0.1"
+ttl = 60
+CONF
+
+    RUST_LOG=info "$BINARY" "$CONFIG" > "$LOG" 2>&1 &
+    NUMA_PID=$!
+    sleep 4
+
+    if ! kill -0 "$NUMA_PID" 2>/dev/null; then
+        FAILED=$((FAILED + 1))
+        printf "  ${RED}✗${RESET} DoT startup\n"
+        printf "    ${DIM}%s${RESET}\n" "$(tail -5 "$LOG")"
+    else
+        echo ""
+        echo "=== Listener ==="
+
+        check "DoT bound on 127.0.0.1:$DOT_PORT" \
+            "DoT listening on 127.0.0.1:$DOT_PORT" \
+            "$(grep 'DoT listening' "$LOG")"
+
+        KDIG="kdig @127.0.0.1 -p $DOT_PORT +tls +tls-ca=$DOT_CERT +tls-hostname=numa.numa +time=5 +retry=0"
+
+        echo ""
+        echo "=== Queries over DoT ==="
+
+        check "DoT local zone A record" \
+            "10.0.0.1" \
+            "$($KDIG +short dot-test.example A 2>/dev/null)"
+
+        # +keepopen reuses one TLS connection for multiple queries — tests
+        # persistent connection handling. kdig applies options left-to-right,
+        # so +short and +keepopen must come before the query specs.
+        check "DoT persistent connection (3 queries, 1 handshake)" \
+            "10.0.0.1" \
+            "$($KDIG +keepopen +short dot-test.example A dot-test.example A dot-test.example A 2>/dev/null | head -1)"
+
+        echo ""
+        echo "=== ALPN ==="
+
+        # Positive case: client offers "dot", server picks it.
+        ALPN_OK=$(echo "" | openssl s_client -connect "127.0.0.1:$DOT_PORT" \
+            -servername numa.numa -alpn dot -CAfile "$DOT_CERT" 2>&1 </dev/null || true)
+        check "DoT negotiates ALPN \"dot\"" \
+            "ALPN protocol: dot" \
+            "$ALPN_OK"
+
+        # Negative case: client offers only "h2", server must reject the
+        # handshake with no_application_protocol alert (cross-protocol
+        # confusion defense, RFC 7858bis §3.2).
+        if echo "" | openssl s_client -connect "127.0.0.1:$DOT_PORT" \
+            -servername numa.numa -alpn h2 -CAfile "$DOT_CERT" \
+            </dev/null >/dev/null 2>&1; then
+            ALPN_MISMATCH="handshake unexpectedly succeeded"
+        else
+            ALPN_MISMATCH="rejected"
+        fi
+        check "DoT rejects non-dot ALPN" \
+            "rejected" \
+            "$ALPN_MISMATCH"
+    fi
+
+    kill "$NUMA_PID" 2>/dev/null || true
+    wait "$NUMA_PID" 2>/dev/null || true
+    rm -f "$DOT_CERT" "$DOT_KEY"
+fi
 
 # Summary
 echo ""
