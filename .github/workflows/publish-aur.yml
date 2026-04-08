@@ -4,13 +4,15 @@
 # Arch User Repository (AUR). The AUR is a community-driven repository for Arch Linux users.
 #
 # Workflow Overview:
-# 1. Validate: Builds and tests the package on both x86_64 and aarch64 (ARM64)
-#    architectures using clean Arch Linux containers.
-# 2. Audit: Checks Rust dependencies for known security vulnerabilities using 'cargo-audit'.
-# 3. Publish: If on the 'main' branch, it pushes the updated PKGBUILD and .SRCINFO to the AUR.
+# 1. Validate: Builds and tests the package for Arch Linux x86_64 using a clean
+#    Arch Linux container.
+# 2. Audit: Checks Rust dependencies for known security vulnerabilities using
+#    'cargo-audit'.
+# 3. Publish: If on the 'main' branch, it pushes the updated PKGBUILD and
+#    .SRCINFO to the AUR.
 #
 # Security Best Practices:
-# - SHA Pinning: All GitHub Actions are pinned to a full-length commit SHA (e.g., v4.1.7 @ SHA)
+# - SHA Pinning: All GitHub Actions are pinned to a full-length commit SHA (e.g., v6.0.2 @ SHA)
 #   to ensure the code is immutable and protects against supply-chain attacks where a tag
 #   might be maliciously moved to a compromised commit.
 # - SSH Hygiene: Uses ssh-agent to keep the private key in memory rather than on disk.
@@ -38,7 +40,7 @@ jobs:
         arch: [x86_64]
     steps:
       - name: Checkout code
-        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Build and Test Package
         timeout-minutes: 60
@@ -90,7 +92,7 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - name: Checkout code
-        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       # Securely configure SSH for AUR access.
       - name: Configure SSH
