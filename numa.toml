@@ -2,11 +2,12 @@
 bind_addr = "0.0.0.0:53"
 api_port = 5380
 # api_bind_addr = "127.0.0.1"  # default; set to "0.0.0.0" for LAN dashboard access
-# data_dir = "/usr/local/var/numa"  # where numa stores TLS CA and cert material
-                                    # (default: /usr/local/var/numa on unix,
-                                    # %PROGRAMDATA%\numa on windows). Override for
-                                    # containerized deploys or tests that can't
-                                    # write to the system path.
+# data_dir = "/var/lib/numa"  # where numa stores TLS CA and cert material
+                              # Defaults: /var/lib/numa on linux (FHS),
+                              # /usr/local/var/numa on macos (homebrew prefix),
+                              # %PROGRAMDATA%\numa on windows. Override for
+                              # containerized deploys or tests that can't
+                              # write to the system path.
 
 # [upstream]
 # mode = "forward"                              # "forward" (default) — relay to upstream
