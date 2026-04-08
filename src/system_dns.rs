@@ -1421,8 +1421,7 @@ fn trust_ca_linux(ca_path: &std::path::Path) -> Result<(), String> {
     })?;
 
     let dest = std::path::Path::new(store.anchor_dir).join(store.anchor_file);
-    std::fs::copy(ca_path, &dest)
-        .map_err(|e| format!("copy CA to {}: {}", dest.display(), e))?;
+    std::fs::copy(ca_path, &dest).map_err(|e| format!("copy CA to {}: {}", dest.display(), e))?;
 
     run_refresh(store.name, store.refresh_install)?;
     eprintln!("  Trusted Numa CA system-wide ({})", store.name);
@@ -1439,10 +1438,7 @@ fn untrust_ca_linux() -> Result<(), String> {
     match std::fs::remove_file(&dest) {
         Ok(()) => {
             let _ = run_refresh(store.name, store.refresh_uninstall);
-            eprintln!(
-                "  Removed Numa CA from system trust store ({})",
-                store.name
-            );
+            eprintln!("  Removed Numa CA from system trust store ({})", store.name);
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(_) => {} // best-effort uninstall
