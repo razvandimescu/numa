@@ -4,10 +4,16 @@
 #
 # Mirrors src/system_dns.rs::trust_ca_macos / untrust_ca_macos by running
 # the same `security` shell commands against a fixture cert with a unique
-# CN. Designed to coexist with a running production numa: refuses to run
-# if a real "Numa Local CA" cert is already present in System.keychain,
-# and uses by-hash deletion (so it cannot accidentally touch a production
-# CA even in the unlikely event the bail-out check is bypassed).
+# CN. Safe to run alongside a production numa install:
+#
+#   - Test cert CN = "Numa Local CA Test <pid-ts>", always strictly longer
+#     than the production CN "Numa Local CA". `security find-certificate -c`
+#     does substring matching, so the test's search for $TEST_CN can never
+#     match the production cert (the search term is longer than the prod CN).
+#   - All deletes use `delete-certificate -Z <hash>`, which only touches the
+#     cert with that exact hash. Production and test certs have different
+#     hashes by construction (different key material), so the delete cannot
+#     reach the production cert even if a CN search somehow returned both.
 #
 # Mutates the System keychain (briefly). Cleans up on success or interrupt.
 # Requires sudo for `security add-trusted-cert` and `delete-certificate`.
@@ -27,15 +33,11 @@ GREEN="\033[32m"; RED="\033[31m"; RESET="\033[0m"
 PROD_CN="Numa Local CA"
 KEYCHAIN="/Library/Keychains/System.keychain"
 
-# Refuse to run if a real Numa CA is installed. The test cert has a unique
-# CN that can never collide, but failing closed protects a dogfood install.
+# Notice if production numa is already installed. We proceed regardless —
+# see header for why coexistence is safe (unique CN + by-hash deletion).
 if security find-certificate -c "$PROD_CN" "$KEYCHAIN" >/dev/null 2>&1; then
-    printf "${RED}refuse:${RESET} a '%s' cert is already in %s.\n" "$PROD_CN" "$KEYCHAIN"
-    echo "  This is your production numa CA. To avoid any chance of touching it,"
-    echo "  this test refuses to run. Either:"
-    echo "    sudo numa uninstall   # then rerun this test, then reinstall"
-    echo "  or accept that the macOS path is covered by manual smoke instead."
-    exit 1
+    echo "  note: production '$PROD_CN' detected — proceeding alongside (test cert can't touch it)"
+    echo
 fi
 
 # Unique CN ensures the test cert can never collide with production.
