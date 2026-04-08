@@ -4,14 +4,15 @@ pkgbase = numa-git
 	pkgrel = 1
 	url = https://github.com/razvandimescu/numa
 	arch = x86_64
-	arch = aarch64
 	license = MIT
+	options = !lto
 	makedepends = cargo
 	makedepends = git
 	depends = gcc-libs
 	depends = glibc
 	provides = numa
 	conflicts = numa
+	backup = etc/numa.toml
 	source = numa::git+https://github.com/razvandimescu/numa.git
 	sha256sums = SKIP
 

@@ -35,50 +35,44 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # We test both standard PC (x86_64) and ARM64 (aarch64) architectures.
-        arch: [x86_64, aarch64]
+        arch: [x86_64]
     steps:
       - name: Checkout code
         uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
-
-      # QEMU allows us to run ARM64 containers on x86_64 GitHub runners.
-      - name: Set up QEMU
-        if: matrix.arch == 'aarch64'
-        uses: docker/setup-qemu-action@68827325e0b33c7199eb31dd4e31fbe9023e06e3 # v3.0.0
 
       - name: Build and Test Package
         timeout-minutes: 60
         env:
           AUR_PKGNAME: ${{ secrets.AUR_PACKAGE_NAME }}
         run: |
-          # Select the appropriate Arch Linux image for the architecture.
-          if [ "${{ matrix.arch }}" = "x86_64" ]; then
-            IMAGE="archlinux:latest"
-          else
-            IMAGE="agners/archlinuxarm:latest"
-          fi
-
           # We use a temporary directory to avoid Docker permission issues with the workspace.
           mkdir -p build-dir
           cp PKGBUILD build-dir/
 
-          docker run --rm -v $PWD/build-dir:/pkg -w /pkg $IMAGE /bin/bash -c "
+          docker run --rm -v $PWD/build-dir:/pkg -w /pkg archlinux:latest /bin/bash -c "
             # ARCH LINUX SECURITY REQUIREMENT:
             # 'makepkg' (the tool that builds Arch packages) refuses to run as root for safety.
             # We must create a standard user and give them sudo access.
-            useradd -m builduser
-            chown -R builduser:builduser /pkg
 
             # Install build-time dependencies.
             # 'base-devel' includes essential tools like gcc, make, and binutils.
-            pacman -Syu --noconfirm --needed base-devel cargo git sudo cargo-audit
+            # Install 'rust' directly to avoid the interactive virtual-package
+            # prompt for 'cargo' on current Arch images.
+            pacman -Syu --noconfirm --needed base-devel rust git sudo cargo-audit
+
+            useradd -m builduser
+            chown -R builduser:builduser /pkg
 
             # Allow the build user to install dependencies during the build process.
             echo 'builduser ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builduser
 
+            # Fetch the source tree first so pkgver() and cargo-audit have a
+            # real Cargo.lock to inspect.
+            sudo -u builduser makepkg -o --nobuild --nocheck --nodeps --noprepare
+
             # SECURITY AUDIT:
             # Fail early if any dependencies have known security vulnerabilities.
-            sudo -u builduser cargo audit
+            sudo -u builduser sh -lc 'cd /pkg/src/numa && cargo audit'
 
             # BUILD & TEST:
             # 'makepkg -s' will:

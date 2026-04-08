@@ -4,13 +4,15 @@ _pkgname=numa
 pkgver=0.10.1.r0.g0000000 # Placeholder — pkgver() rewrites this on each makepkg run
 pkgrel=1
 pkgdesc="Portable DNS resolver in Rust — .numa local domains, ad blocking, developer overrides, DNS-over-HTTPS"
-arch=('x86_64' 'aarch64')
+arch=('x86_64')
 url="https://github.com/razvandimescu/numa"
 license=('MIT')
+options=('!lto')
 depends=('gcc-libs' 'glibc')
 makedepends=('cargo' 'git')
 provides=("$_pkgname")
 conflicts=("$_pkgname")
+backup=('etc/numa.toml')
 source=("$_pkgname::git+$url.git")
 sha256sums=('SKIP')
 
