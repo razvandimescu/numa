@@ -13,6 +13,13 @@ use time::{Duration, OffsetDateTime};
 const CA_VALIDITY_DAYS: i64 = 3650; // 10 years
 const CERT_VALIDITY_DAYS: i64 = 365; // 1 year
 
+/// Common Name on Numa's local CA. Referenced by trust-store helpers
+/// (`security`, `certutil`) when locating the cert for removal.
+pub const CA_COMMON_NAME: &str = "Numa Local CA";
+
+/// Filename of the CA certificate inside the data dir.
+pub const CA_FILE_NAME: &str = "ca.pem";
+
 /// Collect all service + LAN peer names and regenerate the TLS cert.
 pub fn regenerate_tls(ctx: &ServerCtx) {
     let tls = match &ctx.tls_config {
@@ -67,7 +74,7 @@ pub fn build_tls_config(
 
 fn ensure_ca(dir: &Path) -> crate::Result<(rcgen::Certificate, KeyPair)> {
     let ca_key_path = dir.join("ca.key");
-    let ca_cert_path = dir.join("ca.pem");
+    let ca_cert_path = dir.join(CA_FILE_NAME);
 
     if ca_key_path.exists() && ca_cert_path.exists() {
         let key_pem = std::fs::read_to_string(&ca_key_path)?;
@@ -86,7 +93,7 @@ fn ensure_ca(dir: &Path) -> crate::Result<(rcgen::Certificate, KeyPair)> {
     let mut params = CertificateParams::default();
     params
         .distinguished_name
-        .push(DnType::CommonName, "Numa Local CA");
+        .push(DnType::CommonName, CA_COMMON_NAME);
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
     params.not_before = OffsetDateTime::now_utc();

@@ -906,7 +906,7 @@ async fn remove_route(
 }
 
 async fn serve_ca(State(ctx): State<Arc<ServerCtx>>) -> Result<impl IntoResponse, StatusCode> {
-    let ca_path = ctx.data_dir.join("ca.pem");
+    let ca_path = ctx.data_dir.join(crate::tls::CA_FILE_NAME);
     let bytes = tokio::task::spawn_blocking(move || std::fs::read(ca_path))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
