@@ -547,7 +547,7 @@ fn enable_dnscache() {
 }
 
 /// True if the backup map has at least one real upstream (non-loopback, non-stub).
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn backup_has_real_upstream_windows(
     interfaces: &std::collections::HashMap<String, WindowsInterfaceDns>,
 ) -> bool {
@@ -1558,6 +1558,42 @@ Wireless LAN adapter Wi-Fi:
         // One real entry → useful
         map.insert("Tailscale".into(), vec!["192.168.1.1".into()]);
         assert!(backup_has_real_upstream_macos(&map));
+    }
+
+    #[test]
+    fn windows_backup_filters_loopback() {
+        use std::collections::HashMap;
+        let mut map: HashMap<String, WindowsInterfaceDns> = HashMap::new();
+
+        // Empty backup → no real upstream
+        assert!(!backup_has_real_upstream_windows(&map));
+
+        // All-loopback backup → still no real upstream (the bug case)
+        map.insert(
+            "Wi-Fi".into(),
+            WindowsInterfaceDns {
+                dhcp: false,
+                servers: vec!["127.0.0.1".into()],
+            },
+        );
+        map.insert(
+            "Ethernet".into(),
+            WindowsInterfaceDns {
+                dhcp: false,
+                servers: vec!["::1".into(), "0.0.0.0".into()],
+            },
+        );
+        assert!(!backup_has_real_upstream_windows(&map));
+
+        // One real entry alongside loopback → useful
+        map.insert(
+            "Ethernet 2".into(),
+            WindowsInterfaceDns {
+                dhcp: false,
+                servers: vec!["192.168.1.1".into()],
+            },
+        );
+        assert!(backup_has_real_upstream_windows(&map));
     }
 
     #[test]
