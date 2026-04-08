@@ -1080,14 +1080,23 @@ fn install_service_macos() -> Result<(), String> {
     std::fs::write(PLIST_DEST, plist)
         .map_err(|e| format!("failed to write {}: {}", PLIST_DEST, e))?;
 
-    // Load the service first so numa is listening before DNS redirect
+    // Modern launchctl API: explicitly tear down any existing in-memory
+    // state, then bootstrap fresh from the on-disk plist. The deprecated
+    // `load -w` returns exit 0 even when it cannot actually reload (label
+    // already in launchd state), silently leaving the daemon running a
+    // stale binary path after `numa install` rewrites the plist on disk —
+    // which is exactly what `brew upgrade numa` does.
+    let _ = std::process::Command::new("launchctl")
+        .args(["bootout", "system", PLIST_DEST])
+        .status();
+
     let status = std::process::Command::new("launchctl")
-        .args(["load", "-w", PLIST_DEST])
+        .args(["bootstrap", "system", PLIST_DEST])
         .status()
         .map_err(|e| format!("failed to run launchctl: {}", e))?;
 
     if !status.success() {
-        return Err("launchctl load failed".to_string());
+        return Err("launchctl bootstrap failed".to_string());
     }
 
     // Wait for numa to be ready before redirecting DNS
@@ -1100,7 +1109,7 @@ fn install_service_macos() -> Result<(), String> {
     if !api_up {
         // Service failed to start — don't redirect DNS to a dead endpoint
         let _ = std::process::Command::new("launchctl")
-            .args(["unload", PLIST_DEST])
+            .args(["bootout", "system", PLIST_DEST])
             .status();
         return Err(
             "numa service did not start (port 53 may be in use). Service unloaded.".to_string(),
@@ -1128,22 +1137,25 @@ fn uninstall_service_macos() -> Result<(), String> {
         eprintln!("  warning: failed to restore system DNS: {}", e);
     }
 
-    // Remove plist first so service won't restart on boot even if unload fails
-    if let Err(e) = std::fs::remove_file(PLIST_DEST) {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            return Err(format!("failed to remove {}: {}", PLIST_DEST, e));
+    // Bootout the service from launchd's in-memory state BEFORE removing
+    // the plist. The modern API needs the file path as the specifier;
+    // doing this in the wrong order would leave the service loaded in
+    // memory until reboot. (Deprecated `unload -w` had the same issue.)
+    let bootout_status = std::process::Command::new("launchctl")
+        .args(["bootout", "system", PLIST_DEST])
+        .status();
+    if let Ok(s) = bootout_status {
+        if !s.success() {
+            eprintln!(
+                "  warning: launchctl bootout returned non-zero (service may not have been loaded)"
+            );
         }
     }
 
-    // Unload the service
-    let status = std::process::Command::new("launchctl")
-        .args(["unload", "-w", PLIST_DEST])
-        .status();
-    if let Ok(s) = status {
-        if !s.success() {
-            eprintln!(
-                "  warning: launchctl unload returned non-zero (service may still be running)"
-            );
+    // Remove plist so the service won't restart on boot
+    if let Err(e) = std::fs::remove_file(PLIST_DEST) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            return Err(format!("failed to remove {}: {}", PLIST_DEST, e));
         }
     }
 
