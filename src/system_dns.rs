@@ -6,6 +6,13 @@ fn is_loopback_or_stub(addr: &str) -> bool {
     matches!(addr, "127.0.0.1" | "127.0.0.53" | "0.0.0.0" | "::1" | "")
 }
 
+/// Load a JSON backup file as `T`, returning `None` if the file is missing
+/// or unreadable (rather than erroring — callers fall back to a fresh capture).
+#[cfg(any(target_os = "macos", windows))]
+fn load_backup<T: serde::de::DeserializeOwned>(path: &std::path::Path) -> Option<T> {
+    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+}
+
 /// A conditional forwarding rule: domains matching `suffix` are forwarded to `upstream`.
 #[derive(Debug, Clone)]
 pub struct ForwardingRule {
@@ -572,9 +579,7 @@ fn install_windows() -> Result<(), String> {
     // Preserve an existing useful backup rather than overwriting it with
     // numa-managed state (which would be self-referential after uninstall).
     let existing: Option<std::collections::HashMap<String, WindowsInterfaceDns>> =
-        std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|json| serde_json::from_str(&json).ok());
+        load_backup(&path);
     let has_useful_existing = existing
         .as_ref()
         .map(backup_has_real_upstream_windows)
@@ -831,10 +836,7 @@ fn install_macos() -> Result<(), String> {
     // If a useful backup already exists (at least one non-loopback upstream),
     // preserve it — overwriting would destroy the original DNS state when
     // re-installing on top of a numa-managed configuration.
-    let existing_backup: Option<HashMap<String, Vec<String>>> =
-        std::fs::read_to_string(backup_path())
-            .ok()
-            .and_then(|json| serde_json::from_str(&json).ok());
+    let existing_backup: Option<HashMap<String, Vec<String>>> = load_backup(&backup_path());
     let has_useful_existing = existing_backup
         .as_ref()
         .map(backup_has_real_upstream_macos)
