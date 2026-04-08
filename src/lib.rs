@@ -98,8 +98,8 @@ fn daemon_data_dir() -> std::path::PathBuf {
     #[cfg(target_os = "linux")]
     {
         std::path::PathBuf::from(resolve_linux_data_dir(
-            std::path::Path::new(LEGACY_LINUX_DATA_DIR).exists(),
-            std::path::Path::new(FHS_LINUX_DATA_DIR).exists(),
+            std::path::Path::new("/usr/local/var/numa").exists(),
+            std::path::Path::new("/var/lib/numa").exists(),
         ))
     }
     #[cfg(target_os = "macos")]
@@ -109,22 +109,14 @@ fn daemon_data_dir() -> std::path::PathBuf {
     }
 }
 
-#[cfg(any(target_os = "linux", test))]
-const FHS_LINUX_DATA_DIR: &str = "/var/lib/numa";
-#[cfg(any(target_os = "linux", test))]
-const LEGACY_LINUX_DATA_DIR: &str = "/usr/local/var/numa";
-
-/// Pure path-decision logic for Linux. Returns the FHS-compliant default
-/// for fresh installs, or the legacy pre-v0.10.1 path if data already
-/// lives there (so users don't lose their CA cert on upgrade). Extracted
-/// as a pure function so the migration logic is unit-testable without
-/// touching the real filesystem.
+/// Extracted as a pure function so the migration logic is unit-testable
+/// without touching the real filesystem.
 #[cfg(any(target_os = "linux", test))]
 fn resolve_linux_data_dir(legacy_exists: bool, fhs_exists: bool) -> &'static str {
     if legacy_exists && !fhs_exists {
-        LEGACY_LINUX_DATA_DIR
+        "/usr/local/var/numa"
     } else {
-        FHS_LINUX_DATA_DIR
+        "/var/lib/numa"
     }
 }
 
@@ -134,27 +126,22 @@ mod tests {
 
     #[test]
     fn linux_data_dir_fresh_install_uses_fhs() {
-        // No data anywhere → fresh install gets the FHS path.
         assert_eq!(resolve_linux_data_dir(false, false), "/var/lib/numa");
     }
 
     #[test]
     fn linux_data_dir_upgrading_install_keeps_legacy() {
-        // Pre-v0.10.1 install: legacy path has data, FHS path doesn't yet.
-        // Migration must keep using legacy so the user doesn't lose their CA.
+        // Migration must keep legacy so the user doesn't lose their CA on upgrade.
         assert_eq!(resolve_linux_data_dir(true, false), "/usr/local/var/numa");
     }
 
     #[test]
     fn linux_data_dir_after_migration_uses_fhs() {
-        // Both paths exist (e.g., user manually copied data to FHS path).
-        // Prefer FHS since the legacy path is no longer the canonical home.
         assert_eq!(resolve_linux_data_dir(true, true), "/var/lib/numa");
     }
 
     #[test]
     fn linux_data_dir_only_fhs_uses_fhs() {
-        // Only FHS path has data — straightforward fresh-FHS case.
         assert_eq!(resolve_linux_data_dir(false, true), "/var/lib/numa");
     }
 }
