@@ -44,7 +44,7 @@ jobs:
       # QEMU allows us to run ARM64 containers on x86_64 GitHub runners.
       - name: Set up QEMU
         if: matrix.arch == 'aarch64'
-        uses: docker/setup-qemu-action@6882732593b27c7f95a044d559b586a46371a68e # v3.0.0
+        uses: docker/setup-qemu-action@68827325e0b33c7199eb31dd4e31fbe9023e06e3 # v3.0.0
 
       - name: Build and Test Package
         timeout-minutes: 60

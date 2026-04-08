@@ -1,7 +1,7 @@
 # Maintainer: razvandimescu <razvan@dimescu.com>
 pkgname=numa-git
 _pkgname=numa
-pkgver=0.9.1.r0.g1234abc # Updated by pkgver()
+pkgver=0.10.1.r0.g0000000 # Placeholder — pkgver() rewrites this on each makepkg run
 pkgrel=1
 pkgdesc="Portable DNS resolver in Rust — .numa local domains, ad blocking, developer overrides, DNS-over-HTTPS"
 arch=('x86_64' 'aarch64')
@@ -24,8 +24,10 @@ pkgver() {
 
 prepare() {
   cd "$srcdir/$_pkgname"
-  # Patch hardcoded paths to match Arch Linux standard (/usr/bin)
-  sed -i 's|/usr/local/bin/numa|/usr/bin/numa|g' src/system_dns.rs
+  # numa v0.10.1+ uses FHS-compliant paths on Linux by default
+  # (/var/lib/numa for data, journalctl for logs), so no source
+  # patching is needed. The earlier sed targeted /usr/local/bin/numa,
+  # which only appears in a comment in current main.
   export RUSTUP_TOOLCHAIN=stable
   cargo fetch --locked
 }
@@ -45,11 +47,14 @@ check() {
 package() {
   cd "$srcdir/$_pkgname"
   install -Dm755 "target/release/$_pkgname" "$pkgdir/usr/bin/$_pkgname"
-  
-  # Install service file with patched path
-  sed 's|ExecStart=/usr/local/bin/numa|ExecStart=/usr/bin/numa /etc/numa.toml|g' numa.service > numa.service.patched
+
+  # numa.service uses {{exe_path}} as a placeholder substituted by
+  # `numa install` at runtime via replace_exe_path(). For an AUR
+  # package install (no `numa install` step), we substitute it
+  # statically here so systemd gets a real ExecStart path.
+  sed 's|{{exe_path}}|/usr/bin/numa /etc/numa.toml|g' numa.service > numa.service.patched
   install -Dm644 "numa.service.patched" "$pkgdir/usr/lib/systemd/system/numa.service"
-  
+
   install -Dm644 "numa.toml" "$pkgdir/etc/numa.toml"
   install -Dm644 "LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }
