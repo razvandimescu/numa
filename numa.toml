@@ -2,6 +2,12 @@
 bind_addr = "0.0.0.0:53"
 api_port = 5380
 # api_bind_addr = "127.0.0.1"  # default; set to "0.0.0.0" for LAN dashboard access
+# data_dir = "/var/lib/numa"  # where numa stores TLS CA and cert material
+                              # Defaults: /var/lib/numa on linux (FHS),
+                              # /usr/local/var/numa on macos (homebrew prefix),
+                              # %PROGRAMDATA%\numa on windows. Override for
+                              # containerized deploys or tests that can't
+                              # write to the system path.
 
 # [upstream]
 # mode = "forward"                              # "forward" (default) — relay to upstream
@@ -82,6 +88,14 @@ tld = "numa"
 # [dnssec]
 # enabled = false             # opt-in: verify chain of trust from root KSK
 # strict = false              # true = SERVFAIL on bogus signatures
+
+# DNS-over-TLS listener (RFC 7858) — encrypted DNS on port 853
+# [dot]
+# enabled = false             # opt-in: accept DoT queries
+# port = 853                  # standard DoT port
+# bind_addr = "0.0.0.0"       # IPv4 or IPv6; unspecified binds all interfaces
+# cert_path = "/etc/numa/dot.crt"  # PEM cert; omit to use self-signed (proxy CA if available)
+# key_path = "/etc/numa/dot.key"   # PEM private key; must be set together with cert_path
 
 # LAN service discovery via mDNS (disabled by default — no network traffic unless enabled)
 # [lan]

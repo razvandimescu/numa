@@ -204,10 +204,23 @@ async fn main() -> numa::Result<()> {
 
     let forwarding_rules = system_dns.forwarding_rules;
 
+    // Resolve data_dir from config, falling back to the platform default.
+    // Used for TLS CA storage below and stored on ServerCtx for runtime use.
+    let resolved_data_dir = config
+        .server
+        .data_dir
+        .clone()
+        .unwrap_or_else(numa::data_dir);
+
     // Build initial TLS config before ServerCtx (so ArcSwap is ready at construction)
     let initial_tls = if config.proxy.enabled && config.proxy.tls_port > 0 {
         let service_names = service_store.names();
-        match numa::tls::build_tls_config(&config.proxy.tld, &service_names) {
+        match numa::tls::build_tls_config(
+            &config.proxy.tld,
+            &service_names,
+            Vec::new(),
+            &resolved_data_dir,
+        ) {
             Ok(tls_config) => Some(ArcSwap::from(tls_config)),
             Err(e) => {
                 log::warn!("TLS setup failed, HTTPS proxy disabled: {}", e);
@@ -248,7 +261,7 @@ async fn main() -> numa::Result<()> {
         config_path: resolved_config_path,
         config_found,
         config_dir: numa::config_dir(),
-        data_dir: numa::data_dir(),
+        data_dir: resolved_data_dir,
         tls_config: initial_tls,
         upstream_mode: resolved_mode,
         root_hints,
@@ -370,6 +383,9 @@ async fn main() -> numa::Result<()> {
             );
         }
     }
+    if config.dot.enabled {
+        row("DoT", g, &format!("tls://:{}", config.dot.port));
+    }
     if config.lan.enabled {
         row("LAN", g, "mDNS (_numa._tcp.local)");
     }
@@ -474,6 +490,15 @@ async fn main() -> numa::Result<()> {
         let lan_config = config.lan.clone();
         tokio::spawn(async move {
             numa::lan::start_lan_discovery(lan_ctx, &lan_config).await;
+        });
+    }
+
+    // Spawn DNS-over-TLS listener (RFC 7858)
+    if config.dot.enabled {
+        let dot_ctx = Arc::clone(&ctx);
+        let dot_config = config.dot.clone();
+        tokio::spawn(async move {
+            numa::dot::start_dot(dot_ctx, &dot_config).await;
         });
     }
 

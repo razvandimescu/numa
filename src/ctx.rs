@@ -62,24 +62,21 @@ pub struct ServerCtx {
     pub dnssec_strict: bool,
 }
 
-pub async fn handle_query(
-    mut buffer: BytePacketBuffer,
+/// Transport-agnostic DNS resolution. Runs the full pipeline (overrides, blocklist,
+/// cache, upstream, DNSSEC) and returns the serialized response in a buffer.
+/// Callers use `.filled()` to get the response bytes without heap allocation.
+/// Callers are responsible for parsing the incoming buffer into a `DnsPacket`
+/// (and logging parse errors) before calling this function.
+pub async fn resolve_query(
+    query: DnsPacket,
     src_addr: SocketAddr,
     ctx: &ServerCtx,
-) -> crate::Result<()> {
+) -> crate::Result<BytePacketBuffer> {
     let start = Instant::now();
-
-    let query = match DnsPacket::from_buffer(&mut buffer) {
-        Ok(packet) => packet,
-        Err(e) => {
-            warn!("{} | PARSE ERROR | {}", src_addr, e);
-            return Ok(());
-        }
-    };
 
     let (qname, qtype) = match query.questions.first() {
         Some(q) => (q.name.clone(), q.qtype),
-        None => return Ok(()),
+        None => return Err("empty question section".into()),
     };
 
     // Pipeline: overrides -> .tld interception -> blocklist -> local zones -> cache -> upstream
@@ -306,17 +303,17 @@ pub async fn handle_query(
         response.resources.len(),
     );
 
+    // Serialize response
+    // TODO: TC bit is UDP-specific; DoT connections could carry up to 65535 bytes.
+    // Once BytePacketBuffer supports larger buffers, skip truncation for TCP/TLS.
     let mut resp_buffer = BytePacketBuffer::new();
     if response.write(&mut resp_buffer).is_err() {
-        // Response too large for UDP — set TC bit and send header + question only
+        // Response too large — set TC bit and send header + question only
         debug!("response too large, setting TC bit for {}", qname);
         let mut tc_response = DnsPacket::response_from(&query, response.header.rescode);
         tc_response.header.truncated_message = true;
-        let mut tc_buffer = BytePacketBuffer::new();
-        tc_response.write(&mut tc_buffer)?;
-        ctx.socket.send_to(tc_buffer.filled(), src_addr).await?;
-    } else {
-        ctx.socket.send_to(resp_buffer.filled(), src_addr).await?;
+        resp_buffer = BytePacketBuffer::new();
+        tc_response.write(&mut resp_buffer)?;
     }
 
     // Record stats and query log
@@ -339,6 +336,30 @@ pub async fn handle_query(
         dnssec,
     });
 
+    Ok(resp_buffer)
+}
+
+/// Handle a DNS query received over UDP. Thin wrapper around resolve_query.
+pub async fn handle_query(
+    mut buffer: BytePacketBuffer,
+    src_addr: SocketAddr,
+    ctx: &ServerCtx,
+) -> crate::Result<()> {
+    let query = match DnsPacket::from_buffer(&mut buffer) {
+        Ok(packet) => packet,
+        Err(e) => {
+            warn!("{} | PARSE ERROR | {}", src_addr, e);
+            return Ok(());
+        }
+    };
+    match resolve_query(query, src_addr, ctx).await {
+        Ok(resp_buffer) => {
+            ctx.socket.send_to(resp_buffer.filled(), src_addr).await?;
+        }
+        Err(e) => {
+            warn!("{} | RESOLVE ERROR | {}", src_addr, e);
+        }
+    }
     Ok(())
 }
 
