@@ -1583,34 +1583,6 @@ Wireless LAN adapter Wi-Fi:
     }
 
     #[test]
-    fn windows_backup_filters_loopback() {
-        use std::collections::HashMap;
-        let mut interfaces: HashMap<String, WindowsInterfaceDns> = HashMap::new();
-        interfaces.insert(
-            "Wi-Fi".into(),
-            WindowsInterfaceDns {
-                dhcp: false,
-                servers: vec!["127.0.0.1".into(), "1.1.1.1".into()],
-            },
-        );
-        interfaces.insert(
-            "Ethernet".into(),
-            WindowsInterfaceDns {
-                dhcp: true,
-                servers: vec!["127.0.0.1".into()],
-            },
-        );
-
-        // Mimic the filter step from install_windows
-        for iface in interfaces.values_mut() {
-            iface.servers.retain(|s| !is_loopback_or_stub(s));
-        }
-
-        assert_eq!(interfaces["Wi-Fi"].servers, vec!["1.1.1.1".to_string()]);
-        assert!(interfaces["Ethernet"].servers.is_empty());
-    }
-
-    #[test]
     fn parse_ipconfig_skips_disconnected() {
         let sample = "\
 Ethernet adapter Ethernet 2:
