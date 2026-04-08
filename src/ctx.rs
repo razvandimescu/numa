@@ -18,6 +18,7 @@ use crate::cache::{DnsCache, DnssecStatus};
 use crate::config::{UpstreamMode, ZoneMap};
 use crate::forward::{forward_query, Upstream};
 use crate::header::ResultCode;
+use crate::health::HealthMeta;
 use crate::lan::PeerStore;
 use crate::override_store::OverrideStore;
 use crate::packet::DnsPacket;
@@ -60,6 +61,15 @@ pub struct ServerCtx {
     pub inflight: Mutex<InflightMap>,
     pub dnssec_enabled: bool,
     pub dnssec_strict: bool,
+    /// Cached health metadata (version, hostname, DoT config, CA
+    /// fingerprint, features). Shared between the main and mobile
+    /// API `/health` handlers. Built once at startup in `main.rs`.
+    pub health_meta: HealthMeta,
+    /// CA certificate in PEM form, cached at startup. `None` if no
+    /// TLS-using feature is enabled and the CA hasn't been generated.
+    /// Used by `/ca.pem`, `/mobileconfig`, and `/ca.mobileconfig`
+    /// handlers to avoid per-request disk I/O on the hot path.
+    pub ca_pem: Option<String>,
 }
 
 /// Transport-agnostic DNS resolution. Runs the full pipeline (overrides, blocklist,

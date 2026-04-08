@@ -592,8 +592,19 @@ async fn flush_cache_domain(
     StatusCode::NO_CONTENT
 }
 
-async fn health() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "status": "ok" }))
+/// Enriched `/health` handler shared between the main API and the mobile API.
+///
+/// Returns the cached `HealthMeta` assembled with live fields (LAN IP,
+/// uptime). Backward compatible with the previous minimal response in
+/// that `status` is still the first field and `"ok"` is still the value.
+/// The iOS companion app's `HealthInfo` Swift struct decodes the full
+/// response; any HTTP client asserting only on `"status"` keeps working.
+pub async fn health(State(ctx): State<Arc<ServerCtx>>) -> Json<crate::health::HealthResponse> {
+    let lan_ip = Some(*ctx.lan_ip.lock().unwrap());
+    Json(crate::health::HealthResponse::build(
+        &ctx.health_meta,
+        lan_ip,
+    ))
 }
 
 // --- Blocking handlers ---
@@ -905,12 +916,8 @@ async fn remove_route(
     }
 }
 
-async fn serve_ca(State(ctx): State<Arc<ServerCtx>>) -> Result<impl IntoResponse, StatusCode> {
-    let ca_path = ctx.data_dir.join(crate::tls::CA_FILE_NAME);
-    let bytes = tokio::task::spawn_blocking(move || std::fs::read(ca_path))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .map_err(|_| StatusCode::NOT_FOUND)?;
+pub async fn serve_ca(State(ctx): State<Arc<ServerCtx>>) -> Result<impl IntoResponse, StatusCode> {
+    let pem = ctx.ca_pem.as_deref().ok_or(StatusCode::NOT_FOUND)?;
     Ok((
         [
             (header::CONTENT_TYPE, "application/x-pem-file"),
@@ -920,7 +927,7 @@ async fn serve_ca(State(ctx): State<Arc<ServerCtx>>) -> Result<impl IntoResponse
             ),
             (header::CACHE_CONTROL, "public, max-age=86400"),
         ],
-        bytes,
+        pem.to_string(),
     ))
 }
 
@@ -996,6 +1003,8 @@ mod tests {
             inflight: Mutex::new(std::collections::HashMap::new()),
             dnssec_enabled: false,
             dnssec_strict: false,
+            health_meta: crate::health::HealthMeta::test_fixture(),
+            ca_pem: None,
         })
     }
 

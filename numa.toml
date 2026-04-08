@@ -102,3 +102,22 @@ tld = "numa"
 # enabled = true              # discover other Numa instances via mDNS (_numa._tcp.local)
 # broadcast_interval_secs = 30
 # peer_timeout_secs = 90
+
+# Mobile API — persistent HTTP listener serving read-only routes
+# (/health, /ca.pem, /mobileconfig, /ca.mobileconfig) on a LAN-reachable
+# port. Consumed by the iOS/Android companion apps for discovery and
+# profile fetching, and by `numa setup-phone` for QR-based onboarding.
+#
+# Opt-in because the listener binds to the LAN by default. None of the
+# exposed routes are cryptographically sensitive (no private keys, no
+# state mutations, all idempotent GETs), but enabling it does add a new
+# listener to any device on the LAN that scans port 8765.
+#
+# Safe for home LANs. Think twice before enabling on untrusted LANs
+# (office Wi-Fi, coffee shops, etc.) — an attacker on the same network
+# could run a competing Numa instance that shadows yours via mDNS and
+# trick companion apps into installing their profile instead of yours.
+[mobile]
+enabled = true                # opt-in to the mobile API listener
+# port = 8765                 # default; matches Discovery.swift defaultAPIPort
+# bind_addr = "0.0.0.0"       # default; set to "127.0.0.1" for localhost-only

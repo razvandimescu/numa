@@ -381,6 +381,8 @@ mod tests {
             inflight: Mutex::new(HashMap::new()),
             dnssec_enabled: false,
             dnssec_strict: false,
+            health_meta: crate::health::HealthMeta::test_fixture(),
+            ca_pem: None,
         });
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

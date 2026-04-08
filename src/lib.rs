@@ -8,7 +8,10 @@ pub mod dnssec;
 pub mod dot;
 pub mod forward;
 pub mod header;
+pub mod health;
 pub mod lan;
+pub mod mobile_api;
+pub mod mobileconfig;
 pub mod override_store;
 pub mod packet;
 pub mod proxy;
@@ -25,6 +28,20 @@ pub mod tls;
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// Detect the machine hostname via the `hostname` command. Returns the
+/// full hostname (e.g., `macbook-pro.local`), or `"numa"` if the command
+/// fails. Call sites that need the short form (e.g., mDNS instance
+/// names) should truncate at the first `.`.
+pub fn hostname() -> String {
+    std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|h| h.trim().to_string())
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| "numa".to_string())
+}
 
 /// Shared config directory for persistent data (services.json, etc).
 /// Unix users: ~/.config/numa/

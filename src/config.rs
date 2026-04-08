@@ -31,6 +31,8 @@ pub struct Config {
     pub dnssec: DnssecConfig,
     #[serde(default)]
     pub dot: DotConfig,
+    #[serde(default)]
+    pub mobile: MobileConfig,
 }
 
 #[derive(Deserialize)]
@@ -409,6 +411,53 @@ fn default_dot_port() -> u16 {
     853
 }
 fn default_dot_bind_addr() -> String {
+    "0.0.0.0".to_string()
+}
+
+/// Configuration for the mobile API — a persistent HTTP listener that
+/// serves a read-only subset of routes (`/health`, `/ca.pem`,
+/// `/mobileconfig`, `/ca.mobileconfig`) on a LAN-reachable port, for
+/// consumption by the iOS/Android companion apps.
+///
+/// Unlike the main API (port 5380, localhost-only by default, supports
+/// state-mutating routes), the mobile API is safe to expose on the LAN
+/// because every route is idempotent and read-only.
+#[derive(Deserialize, Clone)]
+pub struct MobileConfig {
+    /// If true, spawn the mobile API listener at startup. **Default false.**
+    /// Opt-in because the listener binds to the LAN by default and exposes
+    /// a few read-only endpoints to any device on the same network (`/health`,
+    /// `/ca.pem`, `/mobileconfig`, `/ca.mobileconfig`). None of those are
+    /// cryptographically sensitive (the CA private key is never served),
+    /// but users should enable this explicitly rather than have a new
+    /// LAN-reachable port appear after an upgrade.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Port for the mobile API. Default 8765.
+    #[serde(default = "default_mobile_port")]
+    pub port: u16,
+    /// Bind address for the mobile API. Default "0.0.0.0" (all interfaces)
+    /// so phones on the LAN can reach it. Set to "127.0.0.1" to restrict
+    /// to localhost — useful if you're running behind another front-end.
+    #[serde(default = "default_mobile_bind_addr")]
+    pub bind_addr: String,
+}
+
+impl Default for MobileConfig {
+    fn default() -> Self {
+        MobileConfig {
+            enabled: false,
+            port: default_mobile_port(),
+            bind_addr: default_mobile_bind_addr(),
+        }
+    }
+}
+
+fn default_mobile_port() -> u16 {
+    8765
+}
+
+fn default_mobile_bind_addr() -> String {
     "0.0.0.0".to_string()
 }
 

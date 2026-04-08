@@ -9,6 +9,7 @@ use crate::buffer::BytePacketBuffer;
 use crate::config::LanConfig;
 use crate::ctx::ServerCtx;
 use crate::header::DnsHeader;
+use crate::health::HealthMeta;
 use crate::question::{DnsQuestion, QueryType};
 
 // --- Constants ---
@@ -17,6 +18,18 @@ const MDNS_ADDR: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 251);
 const MDNS_PORT: u16 = 5353;
 const SERVICE_TYPE: &str = "_numa._tcp.local";
 const MDNS_TTL: u32 = 120;
+
+// TXT record key prefixes (including the trailing `=`). Shared between
+// the sender (`build_announcement`) and the receiver (`parse_mdns_response`)
+// to prevent drift — both sides match on the same literal, not on two
+// independent string constants that could diverge.
+const TXT_SERVICES: &str = "services=";
+const TXT_ID: &str = "id=";
+const TXT_VERSION: &str = "version=";
+const TXT_API_PORT: &str = "api_port=";
+const TXT_PROTO: &str = "proto=";
+const TXT_DOT_PORT: &str = "dot_port=";
+const TXT_CA_FP: &str = "ca_fp=";
 
 // --- Peer Store ---
 
@@ -97,14 +110,16 @@ pub fn detect_lan_ip() -> Option<Ipv4Addr> {
     }
 }
 
+/// Short hostname for mDNS instance names (`<short>._numa._tcp.local`).
+/// Truncates at the first `.` so `macbook-pro.local` becomes `macbook-pro`.
+/// Uses the shared `crate::hostname()` helper as the source.
 fn get_hostname() -> String {
-    std::process::Command::new("hostname")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|h| h.trim().split('.').next().unwrap_or("numa").to_string())
-        .filter(|h| !h.is_empty())
-        .unwrap_or_else(|| "numa".to_string())
+    crate::hostname()
+        .split('.')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("numa")
+        .to_string()
 }
 
 /// Generate a per-process instance ID for self-filtering on multi-instance hosts
@@ -168,13 +183,22 @@ pub async fn start_lan_discovery(ctx: Arc<ServerCtx>, config: &LanConfig) {
                     .map(|e| (e.name.clone(), e.target_port))
                     .collect()
             };
-            if services.is_empty() {
-                continue;
-            }
+            // Note: we always announce ourselves, even when the
+            // services list is empty. The announcement still carries
+            // the mobile API port + version + CA fingerprint in TXT,
+            // which is what the iOS companion app browses for via
+            // NWBrowser on `_numa._tcp.local`. Other Numa peers
+            // receive these empty-services announcements too and
+            // correctly ignore them in parse_mdns_response (the
+            // receiver only processes when services is non-empty).
             let current_ip = *sender_ctx.lan_ip.lock().unwrap();
-            if let Ok(pkt) =
-                build_announcement(&sender_hostname, current_ip, &services, &sender_instance_id)
-            {
+            if let Ok(pkt) = build_announcement(
+                &sender_hostname,
+                current_ip,
+                &services,
+                &sender_instance_id,
+                &sender_ctx.health_meta,
+            ) {
                 let _ = sender_socket.send_to(pkt.filled(), dest).await;
             }
         }
@@ -240,6 +264,7 @@ fn build_announcement(
     ip: Ipv4Addr,
     services: &[(String, u16)],
     inst_id: &str,
+    meta: &HealthMeta,
 ) -> crate::Result<BytePacketBuffer> {
     let mut buf = BytePacketBuffer::new();
     let instance_name = format!("{}._numa._tcp.local", hostname);
@@ -260,7 +285,11 @@ fn build_announcement(
     patch_rdlen(&mut buf, rdlen_pos, rdata_start)?;
 
     // SRV: <instance>._numa._tcp.local → <hostname>.local
-    // Port in SRV is informational; actual service ports are in TXT
+    // Port = mobile API port, which is what the iOS companion app resolves
+    // the SRV record for. Legacy Numa peers don't read the SRV port (see
+    // parse_mdns_response — it only uses TXT services= for peer discovery),
+    // so changing the SRV port from "first service's port" to the mobile
+    // API port is backwards compatible.
     write_record_header(
         &mut buf,
         &instance_name,
@@ -273,11 +302,13 @@ fn build_announcement(
     let rdata_start = buf.pos();
     buf.write_u16(0)?; // priority
     buf.write_u16(0)?; // weight
-    buf.write_u16(services.first().map(|(_, p)| *p).unwrap_or(0))?; // first service port for SRV display
+    buf.write_u16(meta.api_port)?; // mobile API port, for iOS companion app
     buf.write_qname(&host_local)?;
     patch_rdlen(&mut buf, rdlen_pos, rdata_start)?;
 
-    // TXT: services + instance ID for self-filtering
+    // TXT: legacy peer-discovery entries (services, id) + enriched entries
+    // for the iOS companion app (version, api_port, proto, dot_port, ca_fp).
+    // All in one TXT RRset per mDNS convention.
     write_record_header(
         &mut buf,
         &instance_name,
@@ -293,8 +324,21 @@ fn build_announcement(
         .map(|(name, port)| format!("{}:{}", name, port))
         .collect::<Vec<_>>()
         .join(",");
-    write_txt_string(&mut buf, &format!("services={}", svc_str))?;
-    write_txt_string(&mut buf, &format!("id={}", inst_id))?;
+    // Legacy peer-discovery entries (consumed by parse_mdns_response)
+    write_txt_string(&mut buf, &format!("{}{}", TXT_SERVICES, svc_str))?;
+    write_txt_string(&mut buf, &format!("{}{}", TXT_ID, inst_id))?;
+    // Enriched entries (consumed by the iOS/Android companion apps)
+    write_txt_string(&mut buf, &format!("{}{}", TXT_VERSION, meta.version))?;
+    write_txt_string(&mut buf, &format!("{}{}", TXT_API_PORT, meta.api_port))?;
+    if meta.dot_enabled {
+        write_txt_string(&mut buf, &format!("{}dot", TXT_PROTO))?;
+        write_txt_string(&mut buf, &format!("{}{}", TXT_DOT_PORT, meta.dot_port))?;
+    } else {
+        write_txt_string(&mut buf, &format!("{}plain", TXT_PROTO))?;
+    }
+    if let Some(fp) = &meta.ca_fingerprint_sha256 {
+        write_txt_string(&mut buf, &format!("{}{}", TXT_CA_FP, fp))?;
+    }
     patch_rdlen(&mut buf, rdlen_pos, rdata_start)?;
 
     // A: <hostname>.local → IP
@@ -408,7 +452,7 @@ fn parse_mdns_response(data: &[u8]) -> Option<MdnsAnnouncement> {
                         break;
                     }
                     if let Ok(txt) = std::str::from_utf8(&data[pos..pos + txt_len]) {
-                        if let Some(val) = txt.strip_prefix("services=") {
+                        if let Some(val) = txt.strip_prefix(TXT_SERVICES) {
                             let svcs: Vec<(String, u16)> = val
                                 .split(',')
                                 .filter_map(|s| {
@@ -421,7 +465,7 @@ fn parse_mdns_response(data: &[u8]) -> Option<MdnsAnnouncement> {
                             if !svcs.is_empty() {
                                 txt_services = Some(svcs);
                             }
-                        } else if let Some(id) = txt.strip_prefix("id=") {
+                        } else if let Some(id) = txt.strip_prefix(TXT_ID) {
                             peer_instance_id = Some(id.to_string());
                         }
                     }
