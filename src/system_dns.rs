@@ -1278,102 +1278,213 @@ fn run_systemctl(args: &[&str]) -> Result<(), String> {
 
 // --- CA trust management ---
 
+/// One Linux trust-store backend (Debian, Fedora pki, Arch p11-kit).
+#[cfg(target_os = "linux")]
+struct LinuxTrustStore {
+    name: &'static str,
+    anchor_dir: &'static str,
+    anchor_file: &'static str,
+    refresh_install: &'static [&'static str],
+    refresh_uninstall: &'static [&'static str],
+}
+
+// If you change this table, update tests/docker/install-trust.sh to match —
+// it asserts the same paths/commands against real distro images.
+#[cfg(target_os = "linux")]
+const LINUX_TRUST_STORES: &[LinuxTrustStore] = &[
+    // Debian / Ubuntu / Mint
+    LinuxTrustStore {
+        name: "debian",
+        anchor_dir: "/usr/local/share/ca-certificates",
+        anchor_file: "numa-local-ca.crt",
+        refresh_install: &["update-ca-certificates"],
+        refresh_uninstall: &["update-ca-certificates", "--fresh"],
+    },
+    // Fedora / RHEL / CentOS / SUSE (p11-kit via update-ca-trust wrapper)
+    LinuxTrustStore {
+        name: "pki",
+        anchor_dir: "/etc/pki/ca-trust/source/anchors",
+        anchor_file: "numa-local-ca.pem",
+        refresh_install: &["update-ca-trust", "extract"],
+        refresh_uninstall: &["update-ca-trust", "extract"],
+    },
+    // Arch / Manjaro (raw p11-kit)
+    LinuxTrustStore {
+        name: "p11kit",
+        anchor_dir: "/etc/ca-certificates/trust-source/anchors",
+        anchor_file: "numa-local-ca.pem",
+        refresh_install: &["trust", "extract-compat"],
+        refresh_uninstall: &["trust", "extract-compat"],
+    },
+];
+
+#[cfg(target_os = "linux")]
+fn detect_linux_trust_store() -> Option<&'static LinuxTrustStore> {
+    LINUX_TRUST_STORES
+        .iter()
+        .find(|s| std::path::Path::new(s.anchor_dir).is_dir())
+}
+
 fn trust_ca() -> Result<(), String> {
-    let ca_path = crate::data_dir().join("ca.pem");
+    let ca_path = crate::data_dir().join(crate::tls::CA_FILE_NAME);
     if !ca_path.exists() {
         return Err("CA not generated yet — start numa first to create certificates".into());
     }
 
     #[cfg(target_os = "macos")]
-    {
-        let status = std::process::Command::new("security")
-            .args([
-                "add-trusted-cert",
-                "-d",
-                "-r",
-                "trustRoot",
-                "-k",
-                "/Library/Keychains/System.keychain",
-            ])
-            .arg(&ca_path)
-            .status()
-            .map_err(|e| format!("security: {}", e))?;
-        if !status.success() {
-            return Err("security add-trusted-cert failed".into());
-        }
-        eprintln!("  Trusted Numa CA in system keychain");
-    }
-
+    let result = trust_ca_macos(&ca_path);
     #[cfg(target_os = "linux")]
-    {
-        let dest = std::path::Path::new("/usr/local/share/ca-certificates/numa-local-ca.crt");
-        std::fs::copy(&ca_path, dest).map_err(|e| format!("copy CA: {}", e))?;
-        let status = std::process::Command::new("update-ca-certificates")
-            .status()
-            .map_err(|e| format!("update-ca-certificates: {}", e))?;
-        if !status.success() {
-            return Err("update-ca-certificates failed".into());
-        }
-        eprintln!("  Trusted Numa CA system-wide");
-    }
+    let result = trust_ca_linux(&ca_path);
+    #[cfg(windows)]
+    let result = trust_ca_windows(&ca_path);
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    let result = Err::<(), String>("CA trust not supported on this OS".to_string());
 
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        Err("CA trust not supported on this OS".into())
-    }
-
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    Ok(())
+    result
 }
 
 fn untrust_ca() -> Result<(), String> {
-    let ca_path = crate::data_dir().join("ca.pem");
-
     #[cfg(target_os = "macos")]
+    let result = untrust_ca_macos();
+    #[cfg(target_os = "linux")]
+    let result = untrust_ca_linux();
+    #[cfg(windows)]
+    let result = untrust_ca_windows();
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    let result = Ok::<(), String>(());
+
+    result
+}
+
+#[cfg(target_os = "macos")]
+fn trust_ca_macos(ca_path: &std::path::Path) -> Result<(), String> {
+    let status = std::process::Command::new("security")
+        .args([
+            "add-trusted-cert",
+            "-d",
+            "-r",
+            "trustRoot",
+            "-k",
+            "/Library/Keychains/System.keychain",
+        ])
+        .arg(ca_path)
+        .status()
+        .map_err(|e| format!("security: {}", e))?;
+    if !status.success() {
+        return Err("security add-trusted-cert failed".into());
+    }
+    eprintln!("  Trusted Numa CA in system keychain");
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn untrust_ca_macos() -> Result<(), String> {
+    if let Ok(out) = std::process::Command::new("security")
+        .args([
+            "find-certificate",
+            "-c",
+            crate::tls::CA_COMMON_NAME,
+            "-a",
+            "-Z",
+            "/Library/Keychains/System.keychain",
+        ])
+        .output()
     {
-        // Find all Numa CA certs by hash and delete each one
-        if let Ok(out) = std::process::Command::new("security")
-            .args([
-                "find-certificate",
-                "-c",
-                "Numa Local CA",
-                "-a",
-                "-Z",
-                "/Library/Keychains/System.keychain",
-            ])
-            .output()
-        {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            for line in stdout.lines() {
-                if let Some(hash) = line.strip_prefix("SHA-1 hash: ") {
-                    let hash = hash.trim();
-                    let _ = std::process::Command::new("security")
-                        .args([
-                            "delete-certificate",
-                            "-Z",
-                            hash,
-                            "/Library/Keychains/System.keychain",
-                        ])
-                        .output();
-                }
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        for line in stdout.lines() {
+            if let Some(hash) = line.strip_prefix("SHA-1 hash: ") {
+                let hash = hash.trim();
+                let _ = std::process::Command::new("security")
+                    .args([
+                        "delete-certificate",
+                        "-Z",
+                        hash,
+                        "/Library/Keychains/System.keychain",
+                    ])
+                    .output();
             }
         }
-        eprintln!("  Removed Numa CA from system keychain");
     }
+    eprintln!("  Removed Numa CA from system keychain");
+    Ok(())
+}
 
-    #[cfg(target_os = "linux")]
-    {
-        let dest = std::path::Path::new("/usr/local/share/ca-certificates/numa-local-ca.crt");
-        if dest.exists() {
-            let _ = std::fs::remove_file(dest);
-            let _ = std::process::Command::new("update-ca-certificates")
-                .arg("--fresh")
-                .status();
-            eprintln!("  Removed Numa CA from system trust store");
+#[cfg(target_os = "linux")]
+fn trust_ca_linux(ca_path: &std::path::Path) -> Result<(), String> {
+    let store = detect_linux_trust_store().ok_or_else(|| {
+        let names: Vec<&str> = LINUX_TRUST_STORES.iter().map(|s| s.name).collect();
+        format!(
+            "no supported CA trust store found (tried: {}). \
+             Please report at https://github.com/razvandimescu/numa/issues",
+            names.join(", ")
+        )
+    })?;
+
+    let dest = std::path::Path::new(store.anchor_dir).join(store.anchor_file);
+    std::fs::copy(ca_path, &dest)
+        .map_err(|e| format!("copy CA to {}: {}", dest.display(), e))?;
+
+    run_refresh(store.name, store.refresh_install)?;
+    eprintln!("  Trusted Numa CA system-wide ({})", store.name);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn untrust_ca_linux() -> Result<(), String> {
+    let Some(store) = detect_linux_trust_store() else {
+        return Ok(());
+    };
+
+    let dest = std::path::Path::new(store.anchor_dir).join(store.anchor_file);
+    match std::fs::remove_file(&dest) {
+        Ok(()) => {
+            let _ = run_refresh(store.name, store.refresh_uninstall);
+            eprintln!(
+                "  Removed Numa CA from system trust store ({})",
+                store.name
+            );
         }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => {} // best-effort uninstall
     }
+    Ok(())
+}
 
-    let _ = ca_path; // suppress unused warning on other platforms
+#[cfg(target_os = "linux")]
+fn run_refresh(store_name: &str, argv: &[&str]) -> Result<(), String> {
+    let (cmd, args) = argv
+        .split_first()
+        .expect("refresh command must be non-empty");
+    let status = std::process::Command::new(cmd)
+        .args(args)
+        .status()
+        .map_err(|e| format!("{} ({}): {}", cmd, store_name, e))?;
+    if !status.success() {
+        return Err(format!("{} ({}) failed", cmd, store_name));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn trust_ca_windows(ca_path: &std::path::Path) -> Result<(), String> {
+    let status = std::process::Command::new("certutil")
+        .args(["-addstore", "-f", "Root"])
+        .arg(ca_path)
+        .status()
+        .map_err(|e| format!("certutil: {}", e))?;
+    if !status.success() {
+        return Err("certutil -addstore Root failed (run as Administrator?)".into());
+    }
+    eprintln!("  Trusted Numa CA in Windows Root store");
+    Ok(())
+}
+
+#[cfg(windows)]
+fn untrust_ca_windows() -> Result<(), String> {
+    let _ = std::process::Command::new("certutil")
+        .args(["-delstore", "Root", crate::tls::CA_COMMON_NAME])
+        .status();
+    eprintln!("  Removed Numa CA from Windows Root store");
     Ok(())
 }
 
