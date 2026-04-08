@@ -219,7 +219,7 @@ fn discover_linux() -> SystemDnsInfo {
 #[cfg(any(target_os = "linux", test))]
 fn iter_nameservers(content: &str) -> impl Iterator<Item = &str> {
     content.lines().filter_map(|line| {
-        let mut parts = line.trim().split_whitespace();
+        let mut parts = line.split_whitespace();
         (parts.next() == Some("nameserver")).then_some(())?;
         parts.next()
     })
