@@ -103,16 +103,15 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          # Use a PAT (not the default GITHUB_TOKEN) so the resulting
-          # `release: published` event propagates to downstream workflows
-          # like homebrew-bump.yml. Events triggered by GITHUB_TOKEN are
-          # deliberately not propagated by GitHub Actions to prevent
-          # infinite loops; PAT-authored events are the documented escape
-          # hatch. Reusing HOMEBREW_TAP_GITHUB_TOKEN (already a PAT used
-          # by homebrew-bump.yml itself) keeps the secret surface flat.
-          token: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
           generate_release_notes: true
           files: |
             *.tar.gz
             *.zip
             *.sha256
+
+  bump-homebrew:
+    needs: release
+    uses: ./.github/workflows/homebrew-bump.yml
+    with:
+      version: ${{ github.ref_name }}
+    secrets: inherit

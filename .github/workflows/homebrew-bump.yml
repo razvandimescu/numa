@@ -1,8 +1,12 @@
 name: Bump Homebrew Tap
 
 on:
-  release:
-    types: [published]
+  workflow_call:
+    inputs:
+      version:
+        description: 'Version to bump (e.g. 0.10.0 or v0.10.0)'
+        type: string
+        required: true
   workflow_dispatch:
     inputs:
       version:
@@ -20,13 +24,10 @@ jobs:
 
       - name: Determine version
         id: ver
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          if [ "${{ github.event_name }}" = "release" ]; then
-            V="${{ github.event.release.tag_name }}"
-          else
-            V="${{ github.event.inputs.version }}"
-          fi
-          V="${V#v}"
+          V="${INPUT_VERSION#v}"
           echo "version=$V" >> "$GITHUB_OUTPUT"
 
       - name: Fetch sha256 checksums from release assets
