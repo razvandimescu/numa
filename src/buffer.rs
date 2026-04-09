@@ -180,13 +180,7 @@ impl BytePacketBuffer {
     }
 
     /// Write a qname in wire format, parsing RFC 1035 §5.1 text escapes.
-    ///
-    /// Dots are label separators unless escaped as `\.`. `\\` yields a literal
-    /// backslash, and `\DDD` (three decimal digits) yields an arbitrary byte.
-    ///
-    /// Streams directly into the buffer by reserving a length byte, writing
-    /// the label body, then backpatching the length. Zero intermediate
-    /// allocations on the common path.
+    /// See `read_qname` for the escape grammar.
     pub fn write_qname(&mut self, qname: &str) -> Result<()> {
         if qname.is_empty() || qname == "." {
             self.write_u8(0)?;
@@ -369,6 +363,19 @@ mod tests {
     }
 
     #[test]
+    fn write_skips_empty_labels() {
+        // Leading dot — first (empty) label is rolled back.
+        let mut buf = BytePacketBuffer::new();
+        buf.write_qname(".foo.com").unwrap();
+        assert_eq!(&buf.buf[..buf.pos], b"\x03foo\x03com\x00");
+
+        // Consecutive dots — middle empty label is rolled back.
+        let mut buf = BytePacketBuffer::new();
+        buf.write_qname("foo..com").unwrap();
+        assert_eq!(&buf.buf[..buf.pos], b"\x03foo\x03com\x00");
+    }
+
+    #[test]
     fn write_rejects_out_of_range_decimal_escape() {
         let mut buf = BytePacketBuffer::new();
         assert!(buf.write_qname("\\999foo.com").is_err());
@@ -384,6 +391,17 @@ mod tests {
     fn write_rejects_short_decimal_escape() {
         let mut buf = BytePacketBuffer::new();
         assert!(buf.write_qname("\\1").is_err());
+    }
+
+    #[test]
+    fn write_rejects_label_over_63_bytes() {
+        // 64 bytes exceeds the wire-format label cap.
+        let mut buf = BytePacketBuffer::new();
+        assert!(buf.write_qname(&"a".repeat(64)).is_err());
+
+        // 63 bytes is the maximum permitted label length.
+        let mut buf = BytePacketBuffer::new();
+        assert!(buf.write_qname(&"a".repeat(63)).is_ok());
     }
 
     #[test]

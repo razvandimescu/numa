@@ -722,14 +722,10 @@ pub fn verify_ds(ds: &DnsRecord, dnskey: &DnsRecord, owner: &str) -> bool {
 // -- Canonical wire format --
 
 /// Encode a DNS name in canonical wire form per RFC 4034 §6.2:
-/// uncompressed, with all ASCII letters lowercased.
+/// uncompressed, with ASCII letters lowercased.
 ///
-/// Label parsing and RFC 1035 §5.1 escape handling live in
-/// `BytePacketBuffer::write_qname`; this function then walks the emitted
-/// wire bytes once to lowercase label bodies (length bytes stay untouched).
-/// Lowercasing has to happen post-escape-resolution because a decimal
-/// escape like `\065` yields `'A'`, which canonical form must convert
-/// to `'a'`.
+/// Lowercasing happens *after* escape resolution because `\065` yields
+/// `'A'`, which canonical form must convert to `'a'`.
 pub fn name_to_wire(name: &str) -> Vec<u8> {
     let mut buf = BytePacketBuffer::new();
     buf.write_qname(name)
