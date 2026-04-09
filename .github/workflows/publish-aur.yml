@@ -99,7 +99,7 @@ jobs:
         run: |
           mkdir -p ~/.ssh
           # Official AUR Ed25519 fingerprint (prevents Man-in-the-Middle attacks).
-          echo "aur.archlinux.org ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEu46S9S6YfBD5C8GeOBip8Z11+4" >> ~/.ssh/known_hosts
+          echo "aur.archlinux.org ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEuBKrPzbawxA/k2g6NcyV5jmqwJ2s+zpgZGZ7tpLIcN" >> ~/.ssh/known_hosts
 
           # Use ssh-agent to keep the private key in memory rather than writing it to disk.
           eval $(ssh-agent -s)
