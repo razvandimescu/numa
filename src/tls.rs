@@ -40,6 +40,40 @@ pub fn regenerate_tls(ctx: &ServerCtx) {
     }
 }
 
+/// Advisory for TLS-setup failures caused by a non-writable data dir;
+/// `None` if not applicable so the caller can fall back to the raw error.
+pub fn try_data_dir_advisory(err: &crate::Error, data_dir: &Path) -> Option<String> {
+    let io_err = err.downcast_ref::<std::io::Error>()?;
+    if io_err.kind() != std::io::ErrorKind::PermissionDenied {
+        return None;
+    }
+    let o = "\x1b[1;38;2;192;98;58m";
+    let r = "\x1b[0m";
+    Some(format!(
+        "
+{o}Numa{r} — HTTPS proxy disabled: cannot write TLS CA to {}.
+
+  The data directory is not writable by the current user. Numa needs
+  to persist a local Certificate Authority there to serve .numa over
+  HTTPS. DNS resolution and plain-HTTP proxy continue to work.
+
+  Fix — pick one:
+
+    1. Install Numa as the system resolver (sets up a writable data dir):
+
+         sudo numa install       (on Windows, run as Administrator)
+
+    2. Point data_dir at a path you can write.
+       Create ~/.config/numa/numa.toml with:
+
+         [server]
+         data_dir = \"/path/you/can/write\"
+
+",
+        data_dir.display()
+    ))
+}
+
 /// Build a TLS config with a cert covering all provided service names.
 /// Wildcards under single-label TLDs (*.numa) are rejected by browsers,
 /// so we list each service explicitly as a SAN.
@@ -169,4 +203,34 @@ fn generate_service_cert(
     let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_pair.serialize_der()));
 
     Ok((vec![cert_der, ca_der], key_der))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn try_data_dir_advisory_permission_denied() {
+        let err: crate::Error =
+            Box::new(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        let path = PathBuf::from("/usr/local/var/numa");
+        let msg = try_data_dir_advisory(&err, &path).expect("should advise");
+        assert!(msg.contains("HTTPS proxy disabled"));
+        assert!(msg.contains("/usr/local/var/numa"));
+        assert!(msg.contains("numa install"));
+        assert!(msg.contains("data_dir"));
+    }
+
+    #[test]
+    fn try_data_dir_advisory_skips_other_io_kinds() {
+        let err: crate::Error = Box::new(std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert!(try_data_dir_advisory(&err, &PathBuf::from("/x")).is_none());
+    }
+
+    #[test]
+    fn try_data_dir_advisory_skips_non_io_errors() {
+        let err: crate::Error = "rcgen failure".into();
+        assert!(try_data_dir_advisory(&err, &PathBuf::from("/x")).is_none());
+    }
 }

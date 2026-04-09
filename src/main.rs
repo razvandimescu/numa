@@ -223,7 +223,11 @@ async fn main() -> numa::Result<()> {
         ) {
             Ok(tls_config) => Some(ArcSwap::from(tls_config)),
             Err(e) => {
-                log::warn!("TLS setup failed, HTTPS proxy disabled: {}", e);
+                if let Some(advisory) = numa::tls::try_data_dir_advisory(&e, &resolved_data_dir) {
+                    eprint!("{}", advisory);
+                } else {
+                    log::warn!("TLS setup failed, HTTPS proxy disabled: {}", e);
+                }
                 None
             }
         }
@@ -231,8 +235,21 @@ async fn main() -> numa::Result<()> {
         None
     };
 
+    let socket = match UdpSocket::bind(&config.server.bind_addr).await {
+        Ok(s) => s,
+        Err(e) => {
+            if let Some(advisory) =
+                numa::system_dns::try_port53_advisory(&config.server.bind_addr, &e)
+            {
+                eprint!("{}", advisory);
+                std::process::exit(1);
+            }
+            return Err(e.into());
+        }
+    };
+
     let ctx = Arc::new(ServerCtx {
-        socket: UdpSocket::bind(&config.server.bind_addr).await?,
+        socket,
         zone_map: build_zone_map(&config.zones)?,
         cache: RwLock::new(DnsCache::new(
             config.cache.max_entries,
