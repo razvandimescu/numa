@@ -724,14 +724,16 @@ pub fn verify_ds(ds: &DnsRecord, dnskey: &DnsRecord, owner: &str) -> bool {
 /// Encode a DNS name in canonical wire form per RFC 4034 §6.2:
 /// uncompressed, with all ASCII letters lowercased.
 ///
-/// Delegates label parsing and RFC 1035 §5.1 escape handling to
-/// `BytePacketBuffer::write_qname`, then post-processes the emitted bytes
-/// to lowercase label bodies (length bytes stay untouched). This keeps
-/// the escape logic in exactly one place — see #55.
+/// Label parsing and RFC 1035 §5.1 escape handling live in
+/// `BytePacketBuffer::write_qname`; this function then walks the emitted
+/// wire bytes once to lowercase label bodies (length bytes stay untouched).
+/// Lowercasing has to happen post-escape-resolution because a decimal
+/// escape like `\065` yields `'A'`, which canonical form must convert
+/// to `'a'`.
 pub fn name_to_wire(name: &str) -> Vec<u8> {
     let mut buf = BytePacketBuffer::new();
     buf.write_qname(name)
-        .expect("DNSSEC canonical form: name must be a well-formed DNS name");
+        .expect("name_to_wire: input must parse as a valid DNS name");
     let mut wire = buf.filled().to_vec();
 
     let mut i = 0;
@@ -742,9 +744,7 @@ pub fn name_to_wire(name: &str) -> Vec<u8> {
         }
         i += 1;
         let end = i + label_len;
-        for b in &mut wire[i..end] {
-            *b = b.to_ascii_lowercase();
-        }
+        wire[i..end].make_ascii_lowercase();
         i = end;
     }
 
@@ -1499,7 +1499,7 @@ mod tests {
 
     #[test]
     fn name_to_wire_decimal_escape_is_lowercased() {
-        // `\065` is the byte 0x41 ('A'), which canonical form must lowercase to 'a'.
+        // \065 = 'A', must become 'a' in canonical form.
         let wire = name_to_wire("\\065bc.com");
         assert_eq!(wire, vec![3, b'a', b'b', b'c', 3, b'c', b'o', b'm', 0]);
     }
