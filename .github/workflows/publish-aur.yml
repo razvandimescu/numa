@@ -135,6 +135,12 @@ jobs:
             sudo -u builduser makepkg -od && sudo -u builduser makepkg --printsrcinfo > .SRCINFO
           "
 
+          # Reclaim ownership: the in-container 'chown -R builduser:builduser /pkg'
+          # propagates through the bind mount, leaving .git/ owned by the container's
+          # builduser UID. Without this, subsequent 'git config' on the host fails with
+          # "could not lock config file .git/config: Permission denied".
+          sudo chown -R "$(id -u):$(id -g)" .
+
           # Set the commit identity using secrets for security and auditability.
           git config user.name "$AUR_USER"
           git config user.email "$AUR_EMAIL"
