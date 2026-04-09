@@ -131,7 +131,7 @@ jobs:
             chown -R builduser:builduser /pkg
             cd /pkg
             sudo -u builduser git config --global --add safe.directory '*'
-            # "makepkg -od" fetches the source first so pkgver() can calculate the version.
+            # makepkg -od fetches the source first so pkgver() can calculate the version.
             sudo -u builduser makepkg -od && sudo -u builduser makepkg --printsrcinfo > .SRCINFO
           "
 
