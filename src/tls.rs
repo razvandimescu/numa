@@ -40,6 +40,39 @@ pub fn regenerate_tls(ctx: &ServerCtx) {
     }
 }
 
+/// Human-readable diagnostic for TLS data-dir permission failures.
+/// Triggered when numa can't write its local CA to the configured
+/// data dir (typically `/usr/local/var/numa` without root). HTTPS
+/// proxy is disabled; DNS resolution and plain-HTTP proxy keep
+/// working.
+pub fn data_dir_permission_advisory(data_dir: &Path) -> String {
+    let o = "\x1b[1;38;2;192;98;58m"; // bold orange
+    let r = "\x1b[0m";
+    format!(
+        "
+{o}Numa{r} — HTTPS proxy disabled: cannot write TLS CA to {}.
+
+  The data directory is not writable by the current user. Numa needs
+  to persist a local Certificate Authority there to serve .numa over
+  HTTPS. DNS resolution and plain-HTTP proxy continue to work.
+
+  Fix — pick one:
+
+    1. Install Numa as the system resolver (sets up a writable data dir):
+
+         sudo numa install       (on Windows, run as Administrator)
+
+    2. Point data_dir at a path you can write.
+       Create ~/.config/numa/numa.toml with:
+
+         [server]
+         data_dir = \"/path/you/can/write\"
+
+",
+        data_dir.display()
+    )
+}
+
 /// Build a TLS config with a cert covering all provided service names.
 /// Wildcards under single-label TLDs (*.numa) are rejected by browsers,
 /// so we list each service explicitly as a SAN.
