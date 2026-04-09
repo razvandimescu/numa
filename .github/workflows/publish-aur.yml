@@ -132,7 +132,10 @@ jobs:
             cd /pkg
             sudo -u builduser git config --global --add safe.directory '*'
             # makepkg -od fetches the source first so pkgver() can calculate the version.
-            sudo -u builduser makepkg -od && sudo -u builduser makepkg --printsrcinfo > .SRCINFO
+            # --noprepare skips the prepare() function, which invokes cargo and would
+            # otherwise require a full rust toolchain in this metadata-only container.
+            # pkgver() runs before prepare(), so .SRCINFO still gets the correct version.
+            sudo -u builduser makepkg -od --noprepare && sudo -u builduser makepkg --printsrcinfo > .SRCINFO
           "
 
           # Reclaim ownership: the in-container 'chown -R builduser:builduser /pkg'
