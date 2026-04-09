@@ -46,6 +46,60 @@ pub fn discover_system_dns() -> SystemDnsInfo {
     }
 }
 
+/// Advisory for port-53 bind failures (EADDRINUSE or EACCES); `None`
+/// if not applicable so the caller can fall back to the raw error.
+pub fn try_port53_advisory(bind_addr: &str, err: &std::io::Error) -> Option<String> {
+    if !is_port_53(bind_addr) {
+        return None;
+    }
+    let (title, cause) = match err.kind() {
+        std::io::ErrorKind::AddrInUse => (
+            "port 53 is already in use",
+            "Another process is already bound to port 53. On Linux this is\n  \
+             typically systemd-resolved; on Windows, the DNS Client service.",
+        ),
+        std::io::ErrorKind::PermissionDenied => (
+            "permission denied",
+            "Port 53 is privileged — binding it requires root on Linux/macOS\n  \
+             or Administrator on Windows.",
+        ),
+        _ => return None,
+    };
+    let o = "\x1b[1;38;2;192;98;58m"; // bold orange
+    let r = "\x1b[0m";
+    Some(format!(
+        "
+{o}Numa{r} — cannot bind to {bind_addr}: {title}.
+
+  {cause}
+
+  Fix — pick one:
+
+    1. Install Numa as the system resolver (frees port 53):
+
+         sudo numa install       (on Windows, run as Administrator)
+
+    2. Run on a non-privileged port for testing.
+       Create ~/.config/numa/numa.toml with:
+
+         [server]
+         bind_addr = \"127.0.0.1:5354\"
+         api_port  = 5380
+
+       Then run:  numa
+       Test with: dig @127.0.0.1 -p 5354 example.com
+
+"
+    ))
+}
+
+fn is_port_53(bind_addr: &str) -> bool {
+    bind_addr
+        .parse::<SocketAddr>()
+        .map(|s| s.port() == 53)
+        .unwrap_or(false)
+}
+
 #[cfg(target_os = "macos")]
 fn discover_macos() -> SystemDnsInfo {
     use log::{debug, warn};
@@ -1752,5 +1806,44 @@ Wireless LAN adapter Wi-Fi:
         let result = parse_ipconfig_interfaces(sample);
         assert_eq!(result.len(), 1);
         assert!(result.contains_key("Wi-Fi"));
+    }
+
+    #[test]
+    fn try_port53_advisory_addr_in_use() {
+        let err = std::io::Error::from(std::io::ErrorKind::AddrInUse);
+        let msg = try_port53_advisory("0.0.0.0:53", &err).expect("should advise on port 53");
+        assert!(msg.contains("cannot bind to"));
+        assert!(msg.contains("already in use"));
+        assert!(msg.contains("numa install"));
+        assert!(msg.contains("bind_addr"));
+    }
+
+    #[test]
+    fn try_port53_advisory_permission_denied() {
+        let err = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let msg = try_port53_advisory("0.0.0.0:53", &err).expect("should advise on port 53");
+        assert!(msg.contains("cannot bind to"));
+        assert!(msg.contains("permission denied"));
+        assert!(msg.contains("numa install"));
+        assert!(msg.contains("bind_addr"));
+    }
+
+    #[test]
+    fn try_port53_advisory_skips_non_53_ports() {
+        let err = std::io::Error::from(std::io::ErrorKind::AddrInUse);
+        assert!(try_port53_advisory("127.0.0.1:5354", &err).is_none());
+        assert!(try_port53_advisory("[::]:853", &err).is_none());
+    }
+
+    #[test]
+    fn try_port53_advisory_skips_unrelated_error_kinds() {
+        let err = std::io::Error::from(std::io::ErrorKind::NotFound);
+        assert!(try_port53_advisory("0.0.0.0:53", &err).is_none());
+    }
+
+    #[test]
+    fn try_port53_advisory_skips_malformed_bind_addr() {
+        let err = std::io::Error::from(std::io::ErrorKind::AddrInUse);
+        assert!(try_port53_advisory("not-an-address", &err).is_none());
     }
 }

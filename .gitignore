@@ -1,4 +1,5 @@
 /target
+/build-dir
 CLAUDE.md
 docs/
 site/blog/posts/
