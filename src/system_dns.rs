@@ -228,6 +228,9 @@ fn discover_linux() -> SystemDnsInfo {
     let default_upstream = if let Some(ns) = upstream {
         info!("detected system upstream: {}", ns);
         Some(ns)
+    } else if let Some(ns) = resolvectl_dns_server() {
+        info!("detected system upstream via resolvectl: {}", ns);
+        Some(ns)
     } else {
         // Fallback to backup from a previous `numa install`
         let backup = {
