@@ -231,8 +231,23 @@ async fn main() -> numa::Result<()> {
         None
     };
 
+    let socket = match UdpSocket::bind(&config.server.bind_addr).await {
+        Ok(s) => s,
+        Err(e)
+            if e.kind() == std::io::ErrorKind::AddrInUse
+                && numa::system_dns::is_port_53(&config.server.bind_addr) =>
+        {
+            eprint!(
+                "{}",
+                numa::system_dns::port53_conflict_advisory(&config.server.bind_addr)
+            );
+            std::process::exit(1);
+        }
+        Err(e) => return Err(e.into()),
+    };
+
     let ctx = Arc::new(ServerCtx {
-        socket: UdpSocket::bind(&config.server.bind_addr).await?,
+        socket,
         zone_map: build_zone_map(&config.zones)?,
         cache: RwLock::new(DnsCache::new(
             config.cache.max_entries,

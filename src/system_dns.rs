@@ -46,6 +46,70 @@ pub fn discover_system_dns() -> SystemDnsInfo {
     }
 }
 
+/// True if `bind_addr` targets DNS port 53. Used to scope the port-53
+/// conflict advisory — we only want to print the systemd-resolved /
+/// Dnscache hint when the user is actually trying to bind the DNS port.
+pub fn is_port_53(bind_addr: &str) -> bool {
+    bind_addr
+        .parse::<SocketAddr>()
+        .map(|s| s.port() == 53)
+        .unwrap_or(false)
+}
+
+/// Human-readable diagnostic for port-53 bind conflicts. Explains the
+/// likely cause on the current platform and offers two concrete fixes:
+/// install Numa as the system resolver, or test on a non-privileged port.
+pub fn port53_conflict_advisory(bind_addr: &str) -> String {
+    let o = "\x1b[1;38;2;192;98;58m"; // bold orange
+    let r = "\x1b[0m";
+    let mut msg = format!(
+        "\n{o}Numa{r} — cannot bind to {}: port 53 is already in use.\n\n",
+        bind_addr
+    );
+
+    #[cfg(target_os = "linux")]
+    {
+        if is_systemd_resolved_active() {
+            msg.push_str(
+                "  systemd-resolved is holding port 53 via its stub listener\n  \
+                 (127.0.0.53:53), which blocks bind(0.0.0.0:53) on Linux.\n\n",
+            );
+        } else {
+            msg.push_str(
+                "  Another process is holding port 53 on this host.\n  \
+                 Check with:  sudo ss -lntu 'sport = :53'\n\n",
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        msg.push_str("  Windows DNS Client (Dnscache) holds port 53 at the kernel level.\n\n");
+    }
+
+    #[cfg(not(any(target_os = "linux", windows)))]
+    {
+        msg.push_str("  Another process on this host is already bound to port 53.\n\n");
+    }
+
+    msg.push_str("  Fix — pick one:\n\n");
+    msg.push_str("    1. Install Numa as the system resolver (frees port 53):\n");
+    #[cfg(windows)]
+    msg.push_str("         numa install    (run as Administrator)\n\n");
+    #[cfg(not(windows))]
+    msg.push_str("         sudo numa install\n\n");
+
+    msg.push_str("    2. Test without privileges on a non-standard port.\n");
+    msg.push_str("       Create ~/.config/numa/numa.toml with:\n\n");
+    msg.push_str("         [server]\n");
+    msg.push_str("         bind_addr = \"127.0.0.1:5354\"\n");
+    msg.push_str("         api_port  = 5380\n\n");
+    msg.push_str("       Then run:  numa\n");
+    msg.push_str("       Test with: dig @127.0.0.1 -p 5354 example.com\n\n");
+
+    msg
+}
+
 #[cfg(target_os = "macos")]
 fn discover_macos() -> SystemDnsInfo {
     use log::{debug, warn};
@@ -1194,7 +1258,7 @@ fn backup_path_linux() -> std::path::PathBuf {
 }
 
 #[cfg(target_os = "linux")]
-fn is_systemd_resolved_active() -> bool {
+pub fn is_systemd_resolved_active() -> bool {
     std::process::Command::new("systemctl")
         .args(["is-active", "--quiet", "systemd-resolved"])
         .status()
