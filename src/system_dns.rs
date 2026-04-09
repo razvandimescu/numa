@@ -46,11 +46,8 @@ pub fn discover_system_dns() -> SystemDnsInfo {
     }
 }
 
-/// Diagnostic advisory for port-53 bind failures. Returns `Some(msg)`
-/// when `bind_addr` targets port 53 and `err` is a kind we can advise
-/// on (EADDRINUSE — another process holds it; EACCES — non-root on a
-/// privileged port). Returns `None` for non-53 targets or unrelated
-/// error kinds, so the caller can fall back to the raw error.
+/// Advisory for port-53 bind failures (EADDRINUSE or EACCES); `None`
+/// if not applicable so the caller can fall back to the raw error.
 pub fn try_port53_advisory(bind_addr: &str, err: &std::io::Error) -> Option<String> {
     if !is_port_53(bind_addr) {
         return None;

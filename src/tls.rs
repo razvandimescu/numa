@@ -40,15 +40,16 @@ pub fn regenerate_tls(ctx: &ServerCtx) {
     }
 }
 
-/// Human-readable diagnostic for TLS data-dir permission failures.
-/// Triggered when numa can't write its local CA to the configured
-/// data dir (typically `/usr/local/var/numa` without root). HTTPS
-/// proxy is disabled; DNS resolution and plain-HTTP proxy keep
-/// working.
-pub fn data_dir_permission_advisory(data_dir: &Path) -> String {
-    let o = "\x1b[1;38;2;192;98;58m"; // bold orange
+/// Advisory for TLS-setup failures caused by a non-writable data dir;
+/// `None` if not applicable so the caller can fall back to the raw error.
+pub fn try_data_dir_advisory(err: &crate::Error, data_dir: &Path) -> Option<String> {
+    let io_err = err.downcast_ref::<std::io::Error>()?;
+    if io_err.kind() != std::io::ErrorKind::PermissionDenied {
+        return None;
+    }
+    let o = "\x1b[1;38;2;192;98;58m";
     let r = "\x1b[0m";
-    format!(
+    Some(format!(
         "
 {o}Numa{r} — HTTPS proxy disabled: cannot write TLS CA to {}.
 
@@ -70,7 +71,7 @@ pub fn data_dir_permission_advisory(data_dir: &Path) -> String {
 
 ",
         data_dir.display()
-    )
+    ))
 }
 
 /// Build a TLS config with a cert covering all provided service names.
@@ -202,4 +203,34 @@ fn generate_service_cert(
     let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_pair.serialize_der()));
 
     Ok((vec![cert_der, ca_der], key_der))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn try_data_dir_advisory_permission_denied() {
+        let err: crate::Error =
+            Box::new(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        let path = PathBuf::from("/usr/local/var/numa");
+        let msg = try_data_dir_advisory(&err, &path).expect("should advise");
+        assert!(msg.contains("HTTPS proxy disabled"));
+        assert!(msg.contains("/usr/local/var/numa"));
+        assert!(msg.contains("numa install"));
+        assert!(msg.contains("data_dir"));
+    }
+
+    #[test]
+    fn try_data_dir_advisory_skips_other_io_kinds() {
+        let err: crate::Error = Box::new(std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert!(try_data_dir_advisory(&err, &PathBuf::from("/x")).is_none());
+    }
+
+    #[test]
+    fn try_data_dir_advisory_skips_non_io_errors() {
+        let err: crate::Error = "rcgen failure".into();
+        assert!(try_data_dir_advisory(&err, &PathBuf::from("/x")).is_none());
+    }
 }

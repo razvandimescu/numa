@@ -223,14 +223,10 @@ async fn main() -> numa::Result<()> {
         ) {
             Ok(tls_config) => Some(ArcSwap::from(tls_config)),
             Err(e) => {
-                match e.downcast_ref::<std::io::Error>() {
-                    Some(io_err) if io_err.kind() == std::io::ErrorKind::PermissionDenied => {
-                        eprint!(
-                            "{}",
-                            numa::tls::data_dir_permission_advisory(&resolved_data_dir)
-                        );
-                    }
-                    _ => log::warn!("TLS setup failed, HTTPS proxy disabled: {}", e),
+                if let Some(advisory) = numa::tls::try_data_dir_advisory(&e, &resolved_data_dir) {
+                    eprint!("{}", advisory);
+                } else {
+                    log::warn!("TLS setup failed, HTTPS proxy disabled: {}", e);
                 }
                 None
             }
