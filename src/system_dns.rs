@@ -46,28 +46,35 @@ pub fn discover_system_dns() -> SystemDnsInfo {
     }
 }
 
-/// True if `bind_addr` targets DNS port 53. Used to scope the port-53
-/// conflict advisory — we only want to print the systemd-resolved /
-/// Dnscache hint when the user is actually trying to bind the DNS port.
-pub fn is_port_53(bind_addr: &str) -> bool {
-    bind_addr
-        .parse::<SocketAddr>()
-        .map(|s| s.port() == 53)
-        .unwrap_or(false)
-}
-
-/// Human-readable diagnostic for port-53 bind conflicts. Offers two
-/// concrete fixes: install Numa as the system resolver, or bind to a
-/// non-privileged port.
-pub fn port53_conflict_advisory(bind_addr: &str) -> String {
+/// Diagnostic advisory for port-53 bind failures. Returns `Some(msg)`
+/// when `bind_addr` targets port 53 and `err` is a kind we can advise
+/// on (EADDRINUSE — another process holds it; EACCES — non-root on a
+/// privileged port). Returns `None` for non-53 targets or unrelated
+/// error kinds, so the caller can fall back to the raw error.
+pub fn try_port53_advisory(bind_addr: &str, err: &std::io::Error) -> Option<String> {
+    if !is_port_53(bind_addr) {
+        return None;
+    }
+    let (title, cause) = match err.kind() {
+        std::io::ErrorKind::AddrInUse => (
+            "port 53 is already in use",
+            "Another process is already bound to port 53. On Linux this is\n  \
+             typically systemd-resolved; on Windows, the DNS Client service.",
+        ),
+        std::io::ErrorKind::PermissionDenied => (
+            "permission denied",
+            "Port 53 is privileged — binding it requires root on Linux/macOS\n  \
+             or Administrator on Windows.",
+        ),
+        _ => return None,
+    };
     let o = "\x1b[1;38;2;192;98;58m"; // bold orange
     let r = "\x1b[0m";
-    format!(
+    Some(format!(
         "
-{o}Numa{r} — cannot bind to {bind_addr}: port 53 is already in use.
+{o}Numa{r} — cannot bind to {bind_addr}: {title}.
 
-  Another process is already bound to port 53. On Linux this is
-  typically systemd-resolved; on Windows, the DNS Client service.
+  {cause}
 
   Fix — pick one:
 
@@ -86,7 +93,14 @@ pub fn port53_conflict_advisory(bind_addr: &str) -> String {
        Test with: dig @127.0.0.1 -p 5354 example.com
 
 "
-    )
+    ))
+}
+
+fn is_port_53(bind_addr: &str) -> bool {
+    bind_addr
+        .parse::<SocketAddr>()
+        .map(|s| s.port() == 53)
+        .unwrap_or(false)
 }
 
 #[cfg(target_os = "macos")]
@@ -1795,5 +1809,44 @@ Wireless LAN adapter Wi-Fi:
         let result = parse_ipconfig_interfaces(sample);
         assert_eq!(result.len(), 1);
         assert!(result.contains_key("Wi-Fi"));
+    }
+
+    #[test]
+    fn try_port53_advisory_addr_in_use() {
+        let err = std::io::Error::from(std::io::ErrorKind::AddrInUse);
+        let msg = try_port53_advisory("0.0.0.0:53", &err).expect("should advise on port 53");
+        assert!(msg.contains("cannot bind to"));
+        assert!(msg.contains("already in use"));
+        assert!(msg.contains("numa install"));
+        assert!(msg.contains("bind_addr"));
+    }
+
+    #[test]
+    fn try_port53_advisory_permission_denied() {
+        let err = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let msg = try_port53_advisory("0.0.0.0:53", &err).expect("should advise on port 53");
+        assert!(msg.contains("cannot bind to"));
+        assert!(msg.contains("permission denied"));
+        assert!(msg.contains("numa install"));
+        assert!(msg.contains("bind_addr"));
+    }
+
+    #[test]
+    fn try_port53_advisory_skips_non_53_ports() {
+        let err = std::io::Error::from(std::io::ErrorKind::AddrInUse);
+        assert!(try_port53_advisory("127.0.0.1:5354", &err).is_none());
+        assert!(try_port53_advisory("[::]:853", &err).is_none());
+    }
+
+    #[test]
+    fn try_port53_advisory_skips_unrelated_error_kinds() {
+        let err = std::io::Error::from(std::io::ErrorKind::NotFound);
+        assert!(try_port53_advisory("0.0.0.0:53", &err).is_none());
+    }
+
+    #[test]
+    fn try_port53_advisory_skips_malformed_bind_addr() {
+        let err = std::io::Error::from(std::io::ErrorKind::AddrInUse);
+        assert!(try_port53_advisory("not-an-address", &err).is_none());
     }
 }
