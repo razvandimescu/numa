@@ -554,6 +554,20 @@ body {
     <div class="tagline">DNS that governs itself</div>
   </div>
   <div style="display:flex;align-items:center;gap:1.2rem;">
+    <div id="phoneSetup" style="position:relative;display:none;">
+      <button class="btn" onclick="togglePhoneSetup()" style="background:var(--bg-surface);color:var(--text-secondary);font-family:var(--font-mono);font-size:0.7rem;padding:0.35rem 0.6rem;border:1px solid var(--border);" title="Set up phone">Phone Setup</button>
+      <div id="phoneSetupPopover" style="display:none;position:absolute;top:calc(100% + 8px);right:0;z-index:100;background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:1.2rem;width:260px;box-shadow:0 4px 20px rgba(0,0,0,0.08);">
+        <div style="font-size:0.7rem;font-weight:600;text-transform:uppercase;letter-spacing:0.1em;color:var(--text-secondary);margin-bottom:0.8rem;">Phone Setup</div>
+        <div id="qrContainer" style="display:flex;justify-content:center;margin-bottom:0.8rem;"></div>
+        <div id="phoneSetupLink" style="display:none;text-align:center;margin-bottom:0.8rem;"></div>
+        <div style="font-family:var(--font-mono);font-size:0.62rem;color:var(--text-dim);line-height:1.6;">
+          1. Scan QR &rarr; allow download<br>
+          2. Settings &rarr; Profile Downloaded &rarr; Install<br>
+          3. Settings &rarr; General &rarr; About &rarr;<br>
+          &nbsp;&nbsp;&nbsp;Certificate Trust Settings &rarr; toggle ON
+        </div>
+      </div>
+    </div>
     <button class="btn" id="pauseBtn" style="background:var(--amber);color:white;font-family:var(--font-mono);font-size:0.7rem;display:none;">Pause 5m</button>
     <button class="btn" id="toggleBtn" onclick="toggleBlocking()" style="background:var(--rose);color:white;font-family:var(--font-mono);font-size:0.7rem;display:none;"></button>
     <div class="status-badge">
@@ -787,6 +801,34 @@ function formatTime(epoch) {
   const d = new Date(epoch * 1000);
   return d.toLocaleTimeString([], { hour12: false });
 }
+
+let mobilePort = 8765;
+function togglePhoneSetup() {
+  const pop = document.getElementById('phoneSetupPopover');
+  const isOpen = pop.style.display !== 'none';
+  pop.style.display = isOpen ? 'none' : 'block';
+  if (!isOpen) {
+    if (window.innerWidth <= 700) {
+      document.getElementById('qrContainer').style.display = 'none';
+      const linkEl = document.getElementById('phoneSetupLink');
+      const host = window.location.hostname;
+      linkEl.style.display = 'block';
+      linkEl.innerHTML = `<a href="http://${host}:${mobilePort}/mobileconfig" style="display:inline-block;padding:0.5rem 1rem;background:var(--amber);color:white;border-radius:6px;text-decoration:none;font-family:var(--font-mono);font-size:0.75rem;">Install Profile</a>`;
+    } else {
+      fetch(API + '/qr').then(r => r.text()).then(svg => {
+        document.getElementById('qrContainer').innerHTML = svg;
+      }).catch(() => {
+        document.getElementById('qrContainer').innerHTML = '<div class="empty-state">Could not load QR</div>';
+      });
+    }
+  }
+}
+document.addEventListener('click', (e) => {
+  const setup = document.getElementById('phoneSetup');
+  if (setup && !setup.contains(e.target)) {
+    document.getElementById('phoneSetupPopover').style.display = 'none';
+  }
+});
 
 function shortSrc(addr) {
   if (!addr) return '';
@@ -1056,6 +1098,14 @@ async function refresh() {
         lanEl.textContent = `LAN on · ${pc} peer${pc !== 1 ? 's' : ''}`;
         lanEl.title = 'mDNS discovery active (_numa._tcp.local)';
       }
+    }
+
+    const phoneSetupEl = document.getElementById('phoneSetup');
+    if (stats.mobile && stats.mobile.enabled) {
+      phoneSetupEl.style.display = '';
+      mobilePort = stats.mobile.port;
+    } else {
+      phoneSetupEl.style.display = 'none';
     }
 
     document.getElementById('overrideCount').textContent = stats.overrides.active;

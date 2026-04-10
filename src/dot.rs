@@ -383,6 +383,8 @@ mod tests {
             dnssec_strict: false,
             health_meta: crate::health::HealthMeta::test_fixture(),
             ca_pem: None,
+            mobile_enabled: false,
+            mobile_port: 8765,
         });
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

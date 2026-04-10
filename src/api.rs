@@ -57,6 +57,7 @@ pub fn router(ctx: Arc<ServerCtx>) -> Router {
         .route("/services/{name}/routes", post(add_route))
         .route("/services/{name}/routes", delete(remove_route))
         .route("/ca.pem", get(serve_ca))
+        .route("/qr", get(serve_qr))
         .route("/fonts/fonts.css", get(serve_fonts_css))
         .route(
             "/fonts/dm-sans-latin.woff2",
@@ -170,7 +171,14 @@ struct StatsResponse {
     overrides: OverrideStats,
     blocking: BlockingStatsResponse,
     lan: LanStatsResponse,
+    mobile: MobileStatsResponse,
     memory: MemoryStats,
+}
+
+#[derive(Serialize)]
+struct MobileStatsResponse {
+    enabled: bool,
+    port: u16,
 }
 
 #[derive(Serialize)]
@@ -550,6 +558,10 @@ async fn stats(State(ctx): State<Arc<ServerCtx>>) -> Json<StatsResponse> {
         lan: LanStatsResponse {
             enabled: ctx.lan_enabled,
             peers: ctx.lan_peers.lock().unwrap().list().len(),
+        },
+        mobile: MobileStatsResponse {
+            enabled: ctx.mobile_enabled,
+            port: ctx.mobile_port,
         },
         memory: MemoryStats {
             cache_bytes,
@@ -931,6 +943,28 @@ pub async fn serve_ca(State(ctx): State<Arc<ServerCtx>>) -> Result<impl IntoResp
     ))
 }
 
+async fn serve_qr(State(ctx): State<Arc<ServerCtx>>) -> Result<impl IntoResponse, StatusCode> {
+    if !ctx.mobile_enabled {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let lan_ip = *ctx.lan_ip.lock().unwrap();
+    let url = format!("http://{}:{}/mobileconfig", lan_ip, ctx.mobile_port);
+    let code = qrcode::QrCode::new(&url).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let svg = code
+        .render::<qrcode::render::svg::Color>()
+        .min_dimensions(180, 180)
+        .dark_color(qrcode::render::svg::Color("#2c2418"))
+        .light_color(qrcode::render::svg::Color("#faf7f2"))
+        .build();
+    Ok((
+        [
+            (header::CONTENT_TYPE, "image/svg+xml"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        svg,
+    ))
+}
+
 async fn serve_fonts_css() -> impl IntoResponse {
     (
         [
@@ -1005,6 +1039,8 @@ mod tests {
             dnssec_strict: false,
             health_meta: crate::health::HealthMeta::test_fixture(),
             ca_pem: None,
+            mobile_enabled: false,
+            mobile_port: 8765,
         })
     }
 
