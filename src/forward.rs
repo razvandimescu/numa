@@ -496,19 +496,15 @@ mod tests {
 
     #[test]
     fn maybe_update_primary_noop_when_same() {
-        let mut pool = UpstreamPool::new(
-            vec![Upstream::Udp("1.2.3.4:53".parse().unwrap())],
-            vec![],
-        );
+        let mut pool =
+            UpstreamPool::new(vec![Upstream::Udp("1.2.3.4:53".parse().unwrap())], vec![]);
         assert!(!pool.maybe_update_primary("1.2.3.4", 53));
     }
 
     #[test]
     fn maybe_update_primary_rejects_invalid_addr() {
-        let mut pool = UpstreamPool::new(
-            vec![Upstream::Udp("1.2.3.4:53".parse().unwrap())],
-            vec![],
-        );
+        let mut pool =
+            UpstreamPool::new(vec![Upstream::Udp("1.2.3.4:53".parse().unwrap())], vec![]);
         assert!(!pool.maybe_update_primary("not-an-ip", 53));
         assert_eq!(pool.preferred().unwrap().to_string(), "1.2.3.4:53");
     }
