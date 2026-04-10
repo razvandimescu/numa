@@ -22,7 +22,7 @@ hyper = { version = "1", features = ["client", "http1", "server"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 http-body-util = "0.1"
 futures = "0.3"
-socket2 = { version = "0.5", features = ["all"] }
+socket2 = { version = "0.6", features = ["all"] }
 rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
 time = "0.3"
 rustls = "0.23"
