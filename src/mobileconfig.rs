@@ -144,8 +144,6 @@ fn build_ca_payload(ca_pem: &str) -> String {
 }
 
 /// Render the `com.apple.dnsSettings.managed` payload dict for Full mode.
-/// Pins the device to Numa as its system resolver over DoT with
-/// `ServerName = "numa.numa"` (must match the DoT cert SAN).
 fn build_dns_payload(lan_ip: Ipv4Addr) -> String {
     format!(
         r#"		<dict>
@@ -160,8 +158,21 @@ fn build_dns_payload(lan_ip: Ipv4Addr) -> String {
 				<key>ServerName</key>
 				<string>numa.numa</string>
 			</dict>
+			<key>OnDemandRules</key>
+			<array>
+				<dict>
+					<key>Action</key>
+					<string>Connect</string>
+					<key>InterfaceTypeMatch</key>
+					<string>WiFi</string>
+				</dict>
+				<dict>
+					<key>Action</key>
+					<string>Disconnect</string>
+				</dict>
+			</array>
 			<key>PayloadDescription</key>
-			<string>Routes all DNS queries through Numa over DNS-over-TLS</string>
+			<string>Routes DNS queries through Numa over DoT when on Wi-Fi</string>
 			<key>PayloadDisplayName</key>
 			<string>Numa DNS-over-TLS</string>
 			<key>PayloadIdentifier</key>
