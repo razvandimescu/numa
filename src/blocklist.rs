@@ -175,8 +175,7 @@ impl BlocklistStore {
 
     pub fn add_to_allowlist(&mut self, domain: &str) {
         let d = domain.to_lowercase();
-        self.allowlist
-            .insert(d.trim_end_matches('.').to_string());
+        self.allowlist.insert(d.trim_end_matches('.').to_string());
     }
 
     pub fn remove_from_allowlist(&mut self, domain: &str) -> bool {
