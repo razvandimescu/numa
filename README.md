@@ -77,6 +77,14 @@ DNSSEC validates the full chain of trust: RRSIG signatures, DNSKEY verification,
 
 ALPN `"dot"` is advertised and enforced in both modes; a handshake with mismatched ALPN is rejected as a cross-protocol confusion defense.
 
+**Phone setup** — point your iPhone or Android at Numa in one step:
+
+```bash
+numa setup-phone
+```
+
+Prints a QR code. Scan it, install the profile, toggle certificate trust — your phone's DNS now routes through Numa over TLS. Requires `[mobile] enabled = true` in `numa.toml`.
+
 ## LAN Discovery
 
 Run Numa on multiple machines. They find each other automatically via mDNS:
@@ -116,6 +124,7 @@ From Machine B: `curl http://api.numa` → proxied to Machine A's port 8000. Ena
 
 ## Learn More
 
+- [Blog: DNS-over-TLS from Scratch in Rust](https://numa.rs/blog/posts/dot-from-scratch.html)
 - [Blog: Implementing DNSSEC from Scratch in Rust](https://numa.rs/blog/posts/dnssec-from-scratch.html)
 - [Blog: I Built a DNS Resolver from Scratch](https://numa.rs/blog/posts/dns-from-scratch.html)
 - [Configuration reference](numa.toml) — all options documented inline
@@ -130,6 +139,7 @@ From Machine B: `curl http://api.numa` → proxied to Machine A's port 8000. Ena
 - [x] DNS-over-TLS listener — encrypted client connections (RFC 7858, ALPN strict)
 - [x] Recursive resolution + DNSSEC — chain-of-trust, NSEC/NSEC3
 - [x] SRTT-based nameserver selection
+- [x] Mobile onboarding — `setup-phone` QR flow, mobile API, mobileconfig profiles
 - [ ] pkarr integration — self-sovereign DNS via Mainline DHT
 - [ ] Global `.numa` names — DHT-backed, no registrar
 

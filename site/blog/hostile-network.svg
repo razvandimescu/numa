@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 330" font-family="'DM Sans', system-ui, sans-serif" font-size="12">
+  <defs>
+    <filter id="shadow" x="-3%" y="-3%" width="106%" height="106%">
+      <feDropShadow dx="0" dy="1" stdDeviation="2" flood-opacity="0.06"/>
+    </filter>
+    <!-- Diagonal hatch for "wasted" UDP timeout regions. Darker warm gray
+         base + slightly darker diagonal stripes at 45°. The stripe pattern
+         is the Gantt convention for "dead/blocked time" — it reads as
+         "this time was thrown away" without needing the legend. -->
+    <pattern id="wasted-hatch" patternUnits="userSpaceOnUse" width="7" height="7" patternTransform="rotate(-45)">
+      <rect width="7" height="7" fill="#8b7f6f"/>
+      <line x1="0" y1="0" x2="0" y2="7" stroke="#3d3427" stroke-width="1.6" opacity="0.38"/>
+    </pattern>
+  </defs>
+
+  <!-- Background -->
+  <rect width="720" height="330" rx="8" fill="#faf7f2"/>
+
+  <!-- Title -->
+  <text x="360" y="32" text-anchor="middle" font-size="15" font-weight="600" fill="#2c2418" font-family="'Instrument Serif', Georgia, serif" letter-spacing="-0.02em">TCP fallback with UDP auto-disable</text>
+  <text x="360" y="50" text-anchor="middle" font-size="11" fill="#a39888">Latency profile on an ISP that blocks outbound UDP:53</text>
+
+  <!-- Legend -->
+  <g transform="translate(160, 70)">
+    <rect width="14" height="12" rx="2" fill="url(#wasted-hatch)"/>
+    <text x="22" y="10" font-size="11" fill="#6b5e4f">UDP timeout — 800 ms wasted</text>
+    <rect x="220" width="14" height="12" rx="2" fill="#c0623a"/>
+    <text x="242" y="10" font-size="11" fill="#6b5e4f">TCP — successful exchange</text>
+  </g>
+
+  <!-- Time axis -->
+  <!-- bar area: x=90 to x=570 (480px), representing 0-1200ms, scale 0.4 px/ms -->
+  <line x1="90" y1="108" x2="570" y2="108" stroke="#d4cbba" stroke-width="1"/>
+  <!-- tick marks -->
+  <line x1="90" y1="106" x2="90" y2="112" stroke="#a39888" stroke-width="1"/>
+  <line x1="210" y1="106" x2="210" y2="112" stroke="#a39888" stroke-width="1"/>
+  <line x1="330" y1="106" x2="330" y2="112" stroke="#a39888" stroke-width="1"/>
+  <line x1="410" y1="106" x2="410" y2="112" stroke="#a39888" stroke-width="1"/>
+  <line x1="530" y1="106" x2="530" y2="112" stroke="#a39888" stroke-width="1"/>
+  <!-- tick labels -->
+  <text x="90" y="102" text-anchor="middle" font-size="9" fill="#a39888" font-family="'JetBrains Mono', monospace">0</text>
+  <text x="210" y="102" text-anchor="middle" font-size="9" fill="#a39888" font-family="'JetBrains Mono', monospace">300</text>
+  <text x="330" y="102" text-anchor="middle" font-size="9" fill="#a39888" font-family="'JetBrains Mono', monospace">600</text>
+  <text x="410" y="102" text-anchor="middle" font-size="9" fill="#a39888" font-family="'JetBrains Mono', monospace">800</text>
+  <text x="530" y="102" text-anchor="middle" font-size="9" fill="#a39888" font-family="'JetBrains Mono', monospace">1100 ms</text>
+
+  <!-- ============ Phase 1: UDP-first (wasted 800ms per query) ============ -->
+
+  <!-- Query 1 -->
+  <text x="82" y="135" text-anchor="end" font-size="11" fill="#6b5e4f">query 1</text>
+  <rect x="90" y="125" width="320" height="16" rx="2" fill="url(#wasted-hatch)"/>
+  <rect x="410" y="125" width="120" height="16" rx="2" fill="#c0623a"/>
+  <text x="540" y="137" font-size="10" fill="#6b5e4f" font-family="'JetBrains Mono', monospace">1,100 ms</text>
+
+  <!-- Query 2 -->
+  <text x="82" y="159" text-anchor="end" font-size="11" fill="#6b5e4f">query 2</text>
+  <rect x="90" y="149" width="320" height="16" rx="2" fill="url(#wasted-hatch)"/>
+  <rect x="410" y="149" width="120" height="16" rx="2" fill="#c0623a"/>
+  <text x="540" y="161" font-size="10" fill="#6b5e4f" font-family="'JetBrains Mono', monospace">1,100 ms</text>
+
+  <!-- Query 3 -->
+  <text x="82" y="183" text-anchor="end" font-size="11" fill="#6b5e4f">query 3</text>
+  <rect x="90" y="173" width="320" height="16" rx="2" fill="url(#wasted-hatch)"/>
+  <rect x="410" y="173" width="120" height="16" rx="2" fill="#c0623a"/>
+  <text x="540" y="185" font-size="10" fill="#6b5e4f" font-family="'JetBrains Mono', monospace">1,100 ms</text>
+
+  <!-- State-change divider -->
+  <line x1="90" y1="206" x2="570" y2="206" stroke="#6b7c4e" stroke-width="1" stroke-dasharray="4 3"/>
+  <rect x="200" y="198" width="260" height="18" rx="9" fill="#faf7f2" stroke="#6b7c4e" stroke-width="1" filter="url(#shadow)"/>
+  <text x="330" y="210" text-anchor="middle" font-size="10" fill="#566540" font-weight="500">3 consecutive failures → UDP auto-disabled</text>
+
+  <!-- ============ Phase 2: TCP-first (UDP skipped) ============ -->
+
+  <!-- Query 4 -->
+  <text x="82" y="235" text-anchor="end" font-size="11" fill="#6b5e4f">query 4</text>
+  <rect x="90" y="225" width="120" height="16" rx="2" fill="#c0623a"/>
+  <text x="220" y="237" font-size="10" fill="#6b5e4f" font-family="'JetBrains Mono', monospace">300 ms</text>
+
+  <!-- Query 5 -->
+  <text x="82" y="259" text-anchor="end" font-size="11" fill="#6b5e4f">query 5</text>
+  <rect x="90" y="249" width="120" height="16" rx="2" fill="#c0623a"/>
+  <text x="220" y="261" font-size="10" fill="#6b5e4f" font-family="'JetBrains Mono', monospace">300 ms</text>
+
+  <!-- Speedup callout -->
+  <g transform="translate(300, 246)">
+    <line x1="0" y1="-10" x2="0" y2="22" stroke="#6b7c4e" stroke-width="1" stroke-dasharray="2 2"/>
+    <text x="10" y="6" font-size="10" fill="#566540" font-style="italic">3.7× faster — no more UDP wait</text>
+  </g>
+
+  <!-- Footer caption -->
+  <text x="360" y="298" text-anchor="middle" font-size="10" fill="#a39888" font-style="italic">The flag resets on network change (LAN IP delta). Switch back to a clean network and UDP is tried again.</text>
+</svg>
