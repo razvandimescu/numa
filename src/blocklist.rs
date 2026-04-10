@@ -95,12 +95,20 @@ impl BlocklistStore {
         }
 
         if let Some(matched) = Self::find_in_set(&domain, &self.allowlist) {
-            let reason = if matched == domain { "exact match in allowlist" } else { "parent domain in allowlist" };
+            let reason = if matched == domain {
+                "exact match in allowlist"
+            } else {
+                "parent domain in allowlist"
+            };
             return BlockCheckResult::allowed(matched, reason);
         }
 
         if let Some(matched) = Self::find_in_set(&domain, &self.domains) {
-            let reason = if matched == domain { "exact match in blocklist" } else { "parent domain in blocklist" };
+            let reason = if matched == domain {
+                "exact match in blocklist"
+            } else {
+                "parent domain in blocklist"
+            };
             return BlockCheckResult::blocked(matched, reason);
         }
 
@@ -229,10 +237,7 @@ mod tests {
 
     fn store_with(domains: &[&str], allowlist: &[&str]) -> BlocklistStore {
         let mut store = BlocklistStore::new();
-        store.swap_domains(
-            domains.iter().map(|s| s.to_string()).collect(),
-            vec![],
-        );
+        store.swap_domains(domains.iter().map(|s| s.to_string()).collect(), vec![]);
         for d in allowlist {
             store.add_to_allowlist(d);
         }
@@ -262,10 +267,7 @@ mod tests {
 
     #[test]
     fn parent_allowlist_unblocks_subdomain() {
-        let store = store_with(
-            &["example.com", "www.example.com"],
-            &["example.com"],
-        );
+        let store = store_with(&["example.com", "www.example.com"], &["example.com"]);
         assert!(!store.is_blocked("example.com"));
         assert!(!store.is_blocked("www.example.com"));
         assert!(!store.is_blocked("sub.deep.example.com"));
