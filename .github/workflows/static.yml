@@ -32,7 +32,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
       - name: Install pandoc
-        run: sudo apt-get install -y pandoc
+        uses: pandoc/actions/setup@v1
       - name: Generate blog HTML
         run: make blog
       - name: Setup Pages
