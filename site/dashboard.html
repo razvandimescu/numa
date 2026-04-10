@@ -797,13 +797,12 @@ function formatTime(epoch) {
   return d.toLocaleTimeString([], { hour12: false });
 }
 
-let qrLoaded = false;
 let mobilePort = 8765;
 function togglePhoneSetup() {
   const pop = document.getElementById('phoneSetupPopover');
   const isOpen = pop.style.display !== 'none';
   pop.style.display = isOpen ? 'none' : 'block';
-  if (!isOpen && !qrLoaded) {
+  if (!isOpen) {
     if (window.innerWidth <= 700) {
       document.getElementById('qrContainer').style.display = 'none';
       const linkEl = document.getElementById('phoneSetupLink');
@@ -813,7 +812,6 @@ function togglePhoneSetup() {
     } else {
       fetch(API + '/qr').then(r => r.text()).then(svg => {
         document.getElementById('qrContainer').innerHTML = svg;
-        qrLoaded = true;
       }).catch(() => {
         document.getElementById('qrContainer').innerHTML = '<div class="empty-state">Could not load QR</div>';
       });
