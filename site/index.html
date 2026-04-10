@@ -189,10 +189,49 @@ p.lead {
 }
 
 /* ===========================
+   TOP NAV
+   =========================== */
+.site-nav {
+  padding: 1.5rem 2rem;
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  position: relative;
+  z-index: 10;
+}
+
+.site-nav a {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  text-decoration: none;
+  transition: color 0.2s ease;
+}
+.site-nav a:hover { color: var(--amber); }
+
+.site-nav .wordmark {
+  font-family: var(--font-display);
+  font-size: 1.4rem;
+  font-weight: 400;
+  color: var(--text-primary);
+  text-transform: none;
+  letter-spacing: -0.02em;
+}
+.site-nav .wordmark:hover { color: var(--amber); }
+
+.site-nav .sep {
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+
+/* ===========================
    HERO
    =========================== */
 .hero {
-  min-height: 100vh;
+  min-height: calc(100vh - 5rem);
   display: flex;
   align-items: center;
   position: relative;
@@ -1158,6 +1197,9 @@ footer .closing {
 @media (max-width: 600px) {
   section { padding: 4rem 0; }
   .container { padding: 0 1.25rem; }
+  .site-nav { padding: 1rem 1.25rem; gap: 1rem; }
+  .site-nav .wordmark { font-size: 1.2rem; }
+  .hero { min-height: calc(100vh - 4rem); }
   .network-grid { grid-template-columns: 1fr; }
   .pipeline { flex-direction: column; align-items: stretch; gap: 0; }
   .pipeline-arrow { transform: rotate(90deg); padding: 0.15rem 0; align-self: center; }
@@ -1170,6 +1212,14 @@ footer .closing {
 <noscript><style>.reveal { opacity: 1 !important; transform: none !important; } .hero .wordmark, .hero .tagline, .hero .description, .hero-actions { opacity: 1 !important; animation: none !important; }</style></noscript>
 </head>
 <body>
+
+<nav class="site-nav">
+  <a href="/" class="wordmark">Numa</a>
+  <span class="sep">/</span>
+  <a href="/blog/">Blog</a>
+  <span class="sep">/</span>
+  <a href="https://github.com/razvandimescu/numa" target="_blank" rel="noopener">GitHub</a>
+</nav>
 
 <!-- ==================== HERO ==================== -->
 <section class="hero">
@@ -1243,6 +1293,8 @@ footer .closing {
           <li>Ad &amp; tracker blocking &mdash; 385K+ domains, zero config</li>
           <li>Recursive resolution &mdash; opt-in, resolve from root nameservers, no upstream needed</li>
           <li>DNSSEC validation &mdash; chain-of-trust + NSEC/NSEC3 denial proofs (RSA, ECDSA, Ed25519)</li>
+          <li>DNS-over-TLS listener &mdash; encrypted DNS for phones and strict clients (RFC 7858 with ALPN defense)</li>
+          <li>Hostile-network resilience &mdash; TCP fallback with UDP auto-disable when ISPs block port 53</li>
           <li>TTL-aware caching (sub-ms lookups)</li>
           <li>Single binary, portable &mdash; macOS, Linux, and Windows</li>
         </ul>
@@ -1261,7 +1313,7 @@ footer .closing {
         </ul>
       </div>
       <div class="layer-card reveal reveal-delay-3">
-        <div class="layer-badge">Coming Next</div>
+        <div class="layer-badge">The Vision</div>
         <h3>Self-Sovereign DNS</h3>
         <ul>
           <li>pkarr integration &mdash; DNS via Mainline DHT, no registrar needed</li>
@@ -1343,6 +1395,14 @@ footer .closing {
             <td class="check">Root hints + full DNSSEC</td>
           </tr>
           <tr>
+            <td>DNSSEC validation</td>
+            <td class="muted">Passthrough</td>
+            <td class="muted">Cloud only</td>
+            <td class="muted">Cloud only</td>
+            <td class="muted">Passthrough</td>
+            <td class="check">Full chain-of-trust</td>
+          </tr>
+          <tr>
             <td>Ad &amp; tracker blocking</td>
             <td class="check">Yes</td>
             <td class="check">Yes</td>
@@ -1397,6 +1457,14 @@ footer .closing {
             <td class="check">Yes</td>
             <td class="cross">No</td>
             <td class="check">Built in (HTTP/2 + rustls)</td>
+          </tr>
+          <tr>
+            <td>DNS-over-TLS listener</td>
+            <td class="cross">No</td>
+            <td class="muted">Cloud only</td>
+            <td class="muted">Cloud only</td>
+            <td class="check">Yes (cert required)</td>
+            <td class="check">Self-signed or BYO</td>
           </tr>
           <tr>
             <td>Conditional forwarding</td>
@@ -1567,11 +1635,14 @@ footer .closing {
         <dt>Resolution Modes</dt>
         <dd>Recursive (iterative from root hints, CNAME chasing, glue extraction) or Forward (DoH / plain UDP)</dd>
 
+        <dt>Listeners</dt>
+        <dd>UDP:53 + TCP:53 (plain DNS), DoT:853 (RFC 7858 + ALPN), HTTP proxy :80 / HTTPS proxy :443, dashboard :5380</dd>
+
         <dt>DNSSEC</dt>
         <dd>Chain-of-trust via ring &mdash; RSA/SHA-256, ECDSA P-256, Ed25519. NSEC/NSEC3 denial proofs. EDNS0 DO bit, 1232-byte payload (DNS Flag Day 2020).</dd>
 
         <dt>Dependencies</dt>
-        <dd>19 runtime crates &mdash; tokio, axum, hyper, ring (DNSSEC), reqwest (DoH), rcgen + rustls (TLS), socket2 (multicast), serde, and more</dd>
+        <dd>A focused set &mdash; tokio, axum, hyper, ring (DNSSEC), reqwest (DoH), rcgen + rustls + tokio-rustls (TLS/DoT), socket2 (multicast), serde. No transitive DNS library.</dd>
 
         <dt>Packet Format</dt>
         <dd>RFC 1035 compliant. EDNS0 OPT pseudo-record. Parses A, AAAA, NS, CNAME, MX, SOA, SRV, HTTPS, DNSKEY, DS, RRSIG, NSEC, NSEC3.</dd>
@@ -1586,7 +1657,7 @@ footer .closing {
 <span class="prompt">$</span> <span class="cmd">curl</span> <span class="flag">-fsSL</span> https://raw.githubusercontent.com/razvandimescu/numa/main/install.sh <span class="flag">|</span> <span class="cmd">sh</span>
 
 <span class="comment"># Run</span>
-<span class="prompt">$</span> <span class="cmd">sudo numa</span>                          <span class="comment"># bind to :53, :80, :5380</span>
+<span class="prompt">$</span> <span class="cmd">sudo numa</span>                          <span class="comment"># bind :53, :80, :443, :853, :5380</span>
 <span class="prompt">$</span> <span class="cmd">dig</span> <span class="flag">@127.0.0.1</span> google.com         <span class="comment"># test resolution</span>
 <span class="prompt">$</span> <span class="cmd">open</span> http://localhost:5380           <span class="comment"># dashboard</span>
 <span class="prompt">$</span> <span class="cmd">curl</span> <span class="flag">-X POST</span> localhost:5380/services \
@@ -1639,16 +1710,28 @@ footer .closing {
         <span class="phase">Phase 7</span>
         <span class="phase-desc">DNSSEC validation &mdash; chain-of-trust, NSEC/NSEC3 denial proofs, RSA + ECDSA + Ed25519</span>
       </div>
-      <div class="roadmap-item phase-teal">
+      <div class="roadmap-item done">
         <span class="phase">Phase 8</span>
+        <span class="phase-desc">Hostile-network resilience &mdash; TCP fallback with UDP auto-disable when ISPs block :53, RFC 7816 query minimization</span>
+      </div>
+      <div class="roadmap-item done">
+        <span class="phase">Phase 9</span>
+        <span class="phase-desc">Windows support &mdash; cross-platform install/uninstall, <code>netsh</code> DNS config, service integration</span>
+      </div>
+      <div class="roadmap-item done">
+        <span class="phase">Phase 10</span>
+        <span class="phase-desc">DNS-over-TLS listener (RFC 7858) &mdash; ALPN enforcement, persistent connections, self-signed or BYO cert</span>
+      </div>
+      <div class="roadmap-item phase-teal">
+        <span class="phase">Phase 11</span>
         <span class="phase-desc">pkarr integration &mdash; self-sovereign DNS via Mainline DHT, no registrar needed</span>
       </div>
       <div class="roadmap-item phase-teal">
-        <span class="phase">Phase 9</span>
+        <span class="phase">Phase 12</span>
         <span class="phase-desc">Global .numa names &mdash; self-publish, DHT-backed, first-come-first-served</span>
       </div>
       <div class="roadmap-item phase-teal">
-        <span class="phase">Phase 10</span>
+        <span class="phase">Phase 13</span>
         <span class="phase-desc">.onion bridge &mdash; human-readable Tor naming via Ed25519 same-key binding</span>
       </div>
     </div>

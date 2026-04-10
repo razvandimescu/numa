@@ -67,6 +67,7 @@ body::before {
   font-weight: 400;
   color: var(--text-primary);
   text-decoration: none;
+  text-transform: none;
   letter-spacing: -0.02em;
 }
 .blog-nav .wordmark:hover { color: var(--amber); }
@@ -167,6 +168,13 @@ body::before {
 <main class="blog-index">
   <h1>Blog</h1>
   <ul class="post-list">
+    <li>
+      <a href="/blog/posts/dot-from-scratch.html">
+        <div class="post-title">DNS-over-TLS from Scratch in Rust</div>
+        <div class="post-desc">Building RFC 7858 on top of rustls — length-prefix framing, ALPN cross-protocol defense, iPhone dogfooding, and two bugs that only the strict clients caught.</div>
+        <div class="post-date">April 2026</div>
+      </a>
+    </li>
     <li>
       <a href="/blog/posts/dnssec-from-scratch.html">
         <div class="post-title">Implementing DNSSEC from Scratch in Rust</div>

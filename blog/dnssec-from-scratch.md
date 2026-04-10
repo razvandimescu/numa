@@ -163,11 +163,11 @@ The fix has three parts:
 
 **TCP fallback.** Every outbound query tries UDP first (800ms timeout). If UDP fails or the response is truncated, retry immediately over TCP. TCP uses a 2-byte length prefix before the DNS message — trivial to implement, and it handles DNSSEC responses that exceed the UDP payload limit.
 
-**UDP auto-disable.** After 3 consecutive UDP failures, flip a global `AtomicBool` and skip UDP entirely — go TCP-first for all queries. This avoids burning 800ms per hop on a network where UDP will never work. The flag resets when the network changes (detected via LAN IP monitoring).
+**UDP auto-disable.** After 3 consecutive UDP failures, flip a global `AtomicBool` and skip UDP entirely — go TCP-first for all queries. The flag resets when the network changes (detected via LAN IP monitoring).
+
+<img src="../hostile-network.svg" alt="Latency profile on a hostile network: queries 1-3 each spend 800ms waiting for a UDP timeout before retrying over TCP, taking 1,100ms total per query. After 3 consecutive failures the UDP auto-disable flag flips, and queries 4+ go TCP-first and complete in 300ms each — 3.7× faster.">
 
 **Query minimization (RFC 7816).** When querying root servers, send only the TLD — `com` instead of `secret-project.example.com`. Root servers handle trillions of queries and are operated by 12 organizations. Minimization reduces what they learn from yours.
-
-The result: on a network that blocks UDP:53, Numa detects the block within the first 3 queries, switches to TCP, and resolves normally at 300-500ms per cold query. Cached queries remain 0ms. No manual config change needed — switch networks and it adapts.
 
 I wouldn't have found this without dogfooding. The code worked perfectly on my home network. It took a real hostile network to expose the assumption that UDP always works.
 
