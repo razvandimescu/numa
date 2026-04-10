@@ -132,19 +132,40 @@ $ numa setup-phone
 
   Numa Phone Setup
 
-  Profile URL: http://192.168.1.16:8765/mobileconfig
+  Profile URL: http://192.168.1.10:8765/mobileconfig
 
-  █▀▀▀▀▀▀▀█▀▀██ ██ ▀█▀▀▀▀▀▀▀█
-  █ █▀▀▀█ █▀▄▀▀▀▀▄▄█ █▀▀▀█ █
-  ...
+  █████████████████████████████████████
+  █████████████████████████████████████
+  ████ ▄▄▄▄▄ ██ ▀█ ▀▀▀▄▀ ▀▀█ ▄▄▄▄▄ ████
+  ████ █   █ █ ▄▀  ▄█▀▄▀█▄▀█ █   █ ████
+  ████ █▄▄▄█ █ ▀▄▄ ▀ █▄▀▀█▀█ █▄▄▄█ ████
+  ████▄▄▄▄▄▄▄█ ▀▄▀▄█▄█ █▄█▄█▄▄▄▄▄▄▄████
+  ████ ▀▄▄▄▄▄█▀ ▀██▄ ▄ ▄▀█▀█ ▄ ▄▄█▀████
+  █████▄▄▀▄▀▄▄█▄ ▀████▀▄▄▀█▀▀▄ ██▀█████
+  ████▄██▄ ▀▄ █ █ █▀█▄▄██ ▄▄▀▄▀▄ █▀████
+  █████ ▀   ▄▀ ▄▀▄  ▄▄▀  ██ ▄▀██▄▀█████
+  ████ ▀▀  █▄█▄▀ ▄ █▄  ▄█▀▄ ▀█▀▀ █▀████
+  ████ ██▀█ ▄▄▀█▄▄██▀▄▀ ▀█▄▀ █▀▄▄▀█████
+  ████▄█▄▄▄▄▄█▀▄█▄█▀▀ ▀██▀ ▄▄▄ ▀   ████
+  ████ ▄▄▄▄▄ █▀▀▀▀  ▄█▀ ▀▄ █▄█ ▄▄▀█████
+  ████ █   █ █ ▄ ██▀▄ ▄▄██  ▄ ▄▄▄██████
+  ████ █▄▄▄█ █▄ ▄▀▀▄▄█▀▄▀▄ ▀▄▀ ▄█ █████
+  ████▄▄▄▄▄▄▄█▄▄█▄▄▄█▄█▄▄██████▄▄██████
+  █████████████████████████████████████
 
   On your iPhone:
     1. Open Camera, point at the QR code, tap the yellow banner
     2. Allow the download when Safari asks
-    3. Settings → "Profile Downloaded" → Install
-    4. Settings → General → About → Certificate Trust Settings
+    3. Open Settings — tap "Profile Downloaded" near the top
+       (or: Settings → General → VPN & Device Management → Numa DNS)
+    4. Tap Install (top right), enter passcode, Install again
+    5. Settings → General → About → Certificate Trust Settings
        Toggle ON "Numa Local CA" — required for DoT to work
 ```
+
+The same QR is available in the dashboard — click "Phone Setup" in the header and the popover renders an SVG QR code pointing at the mobileconfig URL. On mobile viewports it shows a direct download link instead.
+
+<img src="../phone-setup-dashboard.png" alt="Numa dashboard with Phone Setup popover showing QR code and install instructions">
 
 Step 4 is non-negotiable. Even though the CA is bundled in the same profile that installs the DNS settings, iOS still requires the user to explicitly toggle trust in Certificate Trust Settings. It's a deliberate iOS policy to prevent profile-based trust injection — annoying, and correct.
 

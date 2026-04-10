@@ -7,18 +7,19 @@
 # The script:
 #   1. Opens the dashboard in Chrome --app mode (clean, no address bar)
 #   2. Generates DNS traffic (forward, cache hit, blocked)
-#   3. Types "peekm" / "6419" into the Local Services form on camera
-#   4. Shows LAN accessibility badge ("local only" / "LAN")
-#   5. Checks a blocked domain
-#   6. Opens peekm.numa to show the proxy working
-#   7. Records via ffmpeg and converts to optimized GIF
+#   3. Opens Phone Setup QR popover
+#   4. Types "peekm" / "6419" into the Local Services form on camera
+#   5. Shows LAN accessibility badge ("local only" / "LAN")
+#   6. Checks a blocked domain
+#   7. Opens peekm.numa to show the proxy working
+#   8. Records via ffmpeg and converts to optimized GIF
 
 set -euo pipefail
 
 # --------------- Configuration ---------------
 OUTPUT="${1:-assets/hero-demo.gif}"
 PORT=5380
-RECORD_SECONDS=20
+RECORD_SECONDS=24
 VIEWPORT_W=1800
 VIEWPORT_H=1100
 FPS=12
@@ -230,8 +231,16 @@ dig @127.0.0.1 github.com +short > /dev/null 2>&1
 dig @127.0.0.1 ad.doubleclick.net +short > /dev/null 2>&1
 sleep 3
 
-# --------------- Scene 2: Add peekm service via UI (3-7s) ---------------
-log "Scene 2: Adding peekm.numa service..."
+# --------------- Scene 2: Phone Setup popover (3-7s) ---------------
+log "Scene 2: Phone Setup QR popover..."
+run_js "document.querySelector('#phoneSetup button').click();"
+sleep 3
+# Dismiss popover
+run_js "document.getElementById('phoneSetupPopover').style.display = 'none';"
+sleep 1
+
+# --------------- Scene 3: Add peekm service via UI (7-11s) ---------------
+log "Scene 3: Adding peekm.numa service..."
 
 # Services panel is now first — scroll to it
 run_js "
@@ -249,18 +258,18 @@ sleep 0.3
 run_js "document.querySelector('#serviceForm .btn-add').click();"
 sleep 2
 
-# --------------- Scene 3: Open peekm.numa (7-11s) ---------------
-log "Scene 3: Opening peekm.numa in browser..."
+# --------------- Scene 4: Open peekm.numa (11-15s) ---------------
+log "Scene 4: Opening peekm.numa in browser..."
 open "http://peekm.numa/view/peekm/README.md" 2>/dev/null || true
 sleep 4
 
-# --------------- Scene 4: Back to dashboard (11-14s) ---------------
-log "Scene 4: Back to dashboard — LAN badges + LOCAL queries visible..."
+# --------------- Scene 5: Back to dashboard (15-18s) ---------------
+log "Scene 5: Back to dashboard — LAN badges + LOCAL queries visible..."
 osascript -e "tell application \"System Events\" to set frontmost of (first process whose unix id is $CHROME_PID) to true" 2>/dev/null || true
 sleep 3
 
-# --------------- Scene 5: Check Domain blocker (14-17s) ---------------
-log "Scene 5: Check Domain — blocked tracker..."
+# --------------- Scene 6: Check Domain blocker (18-21s) ---------------
+log "Scene 6: Check Domain — blocked tracker..."
 # Scroll down to blocking panel
 run_js "
     var blockPanel = document.getElementById('blockingPanel');
@@ -273,8 +282,8 @@ sleep 0.3
 run_js "document.querySelector('#checkDomainInput').closest('form').querySelector('.btn').click();"
 sleep 2
 
-# --------------- Scene 6: Terminal-style dig overlay (17-20s) ---------------
-log "Scene 6: dig proof overlay..."
+# --------------- Scene 7: Terminal-style dig overlay (21-24s) ---------------
+log "Scene 7: dig proof overlay..."
 DIG_RESULT=$(dig @127.0.0.1 peekm.numa +short 2>/dev/null | head -1)
 run_js "
     var overlay = document.createElement('div');
