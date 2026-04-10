@@ -5,6 +5,7 @@ use log::{debug, trace};
 use ring::digest;
 use ring::signature;
 
+use crate::buffer::BytePacketBuffer;
 use crate::cache::{DnsCache, DnssecStatus};
 use crate::packet::DnsPacket;
 use crate::question::QueryType;
@@ -720,22 +721,29 @@ pub fn verify_ds(ds: &DnsRecord, dnskey: &DnsRecord, owner: &str) -> bool {
 
 // -- Canonical wire format --
 
+/// Encode a DNS name in canonical wire form per RFC 4034 §6.2:
+/// uncompressed, with ASCII letters lowercased.
+///
+/// Lowercasing happens *after* escape resolution because `\065` yields
+/// `'A'`, which canonical form must convert to `'a'`.
 pub fn name_to_wire(name: &str) -> Vec<u8> {
-    let mut wire = Vec::with_capacity(name.len() + 2);
-    if name == "." || name.is_empty() {
-        wire.push(0);
-        return wire;
-    }
-    for label in name.split('.') {
-        if label.is_empty() {
-            continue;
+    let mut buf = BytePacketBuffer::new();
+    buf.write_qname(name)
+        .expect("name_to_wire: input must parse as a valid DNS name");
+    let mut wire = buf.filled().to_vec();
+
+    let mut i = 0;
+    while i < wire.len() {
+        let label_len = wire[i] as usize;
+        if label_len == 0 {
+            break;
         }
-        wire.push(label.len() as u8);
-        for &b in label.as_bytes() {
-            wire.push(b.to_ascii_lowercase());
-        }
+        i += 1;
+        let end = i + label_len;
+        wire[i..end].make_ascii_lowercase();
+        i = end;
     }
-    wire.push(0);
+
     wire
 }
 
@@ -1473,6 +1481,23 @@ mod tests {
             wire,
             vec![7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o', b'm', 0]
         );
+    }
+
+    #[test]
+    fn name_to_wire_escaped_dot_in_label_is_not_a_separator() {
+        // `exa\.mple.com` is two labels: `exa.mple` (8 bytes including the 0x2E) and `com`.
+        let wire = name_to_wire("exa\\.mple.com");
+        assert_eq!(
+            wire,
+            vec![8, b'e', b'x', b'a', b'.', b'm', b'p', b'l', b'e', 3, b'c', b'o', b'm', 0]
+        );
+    }
+
+    #[test]
+    fn name_to_wire_decimal_escape_is_lowercased() {
+        // \065 = 'A', must become 'a' in canonical form.
+        let wire = name_to_wire("\\065bc.com");
+        assert_eq!(wire, vec![3, b'a', b'b', b'c', 3, b'c', b'o', b'm', 0]);
     }
 
     #[test]
