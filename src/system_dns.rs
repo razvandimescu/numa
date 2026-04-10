@@ -2,6 +2,17 @@ use std::net::SocketAddr;
 
 use log::info;
 
+fn print_recursive_hint() {
+    let is_recursive = crate::config::load_config("numa.toml")
+        .map(|c| c.config.upstream.mode == crate::config::UpstreamMode::Recursive)
+        .unwrap_or(false);
+    if !is_recursive {
+        eprintln!("  Want full DNS sovereignty? Add to numa.toml:");
+        eprintln!("    [upstream]");
+        eprintln!("    mode = \"recursive\"\n");
+    }
+}
+
 fn is_loopback_or_stub(addr: &str) -> bool {
     matches!(addr, "127.0.0.1" | "127.0.0.53" | "0.0.0.0" | "::1" | "")
 }
@@ -688,9 +699,7 @@ fn install_windows() -> Result<(), String> {
     } else {
         eprintln!("  Numa will start automatically on next boot.\n");
     }
-    eprintln!("  Want full DNS sovereignty? Add to numa.toml:");
-    eprintln!("    [upstream]");
-    eprintln!("    mode = \"recursive\"\n");
+    print_recursive_hint();
     Ok(())
 }
 
@@ -1181,9 +1190,7 @@ fn install_service_macos() -> Result<(), String> {
     eprintln!("  Numa will auto-start on boot and restart if killed.");
     eprintln!("  Logs: /usr/local/var/log/numa.log");
     eprintln!("  Run 'sudo numa uninstall' to restore original DNS.\n");
-    eprintln!("  Want full DNS sovereignty? Add to numa.toml:");
-    eprintln!("    [upstream]");
-    eprintln!("    mode = \"recursive\"\n");
+    print_recursive_hint();
     Ok(())
 }
 
@@ -1388,9 +1395,7 @@ fn install_service_linux() -> Result<(), String> {
     eprintln!("  Numa will auto-start on boot and restart if killed.");
     eprintln!("  Logs: journalctl -u numa -f");
     eprintln!("  Run 'sudo numa uninstall' to restore original DNS.\n");
-    eprintln!("  Want full DNS sovereignty? Add to numa.toml:");
-    eprintln!("    [upstream]");
-    eprintln!("    mode = \"recursive\"\n");
+    print_recursive_hint();
     Ok(())
 }
 
