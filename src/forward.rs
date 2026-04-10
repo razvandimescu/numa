@@ -106,36 +106,30 @@ pub async fn forward_with_failover(
     srtt: &RwLock<SrttCache>,
     timeout_duration: Duration,
 ) -> Result<DnsPacket> {
-    // Build candidate list: primary (sorted by SRTT) then fallback (config order)
-    let mut candidates: Vec<&Upstream> =
-        Vec::with_capacity(pool.primary.len() + pool.fallback.len());
+    // Build candidate list: primary (sorted by SRTT for UDP) then fallback
+    let mut candidates: Vec<(usize, u64)> = pool
+        .primary
+        .iter()
+        .enumerate()
+        .map(|(i, u)| {
+            let rtt = match u {
+                Upstream::Udp(addr) => srtt.read().unwrap().get(addr.ip()),
+                _ => 0, // DoH: keep config order (stable sort preserves it)
+            };
+            (i, rtt)
+        })
+        .collect();
+    candidates.sort_by_key(|&(_, rtt)| rtt);
 
-    // Sort primary UDP upstreams by SRTT; DoH keeps config order
-    let mut primary_udp_indices: Vec<(usize, u64)> = Vec::new();
-    for (i, u) in pool.primary.iter().enumerate() {
-        if let Upstream::Udp(addr) = u {
-            let rtt = srtt.read().unwrap().get(addr.ip());
-            primary_udp_indices.push((i, rtt));
-        }
-    }
-    primary_udp_indices.sort_by_key(|&(_, rtt)| rtt);
-
-    // Interleave: sorted UDP first, then DoH in config order
-    for &(i, _) in &primary_udp_indices {
-        candidates.push(&pool.primary[i]);
-    }
-    for u in &pool.primary {
-        if matches!(u, Upstream::Doh { .. }) {
-            candidates.push(u);
-        }
-    }
-    for u in &pool.fallback {
-        candidates.push(u);
-    }
+    let all_upstreams: Vec<&Upstream> = candidates
+        .iter()
+        .map(|&(i, _)| &pool.primary[i])
+        .chain(pool.fallback.iter())
+        .collect();
 
     let mut last_err: Option<Box<dyn std::error::Error + Send + Sync>> = None;
 
-    for upstream in &candidates {
+    for upstream in &all_upstreams {
         let start = Instant::now();
         match forward_query(query, upstream, timeout_duration).await {
             Ok(resp) => {

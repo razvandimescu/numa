@@ -129,19 +129,18 @@ async fn main() -> numa::Result<()> {
 
     let root_hints = numa::recursive::parse_root_hints(&config.upstream.root_hints);
 
+    let recursive_pool = || {
+        let dummy = UpstreamPool::new(vec![Upstream::Udp("0.0.0.0:0".parse().unwrap())], vec![]);
+        (dummy, "recursive (root hints)".to_string())
+    };
+
     let (resolved_mode, upstream_auto, pool, upstream_label) = match config.upstream.mode {
         numa::config::UpstreamMode::Auto => {
             info!("auto mode: probing recursive resolution...");
             if numa::recursive::probe_recursive(&root_hints).await {
                 info!("recursive probe succeeded — self-sovereign mode");
-                let dummy =
-                    UpstreamPool::new(vec![Upstream::Udp("0.0.0.0:0".parse().unwrap())], vec![]);
-                (
-                    numa::config::UpstreamMode::Recursive,
-                    false,
-                    dummy,
-                    "recursive (root hints)".to_string(),
-                )
+                let (pool, label) = recursive_pool();
+                (numa::config::UpstreamMode::Recursive, false, pool, label)
             } else {
                 log::warn!("recursive probe failed — falling back to Quad9 DoH");
                 let client = reqwest::Client::builder()
@@ -155,14 +154,8 @@ async fn main() -> numa::Result<()> {
             }
         }
         numa::config::UpstreamMode::Recursive => {
-            let dummy =
-                UpstreamPool::new(vec![Upstream::Udp("0.0.0.0:0".parse().unwrap())], vec![]);
-            (
-                numa::config::UpstreamMode::Recursive,
-                false,
-                dummy,
-                "recursive (root hints)".to_string(),
-            )
+            let (pool, label) = recursive_pool();
+            (numa::config::UpstreamMode::Recursive, false, pool, label)
         }
         numa::config::UpstreamMode::Forward => {
             let addrs = if config.upstream.address.is_empty() {
