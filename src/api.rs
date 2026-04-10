@@ -956,10 +956,13 @@ async fn serve_qr(State(ctx): State<Arc<ServerCtx>>) -> Result<impl IntoResponse
         .dark_color(qrcode::render::svg::Color("#2c2418"))
         .light_color(qrcode::render::svg::Color("#faf7f2"))
         .build();
-    Ok(([
-        (header::CONTENT_TYPE, "image/svg+xml"),
-        (header::CACHE_CONTROL, "no-store"),
-    ], svg))
+    Ok((
+        [
+            (header::CONTENT_TYPE, "image/svg+xml"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        svg,
+    ))
 }
 
 async fn serve_fonts_css() -> impl IntoResponse {
