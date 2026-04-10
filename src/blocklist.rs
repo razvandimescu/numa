@@ -86,12 +86,11 @@ impl BlocklistStore {
                 return false;
             }
         }
-        let domain = domain.to_lowercase();
-        let domain = domain.trim_end_matches('.');
-        if Self::find_in_set(domain, &self.allowlist).is_some() {
+        let domain = Self::normalize(domain);
+        if Self::find_in_set(&domain, &self.allowlist).is_some() {
             return false;
         }
-        Self::find_in_set(domain, &self.domains).is_some()
+        Self::find_in_set(&domain, &self.domains).is_some()
     }
 
     pub fn check(&self, domain: &str) -> BlockCheckResult {
@@ -105,10 +104,9 @@ impl BlocklistStore {
             }
         }
 
-        let domain = domain.to_lowercase();
-        let domain = domain.trim_end_matches('.');
+        let domain = Self::normalize(domain);
 
-        if let Some(matched) = Self::find_in_set(domain, &self.allowlist) {
+        if let Some(matched) = Self::find_in_set(&domain, &self.allowlist) {
             let reason = if matched == domain {
                 "exact match in allowlist"
             } else {
@@ -117,7 +115,7 @@ impl BlocklistStore {
             return BlockCheckResult::allowed(matched, reason);
         }
 
-        if let Some(matched) = Self::find_in_set(domain, &self.domains) {
+        if let Some(matched) = Self::find_in_set(&domain, &self.domains) {
             let reason = if matched == domain {
                 "exact match in blocklist"
             } else {
@@ -127,6 +125,10 @@ impl BlocklistStore {
         }
 
         BlockCheckResult::not_blocked()
+    }
+
+    fn normalize(domain: &str) -> String {
+        domain.to_lowercase().trim_end_matches('.').to_string()
     }
 
     fn find_in_set<'a>(domain: &'a str, set: &HashSet<String>) -> Option<&'a str> {
@@ -174,13 +176,11 @@ impl BlocklistStore {
     }
 
     pub fn add_to_allowlist(&mut self, domain: &str) {
-        let d = domain.to_lowercase();
-        self.allowlist.insert(d.trim_end_matches('.').to_string());
+        self.allowlist.insert(Self::normalize(domain));
     }
 
     pub fn remove_from_allowlist(&mut self, domain: &str) -> bool {
-        let d = domain.to_lowercase();
-        self.allowlist.remove(d.trim_end_matches('.'))
+        self.allowlist.remove(&Self::normalize(domain))
     }
 
     pub fn allowlist(&self) -> Vec<String> {
