@@ -78,12 +78,23 @@ impl BlocklistStore {
     }
 
     pub fn is_blocked(&self, domain: &str) -> bool {
-        self.check(domain).blocked
+        if !self.enabled {
+            return false;
+        }
+        if let Some(until) = self.paused_until {
+            if Instant::now() < until {
+                return false;
+            }
+        }
+        let domain = domain.to_lowercase();
+        let domain = domain.trim_end_matches('.');
+        if Self::find_in_set(domain, &self.allowlist).is_some() {
+            return false;
+        }
+        Self::find_in_set(domain, &self.domains).is_some()
     }
 
     pub fn check(&self, domain: &str) -> BlockCheckResult {
-        let domain = domain.to_lowercase();
-
         if !self.enabled {
             return BlockCheckResult::disabled();
         }
@@ -94,7 +105,10 @@ impl BlocklistStore {
             }
         }
 
-        if let Some(matched) = Self::find_in_set(&domain, &self.allowlist) {
+        let domain = domain.to_lowercase();
+        let domain = domain.trim_end_matches('.');
+
+        if let Some(matched) = Self::find_in_set(domain, &self.allowlist) {
             let reason = if matched == domain {
                 "exact match in allowlist"
             } else {
@@ -103,7 +117,7 @@ impl BlocklistStore {
             return BlockCheckResult::allowed(matched, reason);
         }
 
-        if let Some(matched) = Self::find_in_set(&domain, &self.domains) {
+        if let Some(matched) = Self::find_in_set(domain, &self.domains) {
             let reason = if matched == domain {
                 "exact match in blocklist"
             } else {
@@ -160,11 +174,14 @@ impl BlocklistStore {
     }
 
     pub fn add_to_allowlist(&mut self, domain: &str) {
-        self.allowlist.insert(domain.to_lowercase());
+        let d = domain.to_lowercase();
+        self.allowlist
+            .insert(d.trim_end_matches('.').to_string());
     }
 
     pub fn remove_from_allowlist(&mut self, domain: &str) -> bool {
-        self.allowlist.remove(&domain.to_lowercase())
+        let d = domain.to_lowercase();
+        self.allowlist.remove(d.trim_end_matches('.'))
     }
 
     pub fn allowlist(&self) -> Vec<String> {
@@ -299,6 +316,31 @@ mod tests {
         let mut store = store_with(&["ads.example.com"], &[]);
         store.set_enabled(false);
         assert!(!store.is_blocked("ads.example.com"));
+    }
+
+    #[test]
+    fn trailing_dot_normalized() {
+        let store = store_with(&["ads.example.com"], &["safe.example.com"]);
+        assert!(store.is_blocked("ads.example.com."));
+        assert!(!store.is_blocked("safe.example.com."));
+        let result = store.check("ads.example.com.");
+        assert!(result.blocked);
+    }
+
+    #[test]
+    fn case_insensitive() {
+        let store = store_with(&["ads.example.com"], &["safe.example.com"]);
+        assert!(store.is_blocked("ADS.Example.COM"));
+        assert!(!store.is_blocked("Safe.Example.COM"));
+    }
+
+    #[test]
+    fn domain_in_neither_list() {
+        let store = store_with(&["ads.example.com"], &[]);
+        let result = store.check("clean.example.org");
+        assert!(!result.blocked);
+        assert_eq!(result.reason, "not in blocklist");
+        assert!(result.matched_rule.is_none());
     }
 
     #[test]
