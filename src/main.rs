@@ -319,6 +319,8 @@ async fn main() -> numa::Result<()> {
         dnssec_strict: config.dnssec.strict,
         health_meta,
         ca_pem,
+        mobile_enabled: config.mobile.enabled,
+        mobile_port: config.mobile.port,
     });
 
     let zone_count: usize = ctx.zone_map.values().map(|m| m.len()).sum();

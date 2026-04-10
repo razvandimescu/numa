@@ -70,6 +70,8 @@ pub struct ServerCtx {
     /// Used by `/ca.pem`, `/mobileconfig`, and `/ca.mobileconfig`
     /// handlers to avoid per-request disk I/O on the hot path.
     pub ca_pem: Option<String>,
+    pub mobile_enabled: bool,
+    pub mobile_port: u16,
 }
 
 /// Transport-agnostic DNS resolution. Runs the full pipeline (overrides, blocklist,
