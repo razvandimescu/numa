@@ -6,7 +6,6 @@ updates:
       interval: "monthly"
     commit-message:
       prefix: "chore(deps)"
-      include: "scope"
     groups:
       minor-and-patch:
         patterns: ["*"]
@@ -18,7 +17,6 @@ updates:
       interval: "monthly"
     commit-message:
       prefix: "chore(deps)"
-      include: "scope"
     groups:
       minor-and-patch:
         patterns: ["*"]
@@ -30,7 +28,6 @@ updates:
       interval: "monthly"
     commit-message:
       prefix: "chore(deps)"
-      include: "scope"
     groups:
       minor-and-patch:
         patterns: ["*"]
