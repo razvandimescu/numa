@@ -82,6 +82,29 @@ impl DnsCache {
         Some((packet, entry.dnssec_status))
     }
 
+    pub fn ttl_remaining(&self, domain: &str, qtype: QueryType) -> Option<(u32, u32)> {
+        let type_map = self.entries.get(domain)?;
+        let entry = type_map.get(&qtype)?;
+        let elapsed = entry.inserted_at.elapsed();
+        if elapsed >= entry.ttl {
+            return None;
+        }
+        let total = entry.ttl.as_secs() as u32;
+        let remaining = (entry.ttl - elapsed).as_secs() as u32;
+        Some((remaining, total))
+    }
+
+    pub fn needs_warm(&self, domain: &str) -> bool {
+        for qtype in [QueryType::A, QueryType::AAAA] {
+            match self.ttl_remaining(domain, qtype) {
+                None => return true,
+                Some((remaining, total)) if remaining < total / 4 => return true,
+                _ => {}
+            }
+        }
+        false
+    }
+
     pub fn insert(&mut self, domain: &str, qtype: QueryType, packet: &DnsPacket) {
         self.insert_with_status(domain, qtype, packet, DnssecStatus::Indeterminate);
     }
@@ -232,5 +255,67 @@ mod tests {
         });
         cache.insert("example.com", QueryType::A, &pkt);
         assert!(cache.heap_bytes() > empty);
+    }
+
+    #[test]
+    fn ttl_remaining_returns_values_for_fresh_entry() {
+        let mut cache = DnsCache::new(100, 60, 3600);
+        let mut pkt = DnsPacket::new();
+        pkt.answers.push(DnsRecord::A {
+            domain: "example.com".into(),
+            addr: "1.2.3.4".parse().unwrap(),
+            ttl: 300,
+        });
+        cache.insert("example.com", QueryType::A, &pkt);
+        let (remaining, total) = cache.ttl_remaining("example.com", QueryType::A).unwrap();
+        assert_eq!(total, 300);
+        assert!(remaining <= 300);
+        assert!(remaining > 0);
+    }
+
+    #[test]
+    fn ttl_remaining_none_for_missing() {
+        let cache = DnsCache::new(100, 1, 3600);
+        assert!(cache.ttl_remaining("missing.com", QueryType::A).is_none());
+    }
+
+    #[test]
+    fn needs_warm_true_when_missing() {
+        let cache = DnsCache::new(100, 1, 3600);
+        assert!(cache.needs_warm("missing.com"));
+    }
+
+    #[test]
+    fn needs_warm_false_when_fresh() {
+        let mut cache = DnsCache::new(100, 1, 3600);
+        let mut pkt_a = DnsPacket::new();
+        pkt_a.answers.push(DnsRecord::A {
+            domain: "example.com".into(),
+            addr: "1.2.3.4".parse().unwrap(),
+            ttl: 300,
+        });
+        let mut pkt_aaaa = DnsPacket::new();
+        pkt_aaaa.answers.push(DnsRecord::AAAA {
+            domain: "example.com".into(),
+            addr: "::1".parse().unwrap(),
+            ttl: 300,
+        });
+        cache.insert("example.com", QueryType::A, &pkt_a);
+        cache.insert("example.com", QueryType::AAAA, &pkt_aaaa);
+        assert!(!cache.needs_warm("example.com"));
+    }
+
+    #[test]
+    fn needs_warm_true_when_only_a_cached() {
+        let mut cache = DnsCache::new(100, 1, 3600);
+        let mut pkt = DnsPacket::new();
+        pkt.answers.push(DnsRecord::A {
+            domain: "example.com".into(),
+            addr: "1.2.3.4".parse().unwrap(),
+            ttl: 300,
+        });
+        cache.insert("example.com", QueryType::A, &pkt);
+        // AAAA missing → needs warm
+        assert!(cache.needs_warm("example.com"));
     }
 }

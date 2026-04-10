@@ -402,6 +402,9 @@ async fn main() -> numa::Result<()> {
         g,
         &format!("max {} entries", config.cache.max_entries),
     );
+    if !config.cache.warm.is_empty() {
+        row("Warm", g, &format!("{} domains", config.cache.warm.len()));
+    }
     row(
         "Blocking",
         g,
@@ -481,6 +484,15 @@ async fn main() -> numa::Result<()> {
                 &prime_ctx.srtt,
             )
             .await;
+        });
+    }
+
+    // Spawn cache warming for user-configured domains
+    if !config.cache.warm.is_empty() {
+        let warm_ctx = Arc::clone(&ctx);
+        let warm_domains = config.cache.warm.clone();
+        tokio::spawn(async move {
+            cache_warm_loop(warm_ctx, warm_domains).await;
         });
     }
 
@@ -719,4 +731,54 @@ async fn load_blocklists(ctx: &ServerCtx, lists: &[String]) {
         total,
         downloaded.len()
     );
+}
+
+async fn warm_domain(ctx: &ServerCtx, domain: &str) {
+    use numa::question::QueryType;
+
+    for qtype in [QueryType::A, QueryType::AAAA] {
+        let query = numa::packet::DnsPacket::query(0, domain, qtype);
+        let result = if ctx.upstream_mode == numa::config::UpstreamMode::Recursive {
+            numa::recursive::resolve_recursive(
+                domain,
+                qtype,
+                &ctx.cache,
+                &query,
+                &ctx.root_hints,
+                &ctx.srtt,
+            )
+            .await
+        } else {
+            let pool = ctx.upstream_pool.lock().unwrap().clone();
+            numa::forward::forward_with_failover(&query, &pool, &ctx.srtt, ctx.timeout).await
+        };
+        match result {
+            Ok(resp) => {
+                ctx.cache.write().unwrap().insert(domain, qtype, &resp);
+                log::debug!("cache warm: {} {:?}", domain, qtype);
+            }
+            Err(e) => log::warn!("cache warm: {} {:?} failed: {}", domain, qtype, e),
+        }
+    }
+}
+
+async fn cache_warm_loop(ctx: Arc<ServerCtx>, domains: Vec<String>) {
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    for domain in &domains {
+        warm_domain(&ctx, domain).await;
+    }
+    info!("cache warm: {} domains resolved at startup", domains.len());
+
+    let mut interval = tokio::time::interval(Duration::from_secs(30));
+    interval.tick().await;
+    loop {
+        interval.tick().await;
+        for domain in &domains {
+            let refresh = ctx.cache.read().unwrap().needs_warm(domain);
+            if refresh {
+                warm_domain(&ctx, domain).await;
+            }
+        }
+    }
 }

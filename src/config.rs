@@ -247,6 +247,8 @@ pub struct CacheConfig {
     pub min_ttl: u32,
     #[serde(default = "default_max_ttl")]
     pub max_ttl: u32,
+    #[serde(default)]
+    pub warm: Vec<String>,
 }
 
 impl Default for CacheConfig {
@@ -255,6 +257,7 @@ impl Default for CacheConfig {
             max_entries: default_max_entries(),
             min_ttl: default_min_ttl(),
             max_ttl: default_max_ttl(),
+            warm: Vec::new(),
         }
     }
 }
