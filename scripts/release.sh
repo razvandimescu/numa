@@ -37,7 +37,7 @@ cargo update --workspace
 git add Cargo.toml Cargo.lock
 git commit -m "chore: bump version to $VERSION"
 git tag "$TAG"
-git push origin main --tags
+git push origin main "$TAG"
 
 echo
 echo "Released $TAG — GitHub Actions will build, publish to crates.io, and create the release."
