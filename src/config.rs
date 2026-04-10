@@ -97,10 +97,12 @@ impl UpstreamMode {
 pub struct UpstreamConfig {
     #[serde(default)]
     pub mode: UpstreamMode,
-    #[serde(default = "default_upstream_addr")]
-    pub address: String,
+    #[serde(default, deserialize_with = "string_or_vec")]
+    pub address: Vec<String>,
     #[serde(default = "default_upstream_port")]
     pub port: u16,
+    #[serde(default)]
+    pub fallback: Vec<String>,
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
     #[serde(default = "default_root_hints")]
@@ -115,14 +117,42 @@ impl Default for UpstreamConfig {
     fn default() -> Self {
         UpstreamConfig {
             mode: UpstreamMode::default(),
-            address: default_upstream_addr(),
+            address: Vec::new(),
             port: default_upstream_port(),
+            fallback: Vec::new(),
             timeout_ms: default_timeout_ms(),
             root_hints: default_root_hints(),
             prime_tlds: default_prime_tlds(),
             srtt: default_srtt(),
         }
     }
+}
+
+fn string_or_vec<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct Visitor;
+    impl<'de> serde::de::Visitor<'de> for Visitor {
+        type Value = Vec<String>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("string or array of strings")
+        }
+        fn visit_str<E: serde::de::Error>(self, v: &str) -> std::result::Result<Self::Value, E> {
+            Ok(vec![v.to_string()])
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> std::result::Result<Self::Value, A::Error> {
+            let mut v = Vec::new();
+            while let Some(s) = seq.next_element::<String>()? {
+                v.push(s);
+            }
+            Ok(v)
+        }
+    }
+    deserializer.deserialize_any(Visitor)
 }
 
 fn default_true() -> bool {
@@ -202,9 +232,6 @@ fn default_root_hints() -> Vec<String> {
     ]
 }
 
-fn default_upstream_addr() -> String {
-    String::new() // empty = auto-detect from system resolver
-}
 fn default_upstream_port() -> u16 {
     53
 }
@@ -524,6 +551,33 @@ mod tests {
         assert_eq!(config.services[0].routes.len(), 2);
         assert!(config.services[0].routes[0].strip);
         assert!(!config.services[0].routes[1].strip); // default false
+    }
+
+    #[test]
+    fn address_string_parses_to_vec() {
+        let config: Config = toml::from_str("[upstream]\naddress = \"1.2.3.4\"").unwrap();
+        assert_eq!(config.upstream.address, vec!["1.2.3.4"]);
+    }
+
+    #[test]
+    fn address_array_parses() {
+        let config: Config =
+            toml::from_str("[upstream]\naddress = [\"1.2.3.4\", \"5.6.7.8:5353\"]").unwrap();
+        assert_eq!(config.upstream.address, vec!["1.2.3.4", "5.6.7.8:5353"]);
+    }
+
+    #[test]
+    fn fallback_parses() {
+        let config: Config =
+            toml::from_str("[upstream]\nfallback = [\"8.8.8.8\", \"1.1.1.1\"]").unwrap();
+        assert_eq!(config.upstream.fallback, vec!["8.8.8.8", "1.1.1.1"]);
+    }
+
+    #[test]
+    fn empty_address_gives_empty_vec() {
+        let config: Config = toml::from_str("").unwrap();
+        assert!(config.upstream.address.is_empty());
+        assert!(config.upstream.fallback.is_empty());
     }
 }
 

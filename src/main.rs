@@ -11,7 +11,7 @@ use numa::buffer::BytePacketBuffer;
 use numa::cache::DnsCache;
 use numa::config::{build_zone_map, load_config, ConfigLoad};
 use numa::ctx::{handle_query, ServerCtx};
-use numa::forward::Upstream;
+use numa::forward::{parse_upstream, Upstream, UpstreamPool};
 use numa::override_store::OverrideStore;
 use numa::query_log::QueryLog;
 use numa::service_store::ServiceStore;
@@ -129,12 +129,13 @@ async fn main() -> numa::Result<()> {
 
     let root_hints = numa::recursive::parse_root_hints(&config.upstream.root_hints);
 
-    let (resolved_mode, upstream_auto, upstream, upstream_label) = match config.upstream.mode {
+    let (resolved_mode, upstream_auto, pool, upstream_label) = match config.upstream.mode {
         numa::config::UpstreamMode::Auto => {
             info!("auto mode: probing recursive resolution...");
             if numa::recursive::probe_recursive(&root_hints).await {
                 info!("recursive probe succeeded — self-sovereign mode");
-                let dummy = Upstream::Udp("0.0.0.0:0".parse().unwrap());
+                let dummy =
+                    UpstreamPool::new(vec![Upstream::Udp("0.0.0.0:0".parse().unwrap())], vec![]);
                 (
                     numa::config::UpstreamMode::Recursive,
                     false,
@@ -149,16 +150,13 @@ async fn main() -> numa::Result<()> {
                     .unwrap_or_default();
                 let url = DOH_FALLBACK.to_string();
                 let label = url.clone();
-                (
-                    numa::config::UpstreamMode::Forward,
-                    false,
-                    Upstream::Doh { url, client },
-                    label,
-                )
+                let pool = UpstreamPool::new(vec![Upstream::Doh { url, client }], vec![]);
+                (numa::config::UpstreamMode::Forward, false, pool, label)
             }
         }
         numa::config::UpstreamMode::Recursive => {
-            let dummy = Upstream::Udp("0.0.0.0:0".parse().unwrap());
+            let dummy =
+                UpstreamPool::new(vec![Upstream::Udp("0.0.0.0:0".parse().unwrap())], vec![]);
             (
                 numa::config::UpstreamMode::Recursive,
                 false,
@@ -167,37 +165,36 @@ async fn main() -> numa::Result<()> {
             )
         }
         numa::config::UpstreamMode::Forward => {
-            let upstream_addr = if config.upstream.address.is_empty() {
-                system_dns
+            let addrs = if config.upstream.address.is_empty() {
+                let detected = system_dns
                     .default_upstream
                     .or_else(numa::system_dns::detect_dhcp_dns)
                     .unwrap_or_else(|| {
                         info!("could not detect system DNS, falling back to Quad9 DoH");
                         DOH_FALLBACK.to_string()
-                    })
+                    });
+                vec![detected]
             } else {
                 config.upstream.address.clone()
             };
 
-            let upstream: Upstream = if upstream_addr.starts_with("https://") {
-                let client = reqwest::Client::builder()
-                    .use_rustls_tls()
-                    .build()
-                    .unwrap_or_default();
-                Upstream::Doh {
-                    url: upstream_addr,
-                    client,
-                }
-            } else {
-                let addr: SocketAddr =
-                    format!("{}:{}", upstream_addr, config.upstream.port).parse()?;
-                Upstream::Udp(addr)
-            };
-            let label = upstream.to_string();
+            let primary: Vec<Upstream> = addrs
+                .iter()
+                .map(|s| parse_upstream(s, config.upstream.port))
+                .collect::<numa::Result<Vec<_>>>()?;
+            let fallback: Vec<Upstream> = config
+                .upstream
+                .fallback
+                .iter()
+                .map(|s| parse_upstream(s, config.upstream.port))
+                .collect::<numa::Result<Vec<_>>>()?;
+
+            let pool = UpstreamPool::new(primary, fallback);
+            let label = pool.label();
             (
                 numa::config::UpstreamMode::Forward,
                 config.upstream.address.is_empty(),
-                upstream,
+                pool,
                 label,
             )
         }
@@ -294,7 +291,7 @@ async fn main() -> numa::Result<()> {
         services: Mutex::new(service_store),
         lan_peers: Mutex::new(numa::lan::PeerStore::new(config.lan.peer_timeout_secs)),
         forwarding_rules,
-        upstream: Mutex::new(upstream),
+        upstream_pool: Mutex::new(pool),
         upstream_auto,
         upstream_port: config.upstream.port,
         lan_ip: Mutex::new(numa::lan::detect_lan_ip().unwrap_or(std::net::Ipv4Addr::LOCALHOST)),
@@ -613,12 +610,8 @@ async fn network_watch_loop(ctx: Arc<numa::ctx::ServerCtx>) {
             }
         }
 
-        // Re-detect upstream every 30s or on LAN IP change (UDP only —
-        // DoH upstreams are explicitly configured via URL, not auto-detected)
-        if ctx.upstream_auto
-            && matches!(*ctx.upstream.lock().unwrap(), Upstream::Udp(_))
-            && (changed || tick.is_multiple_of(6))
-        {
+        // Re-detect upstream every 30s or on LAN IP change (auto-detect only)
+        if ctx.upstream_auto && (changed || tick.is_multiple_of(6)) {
             let dns_info = numa::system_dns::discover_system_dns();
             let new_addr = dns_info
                 .default_upstream
@@ -628,10 +621,11 @@ async fn network_watch_loop(ctx: Arc<numa::ctx::ServerCtx>) {
                 format!("{}:{}", new_addr, ctx.upstream_port).parse::<SocketAddr>()
             {
                 let new_upstream = Upstream::Udp(new_sock);
-                let mut upstream = ctx.upstream.lock().unwrap();
-                if *upstream != new_upstream {
-                    info!("upstream changed: {} → {}", upstream, new_upstream);
-                    *upstream = new_upstream;
+                let mut pool = ctx.upstream_pool.lock().unwrap();
+                let current = pool.preferred().cloned();
+                if current.as_ref() != Some(&new_upstream) {
+                    info!("upstream changed: {} → {}", pool.label(), new_upstream);
+                    pool.set_primary(vec![new_upstream]);
                     changed = true;
                 }
             }

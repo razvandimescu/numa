@@ -16,7 +16,7 @@ use crate::blocklist::BlocklistStore;
 use crate::buffer::BytePacketBuffer;
 use crate::cache::{DnsCache, DnssecStatus};
 use crate::config::{UpstreamMode, ZoneMap};
-use crate::forward::{forward_query, Upstream};
+use crate::forward::{forward_query, forward_with_failover, Upstream, UpstreamPool};
 use crate::header::ResultCode;
 use crate::health::HealthMeta;
 use crate::lan::PeerStore;
@@ -42,7 +42,7 @@ pub struct ServerCtx {
     pub services: Mutex<ServiceStore>,
     pub lan_peers: Mutex<PeerStore>,
     pub forwarding_rules: Vec<ForwardingRule>,
-    pub upstream: Mutex<Upstream>,
+    pub upstream_pool: Mutex<UpstreamPool>,
     pub upstream_auto: bool,
     pub upstream_port: u16,
     pub lan_ip: Mutex<std::net::Ipv4Addr>,
@@ -220,12 +220,8 @@ pub async fn resolve_query(
                 }
                 (resp, path, DnssecStatus::Indeterminate)
             } else {
-                let upstream =
-                    match crate::system_dns::match_forwarding_rule(&qname, &ctx.forwarding_rules) {
-                        Some(addr) => Upstream::Udp(addr),
-                        None => ctx.upstream.lock().unwrap().clone(),
-                    };
-                match forward_query(&query, &upstream, ctx.timeout).await {
+                let pool = ctx.upstream_pool.lock().unwrap().clone();
+                match forward_with_failover(&query, &pool, &ctx.srtt, ctx.timeout).await {
                     Ok(resp) => {
                         ctx.cache.write().unwrap().insert(&qname, qtype, &resp);
                         (resp, QueryPath::Forwarded, DnssecStatus::Indeterminate)

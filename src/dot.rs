@@ -362,7 +362,10 @@ mod tests {
             services: Mutex::new(crate::service_store::ServiceStore::new()),
             lan_peers: Mutex::new(crate::lan::PeerStore::new(90)),
             forwarding_rules: Vec::new(),
-            upstream: Mutex::new(crate::forward::Upstream::Udp(upstream_addr)),
+            upstream_pool: Mutex::new(crate::forward::UpstreamPool::new(
+                vec![crate::forward::Upstream::Udp(upstream_addr)],
+                vec![],
+            )),
             upstream_auto: false,
             upstream_port: 53,
             lan_ip: Mutex::new(std::net::Ipv4Addr::LOCALHOST),

@@ -411,9 +411,12 @@ async fn diagnose(
     }
 
     // Check upstream (async, no locks held)
-    let upstream = ctx.upstream.lock().unwrap().clone();
-    let (upstream_matched, upstream_detail) =
-        forward_query_for_diagnose(&domain_lower, &upstream, ctx.timeout).await;
+    let upstream = ctx.upstream_pool.lock().unwrap().preferred().cloned();
+    let (upstream_matched, upstream_detail) = if let Some(ref u) = upstream {
+        forward_query_for_diagnose(&domain_lower, u, ctx.timeout).await
+    } else {
+        (false, "no upstream configured".to_string())
+    };
     steps.push(DiagnoseStep {
         source: "upstream".to_string(),
         matched: upstream_matched,
@@ -520,7 +523,7 @@ async fn stats(State(ctx): State<Arc<ServerCtx>>) -> Json<StatsResponse> {
     let upstream = if ctx.upstream_mode == crate::config::UpstreamMode::Recursive {
         "recursive (root hints)".to_string()
     } else {
-        ctx.upstream.lock().unwrap().to_string()
+        ctx.upstream_pool.lock().unwrap().label()
     };
 
     Json(StatsResponse {
@@ -1016,8 +1019,11 @@ mod tests {
             services: Mutex::new(crate::service_store::ServiceStore::new()),
             lan_peers: Mutex::new(crate::lan::PeerStore::new(90)),
             forwarding_rules: Vec::new(),
-            upstream: Mutex::new(crate::forward::Upstream::Udp(
-                "127.0.0.1:53".parse().unwrap(),
+            upstream_pool: Mutex::new(crate::forward::UpstreamPool::new(
+                vec![crate::forward::Upstream::Udp(
+                    "127.0.0.1:53".parse().unwrap(),
+                )],
+                vec![],
             )),
             upstream_auto: false,
             upstream_port: 53,
