@@ -288,6 +288,7 @@ body {
 .path-tag.SERVFAIL { background: rgba(181, 68, 58, 0.12); color: var(--rose); }
 .path-tag.BLOCKED { background: rgba(163, 152, 136, 0.15); color: var(--text-dim); }
 .path-tag.COALESCED { background: rgba(138, 104, 158, 0.12); color: var(--violet-dim); }
+.src-tag { font-size: 0.6rem; color: var(--text-dim); letter-spacing: 0.02em; }
 
 /* Sidebar panels */
 .sidebar {
@@ -787,6 +788,13 @@ function formatTime(epoch) {
   return d.toLocaleTimeString([], { hour12: false });
 }
 
+function shortSrc(addr) {
+  if (!addr) return '';
+  const ip = addr.replace(/:\d+$/, '');
+  if (ip === '127.0.0.1' || ip === '::1') return 'localhost';
+  return ip;
+}
+
 function formatRemaining(secs) {
   if (secs == null) return 'permanent';
   if (secs < 60) return `${secs}s left`;
@@ -912,8 +920,8 @@ function applyLogFilter() {
       ? ` <button class="btn-delete" onclick="allowDomain('${e.domain}')" title="Allow this domain" style="color:var(--emerald);font-size:0.65rem;">allow</button>`
       : '';
     return `
-    <tr>
-      <td>${formatTime(e.timestamp_epoch)}</td>
+    <tr title="Source: ${e.src || 'unknown'}">
+      <td>${formatTime(e.timestamp_epoch)}<br><span class="src-tag">${shortSrc(e.src)}</span></td>
       <td>${e.query_type}</td>
       <td class="domain-cell" title="${e.domain}">${e.domain}${allowBtn}</td>
       <td><span class="path-tag ${e.path}">${e.path}</span></td>

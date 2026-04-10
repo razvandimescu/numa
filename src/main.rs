@@ -94,7 +94,21 @@ async fn main() -> numa::Result<()> {
             eprintln!("Config path defaults to numa.toml");
             return Ok(());
         }
-        _ => {}
+        _ => {
+            if !arg1.is_empty()
+                && arg1 != "run"
+                && !arg1.contains('/')
+                && !arg1.contains('\\')
+                && !arg1.ends_with(".toml")
+            {
+                eprintln!(
+                    "\x1b[1;38;2;192;98;58mNuma\x1b[0m — unknown command: \x1b[1m{}\x1b[0m\n",
+                    arg1
+                );
+                eprintln!("Run \x1b[1mnuma help\x1b[0m for a list of commands.");
+                std::process::exit(1);
+            }
+        }
     }
 
     let config_path = if arg1.is_empty() || arg1 == "run" {

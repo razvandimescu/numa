@@ -48,6 +48,31 @@ pub async fn run() -> Result<(), String> {
     let lan_ip = crate::lan::detect_lan_ip()
         .ok_or("could not detect LAN IP — are you connected to a network?")?;
 
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], SETUP_PORT));
+    let api_reachable = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        tokio::net::TcpStream::connect(addr),
+    )
+    .await
+    .map(|r| r.is_ok())
+    .unwrap_or(false);
+
+    if !api_reachable {
+        eprintln!();
+        eprintln!(
+            "  \x1b[1;38;2;192;98;58mNuma\x1b[0m — mobile API is not reachable on port {}.",
+            SETUP_PORT
+        );
+        eprintln!();
+        eprintln!("  The phone won't be able to download the profile until the mobile");
+        eprintln!("  API is running. Add this to your numa.toml and restart Numa:");
+        eprintln!();
+        eprintln!("    [mobile]");
+        eprintln!("    enabled = true");
+        eprintln!();
+        return Err("mobile API not running".into());
+    }
+
     let url = format!("http://{}:{}/mobileconfig", lan_ip, SETUP_PORT);
     let qr = render_qr(&url)?;
 
