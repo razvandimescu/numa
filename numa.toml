@@ -12,10 +12,11 @@ api_port = 5380
 # [upstream]
 # mode = "forward"                              # "forward" (default) — relay to upstream
 #                                               # "recursive" — resolve from root hints (no address needed)
+# address = "9.9.9.9"                           # single upstream (plain UDP)
+# address = ["192.168.1.1", "9.9.9.9:5353"]    # multiple upstreams — SRTT picks fastest
 # address = "https://dns.quad9.net/dns-query"   # DNS-over-HTTPS (encrypted)
-# address = "https://cloudflare-dns.com/dns-query"  # Cloudflare DoH
-# address = "9.9.9.9"                           # plain UDP
-# port = 53                                     # only for forward mode, plain UDP
+# fallback = ["8.8.8.8", "1.1.1.1"]            # tried only when all primaries fail
+# port = 53                                     # default port for addresses without :port
 # timeout_ms = 3000
 # root_hints = [                                # only used in recursive mode
 #     "198.41.0.4",      # a.root-servers.net (Verisign)
@@ -54,6 +55,7 @@ api_port = 5380
 max_entries = 10000
 min_ttl = 60
 max_ttl = 86400
+# warm = ["google.com", "github.com"]  # resolve at startup, refresh before TTL expiry
 
 [proxy]
 enabled = true
