@@ -85,6 +85,20 @@ impl UpstreamPool {
         self.primary = primary;
     }
 
+    /// Update the primary upstream if `new_addr` (parsed with `port`) differs
+    /// from the current preferred upstream. Returns `true` if the pool changed.
+    pub fn maybe_update_primary(&mut self, new_addr: &str, port: u16) -> bool {
+        let Ok(new_sock) = format!("{}:{}", new_addr, port).parse::<SocketAddr>() else {
+            return false;
+        };
+        let new_upstream = Upstream::Udp(new_sock);
+        if self.preferred() == Some(&new_upstream) {
+            return false;
+        }
+        self.primary = vec![new_upstream];
+        true
+    }
+
     pub fn label(&self) -> String {
         match self.preferred() {
             Some(u) => {
@@ -468,5 +482,34 @@ mod tests {
 
         assert_eq!(result.header.id, 0xABCD);
         assert_eq!(result.answers.len(), 1);
+    }
+
+    #[test]
+    fn maybe_update_primary_swaps_when_different() {
+        let mut pool = UpstreamPool::new(
+            vec![Upstream::Udp("1.2.3.4:53".parse().unwrap())],
+            vec![Upstream::Udp("8.8.8.8:53".parse().unwrap())],
+        );
+        assert!(pool.maybe_update_primary("5.6.7.8", 53));
+        assert_eq!(pool.preferred().unwrap().to_string(), "5.6.7.8:53");
+    }
+
+    #[test]
+    fn maybe_update_primary_noop_when_same() {
+        let mut pool = UpstreamPool::new(
+            vec![Upstream::Udp("1.2.3.4:53".parse().unwrap())],
+            vec![],
+        );
+        assert!(!pool.maybe_update_primary("1.2.3.4", 53));
+    }
+
+    #[test]
+    fn maybe_update_primary_rejects_invalid_addr() {
+        let mut pool = UpstreamPool::new(
+            vec![Upstream::Udp("1.2.3.4:53".parse().unwrap())],
+            vec![],
+        );
+        assert!(!pool.maybe_update_primary("not-an-ip", 53));
+        assert_eq!(pool.preferred().unwrap().to_string(), "1.2.3.4:53");
     }
 }

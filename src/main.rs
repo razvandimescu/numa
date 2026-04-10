@@ -610,17 +610,10 @@ async fn network_watch_loop(ctx: Arc<numa::ctx::ServerCtx>) {
                 .default_upstream
                 .or_else(numa::system_dns::detect_dhcp_dns)
                 .unwrap_or_else(|| QUAD9_IP.to_string());
-            if let Ok(new_sock) =
-                format!("{}:{}", new_addr, ctx.upstream_port).parse::<SocketAddr>()
-            {
-                let new_upstream = Upstream::Udp(new_sock);
-                let mut pool = ctx.upstream_pool.lock().unwrap();
-                let current = pool.preferred().cloned();
-                if current.as_ref() != Some(&new_upstream) {
-                    info!("upstream changed: {} → {}", pool.label(), new_upstream);
-                    pool.set_primary(vec![new_upstream]);
-                    changed = true;
-                }
+            let mut pool = ctx.upstream_pool.lock().unwrap();
+            if pool.maybe_update_primary(&new_addr, ctx.upstream_port) {
+                info!("upstream changed → {}", pool.label());
+                changed = true;
             }
         }
 
