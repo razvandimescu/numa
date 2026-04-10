@@ -23,7 +23,7 @@ hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 http-body-util = "0.1"
 futures = "0.3"
 socket2 = { version = "0.6", features = ["all"] }
-rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
+rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
 time = "0.3"
 rustls = "0.23"
 tokio-rustls = "0.26"

@@ -5,7 +5,9 @@ use std::sync::Arc;
 use log::{info, warn};
 
 use crate::ctx::ServerCtx;
-use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, KeyUsagePurpose, SanType};
+use rcgen::{
+    BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair, KeyUsagePurpose, SanType,
+};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::ServerConfig;
 use time::{Duration, OffsetDateTime};
@@ -87,8 +89,8 @@ pub fn build_tls_config(
     alpn: Vec<Vec<u8>>,
     data_dir: &Path,
 ) -> crate::Result<Arc<ServerConfig>> {
-    let (ca_cert, ca_key) = ensure_ca(data_dir)?;
-    let (cert_chain, key) = generate_service_cert(&ca_cert, &ca_key, tld, service_names)?;
+    let (ca_der, issuer) = ensure_ca(data_dir)?;
+    let (cert_chain, key) = generate_service_cert(&ca_der, &issuer, tld, service_names)?;
 
     // Ensure a crypto provider is installed (rustls needs one)
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -106,7 +108,7 @@ pub fn build_tls_config(
     Ok(Arc::new(config))
 }
 
-fn ensure_ca(dir: &Path) -> crate::Result<(rcgen::Certificate, KeyPair)> {
+fn ensure_ca(dir: &Path) -> crate::Result<(CertificateDer<'static>, Issuer<'static, KeyPair>)> {
     let ca_key_path = dir.join("ca.key");
     let ca_cert_path = dir.join(CA_FILE_NAME);
 
@@ -114,10 +116,12 @@ fn ensure_ca(dir: &Path) -> crate::Result<(rcgen::Certificate, KeyPair)> {
         let key_pem = std::fs::read_to_string(&ca_key_path)?;
         let cert_pem = std::fs::read_to_string(&ca_cert_path)?;
         let key_pair = KeyPair::from_pem(&key_pem)?;
-        let params = CertificateParams::from_ca_cert_pem(&cert_pem)?;
-        let cert = params.self_signed(&key_pair)?;
+        let ca_der = rustls_pemfile::certs(&mut cert_pem.as_bytes())
+            .next()
+            .ok_or("empty CA PEM file")??;
+        let issuer = Issuer::from_ca_cert_der(&ca_der, key_pair)?;
         info!("loaded CA from {:?}", ca_cert_path);
-        return Ok((cert, key_pair));
+        return Ok((ca_der, issuer));
     }
 
     // Generate new CA
@@ -145,14 +149,16 @@ fn ensure_ca(dir: &Path) -> crate::Result<(rcgen::Certificate, KeyPair)> {
     }
 
     info!("generated CA at {:?}", ca_cert_path);
-    Ok((cert, key_pair))
+    let ca_der = cert.der().clone();
+    let issuer = Issuer::new(params, key_pair);
+    Ok((ca_der, issuer))
 }
 
 /// Generate a cert with explicit SANs for each service name.
 /// Always regenerated at startup (~5ms) — no disk caching needed.
 fn generate_service_cert(
-    ca_cert: &rcgen::Certificate,
-    ca_key: &KeyPair,
+    ca_der: &CertificateDer<'static>,
+    issuer: &Issuer<'_, KeyPair>,
     tld: &str,
     service_names: &[String],
 ) -> crate::Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
@@ -187,7 +193,7 @@ fn generate_service_cert(
     params.not_before = OffsetDateTime::now_utc();
     params.not_after = OffsetDateTime::now_utc() + Duration::days(CERT_VALIDITY_DAYS);
 
-    let cert = params.signed_by(&key_pair, ca_cert, ca_key)?;
+    let cert = params.signed_by(&key_pair, issuer)?;
 
     info!(
         "generated TLS cert for: {}",
@@ -198,11 +204,11 @@ fn generate_service_cert(
             .join(", ")
     );
 
-    let cert_der = CertificateDer::from(cert.der().to_vec());
-    let ca_der = CertificateDer::from(ca_cert.der().to_vec());
+    let cert_der = cert.der().clone();
+    let ca_cert_der = ca_der.clone();
     let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_pair.serialize_der()));
 
-    Ok((vec![cert_der, ca_der], key_der))
+    Ok((vec![cert_der, ca_cert_der], key_der))
 }
 
 #[cfg(test)]
