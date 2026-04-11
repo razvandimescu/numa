@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DNS-over-TLS from Scratch in Rust — Numa</title>
+<meta name="description" content="Building RFC 7858 on top of rustls —
+length-prefix framing, ALPN cross-protocol defense, and two bugs that
+only the strict clients caught.">
+<link rel="stylesheet" href="/fonts/fonts.css">
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --bg-deep: #f5f0e8;
+  --bg-surface: #ece5da;
+  --bg-elevated: #e3dbce;
+  --bg-card: #faf7f2;
+  --amber: #c0623a;
+  --amber-dim: #9e4e2d;
+  --teal: #6b7c4e;
+  --teal-dim: #566540;
+  --violet: #64748b;
+  --text-primary: #2c2418;
+  --text-secondary: #6b5e4f;
+  --text-dim: #a39888;
+  --border: rgba(0, 0, 0, 0.08);
+  --border-amber: rgba(192, 98, 58, 0.22);
+  --font-display: 'Instrument Serif', Georgia, serif;
+  --font-body: 'DM Sans', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+}
+
+html { scroll-behavior: smooth; }
+
+body {
+  background: var(--bg-deep);
+  color: var(--text-primary);
+  font-family: var(--font-body);
+  font-weight: 400;
+  line-height: 1.7;
+  -webkit-font-smoothing: antialiased;
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.025'/%3E%3C/svg%3E");
+  pointer-events: none;
+  z-index: 9999;
+}
+
+/* --- Blog nav --- */
+.blog-nav {
+  padding: 1.5rem 2rem;
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+}
+
+.blog-nav a {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  text-decoration: none;
+  transition: color 0.2s;
+}
+.blog-nav a:hover { color: var(--amber); }
+
+.blog-nav .wordmark {
+  font-family: var(--font-display);
+  font-size: 1.4rem;
+  font-weight: 400;
+  color: var(--text-primary);
+  text-decoration: none;
+  text-transform: none;
+  letter-spacing: -0.02em;
+}
+.blog-nav .wordmark:hover { color: var(--amber); }
+
+.blog-nav .sep {
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+
+/* --- Article --- */
+.article {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 3rem 2rem 6rem;
+}
+
+.article-header {
+  margin-bottom: 3rem;
+  padding-bottom: 2rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.article-header h1 {
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: clamp(2rem, 5vw, 3rem);
+  line-height: 1.15;
+  margin-bottom: 1rem;
+  color: var(--text-primary);
+}
+
+.article-meta {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  letter-spacing: 0.04em;
+}
+
+.article-meta a {
+  color: var(--amber);
+  text-decoration: none;
+}
+.article-meta a:hover { text-decoration: underline; }
+
+/* --- Prose --- */
+.article h2 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 1.8rem;
+  line-height: 1.2;
+  margin: 3rem 0 1rem;
+  color: var(--text-primary);
+}
+
+.article h3 {
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: 1.2rem;
+  margin: 2rem 0 0.75rem;
+  color: var(--text-primary);
+}
+
+.article p {
+  margin-bottom: 1.25rem;
+  color: var(--text-secondary);
+  font-size: 1.05rem;
+}
+
+.article a {
+  color: var(--amber);
+  text-decoration: underline;
+  text-decoration-color: rgba(192, 98, 58, 0.3);
+  text-underline-offset: 2px;
+  transition: text-decoration-color 0.2s;
+}
+.article a:hover {
+  text-decoration-color: var(--amber);
+}
+
+.article strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.article ul, .article ol {
+  margin-bottom: 1.25rem;
+  padding-left: 1.5rem;
+  color: var(--text-secondary);
+}
+
+.article li {
+  margin-bottom: 0.4rem;
+  font-size: 1.05rem;
+}
+
+.article blockquote {
+  border-left: 3px solid var(--amber);
+  padding: 0.75rem 1.25rem;
+  margin: 1.5rem 0;
+  background: rgba(192, 98, 58, 0.04);
+  border-radius: 0 4px 4px 0;
+}
+
+.article blockquote p {
+  color: var(--text-secondary);
+  font-style: italic;
+  margin-bottom: 0;
+}
+
+/* --- Code --- */
+.article code {
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  background: var(--bg-elevated);
+  padding: 0.15em 0.4em;
+  border-radius: 3px;
+  color: var(--amber-dim);
+}
+
+.article pre {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1.25rem 1.5rem;
+  margin: 1.5rem 0;
+  overflow-x: auto;
+  line-height: 1.55;
+}
+
+.article pre code {
+  background: none;
+  padding: 0;
+  border-radius: 0;
+  color: var(--text-primary);
+  font-size: 0.85rem;
+}
+
+/* --- Images --- */
+.article img {
+  max-width: 100%;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  margin: 1.5rem 0;
+}
+
+/* --- Tables --- */
+.article table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1.5rem 0;
+  font-size: 0.95rem;
+}
+
+.article th {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  text-align: left;
+  padding: 0.6rem 1rem;
+  border-bottom: 2px solid var(--border);
+}
+
+.article td {
+  padding: 0.6rem 1rem;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-secondary);
+}
+
+/* --- Footer --- */
+.blog-footer {
+  text-align: center;
+  padding: 3rem 2rem;
+  border-top: 1px solid var(--border);
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+.blog-footer a {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  text-decoration: none;
+  margin: 0 1rem;
+}
+.blog-footer a:hover { color: var(--amber); }
+
+/* --- Responsive --- */
+@media (max-width: 640px) {
+  .article { padding: 2rem 1.25rem 4rem; }
+  .article pre { padding: 1rem; margin-left: -0.5rem; margin-right: -0.5rem; border-radius: 0; border-left: none; border-right: none; }
+}
+</style>
+</head>
+<body>
+
+<nav class="blog-nav">
+  <a href="/" class="wordmark">Numa</a>
+  <span class="sep">/</span>
+  <a href="/blog/">Blog</a>
+</nav>
+
+<article class="article">
+  <header class="article-header">
+    <h1>DNS-over-TLS from Scratch in Rust</h1>
+    <div class="article-meta">
+      April 2026 · <a href="https://dimescu.ro">Razvan Dimescu</a>
+    </div>
+  </header>
+
+<p>The <a href="/blog/posts/dnssec-from-scratch.html">previous post</a>
+ended with “DoT — the last encrypted transport we don’t support.” This
+post is about building it.</p>
+<p>Numa now runs a DoT listener on port 853. My iPhone uses it as its
+system resolver, so ad blocking, DNSSEC validation, and recursive
+resolution follow my phone through the day. No cloud, no account, no
+companion app — a self-signed cert, a <code>.mobileconfig</code>
+profile, and a QR code in the terminal.</p>
+<p>RFC 7858 is ten pages. The hard parts weren’t in the RFC. They were
+in cross-protocol confusion defenses, a crypto-provider init gotcha that
+only triggered in one specific config combination, and a certificate SAN
+bug iOS was happy to accept and <code>kdig</code> immediately rejected.
+This post is about those parts.</p>
+<h2 id="why-dot-when-you-already-have-doh">Why DoT when you already have
+DoH?</h2>
+<p>Numa has shipped DoH since v0.1. Both protocols tunnel DNS over TLS;
+DoH wraps queries in HTTP/2, DoT is DNS-over-TCP with TLS in front. Same
+privacy guarantees, different wrapper.</p>
+<p>The answer to “why both” is that <strong>phones ask for DoT by
+name.</strong> iOS system DNS configures it with two fields (IP + server
+name) instead of a URL template. Android 9+ “Private DNS” speaks DoT
+natively. Linux stubs default to DoT. I wanted my phone on Numa without
+installing anything on the phone itself, and DoT is the protocol iOS and
+Android already speak for that.</p>
+<h2 id="the-wire-format-is-refreshingly-small">The wire format is
+refreshingly small</h2>
+<p>RFC 7858 is one sentence of wire protocol: <em>DNS-over-TCP (RFC 1035
+§4.2.2) with TLS in front, on port 853.</em> DNS-over-TCP has existed
+since 1987 — a 2-byte length prefix followed by the DNS message. DoT is
+that, wrapped in a TLS session. The entire framing code is seven
+lines:</p>
+<div class="sourceCode" id="cb1"><pre
+class="sourceCode rust"><code class="sourceCode rust"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="kw">async</span> <span class="kw">fn</span> write_framed<span class="op">&lt;</span>S<span class="op">&gt;</span>(stream<span class="op">:</span> <span class="op">&amp;</span><span class="kw">mut</span> S<span class="op">,</span> msg<span class="op">:</span> <span class="op">&amp;</span>[<span class="dt">u8</span>]) <span class="op">-&gt;</span> <span class="pp">io::</span><span class="dt">Result</span><span class="op">&lt;</span>()<span class="op">&gt;</span></span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a><span class="kw">where</span> S<span class="op">:</span> AsyncWriteExt <span class="op">+</span> <span class="bu">Unpin</span> <span class="op">{</span></span>
+<span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> <span class="kw">mut</span> out <span class="op">=</span> <span class="dt">Vec</span><span class="pp">::</span>with_capacity(<span class="dv">2</span> <span class="op">+</span> msg<span class="op">.</span>len())<span class="op">;</span></span>
+<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a>    out<span class="op">.</span>extend_from_slice(<span class="op">&amp;</span>(msg<span class="op">.</span>len() <span class="kw">as</span> <span class="dt">u16</span>)<span class="op">.</span>to_be_bytes())<span class="op">;</span></span>
+<span id="cb1-5"><a href="#cb1-5" aria-hidden="true" tabindex="-1"></a>    out<span class="op">.</span>extend_from_slice(msg)<span class="op">;</span></span>
+<span id="cb1-6"><a href="#cb1-6" aria-hidden="true" tabindex="-1"></a>    stream<span class="op">.</span>write_all(<span class="op">&amp;</span>out)<span class="op">.</span><span class="kw">await</span><span class="op">?;</span></span>
+<span id="cb1-7"><a href="#cb1-7" aria-hidden="true" tabindex="-1"></a>    stream<span class="op">.</span>flush()<span class="op">.</span><span class="kw">await</span></span>
+<span id="cb1-8"><a href="#cb1-8" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
+<p>Reads are symmetric: <code>read_exact</code> two bytes, convert to
+<code>u16</code>, <code>read_exact</code> that many bytes. No HTTP
+headers, no chunked encoding, no framing layer.</p>
+<h2 id="persistent-connections">Persistent connections</h2>
+<p>A fresh TCP+TLS handshake is at least 3 RTTs — about 300ms on a 100ms
+connection, 60× the cost of a UDP query. RFC 7858 §3.4 says clients
+SHOULD reuse the TCP connection for multiple queries, and every real DoT
+client does: iOS, Android, systemd, stubby. A single connection often
+carries hundreds of queries.</p>
+<p><img src="../dot-handshake.svg" alt="Timing diagram comparing a DNS lookup over plain UDP (1 RTT), over DoT on a fresh connection (3 RTTs — TCP handshake, TLS 1.3 handshake, then the query), and over a reused DoT session (1 RTT, same as UDP)."></p>
+<p>The amortization point is the whole game. If you only ever do one
+query per connection, DoT is roughly 3× slower than UDP and you should
+not use it. If you reuse the same TLS session for a browsing session’s
+worth of queries, the handshake is paid once and every subsequent query
+is effectively free.</p>
+<p>The server is a loop that reads a length-prefixed message, resolves
+it, writes the response framed the same way, waits for the next one.
+Three timeouts keep it honest:</p>
+<ul>
+<li><strong>Handshake timeout (10s)</strong> — a slowloris that opens
+TCP but never sends a ClientHello can’t pin a worker.</li>
+<li><strong>Idle timeout (30s)</strong> — a connected client with
+nothing to say gets dropped.</li>
+<li><strong>Write timeout (10s)</strong> — a stalled reader can’t hold a
+response buffer indefinitely.</li>
+</ul>
+<p>A semaphore caps concurrent connections at 512 so a burst of
+handshakes can’t exhaust the tokio runtime.</p>
+<h2 id="alpn-the-cross-protocol-defense-that-matters">ALPN, the
+cross-protocol defense that matters</h2>
+<p>If DoT lives on port 853 and HTTPS on 443, what stops an HTTP/2
+client from hitting 853 and getting confused replies? <a
+href="https://alpaca-attack.com/">Cross-protocol attacks</a> exist and
+have had real CVEs. The defense is ALPN: during the TLS handshake the
+client advertises protocols, the server picks one it supports or fails.
+A DoT server advertises <code>"dot"</code>; a client offering only
+<code>"h2"</code> gets a <code>no_application_protocol</code> fatal
+alert before any frames are exchanged.</p>
+<p>rustls enforces this by default when you set
+<code>alpn_protocols</code>:</p>
+<div class="sourceCode" id="cb2"><pre
+class="sourceCode rust"><code class="sourceCode rust"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> <span class="kw">mut</span> config <span class="op">=</span> <span class="pp">ServerConfig::</span>builder()</span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a>    <span class="op">.</span>with_no_client_auth()</span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a>    <span class="op">.</span>with_single_cert(certs<span class="op">,</span> key)<span class="op">?;</span></span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a>config<span class="op">.</span>alpn_protocols <span class="op">=</span> <span class="pp">vec!</span>[<span class="st">b&quot;dot&quot;</span><span class="op">.</span>to_vec()]<span class="op">;</span></span></code></pre></div>
+<p>“The library enforces it by default” has a latent risk: a future
+rustls upgrade could change the default, and the defense would quietly
+evaporate. I wrote a test that pins the behavior so any regression in a
+dependency update fails loudly:</p>
+<div class="sourceCode" id="cb3"><pre
+class="sourceCode rust"><code class="sourceCode rust"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="at">#[</span><span class="pp">tokio::</span>test<span class="at">]</span></span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a><span class="kw">async</span> <span class="kw">fn</span> dot_rejects_non_dot_alpn() <span class="op">{</span></span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> (addr<span class="op">,</span> cert_der) <span class="op">=</span> spawn_dot_server()<span class="op">.</span><span class="kw">await</span><span class="op">;</span></span>
+<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> client_config <span class="op">=</span> dot_client(<span class="op">&amp;</span>cert_der<span class="op">,</span> <span class="pp">vec!</span>[<span class="st">b&quot;h2&quot;</span><span class="op">.</span>to_vec()])<span class="op">;</span></span>
+<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> connector <span class="op">=</span> <span class="pp">tokio_rustls::TlsConnector::</span>from(client_config)<span class="op">;</span></span>
+<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> tcp <span class="op">=</span> <span class="pp">tokio::net::TcpStream::</span>connect(addr)<span class="op">.</span><span class="kw">await</span><span class="op">.</span>unwrap()<span class="op">;</span></span>
+<span id="cb3-7"><a href="#cb3-7" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> result <span class="op">=</span> connector</span>
+<span id="cb3-8"><a href="#cb3-8" aria-hidden="true" tabindex="-1"></a>        <span class="op">.</span>connect(<span class="pp">ServerName::</span>try_from(<span class="st">&quot;numa.numa&quot;</span>)<span class="op">.</span>unwrap()<span class="op">,</span> tcp)</span>
+<span id="cb3-9"><a href="#cb3-9" aria-hidden="true" tabindex="-1"></a>        <span class="op">.</span><span class="kw">await</span><span class="op">;</span></span>
+<span id="cb3-10"><a href="#cb3-10" aria-hidden="true" tabindex="-1"></a>    <span class="pp">assert!</span>(result<span class="op">.</span>is_err()<span class="op">,</span></span>
+<span id="cb3-11"><a href="#cb3-11" aria-hidden="true" tabindex="-1"></a>        <span class="st">&quot;DoT server must reject ALPN that doesn&#39;t include </span><span class="sc">\&quot;</span><span class="st">dot</span><span class="sc">\&quot;</span><span class="st">&quot;</span>)<span class="op">;</span></span>
+<span id="cb3-12"><a href="#cb3-12" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
+<p>When you’re leaning on a library’s default for a security-critical
+invariant, the test is the contract.</p>
+<h2 id="two-bugs-that-hid-for-days">Two bugs that hid for days</h2>
+<p>Both were fixed before v0.10 shipped. Both stayed hidden because my
+initial tests used <em>permissive</em> clients.</p>
+<h3 id="the-rustls-crypto-provider-panic">The rustls crypto provider
+panic</h3>
+<p>rustls 0.23 requires a <code>CryptoProvider</code> installed before
+you can build a <code>ServerConfig</code>. Numa’s HTTPS proxy calls
+<code>install_default</code> as a side effect when it builds its own
+config, so DoT “just worked” for users who enabled both — the proxy had
+already initialized the provider before DoT’s first handshake.</p>
+<p>Then I added support for user-provided DoT certificates. Someone
+running DoT with their own Let’s Encrypt cert, with the HTTPS proxy
+disabled, would hit:</p>
+<pre><code>thread &#39;dot&#39; panicked at rustls-0.23.25/src/crypto/mod.rs:185:14:
+no process-level CryptoProvider available -- call
+CryptoProvider::install_default() before this point</code></pre>
+<p>The panic happened on the first client connection, not at startup.
+While writing the integration suite for “DoT with BYO cert, proxy
+disabled” — the one combination nobody had ever actually exercised — the
+first run panicked. Fix is two lines: call <code>install_default</code>
+inside <code>load_tls_config</code> so DoT can stand alone. If a side
+effect initializes something and you have a path that skips that side
+effect, you have a bug waiting for a specific deployment.</p>
+<h3 id="the-san-bug-ios-was-happy-to-accept">The SAN bug iOS was happy
+to accept</h3>
+<p>Numa’s self-signed DoT cert is generated on first run from a local CA
+alongside the data directory. It needs to match whatever
+<code>ServerName</code> the client sends as SNI. For the HTTPS proxy,
+that’s the wildcard domain pattern <code>*.numa</code> (matching
+<code>frontend.numa</code>, <code>api.numa</code>, etc.). I initially
+reused the same SAN list for DoT: a wildcard <code>*.numa</code> and
+nothing else.</p>
+<p>On an iPhone this worked perfectly. Full browsing session, persistent
+connections in the log, ad blocking active. I was about to merge when I
+ran one last smoke test with <code>kdig</code> (GnuTLS-backed, from <a
+href="https://www.knot-dns.cz/">Knot DNS</a>):</p>
+<pre><code>$ kdig @192.168.1.16 -p 853 +tls \
+    +tls-ca=/usr/local/var/numa/ca.pem \
+    +tls-hostname=numa.numa example.com A
+
+;; TLS, handshake failed (Error in the certificate.)</code></pre>
+<p>Huh.</p>
+<p><a
+href="https://datatracker.ietf.org/doc/html/rfc6125#section-6.4.3">RFC
+6125 §6.4.3</a>: a wildcard in a certificate’s DNS-ID matches exactly
+one label. <code>*.numa</code> matches <code>frontend.numa</code>, but
+not <code>numa.numa</code>, because the wildcard wants at least one
+label to substitute and strict clients reject wildcards in the leftmost
+label under single-label TLDs as ambiguous.</p>
+<p>iOS’s TLS stack is lenient and accepts it. GnuTLS, NSS (Firefox), and
+most non-Apple validators don’t. The fix is five lines — add an explicit
+<code>numa.numa</code> SAN alongside the wildcard. But the lesson is the
+one that stuck: I wrote a commit message saying “fix an iOS bug” and had
+to rewrite it, because iOS was fine. The real bug was that every
+GnuTLS/NSS-based client on the planet would have rejected the cert, and
+I only found it by running one more test with a stricter tool.</p>
+<blockquote>
+<p>Test with the strict client. The permissive client hides your
+bugs.</p>
+</blockquote>
+<h2 id="getting-your-phone-onto-it">Getting your phone onto it</h2>
+<p>A DoT server is useless without a way to point a phone at it. iOS
+won’t let you type an IP and a server name into Settings directly — you
+install a <code>.mobileconfig</code> profile that bundles the CA as a
+trust anchor and the DNS settings in a single payload.</p>
+<p>Numa ships a subcommand that builds one on the fly and serves it over
+a QR code in the terminal:</p>
+<pre><code>$ numa setup-phone
+
+  Numa Phone Setup
+
+  Profile URL: http://192.168.1.10:8765/mobileconfig
+
+  ██████████████████████████████
+  ██                          ██
+  ██   [QR code rendered in   ██
+  ██    your terminal]        ██
+  ██                          ██
+  ██████████████████████████████
+
+  On your iPhone:
+    1. Open Camera, point at the QR code, tap the yellow banner
+    2. Allow the download when Safari asks
+    3. Open Settings — tap &quot;Profile Downloaded&quot; near the top
+       (or: Settings → General → VPN &amp; Device Management → Numa DNS)
+    4. Tap Install (top right), enter passcode, Install again
+    5. Settings → General → About → Certificate Trust Settings
+       Toggle ON &quot;Numa Local CA&quot; — required for DoT to work</code></pre>
+<p>The same QR is available in the dashboard — click “Phone Setup” in
+the header and the popover renders an SVG QR code pointing at the
+mobileconfig URL. On mobile viewports it shows a direct download link
+instead.</p>
+<p><img src="../phone-setup-dashboard.png" alt="Numa dashboard with Phone Setup popover showing QR code and install instructions"></p>
+<p>Step 4 is non-negotiable. Even though the CA is bundled in the same
+profile that installs the DNS settings, iOS still requires the user to
+explicitly toggle trust in Certificate Trust Settings. It’s a deliberate
+iOS policy to prevent profile-based trust injection — annoying, and
+correct.</p>
+<p>I’ve been dogfooding this since v0.10 shipped in early April. The
+phone resolves through Numa over DoT whenever I’m home; persistent
+connections are visible in the log as a single source port living
+through dozens of queries. The one real caveat: if the laptop’s LAN IP
+changes, the profile breaks. <a
+href="https://datatracker.ietf.org/doc/html/rfc9462">RFC 9462 DDR</a>
+fixes that — Numa can respond to <code>_dns.resolver.arpa IN SVCB</code>
+with its current IP and iOS picks it up on each network join. Next piece
+of work.</p>
+<h2 id="what-i-learned">What I learned</h2>
+<p><strong>RFC-level small, API-level hard.</strong> RFC 7858 is ten
+pages. The framing is trivial. But the subtle stuff — ALPN, timeouts,
+connection caps, handshake vs idle vs write deadlines, backoff on accept
+errors — isn’t in the RFC. Miss any of it and you leak a DoS vector or a
+protocol confusion hole.</p>
+<p><strong>Your test matrix is your security matrix.</strong> Both bugs
+in this post were hidden by lenient clients. In both cases the strict
+client — kdig, or a specific config combination — surfaced the bug
+instantly. Pick test tools for strictness, not convenience. The moment
+you find yourself thinking “but iOS accepts it,” stop and run kdig.</p>
+<p><strong>Don’t initialize global state via side effects.</strong>
+“Module A installs a global, module B silently depends on it, disabling
+A breaks B” is a bug pattern that keeps coming back. Fix: have module B
+initialize its dependency explicitly, even if it means calling an
+idempotent <code>install_default</code> twice. The dependency graph
+should be local and obvious.</p>
+<h2 id="whats-next">What’s next</h2>
+<ul>
+<li><del><strong>DoH server</strong></del> — shipped in v0.12.0.
+<code>POST /dns-query</code> accepts <a
+href="https://datatracker.ietf.org/doc/html/rfc8484">RFC 8484</a>
+wire-format queries, so Firefox/Chrome can point their built-in DoH at
+Numa.</li>
+<li><strong>DoQ server (RFC 9250)</strong> — DNS over QUIC. Android 14+
+supports it natively.</li>
+<li><strong>DDR (RFC 9462)</strong> — auto-discovery via
+<code>_dns.resolver.arpa IN SVCB</code>, so phones pick up a moved Numa
+instance without the installed profile going stale.</li>
+</ul>
+<p>The code is at <a
+href="https://github.com/razvandimescu/numa">github.com/razvandimescu/numa</a>
+— the DoT listener is in <a
+href="https://github.com/razvandimescu/numa/blob/main/src/dot.rs"><code>src/dot.rs</code></a>
+and the phone onboarding flow is in <a
+href="https://github.com/razvandimescu/numa/blob/main/src/setup_phone.rs"><code>src/setup_phone.rs</code></a>
+and <a
+href="https://github.com/razvandimescu/numa/blob/main/src/mobileconfig.rs"><code>src/mobileconfig.rs</code></a>.
+MIT license.</p>
+</article>
+
+<footer class="blog-footer">
+  <a href="https://github.com/razvandimescu/numa">GitHub</a>
+  <a href="/">Home</a>
+  <a href="/blog/">Blog</a>
+</footer>
+
+</body>
+</html>

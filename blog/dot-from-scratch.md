@@ -169,7 +169,7 @@ I've been dogfooding this since v0.10 shipped in early April. The phone resolves
 
 ## What's next
 
-- **DoH server** — Numa already has a DoH client; the other half unlocks Firefox's built-in DoH setting pointing at Numa.
+- ~~**DoH server**~~ — shipped in v0.12.0. `POST /dns-query` accepts [RFC 8484](https://datatracker.ietf.org/doc/html/rfc8484) wire-format queries, so Firefox/Chrome can point their built-in DoH at Numa.
 - **DoQ server (RFC 9250)** — DNS over QUIC. Android 14+ supports it natively.
 - **DDR (RFC 9462)** — auto-discovery via `_dns.resolver.arpa IN SVCB`, so phones pick up a moved Numa instance without the installed profile going stale.
 
