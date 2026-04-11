@@ -93,7 +93,7 @@ tld = "numa"
 
 # DNS-over-TLS listener (RFC 7858) — encrypted DNS on port 853
 # [dot]
-# enabled = false             # opt-in: accept DoT queries
+# enabled = true              # on by default; set false to disable
 # port = 853                  # standard DoT port
 # bind_addr = "0.0.0.0"       # IPv4 or IPv6; unspecified binds all interfaces
 # cert_path = "/etc/numa/dot.crt"  # PEM cert; omit to use self-signed (proxy CA if available)
