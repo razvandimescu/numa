@@ -139,6 +139,8 @@ From Machine B: `curl http://api.numa` → proxied to Machine A's port 8000. Ena
 - [x] DNS-over-TLS listener — encrypted client connections (RFC 7858, ALPN strict)
 - [x] Recursive resolution + DNSSEC — chain-of-trust, NSEC/NSEC3
 - [x] SRTT-based nameserver selection
+- [x] Multi-forwarder failover — multiple upstreams with SRTT ranking, fallback pool
+- [x] Cache warming — proactive resolution for configured domains
 - [x] Mobile onboarding — `setup-phone` QR flow, mobile API, mobileconfig profiles
 - [ ] pkarr integration — self-sovereign DNS via Mainline DHT
 - [ ] Global `.numa` names — DHT-backed, no registrar

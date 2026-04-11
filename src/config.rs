@@ -411,7 +411,7 @@ pub struct DnssecConfig {
 
 #[derive(Deserialize, Clone)]
 pub struct DotConfig {
-    #[serde(default)]
+    #[serde(default = "default_dot_enabled")]
     pub enabled: bool,
     #[serde(default = "default_dot_port")]
     pub port: u16,
@@ -428,7 +428,7 @@ pub struct DotConfig {
 impl Default for DotConfig {
     fn default() -> Self {
         DotConfig {
-            enabled: false,
+            enabled: default_dot_enabled(),
             port: default_dot_port(),
             bind_addr: default_dot_bind_addr(),
             cert_path: None,
@@ -437,6 +437,9 @@ impl Default for DotConfig {
     }
 }
 
+fn default_dot_enabled() -> bool {
+    true
+}
 fn default_dot_port() -> u16 {
     853
 }

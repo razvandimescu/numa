@@ -73,11 +73,15 @@ impl HealthMeta {
         recursive_enabled: bool,
         mdns_enabled: bool,
         blocking_enabled: bool,
+        doh_enabled: bool,
     ) -> Self {
         let ca_path = data_dir.join("ca.pem");
         let ca_fingerprint_sha256 = compute_ca_fingerprint(&ca_path);
 
         let mut features = Vec::new();
+        if doh_enabled {
+            features.push("doh".to_string());
+        }
         if dot_enabled {
             features.push("dot".to_string());
         }

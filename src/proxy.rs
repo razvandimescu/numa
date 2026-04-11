@@ -4,7 +4,7 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::response::IntoResponse;
-use axum::routing::any;
+use axum::routing::{any, post};
 use axum::Router;
 use http_body_util::BodyExt;
 use hyper::StatusCode;
@@ -17,6 +17,14 @@ use tokio_rustls::TlsAcceptor;
 use crate::ctx::ServerCtx;
 
 type HttpClient = Client<hyper_util::client::legacy::connect::HttpConnector, Body>;
+
+/// State passed to the DoH handler. Includes the remote address so
+/// `resolve_query` can log the client IP.
+#[derive(Clone)]
+pub struct DohState {
+    pub ctx: Arc<ServerCtx>,
+    pub remote_addr: Option<std::net::SocketAddr>,
+}
 
 #[derive(Clone)]
 struct ProxyState {
@@ -74,9 +82,17 @@ pub async fn start_proxy_tls(ctx: Arc<ServerCtx>, port: u16, bind_addr: Ipv4Addr
 
     // Hold a separate Arc so we can access tls_config after ctx moves into ProxyState
     let tls_holder = Arc::clone(&ctx);
-    let state = ProxyState { ctx, client };
+    let proxy_state = ProxyState {
+        ctx: Arc::clone(&ctx),
+        client,
+    };
 
-    let app = Router::new().fallback(any(proxy_handler)).with_state(state);
+    // DoH route (RFC 8484) served only on the TLS listener.
+    // DohState.remote_addr is set per-connection below.
+    let doh_state = DohState {
+        ctx,
+        remote_addr: None,
+    };
 
     loop {
         let (tcp_stream, remote_addr) = match listener.accept().await {
@@ -91,7 +107,17 @@ pub async fn start_proxy_tls(ctx: Arc<ServerCtx>, port: u16, bind_addr: Ipv4Addr
         // unwrap safe: guarded by is_none() check above
         let acceptor =
             TlsAcceptor::from(Arc::clone(&*tls_holder.tls_config.as_ref().unwrap().load()));
-        let app = app.clone();
+
+        let mut conn_doh_state = doh_state.clone();
+        conn_doh_state.remote_addr = Some(remote_addr);
+
+        let app = Router::new()
+            .route(
+                "/dns-query",
+                post(crate::doh::doh_post).with_state(conn_doh_state),
+            )
+            .fallback(any(proxy_handler))
+            .with_state(proxy_state.clone());
 
         tokio::spawn(async move {
             let tls_stream = match acceptor.accept(tcp_stream).await {
@@ -232,7 +258,7 @@ pre .str {{ color: #d48a5a }}
     )
 }
 
-fn extract_host(req: &Request) -> Option<String> {
+pub fn extract_host(req: &Request) -> Option<String> {
     req.headers()
         .get(hyper::header::HOST)
         .and_then(|v| v.to_str().ok())
