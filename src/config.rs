@@ -612,6 +612,13 @@ pub fn load_config(path: &str) -> Result<ConfigLoad> {
             let filename = p.file_name().unwrap_or(p.as_os_str());
             v.push(crate::config_dir().join(filename));
             v.push(crate::data_dir().join(filename));
+            // Interactive root and sudo'd users: always consult the XDG path
+            // so `touch ~/.config/numa/numa.toml` works regardless of whether
+            // config_dir() routed to FHS (issue #81).
+            let suggested = crate::suggested_config_path();
+            if !v.contains(&suggested) {
+                v.push(suggested);
+            }
         }
         v
     };
@@ -632,11 +639,7 @@ pub fn load_config(path: &str) -> Result<ConfigLoad> {
         }
     }
 
-    // Show config_dir candidate as the "expected" path — it's actionable
-    let display_path = candidates
-        .get(1)
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| resolve_path(path));
+    let display_path = crate::suggested_config_path().to_string_lossy().to_string();
     log::info!("config not found, using defaults (create {})", display_path);
     Ok(ConfigLoad {
         config: Config::default(),

@@ -91,7 +91,7 @@ pub fn try_port53_advisory(bind_addr: &str, err: &std::io::Error) -> Option<Stri
          sudo numa install       (on Windows, run as Administrator)
 
     2. Run on a non-privileged port for testing.
-       Create ~/.config/numa/numa.toml with:
+       Create {} with:
 
          [server]
          bind_addr = \"127.0.0.1:5354\"
@@ -100,7 +100,8 @@ pub fn try_port53_advisory(bind_addr: &str, err: &std::io::Error) -> Option<Stri
        Then run:  numa
        Test with: dig @127.0.0.1 -p 5354 example.com
 
-"
+",
+        crate::suggested_config_path().display()
     ))
 }
 

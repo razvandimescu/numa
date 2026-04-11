@@ -66,13 +66,14 @@ pub fn try_data_dir_advisory(err: &crate::Error, data_dir: &Path) -> Option<Stri
          sudo numa install       (on Windows, run as Administrator)
 
     2. Point data_dir at a path you can write.
-       Create ~/.config/numa/numa.toml with:
+       Create {} with:
 
          [server]
          data_dir = \"/path/you/can/write\"
 
 ",
-        data_dir.display()
+        data_dir.display(),
+        crate::suggested_config_path().display()
     ))
 }
 

@@ -44,6 +44,42 @@ pub fn hostname() -> String {
         .unwrap_or_else(|| "numa".to_string())
 }
 
+/// Path to suggest to an interactive user when asking them to create
+/// `numa.toml`. Prefers `$HOME/.config/numa/numa.toml` when HOME is set
+/// (actionable without sudo); falls back to `config_dir()` otherwise.
+///
+/// Note: `config_dir()` routes interactive root to FHS (`/var/lib/numa`)
+/// so that runtime state like `services.json` stays continuous with the
+/// installed daemon. This helper exists specifically to give advisories
+/// and `load_config` an XDG-aware path for user-authored config, without
+/// moving runtime state out of FHS — see issue #81.
+pub(crate) fn suggested_config_path() -> std::path::PathBuf {
+    #[cfg(not(windows))]
+    {
+        resolve_suggested_config_path(std::env::var("HOME").ok().as_deref(), config_dir)
+    }
+    #[cfg(windows)]
+    {
+        config_dir().join("numa.toml")
+    }
+}
+
+#[cfg(not(windows))]
+fn resolve_suggested_config_path<F>(home: Option<&str>, fallback_dir: F) -> std::path::PathBuf
+where
+    F: FnOnce() -> std::path::PathBuf,
+{
+    if let Some(home) = home {
+        if !home.is_empty() && home != "/" {
+            return std::path::PathBuf::from(home)
+                .join(".config")
+                .join("numa")
+                .join("numa.toml");
+        }
+    }
+    fallback_dir().join("numa.toml")
+}
+
 /// Shared config directory for persistent data (services.json, etc).
 /// Unix users: ~/.config/numa/
 /// Linux root daemon: /var/lib/numa (FHS) — falls back to /usr/local/var/numa
@@ -162,5 +198,74 @@ mod tests {
     #[test]
     fn linux_data_dir_only_fhs_uses_fhs() {
         assert_eq!(resolve_linux_data_dir(false, true), "/var/lib/numa");
+    }
+
+    #[cfg(not(windows))]
+    fn fhs() -> std::path::PathBuf {
+        std::path::PathBuf::from("/var/lib/numa")
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn suggested_config_path_prefers_home() {
+        assert_eq!(
+            resolve_suggested_config_path(Some("/home/alice"), fhs),
+            std::path::PathBuf::from("/home/alice/.config/numa/numa.toml"),
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn suggested_config_path_prefers_root_home_over_fhs() {
+        // Interactive root: HOME=/root is a real user context, not a daemon signal.
+        // Advisory must point where load_config will actually look — issue #81.
+        assert_eq!(
+            resolve_suggested_config_path(Some("/root"), fhs),
+            std::path::PathBuf::from("/root/.config/numa/numa.toml"),
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn suggested_config_path_falls_back_when_home_unset() {
+        assert_eq!(
+            resolve_suggested_config_path(None, fhs),
+            std::path::PathBuf::from("/var/lib/numa/numa.toml"),
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn suggested_config_path_falls_back_when_home_is_root() {
+        // systemd services sometimes have HOME=/ — don't treat that as a real home.
+        assert_eq!(
+            resolve_suggested_config_path(Some("/"), fhs),
+            std::path::PathBuf::from("/var/lib/numa/numa.toml"),
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn suggested_config_path_falls_back_when_home_is_empty() {
+        assert_eq!(
+            resolve_suggested_config_path(Some(""), fhs),
+            std::path::PathBuf::from("/var/lib/numa/numa.toml"),
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn suggested_config_path_skips_fallback_when_home_valid() {
+        // Happy path shouldn't probe the filesystem via config_dir().
+        let called = std::cell::Cell::new(false);
+        let fallback = || {
+            called.set(true);
+            std::path::PathBuf::from("/should/not/be/used")
+        };
+        let _ = resolve_suggested_config_path(Some("/home/alice"), fallback);
+        assert!(
+            !called.get(),
+            "fallback must not be invoked when HOME is valid"
+        );
     }
 }
