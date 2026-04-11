@@ -243,6 +243,7 @@ async fn main() -> numa::Result<()> {
         None
     };
 
+    let doh_enabled = initial_tls.is_some();
     let health_meta = numa::health::HealthMeta::build(
         &resolved_data_dir,
         config.dot.enabled,
@@ -252,6 +253,7 @@ async fn main() -> numa::Result<()> {
         resolved_mode == numa::config::UpstreamMode::Recursive,
         config.lan.enabled,
         config.blocking.enabled,
+        doh_enabled,
     );
 
     let ca_pem = std::fs::read_to_string(resolved_data_dir.join("ca.pem")).ok();
@@ -430,6 +432,13 @@ async fn main() -> numa::Result<()> {
     }
     if config.dot.enabled {
         row("DoT", g, &format!("tls://:{}", config.dot.port));
+    }
+    if doh_enabled {
+        row(
+            "DoH",
+            g,
+            &format!("https://:{}/dns-query", config.proxy.tls_port),
+        );
     }
     if config.lan.enabled {
         row("LAN", g, "mDNS (_numa._tcp.local)");

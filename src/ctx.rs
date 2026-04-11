@@ -110,6 +110,10 @@ pub async fn resolve_query(
                 300,
             ));
             (resp, QueryPath::Local, DnssecStatus::Indeterminate)
+        } else if let Some(records) = ctx.zone_map.get(qname.as_str()).and_then(|m| m.get(&qtype)) {
+            let mut resp = DnsPacket::response_from(&query, ResultCode::NOERROR);
+            resp.answers = records.clone();
+            (resp, QueryPath::Local, DnssecStatus::Indeterminate)
         } else if is_special_use_domain(&qname) {
             // RFC 6761/8880: private PTR, DDR, NAT64 — answer locally
             let resp = special_use_response(&query, &qname, qtype);
@@ -158,10 +162,6 @@ pub async fn resolve_query(
                 60,
             ));
             (resp, QueryPath::Blocked, DnssecStatus::Indeterminate)
-        } else if let Some(records) = ctx.zone_map.get(qname.as_str()).and_then(|m| m.get(&qtype)) {
-            let mut resp = DnsPacket::response_from(&query, ResultCode::NOERROR);
-            resp.answers = records.clone();
-            (resp, QueryPath::Local, DnssecStatus::Indeterminate)
         } else {
             let cached = ctx.cache.read().unwrap().lookup_with_status(&qname, qtype);
             if let Some((cached, cached_dnssec)) = cached {

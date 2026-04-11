@@ -623,6 +623,54 @@ CONF
             "$($KDIG +short dot-test.example A 2>/dev/null)"
 
         echo ""
+        echo "=== DNS-over-HTTPS (RFC 8484) ==="
+
+        DOH_QUERY_FILE=/tmp/numa-doh-query.bin
+        DOH_RESP_FILE=/tmp/numa-doh-resp.bin
+
+        # Build DNS wire-format query for dot-test.example A
+        printf '\x00\x01\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x08dot-test\x07example\x00\x00\x01\x00\x01' > "$DOH_QUERY_FILE"
+
+        # POST valid DoH query
+        DOH_CODE=$(curl -sk -X POST \
+            --resolve "numa.numa:$PROXY_HTTPS_PORT:127.0.0.1" \
+            -H "Content-Type: application/dns-message" \
+            --data-binary @"$DOH_QUERY_FILE" \
+            --cacert "$CA" \
+            -o "$DOH_RESP_FILE" \
+            -w "%{http_code}" \
+            "https://numa.numa:$PROXY_HTTPS_PORT/dns-query")
+        check "DoH POST returns HTTP 200" "200" "$DOH_CODE"
+
+        # Check response contains IP 10.0.0.1 (hex: 0a000001)
+        DOH_HEX=$(xxd -p "$DOH_RESP_FILE" | tr -d '\n')
+        if echo "$DOH_HEX" | grep -q "0a000001"; then
+            check "DoH response resolves dot-test.example → 10.0.0.1" "found" "found"
+        else
+            check "DoH response resolves dot-test.example → 10.0.0.1" "0a000001" "$DOH_HEX"
+        fi
+
+        # Wrong Content-Type → 415
+        DOH_CT_CODE=$(curl -sk -X POST \
+            -H "Host: numa.numa" \
+            -H "Content-Type: text/plain" \
+            --data-binary @"$DOH_QUERY_FILE" \
+            -o /dev/null -w "%{http_code}" \
+            "https://127.0.0.1:$PROXY_HTTPS_PORT/dns-query")
+        check "DoH wrong Content-Type → 415" "415" "$DOH_CT_CODE"
+
+        # Wrong host → 404 (DoH only serves numa.numa)
+        DOH_HOST_CODE=$(curl -sk -X POST \
+            -H "Host: foo.numa" \
+            -H "Content-Type: application/dns-message" \
+            --data-binary @"$DOH_QUERY_FILE" \
+            -o /dev/null -w "%{http_code}" \
+            "https://127.0.0.1:$PROXY_HTTPS_PORT/dns-query")
+        check "DoH wrong host → 404" "404" "$DOH_HOST_CODE"
+
+        rm -f "$DOH_QUERY_FILE" "$DOH_RESP_FILE"
+
+        echo ""
         echo "=== Proxy TLS works with DoT enabled ==="
 
         # Proxy cert has SAN numa.numa (auto-added "numa" service). A
