@@ -14,10 +14,7 @@ use crate::packet::DnsPacket;
 const MAX_DNS_MSG: usize = 4096;
 const DOH_CONTENT_TYPE: &str = "application/dns-message";
 
-pub async fn doh_post(
-    State(state): State<super::proxy::DohState>,
-    req: Request,
-) -> Response {
+pub async fn doh_post(State(state): State<super::proxy::DohState>, req: Request) -> Response {
     let host = super::proxy::extract_host(&req);
     if !is_doh_host(host.as_deref(), &state.ctx.proxy_tld) {
         return StatusCode::NOT_FOUND.into_response();
@@ -34,7 +31,9 @@ pub async fn doh_post(
 
     let body = match axum::body::to_bytes(req.into_body(), MAX_DNS_MSG).await {
         Ok(b) => b,
-        Err(_) => return (StatusCode::PAYLOAD_TOO_LARGE, "body exceeds 4096 bytes").into_response(),
+        Err(_) => {
+            return (StatusCode::PAYLOAD_TOO_LARGE, "body exceeds 4096 bytes").into_response()
+        }
     };
 
     if body.is_empty() {
@@ -51,10 +50,12 @@ pub async fn doh_post(
 fn is_doh_host(host: Option<&str>, tld: &str) -> bool {
     match host {
         Some(h) if h == tld => true,
-        Some(h) => h.len() == 2 * tld.len() + 1
-            && h.starts_with(tld)
-            && h.as_bytes().get(tld.len()) == Some(&b'.')
-            && h.ends_with(tld),
+        Some(h) => {
+            h.len() == 2 * tld.len() + 1
+                && h.starts_with(tld)
+                && h.as_bytes().get(tld.len()) == Some(&b'.')
+                && h.ends_with(tld)
+        }
         None => false,
     }
 }
@@ -103,12 +104,7 @@ async fn resolve_doh(dns_bytes: &[u8], src: SocketAddr, ctx: &ServerCtx) -> Resp
 fn extract_min_ttl(wire: &[u8]) -> u32 {
     let mut buf = BytePacketBuffer::from_bytes(wire);
     match DnsPacket::from_buffer(&mut buf) {
-        Ok(pkt) => pkt
-            .answers
-            .iter()
-            .map(|r| r.ttl())
-            .min()
-            .unwrap_or(0),
+        Ok(pkt) => pkt.answers.iter().map(|r| r.ttl()).min().unwrap_or(0),
         Err(_) => 0,
     }
 }
@@ -118,7 +114,10 @@ fn dns_response(wire: &[u8], min_ttl: u32) -> Response {
         StatusCode::OK,
         [
             (hyper::header::CONTENT_TYPE, DOH_CONTENT_TYPE),
-            (hyper::header::CACHE_CONTROL, &format!("max-age={}", min_ttl)),
+            (
+                hyper::header::CACHE_CONTROL,
+                &format!("max-age={}", min_ttl),
+            ),
         ],
         Bytes::copy_from_slice(wire),
     )

@@ -112,7 +112,10 @@ pub async fn start_proxy_tls(ctx: Arc<ServerCtx>, port: u16, bind_addr: Ipv4Addr
         conn_doh_state.remote_addr = Some(remote_addr);
 
         let app = Router::new()
-            .route("/dns-query", post(crate::doh::doh_post).with_state(conn_doh_state))
+            .route(
+                "/dns-query",
+                post(crate::doh::doh_post).with_state(conn_doh_state),
+            )
             .fallback(any(proxy_handler))
             .with_state(proxy_state.clone());
 
