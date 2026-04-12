@@ -100,7 +100,7 @@ impl DnsCache {
         if self.entry_count >= self.max_entries {
             self.evict_expired();
             if self.entry_count >= self.max_entries {
-                return;
+                self.evict_stalest();
             }
         }
 
@@ -259,6 +259,34 @@ impl DnsCache {
             !type_map.is_empty()
         });
         self.entry_count -= count;
+    }
+
+    /// Evict the single entry closest to (or furthest past) expiry.
+    fn evict_stalest(&mut self) {
+        let mut worst: Option<(String, QueryType, Duration)> = None;
+        for (domain, type_map) in &self.entries {
+            for (qtype, entry) in type_map {
+                let age = entry.inserted_at.elapsed();
+                let remaining = entry.ttl.saturating_sub(age);
+                match &worst {
+                    None => worst = Some((domain.clone(), *qtype, remaining)),
+                    Some((_, _, w)) if remaining < *w => {
+                        worst = Some((domain.clone(), *qtype, remaining));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if let Some((domain, qtype, _)) = worst {
+            if let Some(type_map) = self.entries.get_mut(&domain) {
+                if type_map.remove(&qtype).is_some() {
+                    self.entry_count -= 1;
+                }
+                if type_map.is_empty() {
+                    self.entries.remove(&domain);
+                }
+            }
+        }
     }
 }
 

@@ -302,7 +302,7 @@ impl Default for CacheConfig {
 }
 
 fn default_max_entries() -> usize {
-    10000
+    100_000
 }
 fn default_min_ttl() -> u32 {
     60

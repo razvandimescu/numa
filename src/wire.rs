@@ -1350,18 +1350,25 @@ mod tests {
     }
 
     #[test]
-    fn cache_max_entries_cap() {
+    fn cache_max_entries_evicts_stalest() {
         let mut cache = DnsCache::new(2, 1, 3600);
-        for i in 0..3 {
+        // Insert with decreasing TTL so test0.com is stalest
+        for (i, ttl) in [(0, 60), (1, 3600)] {
             let domain = format!("test{}.com", i);
             let pkt = response(
                 i as u16,
                 &domain,
-                vec![a_record(&domain, &format!("1.2.3.{}", i), 3600)],
+                vec![a_record(&domain, &format!("1.2.3.{}", i), ttl)],
             );
             cache.insert(&domain, QueryType::A, &pkt);
         }
-        // Should not exceed max (third insert is silently dropped or evicts)
-        assert!(cache.len() <= 2);
+        assert_eq!(cache.len(), 2);
+
+        // Third insert should evict test0.com (lowest remaining TTL)
+        let pkt = response(2, "test2.com", vec![a_record("test2.com", "1.2.3.2", 3600)]);
+        cache.insert("test2.com", QueryType::A, &pkt);
+        assert_eq!(cache.len(), 2);
+        assert!(cache.lookup("test0.com", QueryType::A).is_none()); // evicted
+        assert!(cache.lookup("test2.com", QueryType::A).is_some()); // inserted
     }
 }
