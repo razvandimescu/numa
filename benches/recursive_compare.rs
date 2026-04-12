@@ -184,12 +184,27 @@ fn compare_two(
     measure_b: &dyn Fn(&str) -> f64,
     iterations: usize,
 ) {
+    compare_two_rounds(
+        rt, title, name_a, name_b, measure_a, measure_b, iterations, ROUNDS,
+    );
+}
+
+fn compare_two_rounds(
+    rt: &tokio::runtime::Runtime,
+    title: &str,
+    name_a: &str,
+    name_b: &str,
+    measure_a: &dyn Fn(&str) -> f64,
+    measure_b: &dyn Fn(&str) -> f64,
+    iterations: usize,
+    rounds: usize,
+) {
     let flush = std::env::args().any(|a| a == "--flush");
     println!("{}", title);
     println!(
         "{} domains × {} rounds × {} iterations\n",
         DOMAINS.len(),
-        ROUNDS,
+        rounds,
         iterations
     );
 
@@ -203,7 +218,7 @@ fn compare_two(
         let mut b = Vec::new();
 
         for domain in DOMAINS {
-            for round in 0..ROUNDS {
+            for round in 0..rounds {
                 if flush {
                     flush_cache();
                     std::thread::sleep(Duration::from_millis(5));
@@ -230,6 +245,7 @@ fn compare_two(
         &mut all_a,
         &mut all_b,
         iterations,
+        rounds,
     );
 }
 
@@ -240,6 +256,7 @@ fn print_results(
     all_a: &mut Vec<f64>,
     all_b: &mut Vec<f64>,
     iterations: usize,
+    rounds: usize,
 ) {
     let w = name_a.len().max(name_b.len()).max(6);
 
@@ -270,7 +287,7 @@ fn print_results(
     let (a_m, a_med, a_p95, a_p99, a_sd) = stats(all_a);
     let (b_m, b_med, b_p95, b_p99, b_sd) = stats(all_b);
 
-    let total = iterations * DOMAINS.len() * ROUNDS;
+    let total = iterations * DOMAINS.len() * rounds;
     println!("\n=== Aggregated ({} samples per method) ===\n", total);
     println!("{:<10}  {:>w$}  {:>w$}", "", name_a, name_b, w = w + 3);
     println!("{:<10}  {:>w$.1} ms  {:>w$.1} ms", "mean", a_m, b_m, w = w);
@@ -432,7 +449,9 @@ fn run_server_comparison(
         "caching"
     };
 
-    compare_two(
+    let rounds = if cold { 1 } else { ROUNDS };
+
+    compare_two_rounds(
         rt,
         &format!("Server-to-Server: Numa vs {other_name} (UDP, {tag})"),
         "Numa",
@@ -468,6 +487,7 @@ fn run_server_comparison(
             t.elapsed().as_secs_f64() * 1000.0
         },
         iterations,
+        rounds,
     );
 }
 
