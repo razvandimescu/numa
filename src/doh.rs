@@ -49,16 +49,25 @@ pub async fn doh_post(State(state): State<super::proxy::DohState>, req: Request)
 }
 
 fn is_doh_host(host: Option<&str>, tld: &str) -> bool {
-    match host {
-        Some(h) if h == tld => true,
-        Some(h) => {
-            h.len() == 2 * tld.len() + 1
-                && h.starts_with(tld)
-                && h.as_bytes().get(tld.len()) == Some(&b'.')
-                && h.ends_with(tld)
-        }
-        None => false,
-    }
+    let h = match host {
+        Some(h) => h,
+        None => return false,
+    };
+    is_doh_name(h, tld)
+        || h.rsplit_once(':').is_some_and(|(base, port)| {
+            port.bytes().all(|b| b.is_ascii_digit()) && is_doh_name(base, tld)
+        })
+}
+
+fn is_doh_name(h: &str, tld: &str) -> bool {
+    h == tld
+        || (h.len() == 2 * tld.len() + 1
+            && h.starts_with(tld)
+            && h.as_bytes().get(tld.len()) == Some(&b'.')
+            && h.ends_with(tld))
+        || h == "127.0.0.1"
+        || h == "::1"
+        || h == "localhost"
 }
 
 async fn resolve_doh(
@@ -148,6 +157,10 @@ mod tests {
     fn is_doh_host_matches_tld() {
         assert!(is_doh_host(Some("numa"), "numa"));
         assert!(is_doh_host(Some("numa.numa"), "numa"));
+        assert!(is_doh_host(Some("127.0.0.1"), "numa"));
+        assert!(is_doh_host(Some("127.0.0.1:443"), "numa"));
+        assert!(is_doh_host(Some("::1"), "numa"));
+        assert!(is_doh_host(Some("localhost"), "numa"));
         assert!(!is_doh_host(Some("foo.numa"), "numa"));
         assert!(!is_doh_host(None, "numa"));
     }

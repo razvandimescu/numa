@@ -186,6 +186,20 @@ fn generate_service_cert(
         }
     }
 
+    // Loopback IP SANs so browsers can reach DoH at https://127.0.0.1/dns-query
+    sans.push(SanType::IpAddress(std::net::IpAddr::V4(
+        std::net::Ipv4Addr::LOCALHOST,
+    )));
+    sans.push(SanType::IpAddress(std::net::IpAddr::V6(
+        std::net::Ipv6Addr::LOCALHOST,
+    )));
+
+    // Bare TLD (e.g. "numa") for DoH via https://numa/dns-query
+    match tld.to_string().try_into() {
+        Ok(ia5) => sans.push(SanType::DnsName(ia5)),
+        Err(e) => warn!("invalid SAN {}: {}", tld, e),
+    }
+
     if sans.is_empty() {
         return Err("no valid service names for TLS cert".into());
     }
