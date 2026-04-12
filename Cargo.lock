@@ -1170,6 +1170,7 @@ dependencies = [
  "tokio-rustls",
  "toml",
  "tower",
+ "webpki-roots",
 ]
 
 [[package]]
