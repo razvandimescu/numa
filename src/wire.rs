@@ -1374,29 +1374,28 @@ mod tests {
 
     #[test]
     fn lookup_wire_signals_stale_when_expired() {
+        use crate::cache::Freshness;
         let mut cache = DnsCache::new(100, 1, 1); // max_ttl=1s so entry expires fast
         let pkt = response(
             0x1234,
             "example.com",
-            vec![a_record("example.com", "1.2.3.4", 1)], // 1s TTL, clamped to min=1
+            vec![a_record("example.com", "1.2.3.4", 1)],
         );
         cache.insert("example.com", QueryType::A, &pkt);
 
-        // Fresh: not stale
-        let (_, _, stale) = cache.lookup_wire("example.com", QueryType::A, 0).unwrap();
-        assert!(!stale);
+        let (_, _, f) = cache.lookup_wire("example.com", QueryType::A, 0).unwrap();
+        assert_eq!(f, Freshness::Fresh);
 
-        // Wait for expiry
         std::thread::sleep(std::time::Duration::from_millis(1100));
 
-        // Expired but within stale window: stale=true
-        let (_, _, stale) = cache.lookup_wire("example.com", QueryType::A, 0).unwrap();
-        assert!(stale);
+        let (_, _, f) = cache.lookup_wire("example.com", QueryType::A, 0).unwrap();
+        assert_eq!(f, Freshness::Stale);
     }
 
     #[test]
     fn lookup_wire_signals_prefetch_near_expiry() {
-        let mut cache = DnsCache::new(100, 10, 10); // min_ttl=10, max_ttl=10 → entry gets 10s TTL
+        use crate::cache::Freshness;
+        let mut cache = DnsCache::new(100, 10, 10);
         let pkt = response(
             0x1234,
             "example.com",
@@ -1404,18 +1403,14 @@ mod tests {
         );
         cache.insert("example.com", QueryType::A, &pkt);
 
-        // Fresh (>10% remaining): not stale
-        let (_, _, stale) = cache.lookup_wire("example.com", QueryType::A, 0).unwrap();
-        assert!(!stale);
+        let (_, _, f) = cache.lookup_wire("example.com", QueryType::A, 0).unwrap();
+        assert_eq!(f, Freshness::Fresh);
 
-        // Wait until <10% remaining (>9s elapsed of 10s TTL)
         std::thread::sleep(std::time::Duration::from_millis(9100));
 
-        // Still valid but near expiry: stale=true (triggers prefetch)
         let result = cache.lookup_wire("example.com", QueryType::A, 0);
-        if let Some((_, _, stale)) = result {
-            assert!(stale, "entry at <10% TTL should signal stale for prefetch");
+        if let Some((_, _, f)) = result {
+            assert_eq!(f, Freshness::NearExpiry);
         }
-        // (entry may have fully expired on slow CI, so we don't assert Some)
     }
 }

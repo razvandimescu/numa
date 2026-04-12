@@ -180,7 +180,6 @@ async fn handle_dot_connection<S>(
             break;
         };
 
-        let raw_wire = buffer.buf[..msg_len].to_vec();
         let query = match DnsPacket::from_buffer(&mut buffer) {
             Ok(q) => q,
             Err(e) => {
@@ -202,7 +201,7 @@ async fn handle_dot_connection<S>(
             }
         };
 
-        match resolve_query(query.clone(), &raw_wire, remote_addr, ctx).await {
+        match resolve_query(query.clone(), &buffer.buf[..msg_len], remote_addr, ctx).await {
             Ok(resp_buffer) => {
                 if write_framed(&mut stream, resp_buffer.filled())
                     .await

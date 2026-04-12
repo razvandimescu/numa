@@ -6,6 +6,22 @@ use crate::packet::DnsPacket;
 use crate::question::QueryType;
 use crate::wire::WireMeta;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Freshness {
+    /// Within TTL, no action needed.
+    Fresh,
+    /// Within TTL but <10% remaining — trigger background prefetch.
+    NearExpiry,
+    /// Past TTL but within stale window — serve with TTL=1, trigger background refresh.
+    Stale,
+}
+
+impl Freshness {
+    pub fn needs_refresh(self) -> bool {
+        matches!(self, Freshness::NearExpiry | Freshness::Stale)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum DnssecStatus {
     Secure,
@@ -64,17 +80,21 @@ impl DnsCache {
         domain: &str,
         qtype: QueryType,
         new_id: u16,
-    ) -> Option<(Vec<u8>, DnssecStatus, bool)> {
+    ) -> Option<(Vec<u8>, DnssecStatus, Freshness)> {
         let type_map = self.entries.get(domain)?;
         let entry = type_map.get(&qtype)?;
 
         let elapsed = entry.inserted_at.elapsed();
-        let (remaining, stale) = if elapsed < entry.ttl {
+        let (remaining, freshness) = if elapsed < entry.ttl {
             let secs = (entry.ttl - elapsed).as_secs() as u32;
-            let near_expiry = elapsed * 10 >= entry.ttl * 9; // <10% TTL remaining
-            (secs.max(1), near_expiry)
+            let f = if elapsed * 10 >= entry.ttl * 9 {
+                Freshness::NearExpiry
+            } else {
+                Freshness::Fresh
+            };
+            (secs.max(1), f)
         } else if elapsed < entry.ttl + STALE_WINDOW {
-            (1, true)
+            (1, Freshness::Stale)
         } else {
             return None;
         };
@@ -83,7 +103,7 @@ impl DnsCache {
         crate::wire::patch_id(&mut wire, new_id);
         crate::wire::patch_ttls(&mut wire, &entry.meta.ttl_offsets, remaining);
 
-        Some((wire, entry.dnssec_status, stale))
+        Some((wire, entry.dnssec_status, freshness))
     }
 
     pub fn insert_wire(
@@ -141,11 +161,11 @@ impl DnsCache {
         &self,
         domain: &str,
         qtype: QueryType,
-    ) -> Option<(DnsPacket, DnssecStatus, bool)> {
-        let (wire, status, stale) = self.lookup_wire(domain, qtype, 0)?;
+    ) -> Option<(DnsPacket, DnssecStatus, Freshness)> {
+        let (wire, status, freshness) = self.lookup_wire(domain, qtype, 0)?;
         let mut buf = BytePacketBuffer::from_bytes(&wire);
         let pkt = DnsPacket::from_buffer(&mut buf).ok()?;
-        Some((pkt, status, stale))
+        Some((pkt, status, freshness))
     }
 
     pub fn insert(&mut self, domain: &str, qtype: QueryType, packet: &DnsPacket) {

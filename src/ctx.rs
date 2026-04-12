@@ -168,14 +168,14 @@ pub async fn resolve_query(
             (resp, QueryPath::Blocked, DnssecStatus::Indeterminate)
         } else {
             let cached = ctx.cache.read().unwrap().lookup_with_status(&qname, qtype);
-            if let Some((cached, cached_dnssec, stale)) = cached {
-                if stale {
+            if let Some((cached, cached_dnssec, freshness)) = cached {
+                if freshness.needs_refresh() {
                     let key = (qname.clone(), qtype);
                     let already = !ctx.refreshing.lock().unwrap().insert(key.clone());
                     if !already {
                         let ctx = Arc::clone(ctx);
                         tokio::spawn(async move {
-                            warm_stale(&ctx, &key.0, key.1).await;
+                            refresh_entry(&ctx, &key.0, key.1).await;
                             ctx.refreshing.lock().unwrap().remove(&key);
                         });
                     }
@@ -388,8 +388,9 @@ fn cache_and_parse(
     DnsPacket::from_buffer(&mut buf)
 }
 
-/// Background refresh for a stale cache entry (RFC 8767 revalidation).
-async fn warm_stale(ctx: &ServerCtx, qname: &str, qtype: QueryType) {
+/// Re-resolve a single (domain, qtype) and update the cache.
+/// Used for both stale-entry refresh and proactive cache warming.
+pub async fn refresh_entry(ctx: &ServerCtx, qname: &str, qtype: QueryType) {
     let query = DnsPacket::query(0, qname, qtype);
     if ctx.upstream_mode == UpstreamMode::Recursive {
         if let Ok(resp) = crate::recursive::resolve_recursive(
@@ -445,7 +446,6 @@ pub async fn handle_query(
     src_addr: SocketAddr,
     ctx: &Arc<ServerCtx>,
 ) -> crate::Result<()> {
-    let raw_wire = buffer.buf[..raw_len].to_vec();
     let query = match DnsPacket::from_buffer(&mut buffer) {
         Ok(packet) => packet,
         Err(e) => {
@@ -453,7 +453,7 @@ pub async fn handle_query(
             return Ok(());
         }
     };
-    match resolve_query(query, &raw_wire, src_addr, ctx).await {
+    match resolve_query(query, &buffer.buf[..raw_len], src_addr, ctx).await {
         Ok(resp_buffer) => {
             ctx.socket.send_to(resp_buffer.filled(), src_addr).await?;
         }
