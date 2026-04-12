@@ -113,14 +113,18 @@ From Machine B: `curl http://api.numa` → proxied to Machine A's port 8000. Ena
 | DNSSEC validation | — | — | Yes | Yes (RSA, ECDSA, Ed25519) |
 | Ad blocking | Yes | Yes | — | 385K+ domains |
 | Web admin UI | Full | Full | — | Dashboard |
-| Encrypted upstream (DoH) | Needs cloudflared | Yes | — | Native |
+| Encrypted upstream (DoH/DoT) | Needs cloudflared | DoH only | DoT only | DoH + DoT (`tls://`) |
 | Encrypted clients (DoT listener) | Needs stunnel sidecar | Yes | Yes | Native (RFC 7858) |
+| DoH server endpoint | — | Yes | — | Yes (RFC 8484) |
+| Request hedging | — | — | — | All protocols (UDP, DoH, DoT) |
+| Serve-stale + prefetch | — | — | Prefetch at 90% TTL | RFC 8767, prefetch at 90% TTL |
+| Conditional forwarding | — | Yes | Yes | Yes (per-suffix rules) |
 | Portable (laptop) | No (appliance) | No (appliance) | Server | Single binary, macOS/Linux/Windows |
 | Community maturity | 56K stars, 10 years | 33K stars | 20 years | New |
 
 ## Performance
 
-691ns cached round-trip. ~2.0M qps throughput. Zero heap allocations in the hot path. Recursive queries average 237ms after SRTT warmup (12x improvement over round-robin). ECDSA P-256 DNSSEC verification: 174ns. [Benchmarks →](bench/)
+0.1ms cached queries — matches Unbound and AdGuard Home. Wire-level cache stores raw bytes with in-place TTL patching. Request hedging eliminates p99 spikes: cold recursive p99 538ms vs Unbound 748ms (−28%), σ 4× tighter. [Benchmarks →](benches/)
 
 ## Learn More
 
@@ -135,11 +139,14 @@ From Machine B: `curl http://api.numa` → proxied to Machine A's port 8000. Ena
 - [x] DNS forwarding, caching, ad blocking, developer overrides
 - [x] `.numa` local domains — auto TLS, path routing, WebSocket proxy
 - [x] LAN service discovery — mDNS, cross-machine DNS + proxy
-- [x] DNS-over-HTTPS — encrypted upstream
-- [x] DNS-over-TLS listener — encrypted client connections (RFC 7858, ALPN strict)
+- [x] DNS-over-HTTPS — encrypted upstream + server endpoint (RFC 8484)
+- [x] DNS-over-TLS — encrypted client listener (RFC 7858) + upstream forwarding (`tls://`)
 - [x] Recursive resolution + DNSSEC — chain-of-trust, NSEC/NSEC3
 - [x] SRTT-based nameserver selection
 - [x] Multi-forwarder failover — multiple upstreams with SRTT ranking, fallback pool
+- [x] Request hedging — parallel requests rescue packet loss and tail latency (all protocols)
+- [x] Serve-stale + prefetch — RFC 8767, background refresh at <10% TTL and on stale serve
+- [x] Conditional forwarding — per-suffix rules for split-horizon DNS (Tailscale, VPNs)
 - [x] Cache warming — proactive resolution for configured domains
 - [x] Mobile onboarding — `setup-phone` QR flow, mobile API, mobileconfig profiles
 - [ ] pkarr integration — self-sovereign DNS via Mainline DHT
