@@ -8,6 +8,7 @@
 //!   --hedge-5x      Hedging: single vs hedge-same vs hedge-dual vs Hickory (5 iterations)
 //!   --vs-unbound    Server-to-server: Numa vs Unbound (plain UDP, caching)
 //!   --vs-unbound-cold  Cold: Numa vs Unbound (unique subdomains, no cache hits)
+//!   --vs-adguard    Server-to-server: Numa vs AdGuard Home (plain UDP, caching)
 //!   --vs-nextdns    Server-to-cloud: Numa (local cache) vs NextDNS (remote, 45.90.28.0)
 //!   --vs-dot        DoT server: Numa vs Unbound
 //!   --vs-doh-servers DoH server: Numa vs Unbound (DoT upstream)
@@ -157,6 +158,10 @@ fn main() {
     if arg("--vs-dnscrypt") {
         check_numa_mode(&rt, "forward");
         return run_server_comparison(&rt, "dnscrypt-proxy", "127.0.0.1:5455", 5, false);
+    }
+    if arg("--vs-adguard") {
+        check_numa_mode(&rt, "forward");
+        return run_server_comparison(&rt, "AdGuard Home", "127.0.0.1:5457", 5, false);
     }
     if arg("--vs-nextdns") {
         check_numa_mode(&rt, "forward");
