@@ -16,7 +16,9 @@ use crate::blocklist::BlocklistStore;
 use crate::buffer::BytePacketBuffer;
 use crate::cache::{DnsCache, DnssecStatus};
 use crate::config::{UpstreamMode, ZoneMap};
-use crate::forward::{forward_query, forward_with_failover, Upstream, UpstreamPool};
+use crate::forward::{
+    forward_query_raw, forward_with_failover_raw, Upstream, UpstreamPool,
+};
 use crate::header::ResultCode;
 use crate::health::HealthMeta;
 use crate::lan::PeerStore;
@@ -47,6 +49,7 @@ pub struct ServerCtx {
     pub upstream_port: u16,
     pub lan_ip: Mutex<std::net::Ipv4Addr>,
     pub timeout: Duration,
+    pub hedge_delay: Duration,
     pub proxy_tld: String,
     pub proxy_tld_suffix: String, // pre-computed ".{tld}" to avoid per-query allocation
     pub lan_enabled: bool,
@@ -81,6 +84,7 @@ pub struct ServerCtx {
 /// (and logging parse errors) before calling this function.
 pub async fn resolve_query(
     query: DnsPacket,
+    raw_wire: &[u8],
     src_addr: SocketAddr,
     ctx: &ServerCtx,
 ) -> crate::Result<BytePacketBuffer> {
@@ -177,9 +181,8 @@ pub async fn resolve_query(
                 // Conditional forwarding takes priority over recursive mode
                 // (e.g. Tailscale .ts.net, VPC private zones)
                 let upstream = Upstream::Udp(fwd_addr);
-                match forward_query(&query, &upstream, ctx.timeout).await {
+                match forward_and_cache(raw_wire, &upstream, ctx, &qname, qtype).await {
                     Ok(resp) => {
-                        ctx.cache.write().unwrap().insert(&qname, qtype, &resp);
                         (resp, QueryPath::Forwarded, DnssecStatus::Indeterminate)
                     }
                     Err(e) => {
@@ -221,10 +224,19 @@ pub async fn resolve_query(
                 (resp, path, DnssecStatus::Indeterminate)
             } else {
                 let pool = ctx.upstream_pool.lock().unwrap().clone();
-                match forward_with_failover(&query, &pool, &ctx.srtt, ctx.timeout).await {
-                    Ok(resp) => {
-                        ctx.cache.write().unwrap().insert(&qname, qtype, &resp);
-                        (resp, QueryPath::Forwarded, DnssecStatus::Indeterminate)
+                match forward_with_failover_raw(raw_wire, &pool, &ctx.srtt, ctx.timeout, ctx.hedge_delay).await {
+                    Ok(resp_wire) => {
+                        ctx.cache.write().unwrap().insert_wire(
+                            &qname, qtype, &resp_wire, DnssecStatus::Indeterminate,
+                        );
+                        let mut buf = BytePacketBuffer::from_bytes(&resp_wire);
+                        match DnsPacket::from_buffer(&mut buf) {
+                            Ok(resp) => (resp, QueryPath::Forwarded, DnssecStatus::Indeterminate),
+                            Err(e) => {
+                                error!("{} | {:?} {} | PARSE ERROR | {}", src_addr, qtype, qname, e);
+                                (DnsPacket::response_from(&query, ResultCode::SERVFAIL), QueryPath::UpstreamError, DnssecStatus::Indeterminate)
+                            }
+                        }
                     }
                     Err(e) => {
                         error!(
@@ -347,12 +359,29 @@ pub async fn resolve_query(
     Ok(resp_buffer)
 }
 
-/// Handle a DNS query received over UDP. Thin wrapper around resolve_query.
+async fn forward_and_cache(
+    wire: &[u8],
+    upstream: &Upstream,
+    ctx: &ServerCtx,
+    qname: &str,
+    qtype: QueryType,
+) -> crate::Result<DnsPacket> {
+    let resp_wire = forward_query_raw(wire, upstream, ctx.timeout).await?;
+    ctx.cache
+        .write()
+        .unwrap()
+        .insert_wire(qname, qtype, &resp_wire, DnssecStatus::Indeterminate);
+    let mut buf = BytePacketBuffer::from_bytes(&resp_wire);
+    DnsPacket::from_buffer(&mut buf)
+}
+
 pub async fn handle_query(
     mut buffer: BytePacketBuffer,
+    raw_len: usize,
     src_addr: SocketAddr,
     ctx: &ServerCtx,
 ) -> crate::Result<()> {
+    let raw_wire = buffer.buf[..raw_len].to_vec();
     let query = match DnsPacket::from_buffer(&mut buffer) {
         Ok(packet) => packet,
         Err(e) => {
@@ -360,7 +389,7 @@ pub async fn handle_query(
             return Ok(());
         }
     };
-    match resolve_query(query, src_addr, ctx).await {
+    match resolve_query(query, &raw_wire, src_addr, ctx).await {
         Ok(resp_buffer) => {
             ctx.socket.send_to(resp_buffer.filled(), src_addr).await?;
         }

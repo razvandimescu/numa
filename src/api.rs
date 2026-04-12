@@ -1029,6 +1029,7 @@ mod tests {
             upstream_port: 53,
             lan_ip: Mutex::new(std::net::Ipv4Addr::LOCALHOST),
             timeout: std::time::Duration::from_secs(3),
+            hedge_delay: std::time::Duration::ZERO,
             proxy_tld: "numa".to_string(),
             proxy_tld_suffix: ".numa".to_string(),
             lan_enabled: false,

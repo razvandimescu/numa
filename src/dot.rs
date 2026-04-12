@@ -177,8 +177,7 @@ where
             break;
         };
 
-        // Parse query up-front so we can echo its question section in SERVFAIL
-        // responses when resolve_query fails.
+        let raw_wire = buffer.buf[..msg_len].to_vec();
         let query = match DnsPacket::from_buffer(&mut buffer) {
             Ok(q) => q,
             Err(e) => {
@@ -200,7 +199,7 @@ where
             }
         };
 
-        match resolve_query(query.clone(), remote_addr, ctx).await {
+        match resolve_query(query.clone(), &raw_wire, remote_addr, ctx).await {
             Ok(resp_buffer) => {
                 if write_framed(&mut stream, resp_buffer.filled())
                     .await
@@ -370,6 +369,7 @@ mod tests {
             upstream_port: 53,
             lan_ip: Mutex::new(std::net::Ipv4Addr::LOCALHOST),
             timeout: Duration::from_millis(200),
+            hedge_delay: Duration::ZERO,
             proxy_tld: "numa".to_string(),
             proxy_tld_suffix: ".numa".to_string(),
             lan_enabled: false,

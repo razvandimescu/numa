@@ -82,7 +82,7 @@ async fn resolve_doh(dns_bytes: &[u8], src: SocketAddr, ctx: &ServerCtx) -> Resp
     let query_rd = query.header.recursion_desired;
     let questions = query.questions.clone();
 
-    match resolve_query(query, src, ctx).await {
+    match resolve_query(query, dns_bytes, src, ctx).await {
         Ok(resp_buffer) => {
             let min_ttl = extract_min_ttl(resp_buffer.filled());
             dns_response(resp_buffer.filled(), min_ttl)
@@ -102,11 +102,10 @@ async fn resolve_doh(dns_bytes: &[u8], src: SocketAddr, ctx: &ServerCtx) -> Resp
 }
 
 fn extract_min_ttl(wire: &[u8]) -> u32 {
-    let mut buf = BytePacketBuffer::from_bytes(wire);
-    match DnsPacket::from_buffer(&mut buf) {
-        Ok(pkt) => pkt.answers.iter().map(|r| r.ttl()).min().unwrap_or(0),
-        Err(_) => 0,
-    }
+    crate::wire::scan_ttl_offsets(wire)
+        .ok()
+        .and_then(|meta| crate::wire::min_ttl_from_wire(wire, &meta))
+        .unwrap_or(0)
 }
 
 fn dns_response(wire: &[u8], min_ttl: u32) -> Response {

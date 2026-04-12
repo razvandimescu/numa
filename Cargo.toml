@@ -37,6 +37,8 @@ webpki-roots = "1"
 criterion = { version = "0.8", features = ["html_reports"] }
 tower = { version = "0.5", features = ["util"] }
 http = "1"
+hickory-resolver = { version = "0.25", features = ["https-ring", "webpki-roots"] }
+hickory-proto = "0.25"
 
 [[bench]]
 name = "hot_path"
@@ -48,4 +50,8 @@ harness = false
 
 [[bench]]
 name = "dnssec"
+harness = false
+
+[[bench]]
+name = "recursive_compare"
 harness = false

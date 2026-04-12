@@ -65,6 +65,13 @@ pub fn parse_upstream(s: &str, default_port: u16) -> Result<Upstream> {
     if s.starts_with("https://") {
         let client = reqwest::Client::builder()
             .use_rustls_tls()
+            .http2_initial_stream_window_size(65_535)
+            .http2_initial_connection_window_size(65_535)
+            .http2_keep_alive_interval(Duration::from_secs(15))
+            .http2_keep_alive_while_idle(true)
+            .http2_keep_alive_timeout(Duration::from_secs(10))
+            .pool_idle_timeout(Duration::from_secs(300))
+            .pool_max_idle_per_host(1)
             .build()
             .unwrap_or_default();
         return Ok(Upstream::Doh {
@@ -325,13 +332,170 @@ async fn forward_doh(
     let mut send_buffer = BytePacketBuffer::new();
     query.write(&mut send_buffer)?;
 
+    let resp_bytes = forward_doh_raw(send_buffer.filled(), url, client, timeout_duration).await?;
+    let mut recv_buffer = BytePacketBuffer::from_bytes(&resp_bytes);
+    DnsPacket::from_buffer(&mut recv_buffer)
+}
+
+pub async fn forward_query_raw(
+    wire: &[u8],
+    upstream: &Upstream,
+    timeout_duration: Duration,
+) -> Result<Vec<u8>> {
+    match upstream {
+        Upstream::Udp(addr) => forward_udp_raw(wire, *addr, timeout_duration).await,
+        Upstream::Doh { url, client } => forward_doh_raw(wire, url, client, timeout_duration).await,
+    }
+}
+
+pub async fn forward_with_hedging_raw(
+    wire: &[u8],
+    primary: &Upstream,
+    secondary: &Upstream,
+    hedge_delay: Duration,
+    timeout_duration: Duration,
+) -> Result<Vec<u8>> {
+    use tokio::time::sleep;
+
+    let primary_fut = forward_query_raw(wire, primary, timeout_duration);
+    tokio::pin!(primary_fut);
+
+    let delay = sleep(hedge_delay);
+    tokio::pin!(delay);
+
+    // Phase 1: wait for either primary to return, or the hedge delay.
+    tokio::select! {
+        result = &mut primary_fut => return result,
+        _ = &mut delay => {}
+    }
+
+    // Phase 2: hedge delay expired — fire secondary while still polling primary.
+    let secondary_fut = forward_query_raw(wire, secondary, timeout_duration);
+    tokio::pin!(secondary_fut);
+
+    // First successful response wins. If one errors, wait for the other.
+    let mut primary_err: Option<crate::Error> = None;
+    let mut secondary_err: Option<crate::Error> = None;
+
+    loop {
+        tokio::select! {
+            r = &mut primary_fut, if primary_err.is_none() => {
+                match r {
+                    Ok(resp) => return Ok(resp),
+                    Err(e) => {
+                        if let Some(se) = secondary_err.take() {
+                            return Err(se);
+                        }
+                        primary_err = Some(e);
+                    }
+                }
+            }
+            r = &mut secondary_fut, if secondary_err.is_none() => {
+                match r {
+                    Ok(resp) => return Ok(resp),
+                    Err(e) => {
+                        if let Some(pe) = primary_err.take() {
+                            return Err(pe);
+                        }
+                        secondary_err = Some(e);
+                    }
+                }
+            }
+        }
+
+        match (primary_err, secondary_err) {
+            (Some(pe), Some(_)) => return Err(pe),
+            (pe, se) => { primary_err = pe; secondary_err = se; }
+        }
+    }
+}
+
+pub async fn forward_with_failover_raw(
+    wire: &[u8],
+    pool: &UpstreamPool,
+    srtt: &RwLock<SrttCache>,
+    timeout_duration: Duration,
+    hedge_delay: Duration,
+) -> Result<Vec<u8>> {
+    let mut candidates: Vec<(usize, u64)> = pool
+        .primary
+        .iter()
+        .enumerate()
+        .map(|(i, u)| {
+            let rtt = match u {
+                Upstream::Udp(addr) => srtt.read().unwrap().get(addr.ip()),
+                _ => 0,
+            };
+            (i, rtt)
+        })
+        .collect();
+    candidates.sort_by_key(|&(_, rtt)| rtt);
+
+    let all_upstreams: Vec<&Upstream> = candidates
+        .iter()
+        .map(|&(i, _)| &pool.primary[i])
+        .chain(pool.fallback.iter())
+        .collect();
+
+    let mut last_err: Option<Box<dyn std::error::Error + Send + Sync>> = None;
+
+    for upstream in &all_upstreams {
+        let start = Instant::now();
+        let result = if !hedge_delay.is_zero() && matches!(upstream, Upstream::Doh { .. }) {
+            // Hedge against the same upstream: parallel h2 streams on same
+            // connection. Independent stream scheduling rescues dispatch spikes.
+            forward_with_hedging_raw(wire, upstream, upstream, hedge_delay, timeout_duration).await
+        } else {
+            forward_query_raw(wire, upstream, timeout_duration).await
+        };
+        match result {
+            Ok(resp) => {
+                if let Upstream::Udp(addr) = upstream {
+                    let rtt_ms = start.elapsed().as_millis() as u64;
+                    srtt.write().unwrap().record_rtt(addr.ip(), rtt_ms, false);
+                }
+                return Ok(resp);
+            }
+            Err(e) => {
+                if let Upstream::Udp(addr) = upstream {
+                    srtt.write().unwrap().record_failure(addr.ip());
+                }
+                log::debug!("upstream {} failed: {}", upstream, e);
+                last_err = Some(e);
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| "no upstream configured".into()))
+}
+
+async fn forward_udp_raw(
+    wire: &[u8],
+    upstream: SocketAddr,
+    timeout_duration: Duration,
+) -> Result<Vec<u8>> {
+    let socket = UdpSocket::bind("0.0.0.0:0").await?;
+    socket.send_to(wire, upstream).await?;
+
+    let mut recv_buf = vec![0u8; 4096];
+    let (size, _) = timeout(timeout_duration, socket.recv_from(&mut recv_buf)).await??;
+    recv_buf.truncate(size);
+    Ok(recv_buf)
+}
+
+async fn forward_doh_raw(
+    wire: &[u8],
+    url: &str,
+    client: &reqwest::Client,
+    timeout_duration: Duration,
+) -> Result<Vec<u8>> {
     let resp = timeout(
         timeout_duration,
         client
             .post(url)
             .header("content-type", "application/dns-message")
             .header("accept", "application/dns-message")
-            .body(send_buffer.filled().to_vec())
+            .body(wire.to_vec())
             .send(),
     )
     .await??
@@ -339,9 +503,25 @@ async fn forward_doh(
 
     let bytes = resp.bytes().await?;
     log::debug!("DoH response: {} bytes", bytes.len());
+    Ok(bytes.to_vec())
+}
 
-    let mut recv_buffer = BytePacketBuffer::from_bytes(&bytes);
-    DnsPacket::from_buffer(&mut recv_buffer)
+/// Send a lightweight keepalive query to a DoH upstream to prevent
+/// the HTTP/2 + TLS connection from going idle and being torn down.
+pub async fn keepalive_doh(upstream: &Upstream) {
+    if let Upstream::Doh { url, client } = upstream {
+        // Query for . NS — minimal, always succeeds, response is small
+        let wire: &[u8] = &[
+            0x00, 0x00, // ID
+            0x01, 0x00, // flags: RD=1
+            0x00, 0x01, // QDCOUNT=1
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // AN=0, NS=0, AR=0
+            0x00,       // root name (.)
+            0x00, 0x02, // type NS
+            0x00, 0x01, // class IN
+        ];
+        let _ = forward_doh_raw(wire, url, client, Duration::from_secs(5)).await;
+    }
 }
 
 #[cfg(test)]

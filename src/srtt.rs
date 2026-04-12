@@ -45,6 +45,11 @@ impl SrttCache {
         }
     }
 
+    /// Whether we have observed RTT data for this IP.
+    pub fn is_known(&self, ip: IpAddr) -> bool {
+        self.entries.contains_key(&ip)
+    }
+
     /// Apply time-based decay: each DECAY_AFTER_SECS period halves distance to INITIAL.
     fn decayed_srtt(entry: &SrttEntry) -> u64 {
         Self::decay_for_age(entry.srtt_ms, entry.updated_at.elapsed().as_secs())

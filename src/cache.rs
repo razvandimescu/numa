@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use crate::buffer::BytePacketBuffer;
 use crate::packet::DnsPacket;
 use crate::question::QueryType;
-use crate::record::DnsRecord;
+use crate::wire::WireMeta;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum DnssecStatus {
@@ -26,14 +27,16 @@ impl DnssecStatus {
 }
 
 struct CacheEntry {
-    packet: DnsPacket,
+    wire: Vec<u8>,
+    meta: WireMeta,
     inserted_at: Instant,
     ttl: Duration,
     dnssec_status: DnssecStatus,
 }
 
-/// DNS cache using a two-level map (domain -> query_type -> entry) so that
-/// lookups can borrow `&str` instead of allocating a `String` key.
+const STALE_WINDOW: Duration = Duration::from_secs(3600);
+
+/// DNS cache with serve-stale (RFC 8767). Stores raw wire bytes.
 pub struct DnsCache {
     entries: HashMap<String, HashMap<QueryType, CacheEntry>>,
     entry_count: usize,
@@ -53,6 +56,80 @@ impl DnsCache {
         }
     }
 
+    /// Look up cached wire bytes, patching ID and TTLs in the returned copy.
+    /// Implements serve-stale (RFC 8767): expired entries within STALE_WINDOW
+    /// are returned with TTL=1 and `stale=true` so callers can revalidate.
+    pub fn lookup_wire(
+        &self,
+        domain: &str,
+        qtype: QueryType,
+        new_id: u16,
+    ) -> Option<(Vec<u8>, DnssecStatus, bool)> {
+        let type_map = self.entries.get(domain)?;
+        let entry = type_map.get(&qtype)?;
+
+        let elapsed = entry.inserted_at.elapsed();
+        let (remaining, stale) = if elapsed < entry.ttl {
+            let secs = (entry.ttl - elapsed).as_secs() as u32;
+            (secs.max(1), false)
+        } else if elapsed < entry.ttl + STALE_WINDOW {
+            (1, true)
+        } else {
+            return None;
+        };
+
+        let mut wire = entry.wire.clone();
+        crate::wire::patch_id(&mut wire, new_id);
+        crate::wire::patch_ttls(&mut wire, &entry.meta.ttl_offsets, remaining);
+
+        Some((wire, entry.dnssec_status, stale))
+    }
+
+    pub fn insert_wire(
+        &mut self,
+        domain: &str,
+        qtype: QueryType,
+        wire: &[u8],
+        dnssec_status: DnssecStatus,
+    ) {
+        let meta = match crate::wire::scan_ttl_offsets(wire) {
+            Ok(m) => m,
+            Err(_) => return, // malformed wire, skip
+        };
+
+        if self.entry_count >= self.max_entries {
+            self.evict_expired();
+            if self.entry_count >= self.max_entries {
+                return;
+            }
+        }
+
+        let min_ttl = crate::wire::min_ttl_from_wire(wire, &meta)
+            .unwrap_or(self.min_ttl)
+            .clamp(self.min_ttl, self.max_ttl);
+
+        let type_map = if let Some(existing) = self.entries.get_mut(domain) {
+            existing
+        } else {
+            self.entries.entry(domain.to_string()).or_default()
+        };
+
+        if !type_map.contains_key(&qtype) {
+            self.entry_count += 1;
+        }
+
+        type_map.insert(
+            qtype,
+            CacheEntry {
+                wire: wire.to_vec(),
+                meta,
+                inserted_at: Instant::now(),
+                ttl: Duration::from_secs(min_ttl as u64),
+                dnssec_status,
+            },
+        );
+    }
+
     /// Read-only lookup — expired entries are left in place (cleaned up on insert).
     pub fn lookup(&self, domain: &str, qtype: QueryType) -> Option<DnsPacket> {
         self.lookup_with_status(domain, qtype).map(|(pkt, _)| pkt)
@@ -63,23 +140,28 @@ impl DnsCache {
         domain: &str,
         qtype: QueryType,
     ) -> Option<(DnsPacket, DnssecStatus)> {
-        let type_map = self.entries.get(domain)?;
-        let entry = type_map.get(&qtype)?;
+        let (wire, status, _stale) = self.lookup_wire(domain, qtype, 0)?;
+        let mut buf = BytePacketBuffer::from_bytes(&wire);
+        let pkt = DnsPacket::from_buffer(&mut buf).ok()?;
+        Some((pkt, status))
+    }
 
-        let elapsed = entry.inserted_at.elapsed();
-        if elapsed >= entry.ttl {
-            return None;
+    pub fn insert(&mut self, domain: &str, qtype: QueryType, packet: &DnsPacket) {
+        self.insert_with_status(domain, qtype, packet, DnssecStatus::Indeterminate);
+    }
+
+    pub fn insert_with_status(
+        &mut self,
+        domain: &str,
+        qtype: QueryType,
+        packet: &DnsPacket,
+        dnssec_status: DnssecStatus,
+    ) {
+        let mut buf = BytePacketBuffer::new();
+        if packet.write(&mut buf).is_err() {
+            return;
         }
-
-        let remaining_secs = (entry.ttl - elapsed).as_secs() as u32;
-        let remaining = remaining_secs.max(1);
-
-        let mut packet = entry.packet.clone();
-        adjust_ttls(&mut packet.answers, remaining);
-        adjust_ttls(&mut packet.authorities, remaining);
-        adjust_ttls(&mut packet.resources, remaining);
-
-        Some((packet, entry.dnssec_status))
+        self.insert_wire(domain, qtype, buf.filled(), dnssec_status);
     }
 
     pub fn ttl_remaining(&self, domain: &str, qtype: QueryType) -> Option<(u32, u32)> {
@@ -103,49 +185,6 @@ impl DnsCache {
             }
         }
         false
-    }
-
-    pub fn insert(&mut self, domain: &str, qtype: QueryType, packet: &DnsPacket) {
-        self.insert_with_status(domain, qtype, packet, DnssecStatus::Indeterminate);
-    }
-
-    pub fn insert_with_status(
-        &mut self,
-        domain: &str,
-        qtype: QueryType,
-        packet: &DnsPacket,
-        dnssec_status: DnssecStatus,
-    ) {
-        if self.entry_count >= self.max_entries {
-            self.evict_expired();
-            if self.entry_count >= self.max_entries {
-                return;
-            }
-        }
-
-        let min_ttl = extract_min_ttl(&packet.answers)
-            .unwrap_or(self.min_ttl)
-            .clamp(self.min_ttl, self.max_ttl);
-
-        let type_map = if let Some(existing) = self.entries.get_mut(domain) {
-            existing
-        } else {
-            self.entries.entry(domain.to_string()).or_default()
-        };
-
-        if !type_map.contains_key(&qtype) {
-            self.entry_count += 1;
-        }
-
-        type_map.insert(
-            qtype,
-            CacheEntry {
-                packet: packet.clone(),
-                inserted_at: Instant::now(),
-                ttl: Duration::from_secs(min_ttl as u64),
-                dnssec_status,
-            },
-        );
     }
 
     pub fn len(&self) -> usize {
@@ -179,7 +218,8 @@ impl DnsCache {
                 + 1;
             total += type_map.capacity() * inner_slot;
             for entry in type_map.values() {
-                total += entry.packet.heap_bytes();
+                total += entry.wire.capacity()
+                    + entry.meta.ttl_offsets.capacity() * std::mem::size_of::<usize>();
             }
         }
         total
@@ -228,20 +268,11 @@ pub struct CacheInfo {
     pub ttl_remaining: u32,
 }
 
-fn extract_min_ttl(records: &[DnsRecord]) -> Option<u32> {
-    records.iter().map(|r| r.ttl()).min()
-}
-
-fn adjust_ttls(records: &mut [DnsRecord], new_ttl: u32) {
-    for record in records.iter_mut() {
-        record.set_ttl(new_ttl);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::packet::DnsPacket;
+    use crate::record::DnsRecord;
 
     #[test]
     fn heap_bytes_grows_with_entries() {

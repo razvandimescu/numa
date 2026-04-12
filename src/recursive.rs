@@ -202,23 +202,22 @@ pub(crate) fn resolve_iterative<'a>(
         let mut ns_idx = 0;
 
         for _ in 0..MAX_REFERRAL_DEPTH {
-            let ns_addr = match ns_addrs.get(ns_idx) {
-                Some(addr) => *addr,
-                None => return Err("no nameserver available".into()),
-            };
+            if ns_idx >= ns_addrs.len() {
+                return Err("no nameserver available".into());
+            }
 
             let (q_name, q_type) = minimize_query(qname, qtype, &current_zone);
 
             debug!(
-                "recursive: querying {} for {:?} {} (zone: {}, depth {})",
-                ns_addr, q_type, q_name, current_zone, referral_depth
+                "recursive: querying {} (+ hedge) for {:?} {} (zone: {}, depth {})",
+                ns_addrs[ns_idx], q_type, q_name, current_zone, referral_depth
             );
 
-            let response = match send_query(q_name, q_type, ns_addr, srtt).await {
+            let response = match send_query_hedged(q_name, q_type, &ns_addrs[ns_idx..], srtt).await {
                 Ok(r) => r,
                 Err(e) => {
-                    debug!("recursive: NS {} failed: {}", ns_addr, e);
-                    ns_idx += 1;
+                    debug!("recursive: NS query failed: {}", e);
+                    ns_idx += 2; // both tried, skip past them
                     continue;
                 }
             };
@@ -228,6 +227,9 @@ pub(crate) fn resolve_iterative<'a>(
             {
                 if let Some(zone) = referral_zone(&response) {
                     current_zone = zone;
+                    let mut cache_w = cache.write().unwrap();
+                    cache_ns_delegation(&mut cache_w, &current_zone, &response);
+                    drop(cache_w);
                 }
                 let mut all_ns = extract_ns_from_records(&response.answers);
                 if all_ns.is_empty() {
@@ -296,6 +298,7 @@ pub(crate) fn resolve_iterative<'a>(
 
             {
                 let mut cache_w = cache.write().unwrap();
+                cache_ns_delegation(&mut cache_w, &current_zone, &response);
                 cache_ds_from_authority(&mut cache_w, &response);
             }
             let mut new_ns_addrs = resolve_ns_addrs_from_glue(&response, &ns_names, cache);
@@ -560,6 +563,23 @@ fn cache_ds_from_authority(cache: &mut DnsCache, response: &DnsPacket) {
     }
 }
 
+/// Cache NS delegation records from a referral response so that
+/// `find_closest_ns` can skip re-querying TLD servers on subsequent lookups.
+fn cache_ns_delegation(cache: &mut DnsCache, zone: &str, response: &DnsPacket) {
+    let ns_records: Vec<_> = response
+        .authorities
+        .iter()
+        .filter(|r| matches!(r, DnsRecord::NS { .. }))
+        .cloned()
+        .collect();
+    if ns_records.is_empty() {
+        return;
+    }
+    let mut pkt = make_glue_packet();
+    pkt.answers = ns_records;
+    cache.insert(zone, QueryType::NS, &pkt);
+}
+
 fn make_glue_packet() -> DnsPacket {
     let mut pkt = DnsPacket::new();
     pkt.header.response = true;
@@ -583,6 +603,91 @@ async fn tcp_with_srtt(
         Err(e) => {
             srtt.write().unwrap().record_failure(server.ip());
             Err(e)
+        }
+    }
+}
+
+/// Smart NS query: fire to two servers simultaneously when SRTT is unknown
+/// (cold queries), or to the best server with SRTT-based hedge when known.
+async fn send_query_hedged(
+    qname: &str,
+    qtype: QueryType,
+    servers: &[SocketAddr],
+    srtt: &RwLock<SrttCache>,
+) -> crate::Result<DnsPacket> {
+    if servers.is_empty() {
+        return Err("no nameserver available".into());
+    }
+    if servers.len() == 1 {
+        return send_query(qname, qtype, servers[0], srtt).await;
+    }
+
+    let primary = servers[0];
+    let secondary = servers[1];
+    let primary_known = srtt.read().unwrap().is_known(primary.ip());
+
+    if !primary_known {
+        // Cold: fire both simultaneously, first response wins
+        debug!(
+            "recursive: parallel query to {} and {} for {:?} {}",
+            primary, secondary, qtype, qname
+        );
+        let fut_a = send_query(qname, qtype, primary, srtt);
+        let fut_b = send_query(qname, qtype, secondary, srtt);
+        tokio::pin!(fut_a);
+        tokio::pin!(fut_b);
+
+        // First Ok wins. If one errors, wait for the other.
+        let mut a_done = false;
+        let mut b_done = false;
+        let mut a_err: Option<crate::Error> = None;
+        let mut b_err: Option<crate::Error> = None;
+
+        loop {
+            tokio::select! {
+                r = &mut fut_a, if !a_done => {
+                    match r {
+                        Ok(resp) => return Ok(resp),
+                        Err(e) => { a_done = true; a_err = Some(e); }
+                    }
+                }
+                r = &mut fut_b, if !b_done => {
+                    match r {
+                        Ok(resp) => return Ok(resp),
+                        Err(e) => { b_done = true; b_err = Some(e); }
+                    }
+                }
+            }
+            match (a_err.take(), b_err.take()) {
+                (Some(e), Some(_)) => return Err(e),
+                (a, b) => { a_err = a; b_err = b; }
+            }
+        }
+    } else {
+        // Warm: send to best, hedge after SRTT × 3 if slow
+        let hedge_ms = srtt.read().unwrap().get(primary.ip()) * 3;
+        let hedge_delay = Duration::from_millis(hedge_ms.max(50));
+
+        let fut_a = send_query(qname, qtype, primary, srtt);
+        tokio::pin!(fut_a);
+        let delay = tokio::time::sleep(hedge_delay);
+        tokio::pin!(delay);
+
+        tokio::select! {
+            r = &mut fut_a => return r,
+            _ = &mut delay => {}
+        }
+
+        debug!(
+            "recursive: hedging {} -> {} after {}ms for {:?} {}",
+            primary, secondary, hedge_ms, qtype, qname
+        );
+        let fut_b = send_query(qname, qtype, secondary, srtt);
+        tokio::pin!(fut_b);
+
+        tokio::select! {
+            r = fut_a => r,
+            r = fut_b => r,
         }
     }
 }
