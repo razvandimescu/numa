@@ -71,7 +71,8 @@ impl DnsCache {
         let elapsed = entry.inserted_at.elapsed();
         let (remaining, stale) = if elapsed < entry.ttl {
             let secs = (entry.ttl - elapsed).as_secs() as u32;
-            (secs.max(1), false)
+            let near_expiry = elapsed * 10 >= entry.ttl * 9; // <10% TTL remaining
+            (secs.max(1), near_expiry)
         } else if elapsed < entry.ttl + STALE_WINDOW {
             (1, true)
         } else {

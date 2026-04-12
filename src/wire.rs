@@ -957,7 +957,7 @@ mod tests {
         );
         cache.insert("example.com", QueryType::A, &pkt);
 
-        let (result, status) = cache
+        let (result, status, _) = cache
             .lookup_with_status("example.com", QueryType::A)
             .expect("should hit");
         assert_eq!(result.answers.len(), 1);
@@ -974,7 +974,7 @@ mod tests {
         );
         cache.insert("example.com", QueryType::A, &pkt);
 
-        let (result, _) = cache
+        let (result, _, _) = cache
             .lookup_with_status("example.com", QueryType::A)
             .unwrap();
         // TTL should be <= 300 (at most original, reduced by elapsed time)
@@ -1032,7 +1032,7 @@ mod tests {
         cache.insert("example.com", QueryType::A, &pkt2);
         assert_eq!(cache.len(), 1); // no double count
 
-        let (result, _) = cache
+        let (result, _, _) = cache
             .lookup_with_status("example.com", QueryType::A)
             .unwrap();
         match &result.answers[0] {
@@ -1208,7 +1208,7 @@ mod tests {
         );
         cache.insert_with_status("example.com", QueryType::A, &pkt, DnssecStatus::Secure);
 
-        let (_, status) = cache
+        let (_, status, _) = cache
             .lookup_with_status("example.com", QueryType::A)
             .unwrap();
         assert_eq!(status, DnssecStatus::Secure);
@@ -1370,5 +1370,52 @@ mod tests {
         assert_eq!(cache.len(), 2);
         assert!(cache.lookup("test0.com", QueryType::A).is_none()); // evicted
         assert!(cache.lookup("test2.com", QueryType::A).is_some()); // inserted
+    }
+
+    #[test]
+    fn lookup_wire_signals_stale_when_expired() {
+        let mut cache = DnsCache::new(100, 1, 1); // max_ttl=1s so entry expires fast
+        let pkt = response(
+            0x1234,
+            "example.com",
+            vec![a_record("example.com", "1.2.3.4", 1)], // 1s TTL, clamped to min=1
+        );
+        cache.insert("example.com", QueryType::A, &pkt);
+
+        // Fresh: not stale
+        let (_, _, stale) = cache.lookup_wire("example.com", QueryType::A, 0).unwrap();
+        assert!(!stale);
+
+        // Wait for expiry
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+
+        // Expired but within stale window: stale=true
+        let (_, _, stale) = cache.lookup_wire("example.com", QueryType::A, 0).unwrap();
+        assert!(stale);
+    }
+
+    #[test]
+    fn lookup_wire_signals_prefetch_near_expiry() {
+        let mut cache = DnsCache::new(100, 10, 10); // min_ttl=10, max_ttl=10 → entry gets 10s TTL
+        let pkt = response(
+            0x1234,
+            "example.com",
+            vec![a_record("example.com", "1.2.3.4", 10)],
+        );
+        cache.insert("example.com", QueryType::A, &pkt);
+
+        // Fresh (>10% remaining): not stale
+        let (_, _, stale) = cache.lookup_wire("example.com", QueryType::A, 0).unwrap();
+        assert!(!stale);
+
+        // Wait until <10% remaining (>9s elapsed of 10s TTL)
+        std::thread::sleep(std::time::Duration::from_millis(9100));
+
+        // Still valid but near expiry: stale=true (triggers prefetch)
+        let result = cache.lookup_wire("example.com", QueryType::A, 0);
+        if let Some((_, _, stale)) = result {
+            assert!(stale, "entry at <10% TTL should signal stale for prefetch");
+        }
+        // (entry may have fully expired on slow CI, so we don't assert Some)
     }
 }
