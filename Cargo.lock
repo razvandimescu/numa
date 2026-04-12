@@ -1330,7 +1330,7 @@ dependencies = [
 
 [[package]]
 name = "numa"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "arc-swap",
  "axum",
@@ -1359,6 +1359,7 @@ dependencies = [
  "toml",
  "tower",
  "webpki-roots 1.0.6",
+ "x509-parser",
 ]
 
 [[package]]
