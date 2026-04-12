@@ -56,19 +56,16 @@ impl ForwardingRuleConfig {
     }
 }
 
-/// Merge config-declared rules with auto-discovered rules. Config rules come
-/// first so `match_forwarding_rule`'s first-match semantics gives them precedence.
 pub fn merge_forwarding_rules(
     config_rules: &[ForwardingRuleConfig],
     discovered: Vec<crate::system_dns::ForwardingRule>,
-) -> Result<(Vec<crate::system_dns::ForwardingRule>, usize)> {
+) -> Result<Vec<crate::system_dns::ForwardingRule>> {
     let mut merged: Vec<crate::system_dns::ForwardingRule> = Vec::new();
     for rule in config_rules {
         merged.extend(rule.to_runtime_rules()?);
     }
-    let config_count = merged.len();
     merged.extend(discovered);
-    Ok((merged, config_count))
+    Ok(merged)
 }
 
 #[derive(Deserialize)]
@@ -740,8 +737,7 @@ mod tests {
             "home.local".to_string(),
             "192.168.1.1:53".parse().unwrap(),
         )];
-        let (merged, count) = merge_forwarding_rules(&config_rules, discovered).unwrap();
-        assert_eq!(count, 1);
+        let merged = merge_forwarding_rules(&config_rules, discovered).unwrap();
         let picked = crate::system_dns::match_forwarding_rule("host.home.local", &merged)
             .expect("rule should match");
         assert_eq!(picked.to_string(), "10.0.0.1:53");
@@ -757,7 +753,7 @@ mod tests {
             "corp.example".to_string(),
             "192.168.1.1:53".parse().unwrap(),
         )];
-        let (merged, _) = merge_forwarding_rules(&config_rules, discovered).unwrap();
+        let merged = merge_forwarding_rules(&config_rules, discovered).unwrap();
         assert_eq!(merged.len(), 2);
         let picked = crate::system_dns::match_forwarding_rule("host.corp.example", &merged)
             .expect("discovered rule should still match");
@@ -765,13 +761,12 @@ mod tests {
     }
 
     #[test]
-    fn forwarding_merge_suffix_array_expands_config_count() {
+    fn forwarding_merge_suffix_array_expands_to_multiple_rules() {
         let config_rules = vec![ForwardingRuleConfig {
             suffix: vec!["a.local".to_string(), "b.local".to_string()],
             upstream: "10.0.0.1:53".to_string(),
         }];
-        let (merged, count) = merge_forwarding_rules(&config_rules, vec![]).unwrap();
-        assert_eq!(count, 2);
+        let merged = merge_forwarding_rules(&config_rules, vec![]).unwrap();
         assert_eq!(merged.len(), 2);
     }
 }
