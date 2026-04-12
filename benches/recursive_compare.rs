@@ -7,6 +7,8 @@
 //!   --direct        Library-to-library: Numa forward_query_raw vs Hickory resolver.lookup
 //!   --hedge-5x      Hedging: single vs hedge-same vs hedge-dual vs Hickory (5 iterations)
 //!   --vs-unbound    Server-to-server: Numa vs Unbound (plain UDP, caching)
+//!   --vs-unbound-cold  Cold: Numa vs Unbound (unique subdomains, no cache hits)
+//!   --vs-nextdns    Server-to-cloud: Numa (local cache) vs NextDNS (remote, 45.90.28.0)
 //!   --vs-dot        DoT server: Numa vs Unbound
 //!   --vs-doh-servers DoH server: Numa vs Unbound (DoT upstream)
 //!
@@ -145,10 +147,20 @@ fn main() {
         return run_hedge_multi(&rt, 5);
     }
     if arg("--vs-unbound") {
-        return run_server_comparison(&rt, "Unbound", "127.0.0.1:5456", 5);
+        check_numa_mode(&rt, "forward");
+        return run_server_comparison(&rt, "Unbound", "127.0.0.1:5456", 5, false);
+    }
+    if arg("--vs-unbound-cold") {
+        check_numa_mode(&rt, "recursive");
+        return run_server_comparison(&rt, "Unbound", "127.0.0.1:5456", 5, true);
     }
     if arg("--vs-dnscrypt") {
-        return run_server_comparison(&rt, "dnscrypt-proxy", "127.0.0.1:5455", 5);
+        check_numa_mode(&rt, "forward");
+        return run_server_comparison(&rt, "dnscrypt-proxy", "127.0.0.1:5455", 5, false);
+    }
+    if arg("--vs-nextdns") {
+        check_numa_mode(&rt, "forward");
+        return run_server_comparison(&rt, "NextDNS", "45.90.28.0:53", 5, false);
     }
     if arg("--vs-dot") {
         return run_dot_comparison(&rt, 5);
@@ -380,12 +392,18 @@ fn run_direct(rt: &tokio::runtime::Runtime) {
 }
 
 /// Server-to-server: Numa vs another server, both on plain UDP.
+/// When `cold` is true, each query uses a unique random subdomain so neither
+/// server can answer from its record cache (NS delegation caching still applies).
 fn run_server_comparison(
     rt: &tokio::runtime::Runtime,
     other_name: &str,
     other_addr: &str,
     iterations: usize,
+    cold: bool,
 ) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
     let numa_addr: SocketAddr = NUMA_BENCH.parse().unwrap();
     let other: SocketAddr = other_addr.parse().unwrap();
 
@@ -402,19 +420,35 @@ fn run_server_comparison(
         let _ = rt.block_on(query_udp(other, "example.com"));
     }
 
+    let tag = if cold {
+        "cold, unique subdomains"
+    } else {
+        "caching"
+    };
+
     compare_two(
         rt,
-        &format!("Server-to-Server: Numa vs {other_name} (UDP, caching)"),
+        &format!("Server-to-Server: Numa vs {other_name} (UDP, {tag})"),
         "Numa",
         other_name,
         &|domain| {
+            let d = if cold {
+                format!("c{}.{}", COUNTER.fetch_add(1, Ordering::Relaxed), domain)
+            } else {
+                domain.to_string()
+            };
             let t = Instant::now();
-            let _ = rt.block_on(query_udp(numa_addr, domain));
+            let _ = rt.block_on(query_udp(numa_addr, &d));
             t.elapsed().as_secs_f64() * 1000.0
         },
         &|domain| {
+            let d = if cold {
+                format!("c{}.{}", COUNTER.fetch_add(1, Ordering::Relaxed), domain)
+            } else {
+                domain.to_string()
+            };
             let t = Instant::now();
-            let _ = rt.block_on(query_udp(other, domain));
+            let _ = rt.block_on(query_udp(other, &d));
             t.elapsed().as_secs_f64() * 1000.0
         },
         iterations,
@@ -989,6 +1023,28 @@ fn build_query(buf: &mut [u8], domain: &str) -> usize {
     buf[pos..pos + 2].copy_from_slice(&1u16.to_be_bytes());
     pos += 2;
     pos
+}
+
+fn check_numa_mode(rt: &tokio::runtime::Runtime, expected: &str) {
+    let url = format!("http://127.0.0.1:{NUMA_API}/stats");
+    let resp = match rt.block_on(async { reqwest::get(&url).await?.text().await }) {
+        Ok(body) => body,
+        Err(_) => {
+            eprintln!("Bench Numa not responding on {NUMA_BENCH}");
+            eprintln!("Start with: cargo run -- benches/numa-bench.toml");
+            std::process::exit(1);
+        }
+    };
+    let config = if expected == "recursive" {
+        "benches/numa-bench-recursive.toml"
+    } else {
+        "benches/numa-bench.toml"
+    };
+    if !resp.contains(&format!("\"mode\":\"{expected}\"")) {
+        eprintln!("This benchmark requires Numa in {expected} mode.");
+        eprintln!("Restart with: cargo run -- {config}");
+        std::process::exit(1);
+    }
 }
 
 fn flush_cache() {

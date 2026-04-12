@@ -1,0 +1,30 @@
+[server]
+bind_addr = "127.0.0.1:5454"
+api_port = 5381
+api_bind_addr = "127.0.0.1"
+data_dir = "/tmp/numa-bench"
+
+[upstream]
+mode = "recursive"
+timeout_ms = 10000
+
+[cache]
+min_ttl = 60
+max_ttl = 3600
+
+[blocking]
+enabled = false
+
+[proxy]
+port = 8080
+tls_port = 8443
+
+[dot]
+enabled = true
+port = 8530
+
+[mobile]
+enabled = false
+
+[lan]
+enabled = false
