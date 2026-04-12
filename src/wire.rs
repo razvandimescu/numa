@@ -3,7 +3,6 @@
 //! These operate directly on raw DNS wire bytes without full packet parsing,
 //! enabling zero-copy forwarding and wire-level caching.
 
-use crate::question::QueryType;
 use crate::Result;
 
 /// Metadata extracted from scanning a DNS response's wire bytes.
@@ -16,32 +15,6 @@ pub struct WireMeta {
     /// How many of the offsets belong to the answer section (the first `answer_count`
     /// entries). Used to extract min-TTL from answers only.
     pub answer_count: usize,
-}
-
-/// Extract the first question's (domain, query type) from raw DNS wire bytes.
-///
-/// Reads only the 12-byte header + first question section. Returns the lowercased
-/// domain name and query type without allocating a full `DnsPacket`.
-pub fn extract_question(wire: &[u8]) -> Result<(String, QueryType)> {
-    if wire.len() < 12 {
-        return Err("wire too short for DNS header".into());
-    }
-    let qdcount = u16::from_be_bytes([wire[4], wire[5]]);
-    if qdcount == 0 {
-        return Err("no questions in wire".into());
-    }
-
-    let mut pos = 12;
-    let mut domain = String::with_capacity(64);
-    read_wire_qname(wire, &mut pos, &mut domain)?;
-
-    if pos + 4 > wire.len() {
-        return Err("wire truncated in question section".into());
-    }
-    let qtype = u16::from_be_bytes([wire[pos], wire[pos + 1]]);
-    // skip QTYPE(2) + QCLASS(2)
-
-    Ok((domain, QueryType::from_num(qtype)))
 }
 
 /// Scan a DNS response's wire bytes and return metadata about TTL field locations.
@@ -155,62 +128,6 @@ pub fn patch_ttls(wire: &mut [u8], offsets: &[usize], new_ttl: u32) {
     }
 }
 
-/// Read a DNS name from wire bytes at `pos`, handling compression pointers.
-/// Advances `pos` past the name as it appears at the current position
-/// (compression pointer targets do NOT advance `pos`).
-fn read_wire_qname(wire: &[u8], pos: &mut usize, out: &mut String) -> Result<()> {
-    let mut jumped = false;
-    let mut read_pos = *pos;
-    let mut jumps = 0;
-    let max_jumps = 20;
-
-    loop {
-        if read_pos >= wire.len() {
-            return Err("wire truncated reading name".into());
-        }
-        let len = wire[read_pos] as usize;
-
-        // Compression pointer: top 2 bits set
-        if len & 0xC0 == 0xC0 {
-            if read_pos + 1 >= wire.len() {
-                return Err("wire truncated in compression pointer".into());
-            }
-            if !jumped {
-                *pos = read_pos + 2; // advance past the pointer
-            }
-            let offset = ((len & 0x3F) << 8) | wire[read_pos + 1] as usize;
-            read_pos = offset;
-            jumped = true;
-            jumps += 1;
-            if jumps > max_jumps {
-                return Err("too many compression jumps".into());
-            }
-            continue;
-        }
-
-        if len == 0 {
-            if !jumped {
-                *pos = read_pos + 1;
-            }
-            break;
-        }
-
-        if read_pos + 1 + len > wire.len() {
-            return Err("wire truncated in name label".into());
-        }
-
-        if !out.is_empty() {
-            out.push('.');
-        }
-        for &b in &wire[read_pos + 1..read_pos + 1 + len] {
-            out.push(b.to_ascii_lowercase() as char);
-        }
-        read_pos += 1 + len;
-    }
-
-    Ok(())
-}
-
 /// Skip a DNS name in wire bytes, advancing `pos` past it.
 fn skip_wire_name(wire: &[u8], pos: &mut usize) -> Result<()> {
     loop {
@@ -238,7 +155,7 @@ mod tests {
     use crate::cache::{DnsCache, DnssecStatus};
     use crate::header::ResultCode;
     use crate::packet::{DnsPacket, EdnsOpt};
-    use crate::question::DnsQuestion;
+    use crate::question::{DnsQuestion, QueryType};
     use crate::record::DnsRecord;
 
     // ── Helpers ──────────────────────────────────────────────────────
@@ -760,43 +677,7 @@ mod tests {
         assert_eq!(&wire[0..2], &[0x00, 0x00]);
     }
 
-    // ── D. extract_question ─────────────────────────────────────────
-
-    #[test]
-    fn extract_question_basic() {
-        let pkt = DnsPacket::query(0x1234, "Example.COM", QueryType::A);
-        let wire = to_wire(&pkt);
-        let (domain, qtype) = extract_question(&wire).unwrap();
-
-        assert_eq!(domain, "example.com"); // lowercased
-        assert_eq!(qtype, QueryType::A);
-    }
-
-    #[test]
-    fn extract_question_aaaa() {
-        let pkt = DnsPacket::query(0x1234, "rust-lang.org", QueryType::AAAA);
-        let wire = to_wire(&pkt);
-        let (domain, qtype) = extract_question(&wire).unwrap();
-
-        assert_eq!(domain, "rust-lang.org");
-        assert_eq!(qtype, QueryType::AAAA);
-    }
-
-    #[test]
-    fn extract_question_too_short() {
-        assert!(extract_question(&[0u8; 5]).is_err());
-    }
-
-    #[test]
-    fn extract_question_no_questions() {
-        let mut wire = to_wire(&DnsPacket::query(0x1234, "example.com", QueryType::A));
-        // Zero out QDCOUNT (bytes 4-5)
-        wire[4] = 0;
-        wire[5] = 0;
-        assert!(extract_question(&wire).is_err());
-    }
-
-    // ── E. min_ttl_from_wire ────────────────────────────────────────
+    // ── D. min_ttl_from_wire ────────────────────────────────────────
 
     #[test]
     fn min_ttl_answers_only() {
@@ -1060,12 +941,7 @@ mod tests {
         assert!(scan_ttl_offsets(&[]).is_err());
     }
 
-    #[test]
-    fn extract_question_rejects_empty_wire() {
-        assert!(extract_question(&[]).is_err());
-    }
-
-    // ── H. Cache behavior tests ─────────────────────────────────────
+    // ── G. Cache behavior tests ─────────────────────────────────────
     //
     // These test existing DnsCache behavior that must be preserved after
     // the wire-level migration. They use the current parsed-packet API
