@@ -45,6 +45,14 @@ api_port = 5380
 #     "co", "br", "au", "ca", "jp",             # other major ccTLDs
 # ]
 
+# [[forwarding]]                                  # per-suffix conditional forwarding rules
+# suffix = "168.192.in-addr.arpa"                  # all PTR lookups for 192.168.x.x
+# upstream = "100.90.1.63:5361"                    # → sent to this upstream
+#
+# [[forwarding]]
+# suffix = "home.local"                            # all lookups under home.local
+# upstream = "10.0.0.1"                            # → sent to this upstream (port 53 default)
+
 # [blocking]
 # enabled = true               # set to false to disable ad blocking
 # refresh_hours = 24

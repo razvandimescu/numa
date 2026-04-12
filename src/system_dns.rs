@@ -25,6 +25,17 @@ pub struct ForwardingRule {
     pub upstream: SocketAddr,
 }
 
+impl ForwardingRule {
+    pub fn new(suffix: String, upstream: SocketAddr) -> Self {
+        let dot_suffix = format!(".{}", suffix);
+        Self {
+            suffix,
+            dot_suffix,
+            upstream,
+        }
+    }
+}
+
 /// Result of system DNS discovery — default upstream + conditional forwarding rules.
 pub struct SystemDnsInfo {
     pub default_upstream: Option<String>,
@@ -221,12 +232,8 @@ fn discover_macos() -> SystemDnsInfo {
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn make_rule(domain: &str, nameserver: &str) -> Option<ForwardingRule> {
-    let addr: SocketAddr = format!("{}:53", nameserver).parse().ok()?;
-    Some(ForwardingRule {
-        dot_suffix: format!(".{}", domain),
-        suffix: domain.to_string(),
-        upstream: addr,
-    })
+    let addr = crate::forward::parse_upstream_addr(nameserver, 53).ok()?;
+    Some(ForwardingRule::new(domain.to_string(), addr))
 }
 
 #[cfg(target_os = "linux")]

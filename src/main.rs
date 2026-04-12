@@ -210,7 +210,14 @@ async fn main() -> numa::Result<()> {
     }
     service_store.load_persisted();
 
-    let forwarding_rules = system_dns.forwarding_rules;
+    let forwarding_rules =
+        numa::config::merge_forwarding_rules(&config.forwarding, system_dns.forwarding_rules)?;
+    for rule in forwarding_rules.iter().take(config.forwarding.len()) {
+        info!(
+            "forwarding .{} to {} (config rule)",
+            rule.suffix, rule.upstream
+        );
+    }
 
     // Resolve data_dir from config, falling back to the platform default.
     // Used for TLS CA storage below and stored on ServerCtx for runtime use.
