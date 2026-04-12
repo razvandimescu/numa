@@ -763,7 +763,12 @@ async fn warm_domain(ctx: &ServerCtx, domain: &str) {
         if ctx.upstream_mode == numa::config::UpstreamMode::Recursive {
             let query = numa::packet::DnsPacket::query(0, domain, qtype);
             match numa::recursive::resolve_recursive(
-                domain, qtype, &ctx.cache, &query, &ctx.root_hints, &ctx.srtt,
+                domain,
+                qtype,
+                &ctx.cache,
+                &query,
+                &ctx.root_hints,
+                &ctx.srtt,
             )
             .await
             {
@@ -781,13 +786,20 @@ async fn warm_domain(ctx: &ServerCtx, domain: &str) {
             }
             let pool = ctx.upstream_pool.lock().unwrap().clone();
             match numa::forward::forward_with_failover_raw(
-                buf.filled(), &pool, &ctx.srtt, ctx.timeout, ctx.hedge_delay,
+                buf.filled(),
+                &pool,
+                &ctx.srtt,
+                ctx.timeout,
+                ctx.hedge_delay,
             )
             .await
             {
                 Ok(wire) => {
                     ctx.cache.write().unwrap().insert_wire(
-                        domain, qtype, &wire, numa::cache::DnssecStatus::Indeterminate,
+                        domain,
+                        qtype,
+                        &wire,
+                        numa::cache::DnssecStatus::Indeterminate,
                     );
                     log::debug!("cache warm: {} {:?}", domain, qtype);
                 }
