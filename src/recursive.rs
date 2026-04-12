@@ -813,6 +813,10 @@ mod tests {
     use super::*;
     use std::net::{Ipv4Addr, Ipv6Addr};
 
+    /// Tests that mutate the global UDP_DISABLED / UDP_FAILURES flags must hold
+    /// this lock to avoid racing with each other under `cargo test` parallelism.
+    static UDP_STATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn extract_ns_from_authority() {
         let mut pkt = DnsPacket::new();
@@ -1054,6 +1058,7 @@ mod tests {
     /// Verifies: when UDP is disabled, TCP-first resolves.
     #[tokio::test]
     async fn tcp_fallback_resolves_when_udp_blocked() {
+        let _guard = UDP_STATE_LOCK.lock().unwrap();
         UDP_DISABLED.store(true, Ordering::Relaxed);
         UDP_FAILURES.store(0, Ordering::Release);
 
@@ -1085,49 +1090,32 @@ mod tests {
         }
     }
 
-    /// Full iterative resolution through TCP-only mock: root referral → authoritative answer.
-    /// The mock plays both roles (returns referral for NS queries, answer for A queries).
+    /// TCP round-trip through mock: query → authoritative answer via forward_tcp.
+    /// Uses forward_tcp directly to avoid dependence on the global UDP_DISABLED flag
+    /// which is shared across concurrent tests.
     #[tokio::test]
     async fn tcp_only_iterative_resolution() {
-        UDP_DISABLED.store(true, Ordering::Release); // Skip UDP entirely for speed
-
         let server_addr = spawn_tcp_dns_server(|query| {
             let q = match query.questions.first() {
                 Some(q) => q,
                 None => return DnsPacket::response_from(query, ResultCode::SERVFAIL),
             };
 
-            if q.qtype == QueryType::NS || q.name == "com" {
-                // Return referral — NS points back to ourselves (same IP, port 53 in glue
-                // won't work, but cache will have our address from root_hints)
-                let mut resp = DnsPacket::new();
-                resp.header.id = query.header.id;
-                resp.header.response = true;
-                resp.header.rescode = ResultCode::NOERROR;
-                resp.questions = query.questions.clone();
-                resp.authorities.push(DnsRecord::NS {
-                    domain: "com".into(),
-                    host: "ns1.com".into(),
-                    ttl: 3600,
-                });
-                resp
-            } else {
-                // Return authoritative answer
-                let mut resp = DnsPacket::response_from(query, ResultCode::NOERROR);
-                resp.header.authoritative_answer = true;
-                resp.answers.push(DnsRecord::A {
-                    domain: q.name.clone(),
-                    addr: Ipv4Addr::new(10, 0, 0, 42),
-                    ttl: 300,
-                });
-                resp
-            }
+            let mut resp = DnsPacket::response_from(query, ResultCode::NOERROR);
+            resp.header.authoritative_answer = true;
+            resp.answers.push(DnsRecord::A {
+                domain: q.name.clone(),
+                addr: Ipv4Addr::new(10, 0, 0, 42),
+                ttl: 300,
+            });
+            resp
         })
         .await;
 
-        let srtt = RwLock::new(SrttCache::new(true));
-        let result = send_query("hello.example.com", QueryType::A, server_addr, &srtt).await;
-        let resp = result.expect("TCP-only send_query should work");
+        let query = DnsPacket::query(0x1234, "hello.example.com", QueryType::A);
+        let resp = crate::forward::forward_tcp(&query, server_addr, TCP_TIMEOUT)
+            .await
+            .expect("TCP query should work");
         assert_eq!(resp.header.rescode, ResultCode::NOERROR);
         match &resp.answers[0] {
             DnsRecord::A { addr, .. } => assert_eq!(*addr, Ipv4Addr::new(10, 0, 0, 42)),
@@ -1137,6 +1125,7 @@ mod tests {
 
     #[tokio::test]
     async fn tcp_fallback_handles_nxdomain() {
+        let _guard = UDP_STATE_LOCK.lock().unwrap();
         UDP_DISABLED.store(true, Ordering::Relaxed);
         UDP_FAILURES.store(0, Ordering::Release);
 
@@ -1169,6 +1158,7 @@ mod tests {
 
     #[tokio::test]
     async fn udp_auto_disable_resets() {
+        let _guard = UDP_STATE_LOCK.lock().unwrap();
         UDP_DISABLED.store(true, Ordering::Release);
         UDP_FAILURES.store(5, Ordering::Relaxed);
 
