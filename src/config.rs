@@ -689,10 +689,7 @@ mod tests {
     #[test]
     fn forwarding_suffix_array_expands_to_multiple_runtime_rules() {
         let rule = ForwardingRuleConfig {
-            suffix: vec![
-                "168.192.in-addr.arpa".to_string(),
-                "onsite".to_string(),
-            ],
+            suffix: vec!["168.192.in-addr.arpa".to_string(), "onsite".to_string()],
             upstream: "192.168.88.1".to_string(),
         };
         let runtime = rule.to_runtime_rules().unwrap();
