@@ -138,6 +138,8 @@ pub struct UpstreamConfig {
     pub fallback: Vec<String>,
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
+    #[serde(default = "default_hedge_ms")]
+    pub hedge_ms: u64,
     #[serde(default = "default_root_hints")]
     pub root_hints: Vec<String>,
     #[serde(default = "default_prime_tlds")]
@@ -154,6 +156,7 @@ impl Default for UpstreamConfig {
             port: default_upstream_port(),
             fallback: Vec::new(),
             timeout_ms: default_timeout_ms(),
+            hedge_ms: default_hedge_ms(),
             root_hints: default_root_hints(),
             prime_tlds: default_prime_tlds(),
             srtt: default_srtt(),
@@ -271,6 +274,9 @@ fn default_upstream_port() -> u16 {
 fn default_timeout_ms() -> u64 {
     5000
 }
+fn default_hedge_ms() -> u64 {
+    10
+}
 
 #[derive(Deserialize)]
 pub struct CacheConfig {
@@ -296,7 +302,7 @@ impl Default for CacheConfig {
 }
 
 fn default_max_entries() -> usize {
-    10000
+    100_000
 }
 fn default_min_ttl() -> u32 {
     60

@@ -15,8 +15,8 @@ use crate::srtt::SrttCache;
 
 const MAX_REFERRAL_DEPTH: u8 = 10;
 const MAX_CNAME_DEPTH: u8 = 8;
-const NS_QUERY_TIMEOUT: Duration = Duration::from_millis(800);
-const TCP_TIMEOUT: Duration = Duration::from_millis(1500);
+const NS_QUERY_TIMEOUT: Duration = Duration::from_millis(400);
+const TCP_TIMEOUT: Duration = Duration::from_millis(400);
 const UDP_FAIL_THRESHOLD: u8 = 3;
 
 static QUERY_ID: AtomicU16 = AtomicU16::new(1);
@@ -202,23 +202,24 @@ pub(crate) fn resolve_iterative<'a>(
         let mut ns_idx = 0;
 
         for _ in 0..MAX_REFERRAL_DEPTH {
-            let ns_addr = match ns_addrs.get(ns_idx) {
-                Some(addr) => *addr,
-                None => return Err("no nameserver available".into()),
-            };
+            if ns_idx >= ns_addrs.len() {
+                return Err("no nameserver available".into());
+            }
 
             let (q_name, q_type) = minimize_query(qname, qtype, &current_zone);
 
             debug!(
-                "recursive: querying {} for {:?} {} (zone: {}, depth {})",
-                ns_addr, q_type, q_name, current_zone, referral_depth
+                "recursive: querying {} (+ hedge) for {:?} {} (zone: {}, depth {})",
+                ns_addrs[ns_idx], q_type, q_name, current_zone, referral_depth
             );
 
-            let response = match send_query(q_name, q_type, ns_addr, srtt).await {
+            let response = match send_query_hedged(q_name, q_type, &ns_addrs[ns_idx..], srtt).await
+            {
                 Ok(r) => r,
                 Err(e) => {
-                    debug!("recursive: NS {} failed: {}", ns_addr, e);
-                    ns_idx += 1;
+                    debug!("recursive: NS query failed: {}", e);
+                    let remaining = ns_addrs.len().saturating_sub(ns_idx);
+                    ns_idx += remaining.min(2);
                     continue;
                 }
             };
@@ -228,6 +229,9 @@ pub(crate) fn resolve_iterative<'a>(
             {
                 if let Some(zone) = referral_zone(&response) {
                     current_zone = zone;
+                    let mut cache_w = cache.write().unwrap();
+                    cache_ns_delegation(&mut cache_w, &current_zone, &response);
+                    drop(cache_w);
                 }
                 let mut all_ns = extract_ns_from_records(&response.answers);
                 if all_ns.is_empty() {
@@ -296,6 +300,7 @@ pub(crate) fn resolve_iterative<'a>(
 
             {
                 let mut cache_w = cache.write().unwrap();
+                cache_ns_delegation(&mut cache_w, &current_zone, &response);
                 cache_ds_from_authority(&mut cache_w, &response);
             }
             let mut new_ns_addrs = resolve_ns_addrs_from_glue(&response, &ns_names, cache);
@@ -560,6 +565,23 @@ fn cache_ds_from_authority(cache: &mut DnsCache, response: &DnsPacket) {
     }
 }
 
+/// Cache NS delegation records from a referral response so that
+/// `find_closest_ns` can skip re-querying TLD servers on subsequent lookups.
+fn cache_ns_delegation(cache: &mut DnsCache, zone: &str, response: &DnsPacket) {
+    let ns_records: Vec<_> = response
+        .authorities
+        .iter()
+        .filter(|r| matches!(r, DnsRecord::NS { .. }))
+        .cloned()
+        .collect();
+    if ns_records.is_empty() {
+        return;
+    }
+    let mut pkt = make_glue_packet();
+    pkt.answers = ns_records;
+    cache.insert(zone, QueryType::NS, &pkt);
+}
+
 fn make_glue_packet() -> DnsPacket {
     let mut pkt = DnsPacket::new();
     pkt.header.response = true;
@@ -583,6 +605,115 @@ async fn tcp_with_srtt(
         Err(e) => {
             srtt.write().unwrap().record_failure(server.ip());
             Err(e)
+        }
+    }
+}
+
+/// Smart NS query: fire to two servers simultaneously when SRTT is unknown
+/// (cold queries), or to the best server with SRTT-based hedge when known.
+async fn send_query_hedged(
+    qname: &str,
+    qtype: QueryType,
+    servers: &[SocketAddr],
+    srtt: &RwLock<SrttCache>,
+) -> crate::Result<DnsPacket> {
+    if servers.is_empty() {
+        return Err("no nameserver available".into());
+    }
+    if servers.len() == 1 {
+        return send_query(qname, qtype, servers[0], srtt).await;
+    }
+
+    let primary = servers[0];
+    let secondary = servers[1];
+    let primary_known = srtt.read().unwrap().is_known(primary.ip());
+
+    if !primary_known {
+        // Cold: fire both simultaneously, first response wins
+        debug!(
+            "recursive: parallel query to {} and {} for {:?} {}",
+            primary, secondary, qtype, qname
+        );
+        let fut_a = send_query(qname, qtype, primary, srtt);
+        let fut_b = send_query(qname, qtype, secondary, srtt);
+        tokio::pin!(fut_a);
+        tokio::pin!(fut_b);
+
+        // First Ok wins. If one errors, wait for the other.
+        let mut a_done = false;
+        let mut b_done = false;
+        let mut a_err: Option<crate::Error> = None;
+        let mut b_err: Option<crate::Error> = None;
+
+        loop {
+            tokio::select! {
+                r = &mut fut_a, if !a_done => {
+                    match r {
+                        Ok(resp) => return Ok(resp),
+                        Err(e) => { a_done = true; a_err = Some(e); }
+                    }
+                }
+                r = &mut fut_b, if !b_done => {
+                    match r {
+                        Ok(resp) => return Ok(resp),
+                        Err(e) => { b_done = true; b_err = Some(e); }
+                    }
+                }
+            }
+            match (a_err.take(), b_err.take()) {
+                (Some(e), Some(_)) => return Err(e),
+                (a, b) => {
+                    a_err = a;
+                    b_err = b;
+                }
+            }
+        }
+    } else {
+        // Warm: send to best, hedge after SRTT × 3 if slow
+        let hedge_ms = srtt.read().unwrap().get(primary.ip()) * 3;
+        let hedge_delay = Duration::from_millis(hedge_ms.max(50));
+
+        let fut_a = send_query(qname, qtype, primary, srtt);
+        tokio::pin!(fut_a);
+        let delay = tokio::time::sleep(hedge_delay);
+        tokio::pin!(delay);
+
+        tokio::select! {
+            r = &mut fut_a => return r,
+            _ = &mut delay => {}
+        }
+
+        debug!(
+            "recursive: hedging {} -> {} after {}ms for {:?} {}",
+            primary, secondary, hedge_ms, qtype, qname
+        );
+        let fut_b = send_query(qname, qtype, secondary, srtt);
+        tokio::pin!(fut_b);
+
+        // First Ok wins; if one errors, wait for the other.
+        let mut a_err: Option<crate::Error> = None;
+        let mut b_err: Option<crate::Error> = None;
+        loop {
+            tokio::select! {
+                r = &mut fut_a, if a_err.is_none() => {
+                    match r {
+                        Ok(resp) => return Ok(resp),
+                        Err(e) => {
+                            if b_err.is_some() { return Err(e); }
+                            a_err = Some(e);
+                        }
+                    }
+                }
+                r = &mut fut_b, if b_err.is_none() => {
+                    match r {
+                        Ok(resp) => return Ok(resp),
+                        Err(e) => {
+                            if let Some(ae) = a_err.take() { return Err(ae); }
+                            b_err = Some(e);
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -634,9 +765,13 @@ async fn send_query(
                     "send_query: {} consecutive UDP failures — switching to TCP-first",
                     fails
                 );
+                // Now that UDP is disabled, retry this query via TCP
+                return tcp_with_srtt(&query, server, srtt, start).await;
             }
-            debug!("send_query: UDP failed for {}: {}, trying TCP", server, e);
-            tcp_with_srtt(&query, server, srtt, start).await
+            // UDP works in general (priming succeeded) but this server timed out.
+            // Don't waste another 400ms on TCP — the server is unreachable.
+            srtt.write().unwrap().record_failure(server.ip());
+            Err(e)
         }
     }
 }
@@ -677,6 +812,10 @@ pub fn parse_root_hints(hints: &[String]) -> Vec<SocketAddr> {
 mod tests {
     use super::*;
     use std::net::{Ipv4Addr, Ipv6Addr};
+
+    /// Tests that mutate the global UDP_DISABLED / UDP_FAILURES flags must hold
+    /// this lock to avoid racing with each other under `cargo test` parallelism.
+    static UDP_STATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn extract_ns_from_authority() {
@@ -916,10 +1055,11 @@ mod tests {
     }
 
     /// TCP-only server returns authoritative answer directly.
-    /// Verifies: UDP fails → TCP fallback → resolves.
+    /// Verifies: when UDP is disabled, TCP-first resolves.
     #[tokio::test]
     async fn tcp_fallback_resolves_when_udp_blocked() {
-        UDP_DISABLED.store(false, Ordering::Relaxed);
+        let _guard = UDP_STATE_LOCK.lock().unwrap();
+        UDP_DISABLED.store(true, Ordering::Relaxed);
         UDP_FAILURES.store(0, Ordering::Release);
 
         let server_addr = spawn_tcp_dns_server(|query| {
@@ -950,49 +1090,32 @@ mod tests {
         }
     }
 
-    /// Full iterative resolution through TCP-only mock: root referral → authoritative answer.
-    /// The mock plays both roles (returns referral for NS queries, answer for A queries).
+    /// TCP round-trip through mock: query → authoritative answer via forward_tcp.
+    /// Uses forward_tcp directly to avoid dependence on the global UDP_DISABLED flag
+    /// which is shared across concurrent tests.
     #[tokio::test]
     async fn tcp_only_iterative_resolution() {
-        UDP_DISABLED.store(true, Ordering::Release); // Skip UDP entirely for speed
-
         let server_addr = spawn_tcp_dns_server(|query| {
             let q = match query.questions.first() {
                 Some(q) => q,
                 None => return DnsPacket::response_from(query, ResultCode::SERVFAIL),
             };
 
-            if q.qtype == QueryType::NS || q.name == "com" {
-                // Return referral — NS points back to ourselves (same IP, port 53 in glue
-                // won't work, but cache will have our address from root_hints)
-                let mut resp = DnsPacket::new();
-                resp.header.id = query.header.id;
-                resp.header.response = true;
-                resp.header.rescode = ResultCode::NOERROR;
-                resp.questions = query.questions.clone();
-                resp.authorities.push(DnsRecord::NS {
-                    domain: "com".into(),
-                    host: "ns1.com".into(),
-                    ttl: 3600,
-                });
-                resp
-            } else {
-                // Return authoritative answer
-                let mut resp = DnsPacket::response_from(query, ResultCode::NOERROR);
-                resp.header.authoritative_answer = true;
-                resp.answers.push(DnsRecord::A {
-                    domain: q.name.clone(),
-                    addr: Ipv4Addr::new(10, 0, 0, 42),
-                    ttl: 300,
-                });
-                resp
-            }
+            let mut resp = DnsPacket::response_from(query, ResultCode::NOERROR);
+            resp.header.authoritative_answer = true;
+            resp.answers.push(DnsRecord::A {
+                domain: q.name.clone(),
+                addr: Ipv4Addr::new(10, 0, 0, 42),
+                ttl: 300,
+            });
+            resp
         })
         .await;
 
-        let srtt = RwLock::new(SrttCache::new(true));
-        let result = send_query("hello.example.com", QueryType::A, server_addr, &srtt).await;
-        let resp = result.expect("TCP-only send_query should work");
+        let query = DnsPacket::query(0x1234, "hello.example.com", QueryType::A);
+        let resp = crate::forward::forward_tcp(&query, server_addr, TCP_TIMEOUT)
+            .await
+            .expect("TCP query should work");
         assert_eq!(resp.header.rescode, ResultCode::NOERROR);
         match &resp.answers[0] {
             DnsRecord::A { addr, .. } => assert_eq!(*addr, Ipv4Addr::new(10, 0, 0, 42)),
@@ -1002,7 +1125,8 @@ mod tests {
 
     #[tokio::test]
     async fn tcp_fallback_handles_nxdomain() {
-        UDP_DISABLED.store(false, Ordering::Relaxed);
+        let _guard = UDP_STATE_LOCK.lock().unwrap();
+        UDP_DISABLED.store(true, Ordering::Relaxed);
         UDP_FAILURES.store(0, Ordering::Release);
 
         let server_addr = spawn_tcp_dns_server(|query| {
@@ -1034,6 +1158,7 @@ mod tests {
 
     #[tokio::test]
     async fn udp_auto_disable_resets() {
+        let _guard = UDP_STATE_LOCK.lock().unwrap();
         UDP_DISABLED.store(true, Ordering::Release);
         UDP_FAILURES.store(5, Ordering::Relaxed);
 

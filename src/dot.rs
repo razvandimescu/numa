@@ -153,8 +153,11 @@ async fn accept_loop(listener: TcpListener, acceptor: TlsAcceptor, ctx: Arc<Serv
 
 /// Handle a single persistent DoT connection (RFC 7858).
 /// Reads length-prefixed DNS queries until EOF, idle timeout, or error.
-async fn handle_dot_connection<S>(mut stream: S, remote_addr: SocketAddr, ctx: &ServerCtx)
-where
+async fn handle_dot_connection<S>(
+    mut stream: S,
+    remote_addr: SocketAddr,
+    ctx: &std::sync::Arc<ServerCtx>,
+) where
     S: AsyncReadExt + AsyncWriteExt + Unpin,
 {
     loop {
@@ -177,8 +180,6 @@ where
             break;
         };
 
-        // Parse query up-front so we can echo its question section in SERVFAIL
-        // responses when resolve_query fails.
         let query = match DnsPacket::from_buffer(&mut buffer) {
             Ok(q) => q,
             Err(e) => {
@@ -200,7 +201,7 @@ where
             }
         };
 
-        match resolve_query(query.clone(), remote_addr, ctx).await {
+        match resolve_query(query.clone(), &buffer.buf[..msg_len], remote_addr, ctx).await {
             Ok(resp_buffer) => {
                 if write_framed(&mut stream, resp_buffer.filled())
                     .await
@@ -355,6 +356,7 @@ mod tests {
                 m
             },
             cache: RwLock::new(crate::cache::DnsCache::new(100, 60, 86400)),
+            refreshing: Mutex::new(std::collections::HashSet::new()),
             stats: Mutex::new(crate::stats::ServerStats::new()),
             overrides: RwLock::new(crate::override_store::OverrideStore::new()),
             blocklist: RwLock::new(crate::blocklist::BlocklistStore::new()),
@@ -370,6 +372,7 @@ mod tests {
             upstream_port: 53,
             lan_ip: Mutex::new(std::net::Ipv4Addr::LOCALHOST),
             timeout: Duration::from_millis(200),
+            hedge_delay: Duration::ZERO,
             proxy_tld: "numa".to_string(),
             proxy_tld_suffix: ".numa".to_string(),
             lan_enabled: false,

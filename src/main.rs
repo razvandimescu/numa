@@ -285,6 +285,7 @@ async fn main() -> numa::Result<()> {
             config.cache.min_ttl,
             config.cache.max_ttl,
         )),
+        refreshing: Mutex::new(std::collections::HashSet::new()),
         stats: Mutex::new(ServerStats::new()),
         overrides: RwLock::new(OverrideStore::new()),
         blocklist: RwLock::new(blocklist),
@@ -297,6 +298,7 @@ async fn main() -> numa::Result<()> {
         upstream_port: config.upstream.port,
         lan_ip: Mutex::new(numa::lan::detect_lan_ip().unwrap_or(std::net::Ipv4Addr::LOCALHOST)),
         timeout: Duration::from_millis(config.upstream.timeout_ms),
+        hedge_delay: Duration::from_millis(config.upstream.hedge_ms),
         proxy_tld_suffix: if config.proxy.tld.is_empty() {
             String::new()
         } else {
@@ -511,6 +513,14 @@ async fn main() -> numa::Result<()> {
         });
     }
 
+    // Spawn DoH connection keepalive — prevents idle TLS teardown
+    {
+        let keepalive_ctx = Arc::clone(&ctx);
+        tokio::spawn(async move {
+            doh_keepalive_loop(keepalive_ctx).await;
+        });
+    }
+
     // Spawn HTTP API server
     let api_ctx = Arc::clone(&ctx);
     let api_addr: SocketAddr = format!("{}:{}", config.server.api_bind_addr, api_port).parse()?;
@@ -590,7 +600,7 @@ async fn main() -> numa::Result<()> {
     #[allow(clippy::infinite_loop)]
     loop {
         let mut buffer = BytePacketBuffer::new();
-        let (_, src_addr) = match ctx.socket.recv_from(&mut buffer.buf).await {
+        let (len, src_addr) = match ctx.socket.recv_from(&mut buffer.buf).await {
             Ok(r) => r,
             Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {
                 // Windows delivers ICMP port-unreachable as ConnectionReset on UDP sockets
@@ -598,10 +608,9 @@ async fn main() -> numa::Result<()> {
             }
             Err(e) => return Err(e.into()),
         };
-
         let ctx = Arc::clone(&ctx);
         tokio::spawn(async move {
-            if let Err(e) = handle_query(buffer, src_addr, &ctx).await {
+            if let Err(e) = handle_query(buffer, len, src_addr, &ctx).await {
                 error!("{} | HANDLER ERROR | {}", src_addr, e);
             }
         });
@@ -749,30 +758,22 @@ async fn load_blocklists(ctx: &ServerCtx, lists: &[String]) {
 }
 
 async fn warm_domain(ctx: &ServerCtx, domain: &str) {
-    use numa::question::QueryType;
+    for qtype in [
+        numa::question::QueryType::A,
+        numa::question::QueryType::AAAA,
+    ] {
+        numa::ctx::refresh_entry(ctx, domain, qtype).await;
+    }
+}
 
-    for qtype in [QueryType::A, QueryType::AAAA] {
-        let query = numa::packet::DnsPacket::query(0, domain, qtype);
-        let result = if ctx.upstream_mode == numa::config::UpstreamMode::Recursive {
-            numa::recursive::resolve_recursive(
-                domain,
-                qtype,
-                &ctx.cache,
-                &query,
-                &ctx.root_hints,
-                &ctx.srtt,
-            )
-            .await
-        } else {
-            let pool = ctx.upstream_pool.lock().unwrap().clone();
-            numa::forward::forward_with_failover(&query, &pool, &ctx.srtt, ctx.timeout).await
-        };
-        match result {
-            Ok(resp) => {
-                ctx.cache.write().unwrap().insert(domain, qtype, &resp);
-                log::debug!("cache warm: {} {:?}", domain, qtype);
-            }
-            Err(e) => log::warn!("cache warm: {} {:?} failed: {}", domain, qtype, e),
+async fn doh_keepalive_loop(ctx: Arc<ServerCtx>) {
+    let mut interval = tokio::time::interval(Duration::from_secs(25));
+    interval.tick().await; // skip first immediate tick
+    loop {
+        interval.tick().await;
+        let pool = ctx.upstream_pool.lock().unwrap().clone();
+        if let Some(upstream) = pool.preferred() {
+            numa::forward::keepalive_doh(upstream).await;
         }
     }
 }

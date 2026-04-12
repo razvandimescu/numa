@@ -15,9 +15,15 @@ api_port = 5380
 # address = "9.9.9.9"                           # single upstream (plain UDP)
 # address = ["192.168.1.1", "9.9.9.9:5353"]    # multiple upstreams — SRTT picks fastest
 # address = "https://dns.quad9.net/dns-query"   # DNS-over-HTTPS (encrypted)
+# address = "tls://9.9.9.9#dns.quad9.net"       # DNS-over-TLS (encrypted, port 853)
 # fallback = ["8.8.8.8", "1.1.1.1"]            # tried only when all primaries fail
 # port = 53                                     # default port for addresses without :port
 # timeout_ms = 3000
+# hedge_ms = 10                                  # request hedging delay (ms). After this delay
+#                                                # without a response, fires a parallel request
+#                                                # to the same upstream. Rescues packet loss (UDP),
+#                                                # dispatch spikes (DoH), TLS stalls (DoT).
+#                                                # Set to 0 to disable. Default: 10
 # root_hints = [                                # only used in recursive mode
 #     "198.41.0.4",      # a.root-servers.net (Verisign)
 #     "199.9.14.201",    # b.root-servers.net (USC-ISI)
@@ -60,7 +66,7 @@ api_port = 5380
 # allowlist = ["example.com"]  # domains to never block
 
 [cache]
-max_entries = 10000
+max_entries = 100000
 min_ttl = 60
 max_ttl = 86400
 # warm = ["google.com", "github.com"]  # resolve at startup, refresh before TTL expiry

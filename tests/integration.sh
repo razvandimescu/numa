@@ -53,7 +53,17 @@ CONF
     echo "Starting Numa on :$PORT ($SUITE_NAME)..."
     RUST_LOG=info "$BINARY" "$CONFIG" > "$LOG" 2>&1 &
     NUMA_PID=$!
-    sleep 4
+    sleep 2
+
+    # Wait for blocklist to load (if blocking is enabled in this suite)
+    if echo "$SUITE_CONFIG" | grep -q 'enabled = true'; then
+        for i in $(seq 1 20); do
+            LOADED=$(curl -sf http://127.0.0.1:$API_PORT/blocking/stats 2>/dev/null \
+                | grep -o '"domains_loaded":[0-9]*' | cut -d: -f2)
+            if [ "${LOADED:-0}" -gt 0 ]; then break; fi
+            sleep 1
+        done
+    fi
 
     if ! kill -0 "$NUMA_PID" 2>/dev/null; then
         echo "Failed to start Numa:"

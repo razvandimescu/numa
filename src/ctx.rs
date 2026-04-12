@@ -1,7 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use arc_swap::ArcSwap;
@@ -16,7 +16,7 @@ use crate::blocklist::BlocklistStore;
 use crate::buffer::BytePacketBuffer;
 use crate::cache::{DnsCache, DnssecStatus};
 use crate::config::{UpstreamMode, ZoneMap};
-use crate::forward::{forward_query, forward_with_failover, Upstream, UpstreamPool};
+use crate::forward::{forward_query_raw, forward_with_failover_raw, Upstream, UpstreamPool};
 use crate::header::ResultCode;
 use crate::health::HealthMeta;
 use crate::lan::PeerStore;
@@ -35,6 +35,8 @@ pub struct ServerCtx {
     pub zone_map: ZoneMap,
     /// std::sync::RwLock (not tokio) — locks must never be held across .await points.
     pub cache: RwLock<DnsCache>,
+    /// Domains currently being refreshed in the background (dedup guard).
+    pub refreshing: Mutex<HashSet<(String, QueryType)>>,
     pub stats: Mutex<ServerStats>,
     pub overrides: RwLock<OverrideStore>,
     pub blocklist: RwLock<BlocklistStore>,
@@ -47,6 +49,7 @@ pub struct ServerCtx {
     pub upstream_port: u16,
     pub lan_ip: Mutex<std::net::Ipv4Addr>,
     pub timeout: Duration,
+    pub hedge_delay: Duration,
     pub proxy_tld: String,
     pub proxy_tld_suffix: String, // pre-computed ".{tld}" to avoid per-query allocation
     pub lan_enabled: bool,
@@ -81,8 +84,9 @@ pub struct ServerCtx {
 /// (and logging parse errors) before calling this function.
 pub async fn resolve_query(
     query: DnsPacket,
+    raw_wire: &[u8],
     src_addr: SocketAddr,
-    ctx: &ServerCtx,
+    ctx: &Arc<ServerCtx>,
 ) -> crate::Result<BytePacketBuffer> {
     let start = Instant::now();
 
@@ -164,7 +168,18 @@ pub async fn resolve_query(
             (resp, QueryPath::Blocked, DnssecStatus::Indeterminate)
         } else {
             let cached = ctx.cache.read().unwrap().lookup_with_status(&qname, qtype);
-            if let Some((cached, cached_dnssec)) = cached {
+            if let Some((cached, cached_dnssec, freshness)) = cached {
+                if freshness.needs_refresh() {
+                    let key = (qname.clone(), qtype);
+                    let already = !ctx.refreshing.lock().unwrap().insert(key.clone());
+                    if !already {
+                        let ctx = Arc::clone(ctx);
+                        tokio::spawn(async move {
+                            refresh_entry(&ctx, &key.0, key.1).await;
+                            ctx.refreshing.lock().unwrap().remove(&key);
+                        });
+                    }
+                }
                 let mut resp = cached;
                 resp.header.id = query.header.id;
                 if cached_dnssec == DnssecStatus::Secure {
@@ -177,11 +192,8 @@ pub async fn resolve_query(
                 // Conditional forwarding takes priority over recursive mode
                 // (e.g. Tailscale .ts.net, VPC private zones)
                 let upstream = Upstream::Udp(fwd_addr);
-                match forward_query(&query, &upstream, ctx.timeout).await {
-                    Ok(resp) => {
-                        ctx.cache.write().unwrap().insert(&qname, qtype, &resp);
-                        (resp, QueryPath::Forwarded, DnssecStatus::Indeterminate)
-                    }
+                match forward_and_cache(raw_wire, &upstream, ctx, &qname, qtype).await {
+                    Ok(resp) => (resp, QueryPath::Forwarded, DnssecStatus::Indeterminate),
                     Err(e) => {
                         error!(
                             "{} | {:?} {} | FORWARD ERROR | {}",
@@ -221,11 +233,26 @@ pub async fn resolve_query(
                 (resp, path, DnssecStatus::Indeterminate)
             } else {
                 let pool = ctx.upstream_pool.lock().unwrap().clone();
-                match forward_with_failover(&query, &pool, &ctx.srtt, ctx.timeout).await {
-                    Ok(resp) => {
-                        ctx.cache.write().unwrap().insert(&qname, qtype, &resp);
-                        (resp, QueryPath::Forwarded, DnssecStatus::Indeterminate)
-                    }
+                match forward_with_failover_raw(
+                    raw_wire,
+                    &pool,
+                    &ctx.srtt,
+                    ctx.timeout,
+                    ctx.hedge_delay,
+                )
+                .await
+                {
+                    Ok(resp_wire) => match cache_and_parse(ctx, &qname, qtype, &resp_wire) {
+                        Ok(resp) => (resp, QueryPath::Forwarded, DnssecStatus::Indeterminate),
+                        Err(e) => {
+                            error!("{} | {:?} {} | PARSE ERROR | {}", src_addr, qtype, qname, e);
+                            (
+                                DnsPacket::response_from(&query, ResultCode::SERVFAIL),
+                                QueryPath::UpstreamError,
+                                DnssecStatus::Indeterminate,
+                            )
+                        }
+                    },
                     Err(e) => {
                         error!(
                             "{} | {:?} {} | UPSTREAM ERROR | {}",
@@ -347,11 +374,77 @@ pub async fn resolve_query(
     Ok(resp_buffer)
 }
 
-/// Handle a DNS query received over UDP. Thin wrapper around resolve_query.
+fn cache_and_parse(
+    ctx: &ServerCtx,
+    qname: &str,
+    qtype: QueryType,
+    resp_wire: &[u8],
+) -> crate::Result<DnsPacket> {
+    ctx.cache
+        .write()
+        .unwrap()
+        .insert_wire(qname, qtype, resp_wire, DnssecStatus::Indeterminate);
+    let mut buf = BytePacketBuffer::from_bytes(resp_wire);
+    DnsPacket::from_buffer(&mut buf)
+}
+
+/// Re-resolve a single (domain, qtype) and update the cache.
+/// Used for both stale-entry refresh and proactive cache warming.
+pub async fn refresh_entry(ctx: &ServerCtx, qname: &str, qtype: QueryType) {
+    let query = DnsPacket::query(0, qname, qtype);
+    if ctx.upstream_mode == UpstreamMode::Recursive {
+        if let Ok(resp) = crate::recursive::resolve_recursive(
+            qname,
+            qtype,
+            &ctx.cache,
+            &query,
+            &ctx.root_hints,
+            &ctx.srtt,
+        )
+        .await
+        {
+            ctx.cache.write().unwrap().insert(qname, qtype, &resp);
+        }
+    } else {
+        let mut buf = BytePacketBuffer::new();
+        if query.write(&mut buf).is_ok() {
+            let pool = ctx.upstream_pool.lock().unwrap().clone();
+            if let Ok(wire) = forward_with_failover_raw(
+                buf.filled(),
+                &pool,
+                &ctx.srtt,
+                ctx.timeout,
+                ctx.hedge_delay,
+            )
+            .await
+            {
+                ctx.cache.write().unwrap().insert_wire(
+                    qname,
+                    qtype,
+                    &wire,
+                    DnssecStatus::Indeterminate,
+                );
+            }
+        }
+    }
+}
+
+async fn forward_and_cache(
+    wire: &[u8],
+    upstream: &Upstream,
+    ctx: &ServerCtx,
+    qname: &str,
+    qtype: QueryType,
+) -> crate::Result<DnsPacket> {
+    let resp_wire = forward_query_raw(wire, upstream, ctx.timeout).await?;
+    cache_and_parse(ctx, qname, qtype, &resp_wire)
+}
+
 pub async fn handle_query(
     mut buffer: BytePacketBuffer,
+    raw_len: usize,
     src_addr: SocketAddr,
-    ctx: &ServerCtx,
+    ctx: &Arc<ServerCtx>,
 ) -> crate::Result<()> {
     let query = match DnsPacket::from_buffer(&mut buffer) {
         Ok(packet) => packet,
@@ -360,7 +453,7 @@ pub async fn handle_query(
             return Ok(());
         }
     };
-    match resolve_query(query, src_addr, ctx).await {
+    match resolve_query(query, &buffer.buf[..raw_len], src_addr, ctx).await {
         Ok(resp_buffer) => {
             ctx.socket.send_to(resp_buffer.filled(), src_addr).await?;
         }
