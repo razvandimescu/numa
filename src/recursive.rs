@@ -690,9 +690,30 @@ async fn send_query_hedged(
         let fut_b = send_query(qname, qtype, secondary, srtt);
         tokio::pin!(fut_b);
 
-        tokio::select! {
-            r = fut_a => r,
-            r = fut_b => r,
+        // First Ok wins; if one errors, wait for the other.
+        let mut a_err: Option<crate::Error> = None;
+        let mut b_err: Option<crate::Error> = None;
+        loop {
+            tokio::select! {
+                r = &mut fut_a, if a_err.is_none() => {
+                    match r {
+                        Ok(resp) => return Ok(resp),
+                        Err(e) => {
+                            if b_err.is_some() { return Err(e); }
+                            a_err = Some(e);
+                        }
+                    }
+                }
+                r = &mut fut_b, if b_err.is_none() => {
+                    match r {
+                        Ok(resp) => return Ok(resp),
+                        Err(e) => {
+                            if let Some(ae) = a_err.take() { return Err(ae); }
+                            b_err = Some(e);
+                        }
+                    }
+                }
+            }
         }
     }
 }

@@ -157,58 +157,6 @@ impl UpstreamPool {
     }
 }
 
-pub async fn forward_with_failover(
-    query: &DnsPacket,
-    pool: &UpstreamPool,
-    srtt: &RwLock<SrttCache>,
-    timeout_duration: Duration,
-) -> Result<DnsPacket> {
-    // Build candidate list: primary (sorted by SRTT for UDP) then fallback
-    let mut candidates: Vec<(usize, u64)> = pool
-        .primary
-        .iter()
-        .enumerate()
-        .map(|(i, u)| {
-            let rtt = match u {
-                Upstream::Udp(addr) => srtt.read().unwrap().get(addr.ip()),
-                _ => 0, // DoH: keep config order (stable sort preserves it)
-            };
-            (i, rtt)
-        })
-        .collect();
-    candidates.sort_by_key(|&(_, rtt)| rtt);
-
-    let all_upstreams: Vec<&Upstream> = candidates
-        .iter()
-        .map(|&(i, _)| &pool.primary[i])
-        .chain(pool.fallback.iter())
-        .collect();
-
-    let mut last_err: Option<Box<dyn std::error::Error + Send + Sync>> = None;
-
-    for upstream in &all_upstreams {
-        let start = Instant::now();
-        match forward_query(query, upstream, timeout_duration).await {
-            Ok(resp) => {
-                if let Upstream::Udp(addr) = upstream {
-                    let rtt_ms = start.elapsed().as_millis() as u64;
-                    srtt.write().unwrap().record_rtt(addr.ip(), rtt_ms, false);
-                }
-                return Ok(resp);
-            }
-            Err(e) => {
-                if let Upstream::Udp(addr) = upstream {
-                    srtt.write().unwrap().record_failure(addr.ip());
-                }
-                log::debug!("upstream {} failed: {}", upstream, e);
-                last_err = Some(e);
-            }
-        }
-    }
-
-    Err(last_err.unwrap_or_else(|| "no upstream configured".into()))
-}
-
 pub async fn forward_query(
     query: &DnsPacket,
     upstream: &Upstream,
@@ -226,24 +174,14 @@ pub(crate) async fn forward_udp(
     upstream: SocketAddr,
     timeout_duration: Duration,
 ) -> Result<DnsPacket> {
-    let socket = UdpSocket::bind("0.0.0.0:0").await?;
-
     let mut send_buffer = BytePacketBuffer::new();
     query.write(&mut send_buffer)?;
 
-    socket.send_to(send_buffer.filled(), upstream).await?;
-
-    let mut recv_buffer = BytePacketBuffer::new();
-    let (size, _) = timeout(timeout_duration, socket.recv_from(&mut recv_buffer.buf)).await??;
-
-    if size == recv_buffer.buf.len() {
-        log::debug!(
-            "upstream response truncated ({} bytes, buffer {})",
-            size,
-            recv_buffer.buf.len()
-        );
+    let data = forward_udp_raw(send_buffer.filled(), upstream, timeout_duration).await?;
+    if data.len() >= 4096 {
+        log::debug!("upstream response may be truncated ({} bytes)", data.len());
     }
-
+    let mut recv_buffer = BytePacketBuffer::from_bytes(&data);
     DnsPacket::from_buffer(&mut recv_buffer)
 }
 
@@ -721,10 +659,19 @@ mod tests {
         );
 
         let srtt = RwLock::new(SrttCache::new(true));
-        let result = forward_with_failover(&query, &pool, &srtt, Duration::from_millis(500))
-            .await
-            .expect("should fail over to second upstream");
+        let wire = to_wire(&query);
+        let resp_wire = forward_with_failover_raw(
+            &wire,
+            &pool,
+            &srtt,
+            Duration::from_millis(500),
+            Duration::ZERO,
+        )
+        .await
+        .expect("should fail over to second upstream");
 
+        let mut buf = BytePacketBuffer::from_bytes(&resp_wire);
+        let result = DnsPacket::from_buffer(&mut buf).unwrap();
         assert_eq!(result.header.id, 0xABCD);
         assert_eq!(result.answers.len(), 1);
     }

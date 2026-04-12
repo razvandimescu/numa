@@ -607,11 +607,9 @@ async fn main() -> numa::Result<()> {
             }
             Err(e) => return Err(e.into()),
         };
-        let raw_len = len;
-
         let ctx = Arc::clone(&ctx);
         tokio::spawn(async move {
-            if let Err(e) = handle_query(buffer, raw_len, src_addr, &ctx).await {
+            if let Err(e) = handle_query(buffer, len, src_addr, &ctx).await {
                 error!("{} | HANDLER ERROR | {}", src_addr, e);
             }
         });
@@ -762,27 +760,39 @@ async fn warm_domain(ctx: &ServerCtx, domain: &str) {
     use numa::question::QueryType;
 
     for qtype in [QueryType::A, QueryType::AAAA] {
-        let query = numa::packet::DnsPacket::query(0, domain, qtype);
-        let result = if ctx.upstream_mode == numa::config::UpstreamMode::Recursive {
-            numa::recursive::resolve_recursive(
-                domain,
-                qtype,
-                &ctx.cache,
-                &query,
-                &ctx.root_hints,
-                &ctx.srtt,
+        if ctx.upstream_mode == numa::config::UpstreamMode::Recursive {
+            let query = numa::packet::DnsPacket::query(0, domain, qtype);
+            match numa::recursive::resolve_recursive(
+                domain, qtype, &ctx.cache, &query, &ctx.root_hints, &ctx.srtt,
             )
             .await
-        } else {
-            let pool = ctx.upstream_pool.lock().unwrap().clone();
-            numa::forward::forward_with_failover(&query, &pool, &ctx.srtt, ctx.timeout).await
-        };
-        match result {
-            Ok(resp) => {
-                ctx.cache.write().unwrap().insert(domain, qtype, &resp);
-                log::debug!("cache warm: {} {:?}", domain, qtype);
+            {
+                Ok(resp) => {
+                    ctx.cache.write().unwrap().insert(domain, qtype, &resp);
+                    log::debug!("cache warm: {} {:?}", domain, qtype);
+                }
+                Err(e) => log::warn!("cache warm: {} {:?} failed: {}", domain, qtype, e),
             }
-            Err(e) => log::warn!("cache warm: {} {:?} failed: {}", domain, qtype, e),
+        } else {
+            let query = numa::packet::DnsPacket::query(0, domain, qtype);
+            let mut buf = numa::buffer::BytePacketBuffer::new();
+            if query.write(&mut buf).is_err() {
+                continue;
+            }
+            let pool = ctx.upstream_pool.lock().unwrap().clone();
+            match numa::forward::forward_with_failover_raw(
+                buf.filled(), &pool, &ctx.srtt, ctx.timeout, ctx.hedge_delay,
+            )
+            .await
+            {
+                Ok(wire) => {
+                    ctx.cache.write().unwrap().insert_wire(
+                        domain, qtype, &wire, numa::cache::DnssecStatus::Indeterminate,
+                    );
+                    log::debug!("cache warm: {} {:?}", domain, qtype);
+                }
+                Err(e) => log::warn!("cache warm: {} {:?} failed: {}", domain, qtype, e),
+            }
         }
     }
 }
