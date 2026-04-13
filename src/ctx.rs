@@ -1219,4 +1219,33 @@ mod tests {
         assert_eq!(path, QueryPath::Cached);
         assert_eq!(resp.header.rescode, ResultCode::NOERROR);
     }
+
+    #[tokio::test]
+    async fn pipeline_forwarding_returns_upstream_answer() {
+        let mut upstream_resp = DnsPacket::new();
+        upstream_resp.header.response = true;
+        upstream_resp.header.rescode = ResultCode::NOERROR;
+        upstream_resp.answers.push(DnsRecord::A {
+            domain: "internal.corp".to_string(),
+            addr: Ipv4Addr::new(10, 1, 2, 3),
+            ttl: 600,
+        });
+        let upstream_addr = crate::testutil::mock_upstream(upstream_resp).await;
+
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.forwarding_rules = vec![ForwardingRule::new("corp".to_string(), upstream_addr)];
+        let ctx = Arc::new(ctx);
+
+        let (resp, path) = resolve_in_test(&ctx, "internal.corp", QueryType::A).await;
+        assert_eq!(path, QueryPath::Forwarded);
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+        assert_eq!(resp.answers.len(), 1);
+        match &resp.answers[0] {
+            DnsRecord::A { domain, addr, .. } => {
+                assert_eq!(domain, "internal.corp");
+                assert_eq!(*addr, Ipv4Addr::new(10, 1, 2, 3));
+            }
+            other => panic!("expected A record, got {:?}", other),
+        }
+    }
 }
