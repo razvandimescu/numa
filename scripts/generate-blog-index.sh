@@ -1,3 +1,59 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Generate site/blog/index.html from blog/*.md frontmatter.
+# Reads title, description, date from YAML frontmatter in each post.
+# Sorts newest first (by date string — "April 2026" > "March 2026").
+
+OUT="site/blog/index.html"
+
+# Extract frontmatter fields from a markdown file
+extract() {
+  local file="$1" field="$2"
+  sed -n '/^---$/,/^---$/p' "$file" | grep "^${field}:" | sed "s/^${field}: *//"
+}
+
+# Collect posts: "date|name|title|description" per line
+posts=""
+sources="blog/*.md"
+if [ "${BLOG_INCLUDE_DRAFTS:-}" = "1" ] && ls drafts/*.md >/dev/null 2>&1; then
+  sources="blog/*.md drafts/*.md"
+fi
+for f in $sources; do
+  name=$(basename "$f" .md)
+  title=$(extract "$f" title)
+  desc=$(extract "$f" description)
+  date=$(extract "$f" date)
+  posts+="${date}|${name}|${title}|${desc}"$'\n'
+done
+
+# Sort by ISO date (YYYY-MM-DD), newest first
+posts=$(echo "$posts" | grep -v '^$' | sort -t'|' -k1 -r)
+
+# Format ISO date (YYYY-MM-DD) to "Month YYYY"
+format_date() {
+  local months=(January February March April May June July August September October November December)
+  local y="${1%%-*}"
+  local m="${1#*-}"; m="${m%%-*}"; m=$((10#$m))
+  echo "${months[$((m-1))]} $y"
+}
+
+# Generate post list items
+items=""
+while IFS='|' read -r date name title desc; do
+  display_date=$(format_date "$date")
+  items+="    <li>
+      <a href=\"/blog/posts/${name}.html\">
+        <div class=\"post-title\">${title}</div>
+        <div class=\"post-desc\">${desc}</div>
+        <div class=\"post-date\">${display_date}</div>
+      </a>
+    </li>
+"
+done <<< "$posts"
+
+# Write the full index.html — style matches the existing hand-maintained version
+cat > "$OUT" << HTMLEOF
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -168,35 +224,7 @@ body::before {
 <main class="blog-index">
   <h1>Blog</h1>
   <ul class="post-list">
-    <li>
-      <a href="/blog/posts/fixing-doh-tail-latency.html">
-        <div class="post-title">Fixing DNS tail latency with a 5-line config and a 50-line function</div>
-        <div class="post-desc">We had periodic 40-140ms DoH spikes from hyper's dispatch channel. The fix was reqwest window tuning and request hedging — Dean & Barroso's "The Tail at Scale," applied to a DNS forwarder. Same ideas took our cold recursive p99 from 2.3 seconds to 538ms.</div>
-        <div class="post-date">April 2026</div>
-      </a>
-    </li>
-    <li>
-      <a href="/blog/posts/dot-from-scratch.html">
-        <div class="post-title">DNS-over-TLS from Scratch in Rust</div>
-        <div class="post-desc">Building RFC 7858 on top of rustls — length-prefix framing, ALPN cross-protocol defense, and two bugs that only the strict clients caught.</div>
-        <div class="post-date">April 2026</div>
-      </a>
-    </li>
-    <li>
-      <a href="/blog/posts/dnssec-from-scratch.html">
-        <div class="post-title">Implementing DNSSEC from Scratch in Rust</div>
-        <div class="post-desc">Recursive resolution from root hints, chain-of-trust validation, NSEC/NSEC3 denial proofs, and what I learned implementing DNSSEC with zero DNS libraries.</div>
-        <div class="post-date">March 2026</div>
-      </a>
-    </li>
-    <li>
-      <a href="/blog/posts/dns-from-scratch.html">
-        <div class="post-title">I Built a DNS Resolver from Scratch in Rust</div>
-        <div class="post-desc">How DNS actually works at the wire level — label compression, TTL tricks, DoH, and what surprised me building a resolver with zero DNS libraries.</div>
-        <div class="post-date">March 2026</div>
-      </a>
-    </li>
-  </ul>
+${items}  </ul>
 </main>
 
 <footer class="blog-footer">
@@ -206,3 +234,6 @@ body::before {
 
 </body>
 </html>
+HTMLEOF
+
+echo "  blog/index.html generated ($(echo "$posts" | wc -l | tr -d ' ') posts)"

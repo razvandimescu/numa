@@ -32,6 +32,19 @@ blog:
 		pandoc "$$f" --template=site/blog-template.html -o "site/blog/posts/$$name.html"; \
 		echo "  $$f → site/blog/posts/$$name.html"; \
 	done
+	@scripts/generate-blog-index.sh
+
+blog-drafts: blog
+	@if [ -d drafts ] && ls drafts/*.md >/dev/null 2>&1; then \
+		for f in drafts/*.md; do \
+			name=$$(basename "$$f" .md); \
+			pandoc "$$f" --template=site/blog-template.html -o "site/blog/posts/$$name.html"; \
+			echo "  $$f → site/blog/posts/$$name.html (draft)"; \
+		done; \
+		BLOG_INCLUDE_DRAFTS=1 scripts/generate-blog-index.sh; \
+	else \
+		echo "  No drafts found"; \
+	fi
 
 release:
 ifndef VERSION

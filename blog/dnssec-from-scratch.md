@@ -1,7 +1,7 @@
 ---
 title: Implementing DNSSEC from Scratch in Rust
 description: Recursive resolution from root hints, chain-of-trust validation, NSEC/NSEC3 denial proofs, and what I learned implementing DNSSEC with zero DNS libraries.
-date: March 2026
+date: 2026-03-28
 ---
 
 In the [previous post](/blog/posts/dns-from-scratch.html) I covered how DNS works at the wire level — packet format, label compression, TTL caching, DoH. Numa was a forwarding resolver: it parsed packets, did useful things locally, and relayed the rest to Cloudflare or Quad9.

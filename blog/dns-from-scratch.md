@@ -1,7 +1,7 @@
 ---
 title: I Built a DNS Resolver from Scratch in Rust
 description: How DNS actually works at the wire level — label compression, TTL tricks, DoH, and what surprised me building a resolver with zero DNS libraries.
-date: March 2026
+date: 2026-03-20
 ---
 
 I wanted to understand how DNS actually works. Not the "it translates domain names to IP addresses" explanation — the actual bytes on the wire. What does a DNS packet look like? How does label compression work? Why is everything crammed into 512 bytes?

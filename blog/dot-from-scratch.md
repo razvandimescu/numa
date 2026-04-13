@@ -1,7 +1,7 @@
 ---
 title: DNS-over-TLS from Scratch in Rust
 description: Building RFC 7858 on top of rustls — length-prefix framing, ALPN cross-protocol defense, and two bugs that only the strict clients caught.
-date: April 2026
+date: 2026-04-06
 ---
 
 The [previous post](/blog/posts/dnssec-from-scratch.html) ended with "DoT — the last encrypted transport we don't support." This post is about building it.
