@@ -1,10 +1,12 @@
 ---
 title: Fixing DNS tail latency with a 5-line config and a 50-line function
-description: We had periodic 40-140ms DoH spikes from hyper's dispatch channel. The fix was reqwest window tuning and request hedging — Dean & Barroso's "The Tail at Scale," applied to a DNS forwarder. Same ideas took our cold recursive p99 from 2.3 seconds to 538ms.
+description: Periodic 40-140ms DoH spikes from hyper's dispatch channel. The fix was reqwest window tuning and request hedging — Dean & Barroso's "The Tail at Scale," applied to a DNS forwarder. Same ideas took cold recursive p99 from 2.3 seconds to 538ms.
 date: 2026-04-12
 ---
 
-Numa forwards DNS queries over HTTPS using reqwest. When we benchmarked the DoH path, we found periodic 40-140ms latency spikes every ~100ms of wall clock, in an otherwise ~10ms distribution. The tail was dragging our average — median 10ms, mean 23ms.
+If you're using reqwest for small HTTP/2 payloads, you probably have a tail latency problem you don't know about. Hyper's default flow control windows are 10,000× oversized for anything under 1 KB, and its dispatch channel adds periodic 40-140ms stalls that don't show up in median benchmarks.
+
+I hit this building [Numa](https://github.com/razvandimescu/numa), a DNS resolver that forwards queries over HTTPS. Median was 10ms, mean was 23ms — the tail was dragging everything.
 
 <div class="hero-metrics">
 <div class="metric-card">
@@ -24,21 +26,21 @@ Numa forwards DNS queries over HTTPS using reqwest. When we benchmarked the DoH 
 </div>
 </div>
 
-The fix was a 5-line reqwest config and a 50-line hedging function. This post is also an advertisement for Dean & Barroso's 2013 paper ["The Tail at Scale"](https://research.google/pubs/pub40801/) — a decade-old idea that still demolishes dispatch spikes.
+The fix was a 5-line reqwest config and a 50-line hedging function. This post is also an advertisement for Dean & Barroso's 2013 paper ["The Tail at Scale"](https://research.google/pubs/pub40801/) — a decade-old idea that still demolishes dispatch spikes. The same ideas later took my cold recursive p99 from 2.3 seconds to 538ms.
 
 ---
 
 ## The cause: hyper's dispatch channel
 
-Reqwest sits on top of hyper, which interposes an mpsc dispatch channel and a separate `ClientTask` between `.send()` and the h2 stream. We instrumented the forwarding path and confirmed: 100% of the spike time lives in the `send()` phase, and a parallel heartbeat task showed zero runtime lag during spikes. The tokio runtime was fine — the stall was internal to hyper's request scheduling.
+Reqwest sits on top of hyper, which interposes an mpsc dispatch channel and a separate `ClientTask` between `.send()` and the h2 stream. I instrumented the forwarding path and confirmed: 100% of the spike time lives in the `send()` phase, and a parallel heartbeat task showed zero runtime lag during spikes. The tokio runtime was fine — the stall was internal to hyper's request scheduling.
 
-Hickory-resolver doesn't have this issue. It holds `h2::SendRequest<Bytes>` directly and calls `ready().await; send_request()` in the caller's task — no channel, no scheduling dependency. We used it as a reference point throughout.
+Hickory-resolver doesn't have this issue. It holds `h2::SendRequest<Bytes>` directly and calls `ready().await; send_request()` in the caller's task — no channel, no scheduling dependency. I used it as a reference point throughout.
 
 ## Fix #1 — HTTP/2 window sizes
 
 Reqwest inherits hyper's HTTP/2 defaults: 2 MB stream window, 5 MB connection window. For DNS responses (~200 bytes), that's ~10,000× oversized — unnecessary WINDOW_UPDATE frames, bloated bookkeeping on every poll, and different server-side scheduling behavior.
 
-Setting both windows to the h2 spec default (64 KB) dropped our median from 13.3ms to 10.1ms:
+Setting both windows to the h2 spec default (64 KB) dropped my median from 13.3ms to 10.1ms:
 
 ```rust
 reqwest::Client::builder()
@@ -94,7 +96,7 @@ pub async fn forward_with_hedging_raw(
 }
 ```
 
-The [production version](https://github.com/razvandimescu/numa/blob/main/src/forward.rs#L267) adds error handling — if one leg fails, it waits for the other. In production, Numa passes the same `&Upstream` twice when only one is configured. We extended hedging to all protocols — UDP (rescues packet loss on WiFi), DoT (rescues TLS handshake stalls). Configurable via `hedge_ms`; set to 0 to disable.
+The [production version](https://github.com/razvandimescu/numa/blob/main/src/forward.rs#L267) adds error handling — if one leg fails, it waits for the other. In production, Numa passes the same `&Upstream` twice when only one is configured. I extended hedging to all protocols — UDP (rescues packet loss on WiFi), DoT (rescues TLS handshake stalls). Configurable via `hedge_ms`; set to 0 to disable.
 
 **Caveat: hedging hurts on degraded networks.** When latency is consistently high (no random spikes, just slow), the hedge adds overhead with nothing to rescue. Hedging is a variance reducer, not a latency reducer — it only helps when spikes are *random*.
 
@@ -116,13 +118,13 @@ The internal improvement: hedging cut p95 by 45%, p99 by 37%, σ by 57%. The exa
 
 ## Recursive resolution: from 2.3 seconds to 538ms
 
-Forwarding is one job. Recursive resolution — walking from root hints through TLD nameservers to the authoritative server — is a different one. We started 15× behind Unbound on cold recursive p99 and traced it to four root causes.
+Forwarding is one job. Recursive resolution — walking from root hints through TLD nameservers to the authoritative server — is a different one. I started 15× behind Unbound on cold recursive p99 and traced it to four root causes.
 
-**1. Missing NS delegation caching.** We cached glue records (ns1's IP) but not the delegation itself. Every `.com` query walked from root. Fix: cache NS records from referral authority sections. (10 lines)
+**1. Missing NS delegation caching.** I cached glue records (ns1's IP) but not the delegation itself. Every `.com` query walked from root. Fix: cache NS records from referral authority sections. (10 lines)
 
 **2. Expired cache entries caused full cold resolutions.** Fix: serve-stale ([RFC 8767](https://www.rfc-editor.org/rfc/rfc8767)) — return expired entries with TTL=1 while revalidating in the background. (20 lines)
 
-**3. 1,900ms wasted per unreachable server.** 800ms UDP timeout + unconditional 1,500ms TCP fallback. Fix: 400ms UDP, TCP only for truncation. (5 lines)
+**3. Wasting 1,900ms per unreachable server.** 800ms UDP timeout + unconditional 1,500ms TCP fallback. Fix: 400ms UDP, TCP only for truncation. (5 lines)
 
 **4. Sequential NS queries on cold starts.** Fix: fire to the top 2 nameservers simultaneously. First response wins, SRTT recorded for both. Same hedging principle. (50 lines)
 
@@ -150,9 +152,9 @@ Genuine cold benchmarks — unique subdomains, 1 query per domain, 5 iterations,
 | σ | 254ms | **114ms** | 457ms |
 | median | — | 77.6ms | 74.7ms |
 
-Unbound wins median by ~4% — its C implementation and 19 years of recursive optimization give it an edge on raw speed. It also has features we don't yet: aggressive NSEC caching ([RFC 8198](https://www.rfc-editor.org/rfc/rfc8198)) and a persistent infra cache. Where hedging shines is the tail — domains with slow or unreachable nameservers, where parallel queries turn worst-case sequential timeouts into races.
+Unbound wins median by ~4%. Where hedging shines is the tail — domains with slow or unreachable nameservers, where parallel queries turn worst-case sequential timeouts into races. Cache hits are tied at 0.1ms across Numa, Unbound, and AdGuard Home.
 
-Cache hits are tied across Numa, Unbound, and AdGuard Home — all serve at 0.1ms.
+What I'm exploring next: persistent SRTT data across restarts (currently cold-starts lose all server timing), aggressive NSEC caching to shortcut negative lookups, and adaptive hedge delays that tune themselves to observed network conditions instead of a fixed 10ms.
 
 ---
 
