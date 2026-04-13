@@ -123,8 +123,7 @@ pub async fn resolve_query(
         } else if is_special_use_domain(&qname)
             && crate::system_dns::match_forwarding_rule(&qname, &ctx.forwarding_rules).is_none()
         {
-            // RFC 6761/8880: private PTR, DDR, NAT64 — answer locally,
-            // unless an explicit forwarding rule covers this zone.
+            // RFC 6761/8880: answer locally unless a forwarding rule covers this zone.
             let resp = special_use_response(&query, &qname, qtype);
             (resp, QueryPath::Local, DnssecStatus::Indeterminate)
         } else if !ctx.proxy_tld_suffix.is_empty()
@@ -1135,6 +1134,10 @@ mod tests {
         let (resp, path) = resolve_in_test(&ctx, "app.localhost", QueryType::A).await;
         assert_eq!(path, QueryPath::Local);
         assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+        match &resp.answers[0] {
+            DnsRecord::A { addr, .. } => assert_eq!(*addr, Ipv4Addr::LOCALHOST),
+            other => panic!("expected A record, got {:?}", other),
+        }
     }
 
     #[tokio::test]
