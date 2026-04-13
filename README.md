@@ -27,6 +27,9 @@ yay -S numa-git
 # Windows — download from GitHub Releases
 # All platforms
 cargo install numa
+
+# Docker
+docker run -d --name numa --network host ghcr.io/razvandimescu/numa
 ```
 
 ```bash
@@ -101,6 +104,26 @@ Machine A (192.168.1.5)              Machine B (192.168.1.20)
 From Machine B: `curl http://api.numa` → proxied to Machine A's port 8000. Enable with `numa lan on`.
 
 **Hub mode**: run one instance with `bind_addr = "0.0.0.0:53"` and point other devices' DNS to it — they get ad blocking + `.numa` resolution without installing anything.
+
+## Docker
+
+```bash
+# Recommended — host networking (Linux)
+docker run -d --name numa --network host ghcr.io/razvandimescu/numa
+
+# Port mapping (macOS/Windows Docker Desktop)
+docker run -d --name numa -p 53:53/udp -p 53:53/tcp -p 5380:5380 ghcr.io/razvandimescu/numa
+```
+
+Dashboard at `http://localhost:5380`. The image binds the API and proxy to `0.0.0.0` by default. Override with a custom config:
+
+```bash
+docker run -d --name numa --network host \
+  -v /path/to/numa.toml:/root/.config/numa/numa.toml \
+  ghcr.io/razvandimescu/numa
+```
+
+Multi-arch: `linux/amd64` and `linux/arm64`.
 
 ## How It Compares
 
