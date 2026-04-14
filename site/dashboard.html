@@ -939,10 +939,12 @@ function renderMemory(mem, stats) {
 
 function renderBarChart(containerId, defs, data, total) {
   total = total || 1;
-  document.getElementById(containerId).innerHTML = defs.map(d => {
-    const count = data[d.key] || 0;
-    const pct = ((count / total) * 100).toFixed(1);
-    return `
+  document.getElementById(containerId).innerHTML = defs
+    .filter(d => (data[d.key] || 0) > 0)
+    .map(d => {
+      const count = data[d.key] || 0;
+      const pct = ((count / total) * 100).toFixed(1);
+      return `
       <div class="path-bar-row">
         <span class="path-label">${d.label}</span>
         <div class="path-bar-track">
@@ -950,7 +952,7 @@ function renderBarChart(containerId, defs, data, total) {
         </div>
         <span class="path-pct">${pct}%</span>
       </div>`;
-  }).join('');
+    }).join('');
 }
 
 function encryptionPct(transport) {
