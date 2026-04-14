@@ -246,7 +246,7 @@ pub async fn resolve_query(
                 .await
                 {
                     Ok(resp_wire) => match cache_and_parse(ctx, &qname, qtype, &resp_wire) {
-                        Ok(resp) => (resp, QueryPath::Forwarded, DnssecStatus::Indeterminate),
+                        Ok(resp) => (resp, QueryPath::Upstream, DnssecStatus::Indeterminate),
                         Err(e) => {
                             error!("{} | {:?} {} | PARSE ERROR | {}", src_addr, qtype, qname, e);
                             (
@@ -1252,5 +1252,33 @@ mod tests {
             }
             other => panic!("expected A record, got {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn pipeline_default_pool_reports_upstream_path() {
+        // No forwarding rule matches — query falls through to the default
+        // [upstream] pool. Path must be reported as Upstream (not Forwarded)
+        // so operators can distinguish [[forwarding]] hits from pool traffic.
+        let mut upstream_resp = DnsPacket::new();
+        upstream_resp.header.response = true;
+        upstream_resp.header.rescode = ResultCode::NOERROR;
+        upstream_resp.answers.push(DnsRecord::A {
+            domain: "example.com".to_string(),
+            addr: Ipv4Addr::new(93, 184, 216, 34),
+            ttl: 300,
+        });
+        let upstream_addr = crate::testutil::mock_upstream(upstream_resp).await;
+
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.upstream_pool = std::sync::Mutex::new(crate::forward::UpstreamPool::new(
+            vec![Upstream::Udp(upstream_addr)],
+            vec![],
+        ));
+        let ctx = Arc::new(ctx);
+
+        let (resp, path) = resolve_in_test(&ctx, "example.com", QueryType::A).await;
+        assert_eq!(path, QueryPath::Upstream);
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+        assert_eq!(resp.answers.len(), 1);
     }
 }
