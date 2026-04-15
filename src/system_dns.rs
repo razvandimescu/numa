@@ -729,20 +729,24 @@ fn install_windows() -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(windows)]
-const WINDOWS_SERVICE_NAME: &str = "Numa";
-
 /// Stable install location for the service binary. SCM keeps a handle to
 /// this path; the user's Downloads folder (where `current_exe()` points at
 /// install time) is not durable.
 #[cfg(windows)]
 fn windows_service_exe_path() -> std::path::PathBuf {
-    std::path::PathBuf::from(
-        std::env::var("PROGRAMDATA").unwrap_or_else(|_| "C:\\ProgramData".into()),
-    )
-    .join("numa")
-    .join("bin")
-    .join("numa.exe")
+    crate::data_dir().join("bin").join("numa.exe")
+}
+
+/// Run `sc.exe` with the given args and return its merged stdout/stderr on
+/// failure. `sc` emits errors on stdout (not stderr) on Windows, so the
+/// caller reads stdout to format a useful error.
+#[cfg(windows)]
+fn run_sc(args: &[&str]) -> Result<std::process::Output, String> {
+    let out = std::process::Command::new("sc")
+        .args(args)
+        .output()
+        .map_err(|e| format!("failed to run sc {}: {}", args.first().unwrap_or(&""), e))?;
+    Ok(out)
 }
 
 /// Copy the currently-running binary to the service install location. SCM
@@ -782,24 +786,22 @@ fn remove_service_binary() {
 #[cfg(windows)]
 fn register_service_scm(exe: &std::path::Path) -> Result<(), String> {
     let bin_path = format!("\"{}\" --service", exe.display());
+    let name = crate::windows_service::SERVICE_NAME;
 
     // sc.exe uses a leading space as its `name= value` delimiter; the space
     // after `=` is mandatory.
-    let create = std::process::Command::new("sc")
-        .args([
-            "create",
-            WINDOWS_SERVICE_NAME,
-            "binPath=",
-            &bin_path,
-            "DisplayName=",
-            "Numa DNS",
-            "start=",
-            "auto",
-            "obj=",
-            "LocalSystem",
-        ])
-        .output()
-        .map_err(|e| format!("failed to run sc create: {}", e))?;
+    let create = run_sc(&[
+        "create",
+        name,
+        "binPath=",
+        &bin_path,
+        "DisplayName=",
+        "Numa DNS",
+        "start=",
+        "auto",
+        "obj=",
+        "LocalSystem",
+    ])?;
     if !create.status.success() {
         let out = String::from_utf8_lossy(&create.stdout);
         // "service already exists" is 1073 — treat as idempotent success.
@@ -808,30 +810,23 @@ fn register_service_scm(exe: &std::path::Path) -> Result<(), String> {
         }
     }
 
-    let _ = std::process::Command::new("sc")
-        .args([
-            "description",
-            WINDOWS_SERVICE_NAME,
-            "Self-sovereign DNS resolver (ad blocking, DoH/DoT, local zones).",
-        ])
-        .status();
+    let _ = run_sc(&[
+        "description",
+        name,
+        "Self-sovereign DNS resolver (ad blocking, DoH/DoT, local zones).",
+    ]);
 
     // Restart on crash: 5s, 5s, 10s; reset failure counter after 60s.
-    let _ = std::process::Command::new("sc")
-        .args([
-            "failure",
-            WINDOWS_SERVICE_NAME,
-            "reset=",
-            "60",
-            "actions=",
-            "restart/5000/restart/5000/restart/10000",
-        ])
-        .status();
+    let _ = run_sc(&[
+        "failure",
+        name,
+        "reset=",
+        "60",
+        "actions=",
+        "restart/5000/restart/5000/restart/10000",
+    ]);
 
-    eprintln!(
-        "  Registered service '{}' (boot-time).",
-        WINDOWS_SERVICE_NAME
-    );
+    eprintln!("  Registered service '{}' (boot-time).", name);
     Ok(())
 }
 
@@ -840,10 +835,7 @@ fn register_service_scm(exe: &std::path::Path) -> Result<(), String> {
 /// return the underlying error string rather than masking it.
 #[cfg(windows)]
 fn start_service_scm() -> Result<(), String> {
-    let out = std::process::Command::new("sc")
-        .args(["start", WINDOWS_SERVICE_NAME])
-        .output()
-        .map_err(|e| format!("failed to run sc start: {}", e))?;
+    let out = run_sc(&["start", crate::windows_service::SERVICE_NAME])?;
     if !out.status.success() {
         let text = String::from_utf8_lossy(&out.stdout);
         if text.contains("1056") {
@@ -854,20 +846,22 @@ fn start_service_scm() -> Result<(), String> {
     Ok(())
 }
 
-/// Stop the service. Returns Ok if already stopped — idempotent.
+/// Stop the service. Idempotent — already-stopped or missing service logs
+/// a warning but doesn't error, since both callers (install re-run,
+/// uninstall) want best-effort cleanup rather than hard failure.
 #[cfg(windows)]
 fn stop_service_scm() {
-    let _ = std::process::Command::new("sc")
-        .args(["stop", WINDOWS_SERVICE_NAME])
-        .status();
+    if let Err(e) = run_sc(&["stop", crate::windows_service::SERVICE_NAME]) {
+        log::warn!("sc stop failed: {}", e);
+    }
 }
 
-/// Remove the service from SCM. Safe if already absent.
+/// Remove the service from SCM. Idempotent — see `stop_service_scm`.
 #[cfg(windows)]
 fn delete_service_scm() {
-    let _ = std::process::Command::new("sc")
-        .args(["delete", WINDOWS_SERVICE_NAME])
-        .status();
+    if let Err(e) = run_sc(&["delete", crate::windows_service::SERVICE_NAME]) {
+        log::warn!("sc delete failed: {}", e);
+    }
 }
 
 #[cfg(windows)]

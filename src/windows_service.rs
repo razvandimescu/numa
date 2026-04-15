@@ -62,7 +62,7 @@ fn run_service() -> windows_service::Result<()> {
     // once the SCM tells us to stop — we can't block the dispatcher thread
     // forever without preventing graceful shutdown.
     let config_path = service_config_path();
-    let (runtime_stop_tx, runtime_stop_rx) = mpsc::channel::<()>();
+    let (server_done_tx, server_done_rx) = mpsc::channel::<()>();
 
     let server_thread = std::thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_multi_thread()
@@ -72,28 +72,25 @@ fn run_service() -> windows_service::Result<()> {
             Ok(rt) => rt,
             Err(e) => {
                 log::error!("failed to build tokio runtime: {}", e);
-                let _ = runtime_stop_tx.send(());
+                let _ = server_done_tx.send(());
                 return;
             }
         };
 
-        // block_on returns when serve::run's UDP loop errors out OR when the
-        // runtime is dropped from another thread. Either signals exit.
         if let Err(e) = runtime.block_on(crate::serve::run(config_path)) {
             log::error!("numa serve exited with error: {}", e);
         }
-        let _ = runtime_stop_tx.send(());
+        let _ = server_done_tx.send(());
     });
 
     // Wait for either SCM stop or server termination.
     loop {
-        if shutdown_rx.try_recv().is_ok() {
+        if shutdown_rx.recv_timeout(Duration::from_millis(500)).is_ok() {
             break;
         }
-        if runtime_stop_rx.try_recv().is_ok() {
+        if server_done_rx.try_recv().is_ok() {
             break;
         }
-        std::thread::sleep(Duration::from_millis(200));
     }
 
     // The server's tokio runtime runs detached inside server_thread. Abandon
@@ -124,9 +121,10 @@ pub fn run_as_service() -> windows_service::Result<()> {
 
 /// Path to the config file used when running under SCM. SCM launches the
 /// service with SYSTEM's working directory (usually `C:\Windows\System32`),
-/// so a relative `numa.toml` lookup won't find anything meaningful — use an
-/// absolute path under `%PROGRAMDATA%` instead.
+/// so a relative `numa.toml` lookup won't find anything meaningful.
 fn service_config_path() -> String {
-    let base = std::env::var("PROGRAMDATA").unwrap_or_else(|_| "C:\\ProgramData".into());
-    format!("{}\\numa\\numa.toml", base)
+    crate::data_dir()
+        .join("numa.toml")
+        .to_string_lossy()
+        .into_owned()
 }
