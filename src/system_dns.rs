@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 use log::info;
 
-use crate::forward::Upstream;
+use crate::forward::{Upstream, UpstreamPool};
 
 fn print_recursive_hint() {
     let is_recursive = crate::config::load_config("numa.toml")
@@ -24,11 +24,11 @@ fn is_loopback_or_stub(addr: &str) -> bool {
 pub struct ForwardingRule {
     pub suffix: String,
     dot_suffix: String, // pre-computed ".suffix" for zero-alloc matching
-    pub upstream: Upstream,
+    pub upstream: UpstreamPool,
 }
 
 impl ForwardingRule {
-    pub fn new(suffix: String, upstream: Upstream) -> Self {
+    pub fn new(suffix: String, upstream: UpstreamPool) -> Self {
         let dot_suffix = format!(".{}", suffix);
         Self {
             suffix,
@@ -216,7 +216,8 @@ fn discover_macos() -> SystemDnsInfo {
     for rule in &rules {
         info!(
             "auto-discovered forwarding: *.{} -> {}",
-            rule.suffix, rule.upstream
+            rule.suffix,
+            rule.upstream.label()
         );
     }
     if rules.is_empty() {
@@ -235,7 +236,8 @@ fn discover_macos() -> SystemDnsInfo {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn make_rule(domain: &str, nameserver: &str) -> Option<ForwardingRule> {
     let addr = crate::forward::parse_upstream_addr(nameserver, 53).ok()?;
-    Some(ForwardingRule::new(domain.to_string(), Upstream::Udp(addr)))
+    let pool = UpstreamPool::new(vec![Upstream::Udp(addr)], vec![]);
+    Some(ForwardingRule::new(domain.to_string(), pool))
 }
 
 #[cfg(target_os = "linux")]
@@ -827,7 +829,7 @@ fn uninstall_windows() -> Result<(), String> {
 pub fn match_forwarding_rule<'a>(
     domain: &str,
     rules: &'a [ForwardingRule],
-) -> Option<&'a Upstream> {
+) -> Option<&'a UpstreamPool> {
     for rule in rules {
         if domain == rule.suffix || domain.ends_with(&rule.dot_suffix) {
             return Some(&rule.upstream);

@@ -66,6 +66,13 @@ api_port = 5380
 # [[forwarding]]                                    # DoH upstream: full https:// URL
 # suffix = "example.corp"
 # upstream = "https://dns.quad9.net/dns-query"
+#
+# [[forwarding]]                                    # array of upstreams → SRTT-aware failover
+# suffix = ["google.com", "goog"]                   # fastest-healthy first, dead one skipped
+# upstream = [
+#     "tls://9.9.9.9#dns.quad9.net",
+#     "tls://149.112.112.112#dns.quad9.net",
+# ]
 
 # [blocking]
 # enabled = true               # set to false to disable ad blocking

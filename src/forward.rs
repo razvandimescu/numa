@@ -118,7 +118,7 @@ fn build_dot_connector() -> Result<tokio_rustls::TlsConnector> {
     )))
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct UpstreamPool {
     primary: Vec<Upstream>,
     fallback: Vec<Upstream>,
