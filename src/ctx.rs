@@ -16,9 +16,9 @@ use crate::blocklist::BlocklistStore;
 use crate::buffer::BytePacketBuffer;
 use crate::cache::{DnsCache, DnssecStatus};
 use crate::config::{UpstreamMode, ZoneMap};
-use crate::forward::{forward_with_failover_raw, UpstreamPool};
 #[cfg(test)]
 use crate::forward::Upstream;
+use crate::forward::{forward_with_failover_raw, UpstreamPool};
 use crate::header::ResultCode;
 use crate::health::HealthMeta;
 use crate::lan::PeerStore;
@@ -1280,10 +1280,7 @@ mod tests {
         let mut ctx = crate::testutil::test_ctx().await;
         ctx.forwarding_rules = vec![ForwardingRule::new(
             "corp".to_string(),
-            UpstreamPool::new(
-                vec![Upstream::Udp(dead), Upstream::Udp(live)],
-                vec![],
-            ),
+            UpstreamPool::new(vec![Upstream::Udp(dead), Upstream::Udp(live)], vec![]),
         )];
         let ctx = Arc::new(ctx);
 

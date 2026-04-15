@@ -2,7 +2,9 @@ use std::net::SocketAddr;
 
 use log::info;
 
-use crate::forward::{Upstream, UpstreamPool};
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use crate::forward::Upstream;
+use crate::forward::UpstreamPool;
 
 fn print_recursive_hint() {
     let is_recursive = crate::config::load_config("numa.toml")
