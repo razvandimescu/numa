@@ -217,6 +217,7 @@ body {
   min-width: 2px;
 }
 .path-bar-fill.forward { background: var(--amber); }
+.path-bar-fill.upstream { background: var(--amber-dim); }
 .path-bar-fill.recursive { background: var(--cyan); }
 .path-bar-fill.cached { background: var(--teal); }
 .path-bar-fill.local { background: var(--violet); }
@@ -285,6 +286,7 @@ body {
   font-weight: 500;
 }
 .path-tag.FORWARD { background: rgba(192, 98, 58, 0.12); color: var(--amber-dim); }
+.path-tag.UPSTREAM { background: rgba(160, 120, 72, 0.12); color: var(--amber-dim); }
 .path-tag.RECURSIVE { background: rgba(74, 124, 138, 0.12); color: var(--cyan); }
 .path-tag.CACHED { background: rgba(107, 124, 78, 0.12); color: var(--teal-dim); }
 .path-tag.LOCAL { background: rgba(100, 116, 139, 0.12); color: var(--violet-dim); }
@@ -655,6 +657,7 @@ body {
             <option value="RECURSIVE">recursive</option>
             <option value="COALESCED">coalesced</option>
             <option value="FORWARD">forward</option>
+            <option value="UPSTREAM">upstream</option>
             <option value="CACHED">cached</option>
             <option value="BLOCKED">blocked</option>
             <option value="OVERRIDE">override</option>
@@ -936,10 +939,12 @@ function renderMemory(mem, stats) {
 
 function renderBarChart(containerId, defs, data, total) {
   total = total || 1;
-  document.getElementById(containerId).innerHTML = defs.map(d => {
-    const count = data[d.key] || 0;
-    const pct = ((count / total) * 100).toFixed(1);
-    return `
+  document.getElementById(containerId).innerHTML = defs
+    .filter(d => (data[d.key] || 0) > 0)
+    .map(d => {
+      const count = data[d.key] || 0;
+      const pct = ((count / total) * 100).toFixed(1);
+      return `
       <div class="path-bar-row">
         <span class="path-label">${d.label}</span>
         <div class="path-bar-track">
@@ -947,7 +952,7 @@ function renderBarChart(containerId, defs, data, total) {
         </div>
         <span class="path-pct">${pct}%</span>
       </div>`;
-  }).join('');
+    }).join('');
 }
 
 function encryptionPct(transport) {
@@ -957,6 +962,7 @@ function encryptionPct(transport) {
 
 const PATH_DEFS = [
   { key: 'forwarded', label: 'Forward', cls: 'forward' },
+  { key: 'upstream',  label: 'Upstream', cls: 'upstream' },
   { key: 'recursive', label: 'Recursive', cls: 'recursive' },
   { key: 'cached',    label: 'Cached',  cls: 'cached' },
   { key: 'local',     label: 'Local',   cls: 'local' },
@@ -1209,7 +1215,7 @@ async function refresh() {
     prevTime = now;
 
     // Cache hit rate
-    const answered = q.cached + q.forwarded + q.recursive + q.coalesced + q.local + q.overridden;
+    const answered = q.cached + q.forwarded + q.upstream + q.recursive + q.coalesced + q.local + q.overridden;
     const hitRate = answered > 0 ? ((q.cached / answered) * 100).toFixed(1) : '0.0';
     document.getElementById('cacheRate').textContent = hitRate + '%';
 

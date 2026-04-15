@@ -201,6 +201,7 @@ struct LanStatsResponse {
 struct QueriesStats {
     total: u64,
     forwarded: u64,
+    upstream: u64,
     recursive: u64,
     coalesced: u64,
     cached: u64,
@@ -548,6 +549,7 @@ async fn stats(State(ctx): State<Arc<ServerCtx>>) -> Json<StatsResponse> {
         queries: QueriesStats {
             total: snap.total,
             forwarded: snap.forwarded,
+            upstream: snap.upstream,
             recursive: snap.recursive,
             coalesced: snap.coalesced,
             cached: snap.cached,

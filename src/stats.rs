@@ -90,6 +90,7 @@ fn linux_rss() -> usize {
 pub struct ServerStats {
     queries_total: u64,
     queries_forwarded: u64,
+    queries_upstream: u64,
     queries_recursive: u64,
     queries_coalesced: u64,
     queries_cached: u64,
@@ -127,7 +128,10 @@ impl Transport {
 pub enum QueryPath {
     Local,
     Cached,
+    /// Matched a `[[forwarding]]` suffix rule.
     Forwarded,
+    /// Resolved via the default `[upstream]` pool (no suffix match).
+    Upstream,
     Recursive,
     Coalesced,
     Blocked,
@@ -141,6 +145,7 @@ impl QueryPath {
             QueryPath::Local => "LOCAL",
             QueryPath::Cached => "CACHED",
             QueryPath::Forwarded => "FORWARD",
+            QueryPath::Upstream => "UPSTREAM",
             QueryPath::Recursive => "RECURSIVE",
             QueryPath::Coalesced => "COALESCED",
             QueryPath::Blocked => "BLOCKED",
@@ -156,6 +161,8 @@ impl QueryPath {
             Some(QueryPath::Cached)
         } else if s.eq_ignore_ascii_case("FORWARD") {
             Some(QueryPath::Forwarded)
+        } else if s.eq_ignore_ascii_case("UPSTREAM") {
+            Some(QueryPath::Upstream)
         } else if s.eq_ignore_ascii_case("RECURSIVE") {
             Some(QueryPath::Recursive)
         } else if s.eq_ignore_ascii_case("COALESCED") {
@@ -183,6 +190,7 @@ impl ServerStats {
         ServerStats {
             queries_total: 0,
             queries_forwarded: 0,
+            queries_upstream: 0,
             queries_recursive: 0,
             queries_coalesced: 0,
             queries_cached: 0,
@@ -204,6 +212,7 @@ impl ServerStats {
             QueryPath::Local => self.queries_local += 1,
             QueryPath::Cached => self.queries_cached += 1,
             QueryPath::Forwarded => self.queries_forwarded += 1,
+            QueryPath::Upstream => self.queries_upstream += 1,
             QueryPath::Recursive => self.queries_recursive += 1,
             QueryPath::Coalesced => self.queries_coalesced += 1,
             QueryPath::Blocked => self.queries_blocked += 1,
@@ -232,6 +241,7 @@ impl ServerStats {
             uptime_secs: self.uptime_secs(),
             total: self.queries_total,
             forwarded: self.queries_forwarded,
+            upstream: self.queries_upstream,
             recursive: self.queries_recursive,
             coalesced: self.queries_coalesced,
             cached: self.queries_cached,
@@ -253,10 +263,11 @@ impl ServerStats {
         let secs = uptime.as_secs() % 60;
 
         log::info!(
-            "STATS | uptime {}h{}m{}s | total {} | fwd {} | recursive {} | coalesced {} | cached {} | local {} | override {} | blocked {} | errors {}",
+            "STATS | uptime {}h{}m{}s | total {} | fwd {} | upstream {} | recursive {} | coalesced {} | cached {} | local {} | override {} | blocked {} | errors {}",
             hours, mins, secs,
             self.queries_total,
             self.queries_forwarded,
+            self.queries_upstream,
             self.queries_recursive,
             self.queries_coalesced,
             self.queries_cached,
@@ -272,6 +283,7 @@ pub struct StatsSnapshot {
     pub uptime_secs: u64,
     pub total: u64,
     pub forwarded: u64,
+    pub upstream: u64,
     pub recursive: u64,
     pub coalesced: u64,
     pub cached: u64,
