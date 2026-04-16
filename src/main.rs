@@ -72,7 +72,7 @@ async fn main() -> numa::Result<()> {
             };
         }
         "version" | "--version" | "-V" => {
-            eprintln!("numa {}", env!("CARGO_PKG_VERSION"));
+            eprintln!("numa {}", numa::version());
             return Ok(());
         }
         "help" | "--help" | "-h" => {
@@ -383,12 +383,10 @@ async fn main() -> numa::Result<()> {
     };
 
     // Title row: center within the box
-    let title = format!(
-        "{b}NUMA{r}  {it}DNS that governs itself{r}  {d}v{}{r}",
-        env!("CARGO_PKG_VERSION")
-    );
+    let ver = numa::version();
+    let title = format!("{b}NUMA{r}  {it}DNS that governs itself{r}  {d}v{ver}{r}",);
     // The title contains ANSI codes; visible length is ~38 chars. Pad to fill the box.
-    let title_visible_len = 4 + 2 + 24 + 2 + 1 + env!("CARGO_PKG_VERSION").len() + 1;
+    let title_visible_len = 4 + 2 + 24 + 2 + 1 + ver.len() + 1;
     let title_pad = w.saturating_sub(title_visible_len);
     eprintln!("\n{o}  ╔{bar_top}╗{r}");
     eprint!("{o}  ║{r} {title}");

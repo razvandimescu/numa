@@ -540,7 +540,7 @@ async fn stats(State(ctx): State<Arc<ServerCtx>>) -> Json<StatsResponse> {
     };
 
     Json(StatsResponse {
-        version: env!("CARGO_PKG_VERSION"),
+        version: crate::version(),
         uptime_secs: snap.uptime_secs,
         upstream,
         mode: ctx.upstream_mode.as_str(),
