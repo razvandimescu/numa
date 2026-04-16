@@ -43,7 +43,7 @@ impl HealthMeta {
     #[cfg(test)]
     pub fn test_fixture() -> Self {
         HealthMeta {
-            version: env!("CARGO_PKG_VERSION"),
+            version: crate::version(),
             hostname: "test-host".to_string(),
             sni: "numa.numa".to_string(),
             dot_enabled: false,
@@ -99,7 +99,7 @@ impl HealthMeta {
         }
 
         HealthMeta {
-            version: env!("CARGO_PKG_VERSION"),
+            version: crate::version(),
             hostname: crate::hostname(),
             sni: "numa.numa".to_string(),
             dot_enabled,

@@ -38,6 +38,14 @@ pub(crate) mod testutil;
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Build version string. On tagged releases: `0.13.1`. On commits ahead
+/// of a tag: `0.13.1+a87f907`. With uncommitted changes: `0.13.1+a87f907-dirty`.
+/// Falls back to `CARGO_PKG_VERSION` when built outside a git repo (e.g.
+/// from a source tarball).
+pub fn version() -> &'static str {
+    option_env!("NUMA_BUILD_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+}
+
 /// Detect the machine hostname via the `hostname` command. Returns the
 /// full hostname (e.g., `macbook-pro.local`), or `"numa"` if the command
 /// fails. Call sites that need the short form (e.g., mDNS instance

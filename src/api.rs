@@ -160,6 +160,7 @@ struct QueryLogResponse {
 
 #[derive(Serialize)]
 struct StatsResponse {
+    version: &'static str,
     uptime_secs: u64,
     upstream: String,
     mode: &'static str, // "recursive" or "forward" — never "auto" at runtime
@@ -539,6 +540,7 @@ async fn stats(State(ctx): State<Arc<ServerCtx>>) -> Json<StatsResponse> {
     };
 
     Json(StatsResponse {
+        version: crate::version(),
         uptime_secs: snap.uptime_secs,
         upstream,
         mode: ctx.upstream_mode.as_str(),
