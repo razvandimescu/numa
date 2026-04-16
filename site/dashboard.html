@@ -552,7 +552,11 @@ body {
 @media (max-width: 700px) {
   .stats-row { grid-template-columns: repeat(2, 1fr); }
   .dashboard { padding: 1rem; }
-  .header { padding: 1rem; }
+  .header { padding: 0.8rem 1rem; }
+  .logo { font-size: 1.4rem; }
+  .tagline { display: none; }
+  #headerVersion { display: none; }
+  #phoneSetup { display: none; }
 }
 </style>
 </head>
@@ -561,6 +565,7 @@ body {
 <div class="header">
   <div class="header-left">
     <div class="logo">Numa</div>
+    <span id="headerVersion" style="font-family:var(--font-mono);font-size:0.68rem;color:var(--text-dim);"></span>
     <div class="tagline">DNS that governs itself</div>
   </div>
   <div style="display:flex;align-items:center;gap:1.2rem;">
@@ -1136,16 +1141,20 @@ async function refresh() {
     document.getElementById('totalQueries').textContent = formatNumber(q.total);
     document.getElementById('uptime').textContent = formatUptime(stats.uptime_secs);
     document.getElementById('uptimeSub').textContent = formatUptimeSub(stats.uptime_secs);
+    document.getElementById('headerVersion').textContent = stats.version ? 'v' + stats.version : '';
     document.getElementById('footerUpstream').textContent = stats.upstream || '';
     document.getElementById('footerConfig').textContent = stats.config_path || '';
     document.getElementById('footerData').textContent = stats.data_dir || '';
-    const modeEl = document.getElementById('footerMode');
-    modeEl.textContent = stats.mode || '—';
-    modeEl.style.color = stats.mode === 'recursive' ? 'var(--emerald)' : 'var(--amber)';
     document.getElementById('footerDnssec').textContent = stats.dnssec ? 'on' : 'off';
     document.getElementById('footerDnssec').style.color = stats.dnssec ? 'var(--emerald)' : 'var(--text-dim)';
     document.getElementById('footerSrtt').textContent = stats.srtt ? 'on' : 'off';
     document.getElementById('footerSrtt').style.color = stats.srtt ? 'var(--emerald)' : 'var(--text-dim)';
+    if (!document.getElementById('footerLogs').textContent) {
+      const isMac = stats.data_dir && stats.data_dir.includes('/usr/local/');
+      document.getElementById('footerLogs').textContent = isMac
+        ? '/usr/local/var/log/numa.log'
+        : 'journalctl -u numa -f';
+    }
 
     // LAN status indicator
     const lanEl = document.getElementById('lanToggle');
@@ -1504,14 +1513,14 @@ refresh();
 setInterval(refresh, 2000);
 </script>
 
-<div style="text-align:center;padding:0.8rem;font-family:var(--font-mono);font-size:0.68rem;color:var(--text-dim);">
+<div style="text-align:center;padding:0.8rem 0.8rem 0.4rem;font-family:var(--font-mono);font-size:0.68rem;color:var(--text-dim);line-height:1.8;">
   Config: <span id="footerConfig" style="user-select:all;color:var(--emerald);"></span>
   · Data: <span id="footerData" style="user-select:all;color:var(--emerald);"></span>
-  · Upstream: <span id="footerUpstream" style="user-select:all;color:var(--emerald);"></span>
-  · Mode: <span id="footerMode" style="color:var(--text-dim);">—</span>
+  · Logs: <span id="footerLogs" style="user-select:all;color:var(--emerald);"></span>
+  <br>
+  Upstream: <span id="footerUpstream" style="user-select:all;color:var(--emerald);"></span>
   · DNSSEC: <span id="footerDnssec" style="color:var(--text-dim);">—</span>
   · SRTT: <span id="footerSrtt" style="color:var(--text-dim);">—</span>
-  · Logs: <span style="user-select:all;color:var(--emerald);">macOS: /usr/local/var/log/numa.log · Linux: journalctl -u numa -f</span>
   · <a href="https://github.com/razvandimescu/numa" target="_blank" rel="noopener" style="color:var(--amber);text-decoration:none;">GitHub</a>
 </div>
 
