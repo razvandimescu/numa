@@ -83,6 +83,23 @@ fn run_service() -> windows_service::Result<()> {
         let _ = server_done_tx.send(());
     });
 
+    // Wait for the API to be ready, then ensure DNS points at localhost.
+    // On first boot after install (Dnscache was disabled, reboot freed
+    // port 53), the installer deferred the DNS redirect — do it now.
+    let api_up = (0..20).any(|i| {
+        if i > 0 {
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        std::net::TcpStream::connect(("127.0.0.1", crate::config::DEFAULT_API_PORT)).is_ok()
+    });
+    if api_up {
+        if let Err(e) = crate::system_dns::redirect_dns_to_localhost() {
+            log::warn!("could not redirect DNS to localhost: {}", e);
+        }
+    } else {
+        log::error!("numa API did not start within 10s — DNS not redirected");
+    }
+
     // Wait for either SCM stop or server termination.
     loop {
         if shutdown_rx.recv_timeout(Duration::from_millis(500)).is_ok() {

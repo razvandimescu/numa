@@ -572,7 +572,7 @@ fn windows_backup_path() -> std::path::PathBuf {
 
 #[cfg(windows)]
 fn disable_dnscache() -> Result<bool, String> {
-    // Check if Dnscache is running (it holds port 53 at kernel level)
+    // Check if Dnscache is running (it can hold port 53)
     let output = std::process::Command::new("sc")
         .args(["query", "Dnscache"])
         .output()
@@ -603,8 +603,16 @@ fn disable_dnscache() -> Result<bool, String> {
         return Err("failed to disable Dnscache via registry (run as Administrator?)".into());
     }
 
-    eprintln!("  Dnscache disabled. A reboot is required to free port 53.");
-    Ok(true)
+    // Dnscache is disabled for next boot. Check whether port 53 is
+    // actually blocked right now — on many Windows configurations
+    // Dnscache doesn't bind port 53 even while running.
+    let port_blocked = std::net::UdpSocket::bind("127.0.0.1:53").is_err();
+    if port_blocked {
+        eprintln!("  Dnscache disabled. A reboot is required to free port 53.");
+    } else {
+        eprintln!("  Dnscache disabled. Port 53 is free.");
+    }
+    Ok(port_blocked)
 }
 
 #[cfg(windows)]
@@ -671,31 +679,6 @@ fn install_windows() -> Result<(), String> {
         std::fs::write(&path, json).map_err(|e| format!("failed to write backup: {}", e))?;
     }
 
-    for name in interfaces.keys() {
-        let status = std::process::Command::new("netsh")
-            .args([
-                "interface",
-                "ipv4",
-                "set",
-                "dnsservers",
-                name,
-                "static",
-                "127.0.0.1",
-                "primary",
-            ])
-            .status()
-            .map_err(|e| format!("failed to set DNS for {}: {}", name, e))?;
-
-        if status.success() {
-            eprintln!("  set DNS for \"{}\" -> 127.0.0.1", name);
-        } else {
-            eprintln!(
-                "  warning: failed to set DNS for \"{}\" (run as Administrator?)",
-                name
-            );
-        }
-    }
-
     let needs_reboot = disable_dnscache()?;
 
     // On re-install, stop the running service first so the binary can be
@@ -710,9 +693,14 @@ fn install_windows() -> Result<(), String> {
     let service_exe = install_service_binary()?;
     register_service_scm(&service_exe)?;
 
-    // If no reboot is pending (Dnscache wasn't running, port 53 free),
-    // start the service immediately. Otherwise it'll launch on next boot.
-    if !needs_reboot {
+    if needs_reboot {
+        // Dnscache still holds port 53 until reboot. Do NOT redirect DNS
+        // yet — nothing is listening on 127.0.0.1:53, so redirecting now
+        // would kill DNS. The service will call redirect_dns_to_localhost()
+        // on its first startup after reboot.
+    } else {
+        redirect_dns_with_interfaces(&interfaces)?;
+
         match start_service_scm() {
             Ok(_) => eprintln!("  Service started."),
             Err(e) => eprintln!(
@@ -754,6 +742,45 @@ fn run_sc(args: &[&str]) -> Result<std::process::Output, String> {
         .output()
         .map_err(|e| format!("failed to run sc {}: {}", args.first().unwrap_or(&""), e))?;
     Ok(out)
+}
+
+/// Point all active network interfaces at 127.0.0.1 so Numa handles DNS.
+/// Called from the service on first boot after a reboot that freed Dnscache.
+#[cfg(windows)]
+pub fn redirect_dns_to_localhost() -> Result<(), String> {
+    let interfaces = get_windows_interfaces()?;
+    redirect_dns_with_interfaces(&interfaces)
+}
+
+#[cfg(windows)]
+fn redirect_dns_with_interfaces(
+    interfaces: &std::collections::HashMap<String, WindowsInterfaceDns>,
+) -> Result<(), String> {
+    for name in interfaces.keys() {
+        let status = std::process::Command::new("netsh")
+            .args([
+                "interface",
+                "ipv4",
+                "set",
+                "dnsservers",
+                name,
+                "static",
+                "127.0.0.1",
+                "primary",
+            ])
+            .status()
+            .map_err(|e| format!("failed to set DNS for {}: {}", name, e))?;
+
+        if status.success() {
+            eprintln!("  set DNS for \"{}\" -> 127.0.0.1", name);
+        } else {
+            eprintln!(
+                "  warning: failed to set DNS for \"{}\" (run as Administrator?)",
+                name
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Copy the currently-running binary to the service install location. SCM
