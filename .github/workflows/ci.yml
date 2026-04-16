@@ -97,12 +97,14 @@ jobs:
         if: always()
         run: |
           sudo ./target/release/numa uninstall 2>/dev/null || true
-          # Wait for systemd-resolved to fully restore DNS so post-job
-          # steps (rust-cache upload, log shipping) can reach GitHub.
-          for i in $(seq 1 30); do
-            if getent hosts github.com >/dev/null 2>&1; then break; fi
-            sleep 1
-          done
+          # systemd-resolved has a ~40s DNS reconfiguration stall after
+          # restart (systemd issue #22521) that breaks the runner agent's
+          # connection to GitHub. Bridge it by replacing the stub-resolv
+          # symlink with a direct upstream — DNS works instantly and the
+          # runner can phone home for post-job steps.
+          sudo rm -f /etc/resolv.conf
+          echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf > /dev/null
+          getent hosts github.com >/dev/null
 
   integration-macos:
     needs: [check-macos]
