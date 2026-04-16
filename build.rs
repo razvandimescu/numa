@@ -1,47 +1,48 @@
 fn main() {
+    // --long forces "TAG-N-gSHA[-dirty]" format even on exact tag matches,
+    // making parsing unambiguous for pre-release tags like v0.14.0-rc1.
     let git_version = std::process::Command::new("git")
-        .args(["describe", "--tags", "--always", "--dirty"])
+        .args(["describe", "--tags", "--always", "--dirty", "--long"])
         .output()
         .ok()
         .filter(|o| o.status.success())
         .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| {
-            let s = s.trim();
-            let s = s.strip_prefix('v').unwrap_or(s);
-            // "0.13.1"                     → clean tag  → "0.13.1"
-            // "0.13.1-9-ga87f907"          → ahead      → "0.13.1+a87f907"
-            // "0.13.1-9-ga87f907-dirty"    → dirty       → "0.13.1+a87f907-dirty"
-            // "a87f907"                    → no tags     → "0.0.0+a87f907"
-            // "a87f907-dirty"             → no tags     → "0.0.0+a87f907-dirty"
-            if let Some((base, rest)) = s.split_once("-") {
-                // Could be "0.13.1-9-ga87f907[-dirty]" or "a87f907-dirty"
-                if base.contains('.') {
-                    // Tagged: extract sha from "-N-gSHA[-dirty]"
-                    let parts: Vec<&str> = rest.splitn(3, '-').collect();
-                    match parts.as_slice() {
-                        [_n, sha] => format!("{}+{}", base, sha.strip_prefix('g').unwrap_or(sha)),
-                        [_n, sha, "dirty"] => {
-                            format!("{}+{}-dirty", base, sha.strip_prefix('g').unwrap_or(sha))
-                        }
-                        _ => s.to_string(),
-                    }
-                } else {
-                    // Untagged: "sha-dirty"
-                    format!("0.0.0+{}", s)
-                }
-            } else if s.contains('.') {
-                // Exact tag match: "0.13.1"
-                s.to_string()
-            } else {
-                // Bare sha, no tags at all
-                format!("0.0.0+{}", s)
-            }
-        });
+        .and_then(|raw| parse_git_describe(raw.trim()));
 
     if let Some(v) = git_version {
         println!("cargo:rustc-env=NUMA_BUILD_VERSION={}", v);
     }
 
     println!("cargo:rerun-if-changed=.git/HEAD");
-    println!("cargo:rerun-if-changed=.git/refs/tags/");
+}
+
+/// Parse `git describe --long` output into a SemVer-compatible string.
+///   "v0.13.1-0-ga87f907"          → "0.13.1"
+///   "v0.13.1-9-ga87f907"          → "0.13.1+a87f907"
+///   "v0.14.0-rc1-0-ga87f907"      → "0.14.0-rc1"
+///   "v0.14.0-rc1-3-ga87f907-dirty" → "0.14.0-rc1+a87f907-dirty"
+///   "a87f907"                      → "0.0.0+a87f907"
+fn parse_git_describe(s: &str) -> Option<String> {
+    let s = s.strip_prefix('v').unwrap_or(s);
+    let dirty = s.ends_with("-dirty");
+    let s = s.strip_suffix("-dirty").unwrap_or(s);
+
+    // --long format: TAG-N-gSHA. Split from the right so tags with hyphens work.
+    let gpos = s.rfind("-g")?;
+    let sha = &s[gpos + 2..];
+    let rest = &s[..gpos];
+    let npos = rest.rfind('-')?;
+    let n: u32 = rest[npos + 1..].parse().ok()?;
+    let tag = &rest[..npos];
+
+    if tag.is_empty() {
+        return Some(format!("0.0.0+{}", sha));
+    }
+
+    Some(match (n, dirty) {
+        (0, false) => tag.to_string(),
+        (0, true) => format!("{}+{}-dirty", tag, sha),
+        (_, false) => format!("{}+{}", tag, sha),
+        (_, true) => format!("{}+{}-dirty", tag, sha),
+    })
 }
