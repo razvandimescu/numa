@@ -6,3 +6,4 @@ site/blog/posts/
 ios/
 drafts/
 site/blog/index.html
+.DS_Store

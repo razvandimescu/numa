@@ -89,7 +89,7 @@ pub fn try_port53_advisory(bind_addr: &str, err: &std::io::Error) -> Option<Stri
         ),
         _ => return None,
     };
-    let o = "\x1b[1;38;2;192;98;58m"; // bold orange
+    let o = "\x1b[1;38;5;166m"; // bold orange
     let r = "\x1b[0m";
     Some(format!(
         "
