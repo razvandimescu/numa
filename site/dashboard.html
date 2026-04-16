@@ -1354,6 +1354,7 @@ function renderBlockingInfo(info) {
 }
 
 function renderAllowlist(entries) {
+  if (document.activeElement && document.activeElement.id === 'allowDomainInput') return;
   const el = document.getElementById('blockingAllowlist');
   const count = entries.length;
   el.innerHTML = `
