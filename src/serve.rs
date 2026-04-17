@@ -123,7 +123,11 @@ pub async fn run(config_path: String) -> crate::Result<()> {
 
     for fwd in &config.forwarding {
         for suffix in &fwd.suffix {
-            info!("forwarding .{} to {} (config rule)", suffix, fwd.upstream);
+            info!(
+                "forwarding .{} to {} (config rule)",
+                suffix,
+                fwd.upstream.join(", ")
+            );
         }
     }
     let forwarding_rules =

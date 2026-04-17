@@ -16,7 +16,9 @@ use crate::blocklist::BlocklistStore;
 use crate::buffer::BytePacketBuffer;
 use crate::cache::{DnsCache, DnssecStatus};
 use crate::config::{UpstreamMode, ZoneMap};
-use crate::forward::{forward_query_raw, forward_with_failover_raw, Upstream, UpstreamPool};
+#[cfg(test)]
+use crate::forward::Upstream;
+use crate::forward::{forward_with_failover_raw, UpstreamPool};
 use crate::header::ResultCode;
 use crate::health::HealthMeta;
 use crate::lan::PeerStore;
@@ -190,13 +192,31 @@ pub async fn resolve_query(
                     resp.header.authed_data = true;
                 }
                 (resp, QueryPath::Cached, cached_dnssec)
-            } else if let Some(upstream) =
+            } else if let Some(pool) =
                 crate::system_dns::match_forwarding_rule(&qname, &ctx.forwarding_rules)
             {
                 // Conditional forwarding takes priority over recursive mode
                 // (e.g. Tailscale .ts.net, VPC private zones)
-                match forward_and_cache(raw_wire, upstream, ctx, &qname, qtype).await {
-                    Ok(resp) => (resp, QueryPath::Forwarded, DnssecStatus::Indeterminate),
+                match forward_with_failover_raw(
+                    raw_wire,
+                    pool,
+                    &ctx.srtt,
+                    ctx.timeout,
+                    ctx.hedge_delay,
+                )
+                .await
+                {
+                    Ok(resp_wire) => match cache_and_parse(ctx, &qname, qtype, &resp_wire) {
+                        Ok(resp) => (resp, QueryPath::Forwarded, DnssecStatus::Indeterminate),
+                        Err(e) => {
+                            error!("{} | {:?} {} | PARSE ERROR | {}", src_addr, qtype, qname, e);
+                            (
+                                DnsPacket::response_from(&query, ResultCode::SERVFAIL),
+                                QueryPath::UpstreamError,
+                                DnssecStatus::Indeterminate,
+                            )
+                        }
+                    },
                     Err(e) => {
                         error!(
                             "{} | {:?} {} | FORWARD ERROR | {}",
@@ -431,17 +451,6 @@ pub async fn refresh_entry(ctx: &ServerCtx, qname: &str, qtype: QueryType) {
             }
         }
     }
-}
-
-async fn forward_and_cache(
-    wire: &[u8],
-    upstream: &Upstream,
-    ctx: &ServerCtx,
-    qname: &str,
-    qtype: QueryType,
-) -> crate::Result<DnsPacket> {
-    let resp_wire = forward_query_raw(wire, upstream, ctx.timeout).await?;
-    cache_and_parse(ctx, qname, qtype, &resp_wire)
 }
 
 pub async fn handle_query(
@@ -1082,7 +1091,7 @@ mod tests {
         let mut ctx = crate::testutil::test_ctx().await;
         ctx.forwarding_rules = vec![ForwardingRule::new(
             "168.192.in-addr.arpa".to_string(),
-            Upstream::Udp(upstream_addr),
+            UpstreamPool::new(vec![Upstream::Udp(upstream_addr)], vec![]),
         )];
         let ctx = Arc::new(ctx);
 
@@ -1237,7 +1246,7 @@ mod tests {
         let mut ctx = crate::testutil::test_ctx().await;
         ctx.forwarding_rules = vec![ForwardingRule::new(
             "corp".to_string(),
-            Upstream::Udp(upstream_addr),
+            UpstreamPool::new(vec![Upstream::Udp(upstream_addr)], vec![]),
         )];
         let ctx = Arc::new(ctx);
 
@@ -1250,6 +1259,37 @@ mod tests {
                 assert_eq!(domain, "internal.corp");
                 assert_eq!(*addr, Ipv4Addr::new(10, 1, 2, 3));
             }
+            other => panic!("expected A record, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn pipeline_forwarding_fails_over_to_second_upstream() {
+        let dead = crate::testutil::blackhole_upstream();
+
+        let mut live_resp = DnsPacket::new();
+        live_resp.header.response = true;
+        live_resp.header.rescode = ResultCode::NOERROR;
+        live_resp.answers.push(DnsRecord::A {
+            domain: "internal.corp".to_string(),
+            addr: Ipv4Addr::new(10, 9, 9, 9),
+            ttl: 600,
+        });
+        let live = crate::testutil::mock_upstream(live_resp).await;
+
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.forwarding_rules = vec![ForwardingRule::new(
+            "corp".to_string(),
+            UpstreamPool::new(vec![Upstream::Udp(dead), Upstream::Udp(live)], vec![]),
+        )];
+        let ctx = Arc::new(ctx);
+
+        let (resp, path) = resolve_in_test(&ctx, "internal.corp", QueryType::A).await;
+        assert_eq!(path, QueryPath::Forwarded);
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+        assert_eq!(resp.answers.len(), 1);
+        match &resp.answers[0] {
+            DnsRecord::A { addr, .. } => assert_eq!(*addr, Ipv4Addr::new(10, 9, 9, 9)),
             other => panic!("expected A record, got {:?}", other),
         }
     }
