@@ -22,7 +22,7 @@ fn is_loopback_or_stub(addr: &str) -> bool {
 }
 
 /// A conditional forwarding rule: domains matching `suffix` are forwarded to `upstream`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ForwardingRule {
     pub suffix: String,
     dot_suffix: String, // pre-computed ".suffix" for zero-alloc matching
