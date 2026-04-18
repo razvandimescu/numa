@@ -9,14 +9,14 @@ ExecStart={{exe_path}}
 Restart=always
 RestartSec=2
 
-User=numa
-Group=numa
+# Transient system user per start; no PKGBUILD/sysusers setup required.
+# systemd remaps the StateDirectory ownership to the dynamic UID on each
+# launch, including legacy root-owned trees from pre-drop installs.
+DynamicUser=yes
 
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 
-# StateDirectory maps to crate::data_dir() default on Linux (/var/lib/numa).
-# systemd auto-creates + chowns on every start, fixing legacy root-owned trees.
 StateDirectory=numa
 StateDirectoryMode=0750
 ConfigurationDirectory=numa

@@ -1665,67 +1665,7 @@ fn uninstall_linux() -> Result<(), String> {
 }
 
 #[cfg(target_os = "linux")]
-const NUMA_USER: &str = "numa";
-
-#[cfg(target_os = "linux")]
-fn ensure_numa_user_linux() -> Result<(), String> {
-    let _ = std::process::Command::new("groupadd")
-        .args(["-f", "-r", NUMA_USER])
-        .status();
-
-    let data_dir = crate::data_dir();
-    let status = std::process::Command::new("useradd")
-        .args([
-            "-r",
-            "-g",
-            NUMA_USER,
-            "-d",
-            &data_dir.to_string_lossy(),
-            "-s",
-            "/usr/sbin/nologin",
-            "-c",
-            "Numa DNS service",
-            NUMA_USER,
-        ])
-        .status()
-        .map_err(|e| format!("failed to run useradd: {}", e))?;
-
-    // useradd exit 9 = "username already in use"; idempotent reinstall.
-    match status.code() {
-        Some(0) | Some(9) => Ok(()),
-        Some(code) => Err(format!("useradd {} failed (exit {})", NUMA_USER, code)),
-        None => Err(format!("useradd {} killed by signal", NUMA_USER)),
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn chown_data_dir_to_numa_linux() -> Result<(), String> {
-    let dir = crate::data_dir();
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("failed to create {}: {}", dir.display(), e))?;
-    let owner = format!("{0}:{0}", NUMA_USER);
-    let status = std::process::Command::new("chown")
-        .args(["-R", &owner, &dir.to_string_lossy()])
-        .status()
-        .map_err(|e| format!("failed to run chown: {}", e))?;
-    if !status.success() {
-        return Err(format!(
-            "chown {} failed (exit {})",
-            dir.display(),
-            status.code().unwrap_or(-1)
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
 fn install_service_linux() -> Result<(), String> {
-    // Create the numa account and hand it ownership of data_dir before the
-    // first start — TLS-cert generation and state writes happen on the
-    // unit's first launch and need to land on a numa-owned tree.
-    ensure_numa_user_linux()?;
-    chown_data_dir_to_numa_linux()?;
-
     let unit = include_str!("../numa.service");
     let unit = replace_exe_path(unit)?;
     std::fs::write(SYSTEMD_UNIT, unit)
