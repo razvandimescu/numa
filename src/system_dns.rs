@@ -1416,7 +1416,7 @@ pub fn service_status() -> Result<(), String> {
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(target_os = "macos")]
 fn replace_exe_path(service: &str) -> Result<String, String> {
     let exe_path =
         std::env::current_exe().map_err(|e| format!("failed to get current exe: {}", e))?;
@@ -1664,10 +1664,78 @@ fn uninstall_linux() -> Result<(), String> {
     Ok(())
 }
 
+/// Fallback install location when current_exe() sits on a path the
+/// dynamic user cannot traverse (e.g. `/home/<user>/` mode 0700).
+#[cfg(target_os = "linux")]
+fn linux_service_exe_path() -> std::path::PathBuf {
+    std::path::PathBuf::from("/usr/local/bin/numa")
+}
+
+/// True iff every ancestor of `p` (excluding `/`) grants world-execute —
+/// i.e. the `DynamicUser=yes` service account can traverse the path and
+/// exec the binary without being in any group. Linuxbrew's
+/// `/home/linuxbrew` is 0755 (traversable, keep brew's path, upgrades
+/// via `brew` propagate). A build tree under `/home/<user>/` (0700) or
+/// `~/.cargo/bin/` is not (copy to /usr/local/bin so systemd can reach it).
+#[cfg(target_os = "linux")]
+fn path_world_traversable_linux(p: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let mut current = p;
+    while let Some(parent) = current.parent() {
+        if parent.as_os_str().is_empty() || parent == std::path::Path::new("/") {
+            break;
+        }
+        match std::fs::metadata(parent) {
+            Ok(m) if m.permissions().mode() & 0o001 != 0 => {}
+            _ => return false,
+        }
+        current = parent;
+    }
+    true
+}
+
+#[cfg(target_os = "linux")]
+fn install_service_binary_linux() -> Result<std::path::PathBuf, String> {
+    let src = std::env::current_exe().map_err(|e| format!("current_exe(): {}", e))?;
+    if path_world_traversable_linux(&src) {
+        return Ok(src);
+    }
+    let dst = linux_service_exe_path();
+    if src == dst {
+        return Ok(dst);
+    }
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create {}: {}", parent.display(), e))?;
+    }
+    // Atomic replace via temp + rename. Plain copy fails with ETXTBSY when
+    // re-installing while the service is running the previous binary —
+    // rename swaps the path while the running process keeps the old inode.
+    let tmp = dst.with_extension("new");
+    std::fs::copy(&src, &tmp).map_err(|e| {
+        format!(
+            "failed to copy {} -> {}: {}",
+            src.display(),
+            tmp.display(),
+            e
+        )
+    })?;
+    std::fs::rename(&tmp, &dst).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!(
+            "failed to rename {} -> {}: {}",
+            tmp.display(),
+            dst.display(),
+            e
+        )
+    })?;
+    Ok(dst)
+}
+
 #[cfg(target_os = "linux")]
 fn install_service_linux() -> Result<(), String> {
-    let unit = include_str!("../numa.service");
-    let unit = replace_exe_path(unit)?;
+    let exe = install_service_binary_linux()?;
+    let unit = include_str!("../numa.service").replace("{{exe_path}}", &exe.to_string_lossy());
     std::fs::write(SYSTEMD_UNIT, unit)
         .map_err(|e| format!("failed to write {}: {}", SYSTEMD_UNIT, e))?;
 
@@ -1679,7 +1747,9 @@ fn install_service_linux() -> Result<(), String> {
         eprintln!("  warning: failed to configure system DNS: {}", e);
     }
 
-    run_systemctl(&["start", "numa"])?;
+    // restart, not start: on re-install the service is already running
+    // the previous binary; restart picks up the new one.
+    run_systemctl(&["restart", "numa"])?;
 
     eprintln!("  Service installed and started.");
     eprintln!("  Numa will auto-start on boot and restart if killed.");
@@ -1995,21 +2065,24 @@ Wireless LAN adapter Wi-Fi:
     }
 
     #[test]
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    fn replace_exe_path_substitutes_template() {
+    fn install_templates_contain_exe_path_placeholder() {
+        // Both files are substituted at install time — plist via
+        // replace_exe_path on macOS, numa.service via inline .replace
+        // in install_service_linux. Catch placeholder removal early.
         let plist = include_str!("../com.numa.dns.plist");
         let unit = include_str!("../numa.service");
-
         assert!(plist.contains("{{exe_path}}"), "plist missing placeholder");
         assert!(
             unit.contains("{{exe_path}}"),
             "unit file missing placeholder"
         );
+    }
 
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn replace_exe_path_substitutes_template() {
+        let plist = include_str!("../com.numa.dns.plist");
         let result = replace_exe_path(plist).expect("replace_exe_path failed for plist");
-        assert!(!result.contains("{{exe_path}}"));
-
-        let result = replace_exe_path(unit).expect("replace_exe_path failed for unit");
         assert!(!result.contains("{{exe_path}}"));
     }
 

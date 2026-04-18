@@ -87,12 +87,26 @@ jobs:
           sleep 2
           curl -sf http://127.0.0.1:5380/health
           dig @127.0.0.1 example.com +short +timeout=5 | grep -q '.'
+          user=$(ps -o user= -p "$(systemctl show -p MainPID --value numa)" | tr -d ' ')
+          echo "numa running as: $user"
+          test "$user" != "root"
           sudo ./target/release/numa install
           sleep 2
           curl -sf http://127.0.0.1:5380/health
           sudo ./target/release/numa uninstall
           sleep 1
           ! curl -sf http://127.0.0.1:5380/health 2>/dev/null
+      - name: diagnostics on failure
+        if: failure()
+        run: |
+          echo "=== systemctl status numa ==="
+          sudo systemctl status numa --no-pager -l || true
+          echo "=== journalctl -u numa (last 200) ==="
+          sudo journalctl -u numa --no-pager -n 200 || true
+          echo "=== ss -tulnp on 53/80/443/853/5380 ==="
+          sudo ss -tulnp 2>/dev/null | grep -E ':(53|80|443|853|5380)\b' || true
+          echo "=== systemctl is-active systemd-resolved ==="
+          systemctl is-active systemd-resolved || true
       - name: cleanup
         if: always()
         run: |

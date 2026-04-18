@@ -8,6 +8,39 @@ Type=simple
 ExecStart={{exe_path}}
 Restart=always
 RestartSec=2
+
+# Transient system user per start; no PKGBUILD/sysusers setup required.
+# systemd remaps the StateDirectory ownership to the dynamic UID on each
+# launch, including legacy root-owned trees from pre-drop installs.
+DynamicUser=yes
+
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+StateDirectory=numa
+StateDirectoryMode=0750
+ConfigurationDirectory=numa
+ConfigurationDirectoryMode=0755
+
+# Sandboxing — conservative set known to work with Rust network daemons.
+# Aggressive hardening (MemoryDenyWriteExecute, SystemCallFilter, seccomp
+# allow-lists) can be layered on once tested in isolation.
+NoNewPrivileges=true
+ProtectSystem=strict
+# DynamicUser= sets ProtectHome=read-only by default — leaves /home
+# readable so systemd can exec binaries installed under it (cargo install,
+# source builds), while blocking writes to user $HOMEs. Don't set =yes:
+# that hides /home entirely and fails with status=203/EXEC.
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+# AF_NETLINK for interface enumeration on network changes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=numa
