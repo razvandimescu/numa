@@ -1713,7 +1713,12 @@ fn install_service_binary_linux() -> Result<std::path::PathBuf, String> {
     // rename swaps the path while the running process keeps the old inode.
     let tmp = dst.with_extension("new");
     std::fs::copy(&src, &tmp).map_err(|e| {
-        format!("failed to copy {} -> {}: {}", src.display(), tmp.display(), e)
+        format!(
+            "failed to copy {} -> {}: {}",
+            src.display(),
+            tmp.display(),
+            e
+        )
     })?;
     std::fs::rename(&tmp, &dst).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
