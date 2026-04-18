@@ -1416,7 +1416,7 @@ pub fn service_status() -> Result<(), String> {
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(target_os = "macos")]
 fn replace_exe_path(service: &str) -> Result<String, String> {
     let exe_path =
         std::env::current_exe().map_err(|e| format!("failed to get current exe: {}", e))?;
@@ -2050,21 +2050,24 @@ Wireless LAN adapter Wi-Fi:
     }
 
     #[test]
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    fn replace_exe_path_substitutes_template() {
+    fn install_templates_contain_exe_path_placeholder() {
+        // Both files are substituted at install time — plist via
+        // replace_exe_path on macOS, numa.service via inline .replace
+        // in install_service_linux. Catch placeholder removal early.
         let plist = include_str!("../com.numa.dns.plist");
         let unit = include_str!("../numa.service");
-
         assert!(plist.contains("{{exe_path}}"), "plist missing placeholder");
         assert!(
             unit.contains("{{exe_path}}"),
             "unit file missing placeholder"
         );
+    }
 
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn replace_exe_path_substitutes_template() {
+        let plist = include_str!("../com.numa.dns.plist");
         let result = replace_exe_path(plist).expect("replace_exe_path failed for plist");
-        assert!(!result.contains("{{exe_path}}"));
-
-        let result = replace_exe_path(unit).expect("replace_exe_path failed for unit");
         assert!(!result.contains("{{exe_path}}"));
     }
 
