@@ -1708,10 +1708,18 @@ fn install_service_binary_linux() -> Result<std::path::PathBuf, String> {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("failed to create {}: {}", parent.display(), e))?;
     }
-    std::fs::copy(&src, &dst).map_err(|e| {
+    // Atomic replace via temp + rename. Plain copy fails with ETXTBSY when
+    // re-installing while the service is running the previous binary —
+    // rename swaps the path while the running process keeps the old inode.
+    let tmp = dst.with_extension("new");
+    std::fs::copy(&src, &tmp).map_err(|e| {
+        format!("failed to copy {} -> {}: {}", src.display(), tmp.display(), e)
+    })?;
+    std::fs::rename(&tmp, &dst).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
         format!(
-            "failed to copy {} -> {}: {}",
-            src.display(),
+            "failed to rename {} -> {}: {}",
+            tmp.display(),
             dst.display(),
             e
         )
@@ -1734,7 +1742,9 @@ fn install_service_linux() -> Result<(), String> {
         eprintln!("  warning: failed to configure system DNS: {}", e);
     }
 
-    run_systemctl(&["start", "numa"])?;
+    // restart, not start: on re-install the service is already running
+    // the previous binary; restart picks up the new one.
+    run_systemctl(&["restart", "numa"])?;
 
     eprintln!("  Service installed and started.");
     eprintln!("  Numa will auto-start on boot and restart if killed.");
