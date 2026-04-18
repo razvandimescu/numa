@@ -77,6 +77,10 @@ pub struct ServerCtx {
     pub ca_pem: Option<String>,
     pub mobile_enabled: bool,
     pub mobile_port: u16,
+    /// When true, AAAA queries short-circuit with NODATA (NOERROR + empty
+    /// answer) instead of hitting cache/forwarding/upstream. Local data
+    /// (overrides, zones, .numa proxy, blocklist sinkhole) is unaffected.
+    pub filter_aaaa: bool,
 }
 
 /// Transport-agnostic DNS resolution. Runs the full pipeline (overrides, blocklist,
@@ -172,6 +176,13 @@ pub async fn resolve_query(
                 60,
             ));
             (resp, QueryPath::Blocked, DnssecStatus::Indeterminate)
+        } else if qtype == QueryType::AAAA && ctx.filter_aaaa {
+            // RFC 2308 NODATA: NOERROR with empty answer section. Prevents
+            // Happy Eyeballs clients from waiting on an AAAA they'll never use
+            // on IPv4-only networks. NXDOMAIN would be wrong (it'd imply the
+            // name doesn't exist for A either).
+            let resp = DnsPacket::response_from(&query, ResultCode::NOERROR);
+            (resp, QueryPath::Local, DnssecStatus::Indeterminate)
         } else {
             let cached = ctx.cache.read().unwrap().lookup_with_status(&qname, qtype);
             if let Some((cached, cached_dnssec, freshness)) = cached {
@@ -334,6 +345,13 @@ pub async fn resolve_query(
         strip_dnssec_records(&mut response);
     }
 
+    // filter_aaaa: also strip ipv6hint from HTTPS/SVCB answers so modern
+    // browsers (Chrome ≥103 etc.) don't receive v6 address hints via the
+    // HTTPS record path that bypasses AAAA entirely.
+    if ctx.filter_aaaa {
+        strip_https_ipv6_hints(&mut response);
+    }
+
     // Echo EDNS back if client sent it
     if query.edns.is_some() {
         response.edns = Some(crate::packet::EdnsOpt {
@@ -489,6 +507,29 @@ fn strip_dnssec_records(pkt: &mut DnsPacket) {
     pkt.answers.retain(|r| !is_dnssec_record(r));
     pkt.authorities.retain(|r| !is_dnssec_record(r));
     pkt.resources.retain(|r| !is_dnssec_record(r));
+}
+
+/// HTTPS RR type code (RFC 9460). Numa stores HTTPS/SVCB records as
+/// `DnsRecord::UNKNOWN { qtype: 65, .. }` since it doesn't have a
+/// dedicated variant.
+const HTTPS_TYPE: u16 = 65;
+
+fn strip_https_ipv6_hints(pkt: &mut DnsPacket) {
+    let rewrite = |rec: &mut DnsRecord| {
+        if let DnsRecord::UNKNOWN {
+            qtype: HTTPS_TYPE,
+            data,
+            ..
+        } = rec
+        {
+            if let Some(new_data) = crate::svcb::strip_ipv6hint(data) {
+                *data = new_data;
+            }
+        }
+    };
+    pkt.answers.iter_mut().for_each(rewrite);
+    pkt.authorities.iter_mut().for_each(rewrite);
+    pkt.resources.iter_mut().for_each(rewrite);
 }
 
 fn is_special_use_domain(qname: &str) -> bool {
@@ -1184,6 +1225,120 @@ mod tests {
         match &resp.answers[0] {
             DnsRecord::A { addr, .. } => assert_eq!(*addr, Ipv4Addr::LOCALHOST),
             other => panic!("expected A record, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn pipeline_filter_aaaa_returns_nodata() {
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.filter_aaaa = true;
+        let ctx = Arc::new(ctx);
+
+        let (resp, path) = resolve_in_test(&ctx, "example.com", QueryType::AAAA).await;
+        assert_eq!(path, QueryPath::Local);
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+        assert!(resp.answers.is_empty(), "AAAA must be filtered to NODATA");
+    }
+
+    #[tokio::test]
+    async fn pipeline_filter_aaaa_leaves_a_queries_alone() {
+        let mut upstream_resp = DnsPacket::new();
+        upstream_resp.header.response = true;
+        upstream_resp.header.rescode = ResultCode::NOERROR;
+        upstream_resp.answers.push(DnsRecord::A {
+            domain: "example.com".to_string(),
+            addr: Ipv4Addr::new(93, 184, 216, 34),
+            ttl: 300,
+        });
+        let upstream_addr = crate::testutil::mock_upstream(upstream_resp).await;
+
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.filter_aaaa = true;
+        ctx.upstream_pool
+            .lock()
+            .unwrap()
+            .set_primary(vec![Upstream::Udp(upstream_addr)]);
+        let ctx = Arc::new(ctx);
+
+        let (resp, path) = resolve_in_test(&ctx, "example.com", QueryType::A).await;
+        assert_eq!(path, QueryPath::Upstream);
+        assert_eq!(resp.answers.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn pipeline_filter_aaaa_respects_override() {
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.filter_aaaa = true;
+        ctx.overrides
+            .write()
+            .unwrap()
+            .insert("v6.test", "2001:db8::1", 60, None)
+            .unwrap();
+        let ctx = Arc::new(ctx);
+
+        let (resp, path) = resolve_in_test(&ctx, "v6.test", QueryType::AAAA).await;
+        assert_eq!(path, QueryPath::Overridden);
+        assert_eq!(resp.answers.len(), 1, "override must win over filter");
+    }
+
+    #[tokio::test]
+    async fn pipeline_filter_aaaa_strips_ipv6hint_from_https() {
+        // Build an HTTPS record (type 65) with ipv6hint (key 6). Cache it,
+        // then query with filter_aaaa on — the returned rdata must have
+        // ipv6hint removed.
+        let mut rdata = Vec::new();
+        rdata.extend_from_slice(&1u16.to_be_bytes()); // priority
+        rdata.push(0); // empty target (".")
+                       // alpn = ["h3"]
+        rdata.extend_from_slice(&1u16.to_be_bytes());
+        rdata.extend_from_slice(&3u16.to_be_bytes());
+        rdata.extend_from_slice(&[0x02, b'h', b'3']);
+        // ipv6hint = [2606:4700::1]
+        rdata.extend_from_slice(&6u16.to_be_bytes());
+        rdata.extend_from_slice(&16u16.to_be_bytes());
+        rdata.extend_from_slice(&[
+            0x26, 0x06, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01,
+        ]);
+
+        let mut pkt = DnsPacket::new();
+        pkt.header.response = true;
+        pkt.header.rescode = ResultCode::NOERROR;
+        pkt.questions.push(crate::question::DnsQuestion {
+            name: "hints.test".to_string(),
+            qtype: QueryType::HTTPS,
+        });
+        pkt.answers.push(DnsRecord::UNKNOWN {
+            domain: "hints.test".to_string(),
+            qtype: 65,
+            data: rdata.clone(),
+            ttl: 300,
+        });
+
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.filter_aaaa = true;
+        ctx.cache
+            .write()
+            .unwrap()
+            .insert("hints.test", QueryType::HTTPS, &pkt);
+        let ctx = Arc::new(ctx);
+
+        let (resp, path) = resolve_in_test(&ctx, "hints.test", QueryType::HTTPS).await;
+        assert_eq!(path, QueryPath::Cached);
+        assert_eq!(resp.answers.len(), 1);
+        match &resp.answers[0] {
+            DnsRecord::UNKNOWN { data, .. } => {
+                assert!(
+                    data.len() < rdata.len(),
+                    "ipv6hint (20 bytes) must be removed"
+                );
+                // Bytes for key=6 must not appear at any 4-byte boundary in the
+                // params section — cheap structural check.
+                assert!(
+                    !data.windows(4).any(|w| w == [0, 6, 0, 16]),
+                    "ipv6hint TLV header must be absent"
+                );
+            }
+            other => panic!("expected UNKNOWN record, got {:?}", other),
         }
     }
 

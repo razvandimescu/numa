@@ -236,6 +236,7 @@ pub async fn run(config_path: String) -> crate::Result<()> {
         ca_pem,
         mobile_enabled: config.mobile.enabled,
         mobile_port: config.mobile.port,
+        filter_aaaa: config.server.filter_aaaa,
     });
 
     let zone_count: usize = ctx.zone_map.values().map(|m| m.len()).sum();

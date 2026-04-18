@@ -25,6 +25,7 @@ pub mod service_store;
 pub mod setup_phone;
 pub mod srtt;
 pub mod stats;
+pub mod svcb;
 pub mod system_dns;
 pub mod tls;
 pub mod wire;

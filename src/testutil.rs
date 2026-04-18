@@ -63,6 +63,7 @@ pub async fn test_ctx() -> ServerCtx {
         ca_pem: None,
         mobile_enabled: false,
         mobile_port: 8765,
+        filter_aaaa: false,
     }
 }
 

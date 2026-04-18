@@ -8,6 +8,16 @@ api_port = 5380
                               # %PROGRAMDATA%\numa on windows. Override for
                               # containerized deploys or tests that can't
                               # write to the system path.
+# filter_aaaa = true          # on IPv4-only networks, answer AAAA queries with
+                              # NODATA (NOERROR + empty answer) so Happy Eyeballs
+                              # clients don't wait on a v6 attempt that can't
+                              # succeed. Also strips `ipv6hint` from HTTPS/SVCB
+                              # records (RFC 9460) so modern browsers (Chrome
+                              # ≥103, Firefox, Safari) don't bypass the AAAA
+                              # filter via SVCB hints. Local zones, overrides,
+                              # and the .numa proxy are NOT filtered — you can
+                              # still configure v6 records for local services.
+                              # Default: false.
 
 # [upstream]
 # mode = "forward"                              # "forward" (default) — relay to upstream
