@@ -27,7 +27,10 @@ ConfigurationDirectoryMode=0755
 # allow-lists) can be layered on once tested in isolation.
 NoNewPrivileges=true
 ProtectSystem=strict
-ProtectHome=true
+# DynamicUser= sets ProtectHome=read-only by default — leaves /home
+# readable so systemd can exec binaries installed under it (cargo install,
+# source builds), while blocking writes to user $HOMEs. Don't set =yes:
+# that hides /home entirely and fails with status=203/EXEC.
 PrivateTmp=true
 PrivateDevices=true
 ProtectKernelTunables=true
