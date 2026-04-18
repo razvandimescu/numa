@@ -87,6 +87,9 @@ jobs:
           sleep 2
           curl -sf http://127.0.0.1:5380/health
           dig @127.0.0.1 example.com +short +timeout=5 | grep -q '.'
+          user=$(ps -o user= -p "$(systemctl show -p MainPID --value numa)" | tr -d ' ')
+          echo "numa running as: $user"
+          test "$user" != "root"
           sudo ./target/release/numa install
           sleep 2
           curl -sf http://127.0.0.1:5380/health
