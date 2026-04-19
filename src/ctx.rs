@@ -351,7 +351,7 @@ pub async fn resolve_query(
     // because modifying rdata invalidates any accompanying RRSIG — a DO-bit
     // validator downstream would reject the response as Bogus.
     if ctx.filter_aaaa && !client_do {
-        strip_https_ipv6_hints(&mut response);
+        strip_svcb_ipv6_hints(&mut response);
     }
 
     // Echo EDNS back if client sent it
@@ -511,11 +511,16 @@ fn strip_dnssec_records(pkt: &mut DnsPacket) {
     pkt.resources.retain(|r| !is_dnssec_record(r));
 }
 
-fn strip_https_ipv6_hints(pkt: &mut DnsPacket) {
+/// SVCB and HTTPS share the same RDATA wire format (RFC 9460), so the
+/// ipv6hint strip applies to both. SVCB has no `QueryType` variant — it
+/// arrives as `UNKNOWN { qtype: 64, .. }`.
+const SVCB_QTYPE: u16 = 64;
+
+fn strip_svcb_ipv6_hints(pkt: &mut DnsPacket) {
     let https_qtype = QueryType::HTTPS.to_num();
     pkt.for_each_record_mut(|rec| {
         if let DnsRecord::UNKNOWN { qtype, data, .. } = rec {
-            if *qtype == https_qtype {
+            if *qtype == https_qtype || *qtype == SVCB_QTYPE {
                 if let Some(new_data) = crate::svcb::strip_ipv6hint(data) {
                     *data = new_data;
                 }
@@ -1274,10 +1279,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pipeline_filter_aaaa_strips_ipv6hint_from_https() {
-        // Build an HTTPS record (type 65) with alpn + ipv6hint, cache it,
-        // then query with filter_aaaa on — the returned rdata must have
-        // ipv6hint (20 bytes) removed.
+    async fn pipeline_filter_aaaa_strips_ipv6hint_from_https_and_svcb() {
+        // HTTPS (type 65) and SVCB (type 64) share the same RDATA wire
+        // format (RFC 9460); the filter must strip ipv6hint from both.
+        // Build one HTTPS record with alpn + ipv6hint, then re-key it as
+        // SVCB and assert the returned rdata has the 20-byte hint removed
+        // in both cases.
         let rdata = crate::svcb::build_rdata(
             1,
             &[],
@@ -1306,31 +1313,50 @@ mod tests {
             ttl: 300,
         });
 
+        // Seed an SVCB record (type 64) under a different name — same wire
+        // format as HTTPS, must get the same treatment.
+        let mut svcb_pkt = pkt.clone();
+        svcb_pkt.questions[0].name = "svc.test".to_string();
+        svcb_pkt.questions[0].qtype = QueryType::UNKNOWN(64);
+        if let DnsRecord::UNKNOWN { domain, qtype, .. } = &mut svcb_pkt.answers[0] {
+            *domain = "svc.test".to_string();
+            *qtype = 64;
+        }
+
         let mut ctx = crate::testutil::test_ctx().await;
         ctx.filter_aaaa = true;
         ctx.cache
             .write()
             .unwrap()
             .insert("hints.test", QueryType::HTTPS, &pkt);
+        ctx.cache
+            .write()
+            .unwrap()
+            .insert("svc.test", QueryType::UNKNOWN(64), &svcb_pkt);
         let ctx = Arc::new(ctx);
 
-        let (resp, path) = resolve_in_test(&ctx, "hints.test", QueryType::HTTPS).await;
-        assert_eq!(path, QueryPath::Cached);
-        assert_eq!(resp.answers.len(), 1);
-        match &resp.answers[0] {
-            DnsRecord::UNKNOWN { data, .. } => {
-                assert!(
-                    data.len() < rdata.len(),
-                    "ipv6hint (20 bytes) must be removed"
-                );
-                // Bytes for key=6 must not appear at any 4-byte boundary in the
-                // params section — cheap structural check.
-                assert!(
-                    !data.windows(4).any(|w| w == [0, 6, 0, 16]),
-                    "ipv6hint TLV header must be absent"
-                );
+        for (name, qtype, label) in [
+            ("hints.test", QueryType::HTTPS, "HTTPS"),
+            ("svc.test", QueryType::UNKNOWN(64), "SVCB"),
+        ] {
+            let (resp, path) = resolve_in_test(&ctx, name, qtype).await;
+            assert_eq!(path, QueryPath::Cached, "{label}");
+            assert_eq!(resp.answers.len(), 1, "{label}");
+            match &resp.answers[0] {
+                DnsRecord::UNKNOWN { data, .. } => {
+                    assert!(
+                        data.len() < rdata.len(),
+                        "{label}: ipv6hint (20 bytes) must be removed"
+                    );
+                    // Bytes for key=6 must not appear at any 4-byte boundary in the
+                    // params section — cheap structural check.
+                    assert!(
+                        !data.windows(4).any(|w| w == [0, 6, 0, 16]),
+                        "{label}: ipv6hint TLV header must be absent"
+                    );
+                }
+                other => panic!("{label}: expected UNKNOWN record, got {other:?}"),
             }
-            other => panic!("expected UNKNOWN record, got {:?}", other),
         }
     }
 
