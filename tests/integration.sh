@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Integration test suite for Numa
 # Runs a test instance on port 5354, validates all features, exits with status.
-# Usage: ./tests/integration.sh [release|debug]
+# Usage:
+#   ./tests/integration.sh [release|debug]       # all suites
+#   SUITES=7 ./tests/integration.sh              # only Suite 7
+#   SUITES=1,3,7 ./tests/integration.sh          # Suites 1, 3, and 7
 
 set -euo pipefail
 
@@ -13,6 +16,14 @@ CONFIG="/tmp/numa-integration-test.toml"
 LOG="/tmp/numa-integration-test.log"
 PASSED=0
 FAILED=0
+
+# Suite filter: empty runs all; comma list runs a subset.
+SUITES="${SUITES:-}"
+should_run_suite() {
+    [ -z "$SUITES" ] && return 0
+    case ",$SUITES," in *",$1,"*) return 0;; esac
+    return 1
+}
 
 # Colors
 GREEN="\033[32m"
@@ -166,6 +177,7 @@ CONF
 }
 
 # ---- Suite 1: Recursive mode + DNSSEC ----
+if should_run_suite 1; then
 echo ""
 echo "╔══════════════════════════════════════════╗"
 echo "║  Suite 1: Recursive + DNSSEC + Blocking  ║"
@@ -234,7 +246,10 @@ kill "$NUMA_PID" 2>/dev/null || true
 wait "$NUMA_PID" 2>/dev/null || true
 sleep 1
 
+fi  # end Suite 1
+
 # ---- Suite 2: Forward mode (backward compat) ----
+if should_run_suite 2; then
 echo ""
 echo "╔══════════════════════════════════════════╗"
 echo "║  Suite 2: Forward (DoH) + Blocking       ║"
@@ -261,7 +276,10 @@ enabled = true
 enabled = false
 "
 
+fi  # end Suite 2
+
 # ---- Suite 3: Forward UDP (plain, no DoH) ----
+if should_run_suite 3; then
 echo ""
 echo "╔══════════════════════════════════════════╗"
 echo "║  Suite 3: Forward (UDP) + No Blocking    ║"
@@ -307,7 +325,10 @@ kill "$NUMA_PID" 2>/dev/null || true
 wait "$NUMA_PID" 2>/dev/null || true
 sleep 1
 
+fi  # end Suite 3
+
 # ---- Suite 4: Local zones + Overrides API ----
+if should_run_suite 4; then
 echo ""
 echo "╔══════════════════════════════════════════╗"
 echo "║  Suite 4: Local Zones + Overrides API    ║"
@@ -416,7 +437,10 @@ kill "$NUMA_PID" 2>/dev/null || true
 wait "$NUMA_PID" 2>/dev/null || true
 sleep 1
 
+fi  # end Suite 4
+
 # ---- Suite 5: DNS-over-TLS (RFC 7858) ----
+if should_run_suite 5; then
 echo ""
 echo "╔══════════════════════════════════════════╗"
 echo "║  Suite 5: DNS-over-TLS (RFC 7858)        ║"
@@ -538,7 +562,10 @@ CONF
 fi
 sleep 1
 
+fi  # end Suite 5
+
 # ---- Suite 6: Proxy + DoT coexistence ----
+if should_run_suite 6; then
 echo ""
 echo "╔══════════════════════════════════════════╗"
 echo "║  Suite 6: Proxy + DoT Coexistence        ║"
@@ -697,6 +724,135 @@ CONF
     wait "$NUMA_PID" 2>/dev/null || true
     rm -rf "$NUMA_DATA"
 fi
+
+fi  # end Suite 6
+
+# ---- Suite 7: filter_aaaa (IPv4-only networks) ----
+if should_run_suite 7; then
+echo ""
+echo "╔══════════════════════════════════════════╗"
+echo "║  Suite 7: filter_aaaa                    ║"
+echo "╚══════════════════════════════════════════╝"
+
+# Config A — filter on, with a local AAAA zone to prove local data bypass.
+cat > "$CONFIG" << 'CONF'
+[server]
+bind_addr = "127.0.0.1:5354"
+api_port = 5381
+filter_aaaa = true
+
+[upstream]
+mode = "forward"
+address = "9.9.9.9"
+port = 53
+
+[cache]
+max_entries = 10000
+
+[blocking]
+enabled = false
+
+[proxy]
+enabled = false
+
+[[zones]]
+domain = "v6.test"
+record_type = "AAAA"
+value = "2001:db8::1"
+ttl = 60
+CONF
+
+RUST_LOG=info "$BINARY" "$CONFIG" > "$LOG" 2>&1 &
+NUMA_PID=$!
+sleep 3
+
+DIG="dig @127.0.0.1 -p $PORT +time=5 +tries=1"
+
+echo ""
+echo "=== filter_aaaa = true ==="
+
+# A queries must be untouched.
+check "A record resolves under filter_aaaa" \
+    "." \
+    "$($DIG google.com A +short | head -1)"
+
+# AAAA must be NOERROR (NODATA), not NXDOMAIN, not SERVFAIL.
+check "AAAA returns NOERROR (not NXDOMAIN)" \
+    "status: NOERROR" \
+    "$($DIG google.com AAAA 2>&1 | grep 'status:')"
+
+check "AAAA returns zero answers (NODATA shape)" \
+    "ANSWER: 0" \
+    "$($DIG google.com AAAA 2>&1 | grep -oE 'ANSWER: [0-9]+' | head -1)"
+
+# Local zone AAAA must survive the filter (PR claim: local data bypasses).
+check "Local [[zones]] AAAA bypasses filter" \
+    "2001:db8::1" \
+    "$($DIG v6.test AAAA +short)"
+
+# HTTPS RR: ipv6hint (SvcParamKey 6) must be stripped. Query as `type65`
+# because dig 9.10.6 (macOS) misparses `HTTPS` as a domain name; `type65`
+# works on both 9.10.6 and 9.18. Assert on the raw rdata hex (RFC 3597
+# generic format), since dig 9.10.6 doesn't pretty-print HTTPS params.
+# cloudflare.com's ipv6hint values sit under the 2606:4700 prefix —
+# checking that `26064700` is absent from the rdata hex is a precise,
+# upstream-stable signal that the TLV was stripped.
+HTTPS_OUT=$($DIG cloudflare.com type65 2>&1)
+if echo "$HTTPS_OUT" | grep -qE "cloudflare\.com\..*IN[[:space:]]+TYPE65"; then
+    HTTPS_HEX=$(echo "$HTTPS_OUT" | grep -A5 "IN[[:space:]]*TYPE65" | tr -d " \t\n")
+    if echo "$HTTPS_HEX" | grep -qi "26064700"; then
+        check "HTTPS ipv6hint stripped (2606:4700 absent from rdata)" "absent" "present"
+    else
+        check "HTTPS ipv6hint stripped (2606:4700 absent from rdata)" "absent" "absent"
+    fi
+else
+    # Upstream didn't return an HTTPS record — skip rather than false-pass.
+    printf "  ${DIM}~ HTTPS ipv6hint stripped (skipped: no HTTPS RR returned by upstream)${RESET}\n"
+fi
+
+kill "$NUMA_PID" 2>/dev/null || true
+wait "$NUMA_PID" 2>/dev/null || true
+sleep 1
+
+# Config B — filter off. Regression guard: prove AAAA answers come back
+# when the flag isn't set, so a network failure in Config A can't silently
+# pass as "filter working".
+cat > "$CONFIG" << 'CONF'
+[server]
+bind_addr = "127.0.0.1:5354"
+api_port = 5381
+
+[upstream]
+mode = "forward"
+address = "9.9.9.9"
+port = 53
+
+[cache]
+max_entries = 10000
+
+[blocking]
+enabled = false
+
+[proxy]
+enabled = false
+CONF
+
+RUST_LOG=info "$BINARY" "$CONFIG" > "$LOG" 2>&1 &
+NUMA_PID=$!
+sleep 3
+
+echo ""
+echo "=== filter_aaaa unset (regression guard) ==="
+
+check "AAAA returns real answers with filter off" \
+    ":" \
+    "$($DIG google.com AAAA +short | head -1)"
+
+kill "$NUMA_PID" 2>/dev/null || true
+wait "$NUMA_PID" 2>/dev/null || true
+sleep 1
+
+fi  # end Suite 7
 
 # Summary
 echo ""

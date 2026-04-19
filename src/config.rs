@@ -93,6 +93,12 @@ pub struct ServerConfig {
     /// Defaults to `crate::data_dir()` (platform-specific system path) if unset.
     #[serde(default)]
     pub data_dir: Option<PathBuf>,
+    /// Synthesize NODATA (NOERROR + empty answer) for AAAA queries, and
+    /// strip `ipv6hint` from HTTPS/SVCB responses (RFC 9460). For IPv4-only
+    /// networks where Happy Eyeballs fallback adds latency. Local zones,
+    /// overrides, and the service proxy are not affected. Default false.
+    #[serde(default)]
+    pub filter_aaaa: bool,
 }
 
 impl Default for ServerConfig {
@@ -102,6 +108,7 @@ impl Default for ServerConfig {
             api_port: default_api_port(),
             api_bind_addr: default_api_bind_addr(),
             data_dir: None,
+            filter_aaaa: false,
         }
     }
 }
@@ -578,6 +585,17 @@ mod tests {
     fn lan_enabled_parses() {
         let config: Config = toml::from_str("[lan]\nenabled = true").unwrap();
         assert!(config.lan.enabled);
+    }
+
+    #[test]
+    fn filter_aaaa_defaults_false() {
+        assert!(!ServerConfig::default().filter_aaaa);
+    }
+
+    #[test]
+    fn filter_aaaa_parses_from_server_section() {
+        let config: Config = toml::from_str("[server]\nfilter_aaaa = true").unwrap();
+        assert!(config.server.filter_aaaa);
     }
 
     #[test]

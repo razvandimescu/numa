@@ -77,6 +77,10 @@ pub struct ServerCtx {
     pub ca_pem: Option<String>,
     pub mobile_enabled: bool,
     pub mobile_port: u16,
+    /// When true, AAAA queries short-circuit with NODATA (NOERROR + empty
+    /// answer) instead of hitting cache/forwarding/upstream. Local data
+    /// (overrides, zones, .numa proxy, blocklist sinkhole) is unaffected.
+    pub filter_aaaa: bool,
 }
 
 /// Transport-agnostic DNS resolution. Runs the full pipeline (overrides, blocklist,
@@ -172,6 +176,13 @@ pub async fn resolve_query(
                 60,
             ));
             (resp, QueryPath::Blocked, DnssecStatus::Indeterminate)
+        } else if qtype == QueryType::AAAA && ctx.filter_aaaa {
+            // RFC 2308 NODATA: NOERROR with empty answer section. Prevents
+            // Happy Eyeballs clients from waiting on an AAAA they'll never use
+            // on IPv4-only networks. NXDOMAIN would be wrong (it'd imply the
+            // name doesn't exist for A either).
+            let resp = DnsPacket::response_from(&query, ResultCode::NOERROR);
+            (resp, QueryPath::Local, DnssecStatus::Indeterminate)
         } else {
             let cached = ctx.cache.read().unwrap().lookup_with_status(&qname, qtype);
             if let Some((cached, cached_dnssec, freshness)) = cached {
@@ -334,6 +345,15 @@ pub async fn resolve_query(
         strip_dnssec_records(&mut response);
     }
 
+    // filter_aaaa: also strip ipv6hint from HTTPS/SVCB answers so modern
+    // browsers (Chrome ≥103 etc.) don't receive v6 address hints via the
+    // HTTPS record path that bypasses AAAA entirely. Gated on !client_do
+    // because modifying rdata invalidates any accompanying RRSIG — a DO-bit
+    // validator downstream would reject the response as Bogus.
+    if ctx.filter_aaaa && !client_do {
+        strip_svcb_ipv6_hints(&mut response);
+    }
+
     // Echo EDNS back if client sent it
     if query.edns.is_some() {
         response.edns = Some(crate::packet::EdnsOpt {
@@ -489,6 +509,21 @@ fn strip_dnssec_records(pkt: &mut DnsPacket) {
     pkt.answers.retain(|r| !is_dnssec_record(r));
     pkt.authorities.retain(|r| !is_dnssec_record(r));
     pkt.resources.retain(|r| !is_dnssec_record(r));
+}
+
+const SVCB_QTYPE: u16 = 64;
+
+fn strip_svcb_ipv6_hints(pkt: &mut DnsPacket) {
+    let https_qtype = QueryType::HTTPS.to_num();
+    pkt.for_each_record_mut(|rec| {
+        if let DnsRecord::UNKNOWN { qtype, data, .. } = rec {
+            if *qtype == https_qtype || *qtype == SVCB_QTYPE {
+                if let Some(new_data) = crate::svcb::strip_ipv6hint(data) {
+                    *data = new_data;
+                }
+            }
+        }
+    });
 }
 
 fn is_special_use_domain(qname: &str) -> bool {
@@ -1184,6 +1219,201 @@ mod tests {
         match &resp.answers[0] {
             DnsRecord::A { addr, .. } => assert_eq!(*addr, Ipv4Addr::LOCALHOST),
             other => panic!("expected A record, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn pipeline_filter_aaaa_returns_nodata() {
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.filter_aaaa = true;
+        let ctx = Arc::new(ctx);
+
+        let (resp, path) = resolve_in_test(&ctx, "example.com", QueryType::AAAA).await;
+        assert_eq!(path, QueryPath::Local);
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+        assert!(resp.answers.is_empty(), "AAAA must be filtered to NODATA");
+    }
+
+    #[tokio::test]
+    async fn pipeline_filter_aaaa_leaves_a_queries_alone() {
+        let mut upstream_resp = DnsPacket::new();
+        upstream_resp.header.response = true;
+        upstream_resp.header.rescode = ResultCode::NOERROR;
+        upstream_resp.answers.push(DnsRecord::A {
+            domain: "example.com".to_string(),
+            addr: Ipv4Addr::new(93, 184, 216, 34),
+            ttl: 300,
+        });
+        let upstream_addr = crate::testutil::mock_upstream(upstream_resp).await;
+
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.filter_aaaa = true;
+        ctx.upstream_pool
+            .lock()
+            .unwrap()
+            .set_primary(vec![Upstream::Udp(upstream_addr)]);
+        let ctx = Arc::new(ctx);
+
+        let (resp, path) = resolve_in_test(&ctx, "example.com", QueryType::A).await;
+        assert_eq!(path, QueryPath::Upstream);
+        assert_eq!(resp.answers.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn pipeline_filter_aaaa_respects_override() {
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.filter_aaaa = true;
+        ctx.overrides
+            .write()
+            .unwrap()
+            .insert("v6.test", "2001:db8::1", 60, None)
+            .unwrap();
+        let ctx = Arc::new(ctx);
+
+        let (resp, path) = resolve_in_test(&ctx, "v6.test", QueryType::AAAA).await;
+        assert_eq!(path, QueryPath::Overridden);
+        assert_eq!(resp.answers.len(), 1, "override must win over filter");
+    }
+
+    #[tokio::test]
+    async fn pipeline_filter_aaaa_strips_ipv6hint_from_https_and_svcb() {
+        let rdata = crate::svcb::build_rdata(
+            1,
+            &[],
+            &[
+                (1, vec![0x02, b'h', b'3']),
+                (
+                    6,
+                    vec![
+                        0x26, 0x06, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01,
+                    ],
+                ),
+            ],
+        );
+
+        let mut pkt = DnsPacket::new();
+        pkt.header.response = true;
+        pkt.header.rescode = ResultCode::NOERROR;
+        pkt.questions.push(crate::question::DnsQuestion {
+            name: "hints.test".to_string(),
+            qtype: QueryType::HTTPS,
+        });
+        pkt.answers.push(DnsRecord::UNKNOWN {
+            domain: "hints.test".to_string(),
+            qtype: 65,
+            data: rdata.clone(),
+            ttl: 300,
+        });
+
+        let mut svcb_pkt = pkt.clone();
+        svcb_pkt.questions[0].name = "svc.test".to_string();
+        svcb_pkt.questions[0].qtype = QueryType::UNKNOWN(64);
+        if let DnsRecord::UNKNOWN { domain, qtype, .. } = &mut svcb_pkt.answers[0] {
+            *domain = "svc.test".to_string();
+            *qtype = 64;
+        }
+
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.filter_aaaa = true;
+        ctx.cache
+            .write()
+            .unwrap()
+            .insert("hints.test", QueryType::HTTPS, &pkt);
+        ctx.cache
+            .write()
+            .unwrap()
+            .insert("svc.test", QueryType::UNKNOWN(64), &svcb_pkt);
+        let ctx = Arc::new(ctx);
+
+        for (name, qtype, label) in [
+            ("hints.test", QueryType::HTTPS, "HTTPS"),
+            ("svc.test", QueryType::UNKNOWN(64), "SVCB"),
+        ] {
+            let (resp, path) = resolve_in_test(&ctx, name, qtype).await;
+            assert_eq!(path, QueryPath::Cached, "{label}");
+            assert_eq!(resp.answers.len(), 1, "{label}");
+            match &resp.answers[0] {
+                DnsRecord::UNKNOWN { data, .. } => {
+                    assert!(
+                        data.len() < rdata.len(),
+                        "{label}: ipv6hint (20 bytes) must be removed"
+                    );
+                    // Bytes for key=6 must not appear at any 4-byte boundary in the
+                    // params section — cheap structural check.
+                    assert!(
+                        !data.windows(4).any(|w| w == [0, 6, 0, 16]),
+                        "{label}: ipv6hint TLV header must be absent"
+                    );
+                }
+                other => panic!("{label}: expected UNKNOWN record, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn pipeline_filter_aaaa_preserves_ipv6hint_for_dnssec_clients() {
+        // Regression guard for the DO-bit gate in resolve_query: modifying
+        // HTTPS rdata invalidates any accompanying RRSIG, so a DO=1 client
+        // must receive the record untouched even when filter_aaaa is on.
+        let rdata = crate::svcb::build_rdata(
+            1,
+            &[],
+            &[(
+                6,
+                vec![
+                    0x26, 0x06, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01,
+                ],
+            )],
+        );
+
+        let mut pkt = DnsPacket::new();
+        pkt.header.response = true;
+        pkt.header.rescode = ResultCode::NOERROR;
+        pkt.questions.push(crate::question::DnsQuestion {
+            name: "hints.test".to_string(),
+            qtype: QueryType::HTTPS,
+        });
+        pkt.answers.push(DnsRecord::UNKNOWN {
+            domain: "hints.test".to_string(),
+            qtype: 65,
+            data: rdata.clone(),
+            ttl: 300,
+        });
+
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.filter_aaaa = true;
+        ctx.cache
+            .write()
+            .unwrap()
+            .insert("hints.test", QueryType::HTTPS, &pkt);
+        let ctx = Arc::new(ctx);
+
+        // Build a query with EDNS DO bit set — can't use resolve_in_test
+        // because it constructs a plain query without EDNS.
+        let mut query = DnsPacket::query(0xBEEF, "hints.test", QueryType::HTTPS);
+        query.edns = Some(crate::packet::EdnsOpt {
+            do_bit: true,
+            ..Default::default()
+        });
+        let mut buf = BytePacketBuffer::new();
+        query.write(&mut buf).unwrap();
+        let raw = &buf.buf[..buf.pos];
+        let src: SocketAddr = "127.0.0.1:1234".parse().unwrap();
+
+        let (resp_buf, _) = resolve_query(query, raw, src, &ctx, Transport::Udp)
+            .await
+            .unwrap();
+        let mut resp_parse_buf = BytePacketBuffer::from_bytes(resp_buf.filled());
+        let resp = DnsPacket::from_buffer(&mut resp_parse_buf).unwrap();
+
+        match &resp.answers[0] {
+            DnsRecord::UNKNOWN { data, .. } => {
+                assert_eq!(
+                    data, &rdata,
+                    "ipv6hint must be preserved for DO-bit clients"
+                );
+            }
+            other => panic!("expected UNKNOWN record, got {:?}", other),
         }
     }
 

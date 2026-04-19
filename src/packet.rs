@@ -85,6 +85,14 @@ impl DnsPacket {
             + self.edns.as_ref().map_or(0, |e| e.options.capacity())
     }
 
+    /// Apply `f` to every record in the three RR sections (answers,
+    /// authorities, resources). Does not touch questions or edns.
+    pub fn for_each_record_mut(&mut self, mut f: impl FnMut(&mut DnsRecord)) {
+        self.answers.iter_mut().for_each(&mut f);
+        self.authorities.iter_mut().for_each(&mut f);
+        self.resources.iter_mut().for_each(&mut f);
+    }
+
     pub fn response_from(query: &DnsPacket, rescode: crate::header::ResultCode) -> DnsPacket {
         let mut resp = DnsPacket::new();
         resp.header.id = query.header.id;
