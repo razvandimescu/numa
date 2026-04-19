@@ -511,27 +511,17 @@ fn strip_dnssec_records(pkt: &mut DnsPacket) {
     pkt.resources.retain(|r| !is_dnssec_record(r));
 }
 
-/// HTTPS RR type code (RFC 9460). Numa stores HTTPS/SVCB records as
-/// `DnsRecord::UNKNOWN { qtype: 65, .. }` since it doesn't have a
-/// dedicated variant.
-const HTTPS_TYPE: u16 = 65;
-
 fn strip_https_ipv6_hints(pkt: &mut DnsPacket) {
-    let rewrite = |rec: &mut DnsRecord| {
-        if let DnsRecord::UNKNOWN {
-            qtype: HTTPS_TYPE,
-            data,
-            ..
-        } = rec
-        {
-            if let Some(new_data) = crate::svcb::strip_ipv6hint(data) {
-                *data = new_data;
+    let https_qtype = QueryType::HTTPS.to_num();
+    pkt.for_each_record_mut(|rec| {
+        if let DnsRecord::UNKNOWN { qtype, data, .. } = rec {
+            if *qtype == https_qtype {
+                if let Some(new_data) = crate::svcb::strip_ipv6hint(data) {
+                    *data = new_data;
+                }
             }
         }
-    };
-    pkt.answers.iter_mut().for_each(rewrite);
-    pkt.authorities.iter_mut().for_each(rewrite);
-    pkt.resources.iter_mut().for_each(rewrite);
+    });
 }
 
 fn is_special_use_domain(qname: &str) -> bool {
@@ -1285,22 +1275,20 @@ mod tests {
 
     #[tokio::test]
     async fn pipeline_filter_aaaa_strips_ipv6hint_from_https() {
-        // Build an HTTPS record (type 65) with ipv6hint (key 6). Cache it,
+        // Build an HTTPS record (type 65) with alpn + ipv6hint, cache it,
         // then query with filter_aaaa on — the returned rdata must have
-        // ipv6hint removed.
-        let mut rdata = Vec::new();
-        rdata.extend_from_slice(&1u16.to_be_bytes()); // priority
-        rdata.push(0); // empty target (".")
-                       // alpn = ["h3"]
-        rdata.extend_from_slice(&1u16.to_be_bytes());
-        rdata.extend_from_slice(&3u16.to_be_bytes());
-        rdata.extend_from_slice(&[0x02, b'h', b'3']);
-        // ipv6hint = [2606:4700::1]
-        rdata.extend_from_slice(&6u16.to_be_bytes());
-        rdata.extend_from_slice(&16u16.to_be_bytes());
-        rdata.extend_from_slice(&[
-            0x26, 0x06, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01,
-        ]);
+        // ipv6hint (20 bytes) removed.
+        let rdata = crate::svcb::build_rdata(
+            1,
+            &[],
+            &[
+                (1, vec![0x02, b'h', b'3']),
+                (
+                    6,
+                    vec![0x26, 0x06, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01],
+                ),
+            ],
+        );
 
         let mut pkt = DnsPacket::new();
         pkt.header.response = true;
@@ -1349,14 +1337,14 @@ mod tests {
         // Regression guard for the DO-bit gate in resolve_query: modifying
         // HTTPS rdata invalidates any accompanying RRSIG, so a DO=1 client
         // must receive the record untouched even when filter_aaaa is on.
-        let mut rdata = Vec::new();
-        rdata.extend_from_slice(&1u16.to_be_bytes());
-        rdata.push(0);
-        rdata.extend_from_slice(&6u16.to_be_bytes());
-        rdata.extend_from_slice(&16u16.to_be_bytes());
-        rdata.extend_from_slice(&[
-            0x26, 0x06, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01,
-        ]);
+        let rdata = crate::svcb::build_rdata(
+            1,
+            &[],
+            &[(
+                6,
+                vec![0x26, 0x06, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01],
+            )],
+        );
 
         let mut pkt = DnsPacket::new();
         pkt.header.response = true;

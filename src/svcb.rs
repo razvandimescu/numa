@@ -80,27 +80,33 @@ pub fn strip_ipv6hint(rdata: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Build an SVCB RDATA blob from a priority, target labels, and
+/// (key, value) param pairs. Shared by `svcb` unit tests and `ctx`
+/// pipeline tests that need to seed the cache with a synthetic HTTPS RR.
+#[cfg(test)]
+pub(crate) fn build_rdata(
+    priority: u16,
+    target: &[&str],
+    params: &[(u16, Vec<u8>)],
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&priority.to_be_bytes());
+    for label in target {
+        out.push(label.len() as u8);
+        out.extend_from_slice(label.as_bytes());
+    }
+    out.push(0);
+    for (key, value) in params {
+        out.extend_from_slice(&key.to_be_bytes());
+        out.extend_from_slice(&(value.len() as u16).to_be_bytes());
+        out.extend_from_slice(value);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Build an SVCB RDATA blob from a priority, target labels, and
-    /// (key, value) param pairs. Used for constructing test vectors.
-    fn build(priority: u16, target: &[&str], params: &[(u16, Vec<u8>)]) -> Vec<u8> {
-        let mut out = Vec::new();
-        out.extend_from_slice(&priority.to_be_bytes());
-        for label in target {
-            out.push(label.len() as u8);
-            out.extend_from_slice(label.as_bytes());
-        }
-        out.push(0);
-        for (key, value) in params {
-            out.extend_from_slice(&key.to_be_bytes());
-            out.extend_from_slice(&(value.len() as u16).to_be_bytes());
-            out.extend_from_slice(value);
-        }
-        out
-    }
 
     fn alpn_h3() -> (u16, Vec<u8>) {
         // alpn = ["h3"]: one length-prefixed ALPN id
@@ -123,35 +129,35 @@ mod tests {
 
     #[test]
     fn strips_ipv6hint_and_keeps_other_params() {
-        let rdata = build(1, &[], &[alpn_h3(), ipv4hint_single(), ipv6hint_single()]);
+        let rdata = build_rdata(1, &[], &[alpn_h3(), ipv4hint_single(), ipv6hint_single()]);
         let stripped = strip_ipv6hint(&rdata).expect("ipv6hint present → stripped");
-        let expected = build(1, &[], &[alpn_h3(), ipv4hint_single()]);
+        let expected = build_rdata(1, &[], &[alpn_h3(), ipv4hint_single()]);
         assert_eq!(stripped, expected);
     }
 
     #[test]
     fn no_ipv6hint_returns_none() {
-        let rdata = build(1, &[], &[alpn_h3(), ipv4hint_single()]);
+        let rdata = build_rdata(1, &[], &[alpn_h3(), ipv4hint_single()]);
         assert!(strip_ipv6hint(&rdata).is_none());
     }
 
     #[test]
     fn alias_mode_empty_params_returns_none() {
-        let rdata = build(0, &["example", "com"], &[]);
+        let rdata = build_rdata(0, &["example", "com"], &[]);
         assert!(strip_ipv6hint(&rdata).is_none());
     }
 
     #[test]
     fn only_ipv6hint_yields_empty_param_section() {
-        let rdata = build(1, &[], &[ipv6hint_single()]);
+        let rdata = build_rdata(1, &[], &[ipv6hint_single()]);
         let stripped = strip_ipv6hint(&rdata).expect("ipv6hint present → stripped");
-        let expected = build(1, &[], &[]);
+        let expected = build_rdata(1, &[], &[]);
         assert_eq!(stripped, expected);
     }
 
     #[test]
     fn preserves_target_name() {
-        let rdata = build(1, &["svc", "example", "net"], &[ipv6hint_single()]);
+        let rdata = build_rdata(1, &["svc", "example", "net"], &[ipv6hint_single()]);
         let stripped = strip_ipv6hint(&rdata).unwrap();
         assert!(stripped.starts_with(&[0x00, 0x01])); // priority
         assert_eq!(&stripped[2..6], b"\x03svc");
