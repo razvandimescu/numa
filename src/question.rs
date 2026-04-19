@@ -1,129 +1,66 @@
 use crate::buffer::BytePacketBuffer;
 use crate::Result;
 
-#[derive(PartialEq, Eq, Debug, Clone, Hash, Copy)]
-pub enum QueryType {
-    UNKNOWN(u16),
-    A,      // 1
-    NS,     // 2
-    CNAME,  // 5
-    SOA,    // 6
-    PTR,    // 12
-    MX,     // 15
-    TXT,    // 16
-    AAAA,   // 28
-    LOC,    // 29
-    SRV,    // 33
-    NAPTR,  // 35
-    DS,     // 43
-    RRSIG,  // 46
-    NSEC,   // 47
-    DNSKEY, // 48
-    NSEC3,  // 50
-    OPT,    // 41 (EDNS0 pseudo-type)
-    SVCB,   // 64
-    HTTPS,  // 65
+macro_rules! define_qtypes {
+    ( $( $variant:ident = $num:literal, $str:literal ),* $(,)? ) => {
+        #[derive(PartialEq, Eq, Debug, Clone, Hash, Copy)]
+        pub enum QueryType {
+            UNKNOWN(u16),
+            $( $variant, )*
+        }
+
+        impl QueryType {
+            pub fn to_num(&self) -> u16 {
+                match *self {
+                    QueryType::UNKNOWN(x) => x,
+                    $( QueryType::$variant => $num, )*
+                }
+            }
+
+            pub fn from_num(num: u16) -> QueryType {
+                match num {
+                    $( $num => QueryType::$variant, )*
+                    _ => QueryType::UNKNOWN(num),
+                }
+            }
+
+            pub fn as_str(&self) -> &'static str {
+                match self {
+                    QueryType::UNKNOWN(_) => "UNKNOWN",
+                    $( QueryType::$variant => $str, )*
+                }
+            }
+
+            pub fn parse_str(s: &str) -> Option<QueryType> {
+                match s.to_ascii_uppercase().as_str() {
+                    $( $str => Some(QueryType::$variant), )*
+                    _ => None,
+                }
+            }
+        }
+    };
 }
 
-impl QueryType {
-    pub fn to_num(&self) -> u16 {
-        match *self {
-            QueryType::UNKNOWN(x) => x,
-            QueryType::A => 1,
-            QueryType::NS => 2,
-            QueryType::CNAME => 5,
-            QueryType::SOA => 6,
-            QueryType::PTR => 12,
-            QueryType::MX => 15,
-            QueryType::TXT => 16,
-            QueryType::AAAA => 28,
-            QueryType::LOC => 29,
-            QueryType::SRV => 33,
-            QueryType::NAPTR => 35,
-            QueryType::OPT => 41,
-            QueryType::DS => 43,
-            QueryType::RRSIG => 46,
-            QueryType::NSEC => 47,
-            QueryType::DNSKEY => 48,
-            QueryType::NSEC3 => 50,
-            QueryType::SVCB => 64,
-            QueryType::HTTPS => 65,
-        }
-    }
-
-    pub fn from_num(num: u16) -> QueryType {
-        match num {
-            1 => QueryType::A,
-            2 => QueryType::NS,
-            5 => QueryType::CNAME,
-            6 => QueryType::SOA,
-            12 => QueryType::PTR,
-            15 => QueryType::MX,
-            16 => QueryType::TXT,
-            28 => QueryType::AAAA,
-            29 => QueryType::LOC,
-            33 => QueryType::SRV,
-            35 => QueryType::NAPTR,
-            41 => QueryType::OPT,
-            43 => QueryType::DS,
-            46 => QueryType::RRSIG,
-            47 => QueryType::NSEC,
-            48 => QueryType::DNSKEY,
-            50 => QueryType::NSEC3,
-            64 => QueryType::SVCB,
-            65 => QueryType::HTTPS,
-            _ => QueryType::UNKNOWN(num),
-        }
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            QueryType::A => "A",
-            QueryType::NS => "NS",
-            QueryType::CNAME => "CNAME",
-            QueryType::SOA => "SOA",
-            QueryType::PTR => "PTR",
-            QueryType::MX => "MX",
-            QueryType::TXT => "TXT",
-            QueryType::AAAA => "AAAA",
-            QueryType::LOC => "LOC",
-            QueryType::SRV => "SRV",
-            QueryType::NAPTR => "NAPTR",
-            QueryType::OPT => "OPT",
-            QueryType::DS => "DS",
-            QueryType::RRSIG => "RRSIG",
-            QueryType::NSEC => "NSEC",
-            QueryType::DNSKEY => "DNSKEY",
-            QueryType::NSEC3 => "NSEC3",
-            QueryType::SVCB => "SVCB",
-            QueryType::HTTPS => "HTTPS",
-            QueryType::UNKNOWN(_) => "UNKNOWN",
-        }
-    }
-
-    pub fn parse_str(s: &str) -> Option<QueryType> {
-        match s.to_ascii_uppercase().as_str() {
-            "A" => Some(QueryType::A),
-            "NS" => Some(QueryType::NS),
-            "CNAME" => Some(QueryType::CNAME),
-            "SOA" => Some(QueryType::SOA),
-            "PTR" => Some(QueryType::PTR),
-            "MX" => Some(QueryType::MX),
-            "TXT" => Some(QueryType::TXT),
-            "AAAA" => Some(QueryType::AAAA),
-            "LOC" => Some(QueryType::LOC),
-            "SRV" => Some(QueryType::SRV),
-            "NAPTR" => Some(QueryType::NAPTR),
-            "DS" => Some(QueryType::DS),
-            "RRSIG" => Some(QueryType::RRSIG),
-            "DNSKEY" => Some(QueryType::DNSKEY),
-            "NSEC" => Some(QueryType::NSEC),
-            "NSEC3" => Some(QueryType::NSEC3),
-            "SVCB" => Some(QueryType::SVCB),
-            "HTTPS" => Some(QueryType::HTTPS),
-            _ => None,
-        }
-    }
+define_qtypes! {
+    A      = 1,  "A",
+    NS     = 2,  "NS",
+    CNAME  = 5,  "CNAME",
+    SOA    = 6,  "SOA",
+    PTR    = 12, "PTR",
+    MX     = 15, "MX",
+    TXT    = 16, "TXT",
+    AAAA   = 28, "AAAA",
+    LOC    = 29, "LOC",
+    SRV    = 33, "SRV",
+    NAPTR  = 35, "NAPTR",
+    OPT    = 41, "OPT",
+    DS     = 43, "DS",
+    RRSIG  = 46, "RRSIG",
+    NSEC   = 47, "NSEC",
+    DNSKEY = 48, "DNSKEY",
+    NSEC3  = 50, "NSEC3",
+    SVCB   = 64, "SVCB",
+    HTTPS  = 65, "HTTPS",
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
