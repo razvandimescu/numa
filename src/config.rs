@@ -1,7 +1,7 @@
 use std::collections::HashMap;
-use std::net::Ipv4Addr;
-use std::net::Ipv6Addr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::Deserialize;
 
@@ -146,6 +146,19 @@ impl UpstreamMode {
             UpstreamMode::Odoh => "odoh",
         }
     }
+
+    /// Hedging duplicates the in-flight query against the same upstream to
+    /// rescue tail latency. Beneficial for UDP/DoH/DoT (cheap retransmit /
+    /// h2 stream multiplexing). For ODoH it doubles the relay's HPKE
+    /// seal/unseal load and the sealed-byte footprint a passive observer
+    /// can correlate, with no latency win — the relay hop dominates either
+    /// way. Force-zero in oblivious mode regardless of `hedge_ms`.
+    pub fn hedge_delay(self, hedge_ms: u64) -> Duration {
+        match self {
+            UpstreamMode::Odoh => Duration::ZERO,
+            _ => Duration::from_millis(hedge_ms),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -182,6 +195,16 @@ pub struct UpstreamConfig {
     /// a user who configured ODoH rarely wants a silent non-oblivious path.
     #[serde(default)]
     pub strict: Option<bool>,
+
+    /// Bootstrap IP for the relay host, used when numa is its own system
+    /// resolver (otherwise the ODoH HTTPS client loops resolving through
+    /// itself). TLS still validates the cert against `relay`'s hostname.
+    #[serde(default)]
+    pub relay_ip: Option<IpAddr>,
+
+    /// Same as `relay_ip` but for the target host.
+    #[serde(default)]
+    pub target_ip: Option<IpAddr>,
 }
 
 impl Default for UpstreamConfig {
@@ -199,6 +222,8 @@ impl Default for UpstreamConfig {
             relay: None,
             target: None,
             strict: None,
+            relay_ip: None,
+            target_ip: None,
         }
     }
 }
@@ -208,9 +233,12 @@ impl Default for UpstreamConfig {
 #[derive(Debug)]
 pub struct OdohUpstream {
     pub relay_url: String,
+    pub relay_host: String,
     pub target_host: String,
     pub target_path: String,
     pub strict: bool,
+    pub relay_bootstrap: Option<SocketAddr>,
+    pub target_bootstrap: Option<SocketAddr>,
 }
 
 impl UpstreamConfig {
@@ -246,6 +274,10 @@ impl UpstreamConfig {
             .into());
         }
 
+        let relay_host = relay_url
+            .host_str()
+            .ok_or("upstream.relay has no host")?
+            .to_string();
         let target_host = target_url
             .host_str()
             .ok_or("upstream.target has no host")?
@@ -256,11 +288,17 @@ impl UpstreamConfig {
             target_url.path().to_string()
         };
 
+        let relay_port = relay_url.port_or_known_default().unwrap_or(443);
+        let target_port = target_url.port_or_known_default().unwrap_or(443);
+
         Ok(OdohUpstream {
             relay_url: relay.to_string(),
+            relay_host,
             target_host,
             target_path,
             strict: self.strict.unwrap_or(true),
+            relay_bootstrap: self.relay_ip.map(|ip| SocketAddr::new(ip, relay_port)),
+            target_bootstrap: self.target_ip.map(|ip| SocketAddr::new(ip, target_port)),
         })
     }
 }
@@ -815,6 +853,87 @@ target = "https://odoh.cloudflare-dns.com/dns-query"
         let config: Config = toml::from_str(toml).unwrap();
         let err = config.upstream.odoh_upstream().unwrap_err().to_string();
         assert!(err.contains("upstream.relay"), "got: {err}");
+    }
+
+    #[test]
+    fn odoh_bootstrap_ips_parse_into_socket_addrs() {
+        let toml = r#"
+[upstream]
+mode = "odoh"
+relay = "https://odoh-relay.numa.rs/relay"
+target = "https://odoh.cloudflare-dns.com/dns-query"
+relay_ip = "178.104.229.30"
+target_ip = "104.16.249.249"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let odoh = config.upstream.odoh_upstream().unwrap();
+        assert_eq!(odoh.relay_host, "odoh-relay.numa.rs");
+        assert_eq!(
+            odoh.relay_bootstrap.unwrap().to_string(),
+            "178.104.229.30:443"
+        );
+        assert_eq!(
+            odoh.target_bootstrap.unwrap().to_string(),
+            "104.16.249.249:443"
+        );
+    }
+
+    #[test]
+    fn odoh_bootstrap_ips_optional() {
+        let toml = r#"
+[upstream]
+mode = "odoh"
+relay = "https://odoh-relay.numa.rs/relay"
+target = "https://odoh.cloudflare-dns.com/dns-query"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let odoh = config.upstream.odoh_upstream().unwrap();
+        assert!(odoh.relay_bootstrap.is_none());
+        assert!(odoh.target_bootstrap.is_none());
+    }
+
+    #[test]
+    fn odoh_bootstrap_ip_rejects_garbage() {
+        let toml = r#"
+[upstream]
+mode = "odoh"
+relay = "https://odoh-relay.numa.rs/relay"
+target = "https://odoh.cloudflare-dns.com/dns-query"
+relay_ip = "not-an-ip"
+"#;
+        let err = toml::from_str::<Config>(toml).err().unwrap().to_string();
+        assert!(err.contains("relay_ip"), "got: {err}");
+    }
+
+    #[test]
+    fn odoh_bootstrap_uses_url_port_when_non_default() {
+        let toml = r#"
+[upstream]
+mode = "odoh"
+relay = "https://odoh-relay.numa.rs:8443/relay"
+target = "https://odoh.cloudflare-dns.com/dns-query"
+relay_ip = "178.104.229.30"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let odoh = config.upstream.odoh_upstream().unwrap();
+        assert_eq!(
+            odoh.relay_bootstrap.unwrap().to_string(),
+            "178.104.229.30:8443"
+        );
+    }
+
+    #[test]
+    fn hedge_delay_zeroed_for_odoh_mode() {
+        assert_eq!(
+            UpstreamMode::Odoh.hedge_delay(50),
+            Duration::ZERO,
+            "ODoH mode must zero hedge regardless of configured hedge_ms"
+        );
+        assert_eq!(
+            UpstreamMode::Forward.hedge_delay(50),
+            Duration::from_millis(50),
+            "non-ODoH modes honour configured hedge_ms"
+        );
     }
 
     #[test]

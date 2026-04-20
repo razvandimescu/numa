@@ -17,7 +17,9 @@ use crate::buffer::BytePacketBuffer;
 use crate::cache::DnsCache;
 use crate::config::{build_zone_map, load_config, ConfigLoad};
 use crate::ctx::{handle_query, ServerCtx};
-use crate::forward::{build_https_client, parse_upstream_list, Upstream, UpstreamPool};
+use crate::forward::{
+    build_https_client, build_odoh_client, parse_upstream_list, Upstream, UpstreamPool,
+};
 use crate::odoh::OdohConfigCache;
 use crate::override_store::OverrideStore;
 use crate::query_log::QueryLog;
@@ -94,8 +96,11 @@ pub async fn run(config_path: String) -> crate::Result<()> {
         }
         crate::config::UpstreamMode::Odoh => {
             let odoh = config.upstream.odoh_upstream()?;
-            let client = build_https_client();
-            let target_config = Arc::new(OdohConfigCache::new(odoh.target_host, client.clone()));
+            let client = build_odoh_client(&odoh);
+            let target_config = Arc::new(OdohConfigCache::new(
+                odoh.target_host.clone(),
+                client.clone(),
+            ));
             let primary = vec![Upstream::Odoh {
                 relay_url: odoh.relay_url,
                 target_path: odoh.target_path,
@@ -222,7 +227,7 @@ pub async fn run(config_path: String) -> crate::Result<()> {
         upstream_port: config.upstream.port,
         lan_ip: Mutex::new(crate::lan::detect_lan_ip().unwrap_or(std::net::Ipv4Addr::LOCALHOST)),
         timeout: Duration::from_millis(config.upstream.timeout_ms),
-        hedge_delay: Duration::from_millis(config.upstream.hedge_ms),
+        hedge_delay: resolved_mode.hedge_delay(config.upstream.hedge_ms),
         proxy_tld_suffix: if config.proxy.tld.is_empty() {
             String::new()
         } else {

@@ -176,6 +176,25 @@ pub fn build_https_client() -> reqwest::Client {
 /// and benefit from a larger pool so warm connections survive concurrent
 /// fan-out.
 pub fn build_https_client_with_pool(pool_max_idle_per_host: usize) -> reqwest::Client {
+    https_client_builder(pool_max_idle_per_host)
+        .build()
+        .unwrap_or_default()
+}
+
+/// HTTPS client for the ODoH upstream, with bootstrap-IP overrides applied
+/// so relay/target hostname resolution can bypass system DNS.
+pub fn build_odoh_client(odoh: &crate::config::OdohUpstream) -> reqwest::Client {
+    let mut builder = https_client_builder(1);
+    if let Some(addr) = odoh.relay_bootstrap {
+        builder = builder.resolve(&odoh.relay_host, addr);
+    }
+    if let Some(addr) = odoh.target_bootstrap {
+        builder = builder.resolve(&odoh.target_host, addr);
+    }
+    builder.build().unwrap_or_default()
+}
+
+fn https_client_builder(pool_max_idle_per_host: usize) -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .use_rustls_tls()
         .http2_initial_stream_window_size(65_535)
@@ -185,8 +204,6 @@ pub fn build_https_client_with_pool(pool_max_idle_per_host: usize) -> reqwest::C
         .http2_keep_alive_timeout(Duration::from_secs(10))
         .pool_idle_timeout(Duration::from_secs(300))
         .pool_max_idle_per_host(pool_max_idle_per_host)
-        .build()
-        .unwrap_or_default()
 }
 
 fn build_dot_connector() -> Result<tokio_rustls::TlsConnector> {
