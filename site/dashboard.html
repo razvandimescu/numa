@@ -1244,7 +1244,7 @@ async function refresh() {
 
     // QPS calculation
     const now = Date.now();
-    const encPct = encryptionPct(stats.transport);
+    const encPct = encryptionPct(stats.transport, ['dot', 'doh'], ['udp', 'tcp', 'dot', 'doh']);
     if (prevTotal !== null && prevTime !== null) {
       const dt = (now - prevTime) / 1000;
       const dq = q.total - prevTotal;
@@ -1273,6 +1273,7 @@ async function refresh() {
     renderMemory(stats.memory, stats);
 
   } catch (err) {
+    console.error('[numa dashboard] render failed:', err);
     document.getElementById('statusDot').className = 'status-dot error';
     document.getElementById('statusText').textContent = 'disconnected';
   }
