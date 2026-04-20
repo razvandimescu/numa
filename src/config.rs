@@ -263,25 +263,29 @@ impl UpstreamConfig {
         if relay_url.scheme() != "https" || target_url.scheme() != "https" {
             return Err("upstream.relay and upstream.target must both use https://".into());
         }
-        if relay_url.host_str().is_none() || target_url.host_str().is_none() {
-            return Err("upstream.relay and upstream.target must include a host".into());
-        }
-        if relay_url.host_str() == target_url.host_str() {
-            return Err(format!(
-                "upstream.relay and upstream.target resolve to the same host ({}); the privacy property requires distinct operators",
-                relay_url.host_str().unwrap_or("?")
-            )
-            .into());
-        }
-
         let relay_host = relay_url
             .host_str()
-            .ok_or("upstream.relay has no host")?
+            .ok_or("upstream.relay must include a host")?
             .to_string();
         let target_host = target_url
             .host_str()
-            .ok_or("upstream.target has no host")?
+            .ok_or("upstream.target must include a host")?
             .to_string();
+
+        if relay_host == target_host {
+            return Err(format!(
+                "upstream.relay and upstream.target resolve to the same host ({}); the privacy property requires distinct operators",
+                relay_host
+            )
+            .into());
+        }
+        if let Some(shared) = shared_registrable_domain(&relay_host, &target_host) {
+            return Err(format!(
+                "upstream.relay ({}) and upstream.target ({}) share the registrable domain ({}); the privacy property requires distinct operators",
+                relay_host, target_host, shared
+            )
+            .into());
+        }
         let target_path = if target_url.path().is_empty() {
             "/".to_string()
         } else {
@@ -300,6 +304,20 @@ impl UpstreamConfig {
             relay_bootstrap: self.relay_ip.map(|ip| SocketAddr::new(ip, relay_port)),
             target_bootstrap: self.target_ip.map(|ip| SocketAddr::new(ip, target_port)),
         })
+    }
+}
+
+/// Returns the registrable domain (eTLD+1) shared by both hosts, if any.
+/// Fails open on hosts the PSL can't parse (IP literals, bare TLDs).
+fn shared_registrable_domain(relay_host: &str, target_host: &str) -> Option<String> {
+    let relay = psl::domain(relay_host.as_bytes())?;
+    let target = psl::domain(target_host.as_bytes())?;
+    if relay.as_bytes() == target.as_bytes() {
+        std::str::from_utf8(relay.as_bytes())
+            .ok()
+            .map(str::to_owned)
+    } else {
+        None
     }
 }
 
@@ -828,6 +846,59 @@ target = "https://odoh.example.com/dns-query"
         let config: Config = toml::from_str(toml).unwrap();
         let err = config.upstream.odoh_upstream().unwrap_err().to_string();
         assert!(err.contains("same host"), "got: {err}");
+    }
+
+    #[test]
+    fn odoh_rejects_shared_registrable_domain() {
+        let toml = r#"
+[upstream]
+mode = "odoh"
+relay = "https://r.cloudflare.com/relay"
+target = "https://odoh.cloudflare.com/dns-query"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let err = config.upstream.odoh_upstream().unwrap_err().to_string();
+        assert!(err.contains("registrable domain"), "got: {err}");
+        assert!(err.contains("cloudflare.com"), "got: {err}");
+    }
+
+    #[test]
+    fn odoh_rejects_shared_registrable_under_multi_label_suffix() {
+        let toml = r#"
+[upstream]
+mode = "odoh"
+relay = "https://a.foo.co.uk/relay"
+target = "https://b.foo.co.uk/dns-query"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let err = config.upstream.odoh_upstream().unwrap_err().to_string();
+        assert!(err.contains("foo.co.uk"), "got: {err}");
+    }
+
+    #[test]
+    fn odoh_accepts_distinct_registrable_under_multi_label_suffix() {
+        let toml = r#"
+[upstream]
+mode = "odoh"
+relay = "https://relay.foo.co.uk/relay"
+target = "https://target.bar.co.uk/dns-query"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(config.upstream.odoh_upstream().is_ok());
+    }
+
+    #[test]
+    fn odoh_accepts_distinct_private_psl_suffix_subdomains() {
+        // *.github.io is a public suffix, so foo.github.io and bar.github.io
+        // are independent registrable domains — accept.
+        let toml = r#"
+[upstream]
+mode = "odoh"
+relay = "https://foo.github.io/relay"
+target = "https://bar.github.io/dns-query"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(config.upstream.odoh_upstream().is_ok());
     }
 
     #[test]
