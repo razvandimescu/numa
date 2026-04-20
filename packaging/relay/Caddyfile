@@ -1,0 +1,15 @@
+odoh-relay.example.com {
+    handle /relay {
+        reverse_proxy numa-relay:8443
+    }
+    handle /health {
+        reverse_proxy numa-relay:8443
+    }
+    respond 404
+
+    # Per-request access logs defeat the point of an oblivious relay.
+    # Aggregate counters are exposed at /health on the relay itself.
+    log {
+        output discard
+    }
+}

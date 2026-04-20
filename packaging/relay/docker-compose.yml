@@ -1,0 +1,26 @@
+services:
+  numa-relay:
+    image: ghcr.io/razvandimescu/numa:latest
+    command: ["relay", "8443", "0.0.0.0"]
+    restart: unless-stopped
+    networks: [internal]
+
+  caddy:
+    image: caddy:2
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+    depends_on: [numa-relay]
+    networks: [internal]
+
+networks:
+  internal:
+
+volumes:
+  caddy_data:
+  caddy_config:
