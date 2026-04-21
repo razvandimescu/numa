@@ -975,6 +975,52 @@ check "Same-host relay+target rejected at startup" \
     "same host" \
     "$STARTUP_OUT"
 
+# relay_ip / target_ip must land in the bootstrap resolver's override map,
+# so reqwest connects direct to the configured IPs instead of resolving the
+# hostnames via plain DNS (ODoH's zero-plain-DNS-leak property). Using
+# RFC 5737 TEST-NET-1 IPs — never routable, so the OdohConfigCache won't
+# actually connect, but the override-map wiring is visible in the startup log.
+cat > "$CONFIG" << 'CONF'
+[server]
+bind_addr = "127.0.0.1:5354"
+api_port = 5381
+
+[upstream]
+mode = "odoh"
+relay = "https://odoh-relay.example.com/proxy"
+target = "https://odoh-target.example.org/dns-query"
+relay_ip = "192.0.2.1"
+target_ip = "192.0.2.2"
+
+[cache]
+max_entries = 10000
+
+[blocking]
+enabled = false
+
+[proxy]
+enabled = false
+CONF
+
+RUST_LOG=info "$BINARY" "$CONFIG" > "$LOG" 2>&1 &
+NUMA_PID=$!
+for _ in $(seq 1 30); do
+    curl -sf "http://127.0.0.1:$API_PORT/health" >/dev/null 2>&1 && break
+    sleep 0.1
+done
+
+OVERRIDE_LOG=$(grep 'bootstrap resolver: host overrides' "$LOG" || true)
+check "relay_ip wired into bootstrap override map" \
+    "odoh-relay.example.com=192.0.2.1" \
+    "$OVERRIDE_LOG"
+check "target_ip wired into bootstrap override map" \
+    "odoh-target.example.org=192.0.2.2" \
+    "$OVERRIDE_LOG"
+
+kill "$NUMA_PID" 2>/dev/null || true
+wait "$NUMA_PID" 2>/dev/null || true
+sleep 1
+
 fi  # end Suite 8
 
 # ---- Suite 9: Numa's own ODoH relay (--relay-mode) ----

@@ -13,12 +13,13 @@ use log::{error, info};
 use tokio::net::UdpSocket;
 
 use crate::blocklist::{download_blocklists, parse_blocklist, BlocklistStore};
+use crate::bootstrap_resolver::NumaResolver;
 use crate::buffer::BytePacketBuffer;
 use crate::cache::DnsCache;
 use crate::config::{build_zone_map, load_config, ConfigLoad};
 use crate::ctx::{handle_query, ServerCtx};
 use crate::forward::{
-    build_https_client, build_odoh_client, parse_upstream_list, Upstream, UpstreamPool,
+    build_https_client_with_resolver, parse_upstream_list, Upstream, UpstreamPool,
 };
 use crate::odoh::OdohConfigCache;
 use crate::override_store::OverrideStore;
@@ -48,6 +49,23 @@ pub async fn run(config_path: String) -> crate::Result<()> {
         (dummy, "recursive (root hints)".to_string())
     };
 
+    // Routes numa-originated HTTPS (DoH upstream, ODoH relay/target, blocklist
+    // CDN) away from the system resolver so lookups don't loop back through
+    // numa when it's its own system DNS.
+    // See `docs/implementation/bootstrap-resolver.md`.
+    let resolver_overrides = match config.upstream.mode {
+        crate::config::UpstreamMode::Odoh => config
+            .upstream
+            .odoh_upstream()
+            .map(|o| o.host_ip_overrides())
+            .unwrap_or_default(),
+        _ => std::collections::HashMap::new(),
+    };
+    let bootstrap_resolver: Arc<NumaResolver> = Arc::new(NumaResolver::new(
+        &config.upstream.fallback,
+        resolver_overrides,
+    ));
+
     let (resolved_mode, upstream_auto, pool, upstream_label) = match config.upstream.mode {
         crate::config::UpstreamMode::Auto => {
             info!("auto mode: probing recursive resolution...");
@@ -57,7 +75,7 @@ pub async fn run(config_path: String) -> crate::Result<()> {
                 (crate::config::UpstreamMode::Recursive, false, pool, label)
             } else {
                 log::warn!("recursive probe failed — falling back to Quad9 DoH");
-                let client = build_https_client();
+                let client = build_https_client_with_resolver(1, Some(bootstrap_resolver.clone()));
                 let url = DOH_FALLBACK.to_string();
                 let label = url.clone();
                 let pool = UpstreamPool::new(vec![Upstream::Doh { url, client }], vec![]);
@@ -82,8 +100,16 @@ pub async fn run(config_path: String) -> crate::Result<()> {
                 config.upstream.address.clone()
             };
 
-            let primary = parse_upstream_list(&addrs, config.upstream.port)?;
-            let fallback = parse_upstream_list(&config.upstream.fallback, config.upstream.port)?;
+            let primary = parse_upstream_list(
+                &addrs,
+                config.upstream.port,
+                Some(bootstrap_resolver.clone()),
+            )?;
+            let fallback = parse_upstream_list(
+                &config.upstream.fallback,
+                config.upstream.port,
+                Some(bootstrap_resolver.clone()),
+            )?;
 
             let pool = UpstreamPool::new(primary, fallback);
             let label = pool.label();
@@ -96,7 +122,7 @@ pub async fn run(config_path: String) -> crate::Result<()> {
         }
         crate::config::UpstreamMode::Odoh => {
             let odoh = config.upstream.odoh_upstream()?;
-            let client = build_odoh_client(&odoh);
+            let client = build_https_client_with_resolver(1, Some(bootstrap_resolver.clone()));
             let target_config = Arc::new(OdohConfigCache::new(
                 odoh.target_host.clone(),
                 client.clone(),
@@ -110,7 +136,11 @@ pub async fn run(config_path: String) -> crate::Result<()> {
             let fallback = if odoh.strict {
                 Vec::new()
             } else {
-                parse_upstream_list(&config.upstream.fallback, config.upstream.port)?
+                parse_upstream_list(
+                    &config.upstream.fallback,
+                    config.upstream.port,
+                    Some(bootstrap_resolver.clone()),
+                )?
             };
             let pool = UpstreamPool::new(primary, fallback);
             let label = pool.label();
@@ -405,8 +435,9 @@ pub async fn run(config_path: String) -> crate::Result<()> {
     if config.blocking.enabled && !blocklist_lists.is_empty() {
         let bl_ctx = Arc::clone(&ctx);
         let bl_lists = blocklist_lists.clone();
+        let bl_resolver = bootstrap_resolver.clone();
         tokio::spawn(async move {
-            load_blocklists(&bl_ctx, &bl_lists).await;
+            load_blocklists(&bl_ctx, &bl_lists, Some(bl_resolver.clone())).await;
 
             // Periodic refresh
             let mut interval = tokio::time::interval(Duration::from_secs(refresh_hours * 3600));
@@ -414,7 +445,7 @@ pub async fn run(config_path: String) -> crate::Result<()> {
             loop {
                 interval.tick().await;
                 info!("refreshing blocklists...");
-                load_blocklists(&bl_ctx, &bl_lists).await;
+                load_blocklists(&bl_ctx, &bl_lists, Some(bl_resolver.clone())).await;
             }
         });
     }
@@ -596,8 +627,8 @@ async fn network_watch_loop(ctx: Arc<ServerCtx>) {
     }
 }
 
-async fn load_blocklists(ctx: &ServerCtx, lists: &[String]) {
-    let downloaded = download_blocklists(lists).await;
+async fn load_blocklists(ctx: &ServerCtx, lists: &[String], resolver: Option<Arc<NumaResolver>>) {
+    let downloaded = download_blocklists(lists, resolver).await;
 
     // Parse outside the lock to avoid blocking DNS queries during parse (~100ms)
     let mut all_domains = std::collections::HashSet::new();
@@ -632,8 +663,10 @@ async fn warm_domain(ctx: &ServerCtx, domain: &str) {
 }
 
 async fn doh_keepalive_loop(ctx: Arc<ServerCtx>) {
+    // First tick fires immediately so we surface bootstrap-resolver failures
+    // (unreachable Quad9/Cloudflare, blocked :53, bad upstream hostname) in
+    // the startup logs instead of on the first client query.
     let mut interval = tokio::time::interval(Duration::from_secs(25));
-    interval.tick().await; // skip first immediate tick
     loop {
         interval.tick().await;
         let pool = ctx.upstream_pool.lock().unwrap().clone();

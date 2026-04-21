@@ -113,10 +113,7 @@ impl fmt::Display for Upstream {
     }
 }
 
-pub(crate) fn parse_upstream_addr(
-    s: &str,
-    default_port: u16,
-) -> std::result::Result<SocketAddr, String> {
+pub fn parse_upstream_addr(s: &str, default_port: u16) -> std::result::Result<SocketAddr, String> {
     // Try full socket addr first: "1.2.3.4:5353" or "[::1]:5353"
     if let Ok(addr) = s.parse::<SocketAddr>() {
         return Ok(addr);
@@ -129,19 +126,28 @@ pub(crate) fn parse_upstream_addr(
 }
 
 /// Parse a slice of upstream address strings into `Upstream` values, failing
-/// on the first invalid entry.
-pub fn parse_upstream_list(addrs: &[String], default_port: u16) -> Result<Vec<Upstream>> {
+/// on the first invalid entry. DoH entries use `resolver` (when provided) as
+/// their hostname resolver.
+pub fn parse_upstream_list(
+    addrs: &[String],
+    default_port: u16,
+    resolver: Option<Arc<crate::bootstrap_resolver::NumaResolver>>,
+) -> Result<Vec<Upstream>> {
     addrs
         .iter()
-        .map(|s| parse_upstream(s, default_port))
+        .map(|s| parse_upstream(s, default_port, resolver.clone()))
         .collect()
 }
 
-pub fn parse_upstream(s: &str, default_port: u16) -> Result<Upstream> {
+pub fn parse_upstream(
+    s: &str,
+    default_port: u16,
+    resolver: Option<Arc<crate::bootstrap_resolver::NumaResolver>>,
+) -> Result<Upstream> {
     if s.starts_with("https://") {
         return Ok(Upstream::Doh {
             url: s.to_string(),
-            client: build_https_client(),
+            client: build_https_client_with_resolver(1, resolver),
         });
     }
     // tls://IP:PORT#hostname  or  tls://IP#hostname  (default port 853)
@@ -163,12 +169,16 @@ pub fn parse_upstream(s: &str, default_port: u16) -> Result<Upstream> {
 }
 
 /// HTTP/2 client tuned for DoH/ODoH: small windows for low latency, long-lived
-/// keep-alive. Shared by the DoH upstream and the ODoH config-fetcher +
-/// seal/open path. Pool defaults to one idle conn per host — good for
-/// resolvers that talk to a single upstream; relays that fan out to many
-/// targets should use [`build_https_client_with_pool`].
+/// keep-alive. Pool defaults to one idle conn per host — good for resolvers
+/// that talk to a single upstream; relays that fan out to many targets
+/// should use [`build_https_client_with_pool`].
+///
+/// Uses the system resolver. Callers running inside `serve::run` pass the
+/// shared [`crate::bootstrap_resolver::NumaResolver`] via
+/// [`build_https_client_with_resolver`] to avoid the self-loop documented
+/// in `docs/implementation/bootstrap-resolver.md`.
 pub fn build_https_client() -> reqwest::Client {
-    build_https_client_with_pool(1)
+    build_https_client_with_resolver(1, None)
 }
 
 /// Same shape as [`build_https_client`], but caller picks
@@ -176,20 +186,18 @@ pub fn build_https_client() -> reqwest::Client {
 /// and benefit from a larger pool so warm connections survive concurrent
 /// fan-out.
 pub fn build_https_client_with_pool(pool_max_idle_per_host: usize) -> reqwest::Client {
-    https_client_builder(pool_max_idle_per_host)
-        .build()
-        .unwrap_or_default()
+    build_https_client_with_resolver(pool_max_idle_per_host, None)
 }
 
-/// HTTPS client for the ODoH upstream, with bootstrap-IP overrides applied
-/// so relay/target hostname resolution can bypass system DNS.
-pub fn build_odoh_client(odoh: &crate::config::OdohUpstream) -> reqwest::Client {
-    let mut builder = https_client_builder(1);
-    if let Some(addr) = odoh.relay_bootstrap {
-        builder = builder.resolve(&odoh.relay_host, addr);
-    }
-    if let Some(addr) = odoh.target_bootstrap {
-        builder = builder.resolve(&odoh.target_host, addr);
+/// [`build_https_client`] with an optional custom DNS resolver. Numa wires
+/// [`crate::bootstrap_resolver::NumaResolver`] here.
+pub fn build_https_client_with_resolver(
+    pool_max_idle_per_host: usize,
+    resolver: Option<Arc<crate::bootstrap_resolver::NumaResolver>>,
+) -> reqwest::Client {
+    let mut builder = https_client_builder(pool_max_idle_per_host);
+    if let Some(r) = resolver {
+        builder = builder.dns_resolver(r);
     }
     builder.build().unwrap_or_default()
 }
@@ -553,6 +561,9 @@ async fn forward_doh_raw(
 
 /// Send a lightweight keepalive query to a DoH upstream to prevent
 /// the HTTP/2 + TLS connection from going idle and being torn down.
+/// The first call doubles as a startup warm-up: bootstrap-resolver failures
+/// (unreachable Quad9/Cloudflare defaults, misconfigured hostname upstream)
+/// surface here rather than on the first client query.
 pub async fn keepalive_doh(upstream: &Upstream) {
     if let Upstream::Doh { url, client } = upstream {
         // Query for . NS — minimal, always succeeds, response is small
@@ -565,7 +576,9 @@ pub async fn keepalive_doh(upstream: &Upstream) {
             0x00, 0x02, // type NS
             0x00, 0x01, // class IN
         ];
-        let _ = forward_doh_raw(wire, url, client, Duration::from_secs(5)).await;
+        if let Err(e) = forward_doh_raw(wire, url, client, Duration::from_secs(5)).await {
+            log::warn!("DoH keepalive to {} failed: {}", url, e);
+        }
     }
 }
 
