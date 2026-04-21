@@ -245,8 +245,8 @@ impl OdohUpstream {
     /// Per-host IP overrides for the bootstrap resolver, lifted from
     /// `relay_ip`/`target_ip`. Keeps the "zero plain-DNS leak for ODoH
     /// endpoints" property when numa is its own system resolver.
-    pub fn host_ip_overrides(&self) -> std::collections::HashMap<String, Vec<std::net::IpAddr>> {
-        let mut out = std::collections::HashMap::new();
+    pub fn host_ip_overrides(&self) -> std::collections::BTreeMap<String, Vec<std::net::IpAddr>> {
+        let mut out = std::collections::BTreeMap::new();
         if let Some(addr) = self.relay_bootstrap {
             out.entry(self.relay_host.clone())
                 .or_insert_with(Vec::new)

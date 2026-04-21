@@ -975,11 +975,10 @@ check "Same-host relay+target rejected at startup" \
     "same host" \
     "$STARTUP_OUT"
 
-# relay_ip / target_ip must land in the bootstrap resolver's override map,
-# so reqwest connects direct to the configured IPs instead of resolving the
-# hostnames via plain DNS (ODoH's zero-plain-DNS-leak property). Using
-# RFC 5737 TEST-NET-1 IPs — never routable, so the OdohConfigCache won't
-# actually connect, but the override-map wiring is visible in the startup log.
+# Guards ODoH's zero-plain-DNS-leak property: relay_ip / target_ip must
+# land in the bootstrap resolver's override map so reqwest connects direct
+# to the configured IPs instead of resolving the hostnames via plain DNS.
+# RFC 5737 TEST-NET-1 IPs (unroutable).
 cat > "$CONFIG" << 'CONF'
 [server]
 bind_addr = "127.0.0.1:5354"
@@ -1019,7 +1018,6 @@ check "target_ip wired into bootstrap override map" \
 
 kill "$NUMA_PID" 2>/dev/null || true
 wait "$NUMA_PID" 2>/dev/null || true
-sleep 1
 
 fi  # end Suite 8
 

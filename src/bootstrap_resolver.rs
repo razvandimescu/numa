@@ -13,7 +13,7 @@
 //!    servers, with TCP fallback on UDP timeout (for networks that block
 //!    outbound UDP:53 — see memory: `project_network_udp_hostile.md`).
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
@@ -34,7 +34,7 @@ const DEFAULT_BOOTSTRAP: &[SocketAddr] = &[
 
 pub struct NumaResolver {
     bootstrap: Vec<SocketAddr>,
-    overrides: HashMap<String, Vec<IpAddr>>,
+    overrides: BTreeMap<String, Vec<IpAddr>>,
 }
 
 impl NumaResolver {
@@ -44,7 +44,7 @@ impl NumaResolver {
     /// `fallback` entries are filtered to IP literals only — hostnames would
     /// re-introduce the self-loop inside the resolver itself. Empty or
     /// unusable fallback yields the hardcoded default (Quad9 + Cloudflare).
-    pub fn new(fallback: &[String], overrides: HashMap<String, Vec<IpAddr>>) -> Self {
+    pub fn new(fallback: &[String], overrides: BTreeMap<String, Vec<IpAddr>>) -> Self {
         let mut bootstrap: Vec<SocketAddr> = Vec::with_capacity(fallback.len());
         for entry in fallback {
             match crate::forward::parse_upstream_addr(entry, 53) {
@@ -71,11 +71,10 @@ impl NumaResolver {
             source
         );
         if !overrides.is_empty() {
-            let mut pairs: Vec<String> = overrides
+            let pairs: Vec<String> = overrides
                 .iter()
-                .flat_map(|(host, ips)| ips.iter().map(move |ip| format!("{}={}", host, ip)))
+                .flat_map(|(host, addrs)| addrs.iter().map(move |ip| format!("{}={}", host, ip)))
                 .collect();
-            pairs.sort();
             info!(
                 "bootstrap resolver: host overrides (skip DNS, connect direct): {}",
                 pairs.join(", ")
@@ -185,7 +184,7 @@ mod tests {
 
     #[test]
     fn empty_fallback_uses_defaults() {
-        let r = NumaResolver::new(&[], HashMap::new());
+        let r = NumaResolver::new(&[], BTreeMap::new());
         let got: Vec<String> = r.bootstrap().iter().map(|s| s.to_string()).collect();
         assert_eq!(got, vec!["9.9.9.9:53", "1.1.1.1:53"]);
     }
@@ -197,14 +196,14 @@ mod tests {
             "dns.quad9.net".to_string(),
             "1.1.1.1:5353".to_string(),
         ];
-        let r = NumaResolver::new(&fallback, HashMap::new());
+        let r = NumaResolver::new(&fallback, BTreeMap::new());
         let got: Vec<String> = r.bootstrap().iter().map(|s| s.to_string()).collect();
         assert_eq!(got, vec!["9.9.9.9:53", "1.1.1.1:5353"]);
     }
 
     #[test]
     fn override_returns_configured_ips_without_dns() {
-        let mut overrides = HashMap::new();
+        let mut overrides = BTreeMap::new();
         overrides.insert(
             "odoh-relay.example".to_string(),
             vec![IpAddr::V4(Ipv4Addr::new(178, 104, 229, 30))],
@@ -220,7 +219,7 @@ mod tests {
 
     #[test]
     fn override_supports_multiple_ips_including_ipv6() {
-        let mut overrides = HashMap::new();
+        let mut overrides = BTreeMap::new();
         overrides.insert(
             "dual.example".to_string(),
             vec![

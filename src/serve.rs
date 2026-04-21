@@ -59,7 +59,7 @@ pub async fn run(config_path: String) -> crate::Result<()> {
             .odoh_upstream()
             .map(|o| o.host_ip_overrides())
             .unwrap_or_default(),
-        _ => std::collections::HashMap::new(),
+        _ => std::collections::BTreeMap::new(),
     };
     let bootstrap_resolver: Arc<NumaResolver> = Arc::new(NumaResolver::new(
         &config.upstream.fallback,
