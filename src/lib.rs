@@ -1,5 +1,6 @@
 pub mod api;
 pub mod blocklist;
+pub mod bootstrap_resolver;
 pub mod buffer;
 pub mod cache;
 pub mod config;

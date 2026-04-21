@@ -357,12 +357,17 @@ mod tests {
 
 const RETRY_DELAYS_SECS: &[u64] = &[2, 10, 30];
 
-pub async fn download_blocklists(lists: &[String]) -> Vec<(String, String)> {
-    let client = reqwest::Client::builder()
+pub async fn download_blocklists(
+    lists: &[String],
+    resolver: Option<std::sync::Arc<crate::bootstrap_resolver::NumaResolver>>,
+) -> Vec<(String, String)> {
+    let mut builder = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
-        .gzip(true)
-        .build()
-        .unwrap_or_default();
+        .gzip(true);
+    if let Some(r) = resolver {
+        builder = builder.dns_resolver(r);
+    }
+    let client = builder.build().unwrap_or_default();
 
     let fetches = lists.iter().map(|url| {
         let client = &client;

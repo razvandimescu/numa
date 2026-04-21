@@ -56,7 +56,7 @@ impl ForwardingRuleConfig {
         }
         let mut primary = Vec::with_capacity(self.upstream.len());
         for s in &self.upstream {
-            let u = crate::forward::parse_upstream(s, 53)
+            let u = crate::forward::parse_upstream(s, 53, None)
                 .map_err(|e| format!("forwarding rule for upstream '{}': {}", s, e))?;
             primary.push(u);
         }
@@ -239,6 +239,26 @@ pub struct OdohUpstream {
     pub strict: bool,
     pub relay_bootstrap: Option<SocketAddr>,
     pub target_bootstrap: Option<SocketAddr>,
+}
+
+impl OdohUpstream {
+    /// Per-host IP overrides for the bootstrap resolver, lifted from
+    /// `relay_ip`/`target_ip`. Keeps the "zero plain-DNS leak for ODoH
+    /// endpoints" property when numa is its own system resolver.
+    pub fn host_ip_overrides(&self) -> std::collections::HashMap<String, Vec<std::net::IpAddr>> {
+        let mut out = std::collections::HashMap::new();
+        if let Some(addr) = self.relay_bootstrap {
+            out.entry(self.relay_host.clone())
+                .or_insert_with(Vec::new)
+                .push(addr.ip());
+        }
+        if let Some(addr) = self.target_bootstrap {
+            out.entry(self.target_host.clone())
+                .or_insert_with(Vec::new)
+                .push(addr.ip());
+        }
+        out
+    }
 }
 
 impl UpstreamConfig {

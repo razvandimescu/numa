@@ -383,7 +383,7 @@ fn run_default(rt: &tokio::runtime::Runtime) {
 
 /// Library-to-library: Numa forward_query_raw vs Hickory resolver.lookup.
 fn run_direct(rt: &tokio::runtime::Runtime) {
-    let upstream = numa::forward::parse_upstream(DOH_UPSTREAM, 443).expect("failed to parse");
+    let upstream = numa::forward::parse_upstream(DOH_UPSTREAM, 443, None).expect("failed to parse");
     let resolver = rt.block_on(build_hickory_resolver());
     let timeout = Duration::from_secs(10);
 
@@ -609,9 +609,9 @@ fn run_hedge_multi(rt: &tokio::runtime::Runtime, iterations: usize) {
         DOMAINS.len()
     );
 
-    let primary = numa::forward::parse_upstream(DOH_UPSTREAM, 443).expect("failed to parse");
-    let primary_dual = numa::forward::parse_upstream(DOH_UPSTREAM, 443).expect("failed to parse");
-    let secondary_dual = numa::forward::parse_upstream(DOH_UPSTREAM, 443).expect("failed to parse");
+    let primary = numa::forward::parse_upstream(DOH_UPSTREAM, 443, None).expect("failed to parse");
+    let primary_dual = numa::forward::parse_upstream(DOH_UPSTREAM, 443, None).expect("failed to parse");
+    let secondary_dual = numa::forward::parse_upstream(DOH_UPSTREAM, 443, None).expect("failed to parse");
     let resolver = rt.block_on(build_hickory_resolver());
 
     println!("Warming up...");
@@ -810,7 +810,7 @@ fn run_diag(rt: &tokio::runtime::Runtime) {
 fn run_diag_clients(rt: &tokio::runtime::Runtime) {
     println!("Client diagnostic: reqwest vs Hickory (20 queries to {DOH_UPSTREAM})\n");
 
-    let upstream = numa::forward::parse_upstream(DOH_UPSTREAM, 443).expect("failed to parse");
+    let upstream = numa::forward::parse_upstream(DOH_UPSTREAM, 443, None).expect("failed to parse");
     let resolver = rt.block_on(build_hickory_resolver());
     let timeout = Duration::from_secs(10);
 
