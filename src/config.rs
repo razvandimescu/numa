@@ -451,8 +451,12 @@ fn default_upstream_port() -> u16 {
 fn default_timeout_ms() -> u64 {
     5000
 }
+/// Off by default: hedging fires a second upstream query, which silently
+/// doubles the count at the provider — hurts quota'd DNS (NextDNS, Control
+/// D). Opt in with `hedge_ms = 10` for tail-latency rescue on flaky nets
+/// or handshake-slow DoT.
 fn default_hedge_ms() -> u64 {
-    10
+    0
 }
 
 #[derive(Deserialize)]

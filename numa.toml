@@ -30,11 +30,13 @@ api_port = 5380
 # fallback = ["8.8.8.8", "1.1.1.1"]            # tried only when all primaries fail
 # port = 53                                     # default port for addresses without :port
 # timeout_ms = 3000
-# hedge_ms = 10                                  # request hedging delay (ms). After this delay
-#                                                # without a response, fires a parallel request
-#                                                # to the same upstream. Rescues packet loss (UDP),
-#                                                # dispatch spikes (DoH), TLS stalls (DoT).
-#                                                # Set to 0 to disable. Default: 10
+# hedge_ms = 0                                   # request hedging delay (ms). Default: 0 (off).
+#                                                # Set to e.g. 10 to fire a parallel upstream
+#                                                # request after 10ms of silence — rescues packet
+#                                                # loss (UDP), dispatch spikes (DoH), TLS stalls
+#                                                # (DoT). Doubles the upstream query count, so
+#                                                # leave off for quota'd providers (NextDNS,
+#                                                # Control D).
 
 # ODoH (Oblivious DNS-over-HTTPS, RFC 9230). The relay sees your IP but
 # not the question; the target sees the question but not your IP. Numa
