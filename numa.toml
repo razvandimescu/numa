@@ -22,6 +22,7 @@ api_port = 5380
 # [upstream]
 # mode = "forward"                              # "forward" (default) — relay to upstream
 #                                               # "recursive" — resolve from root hints (no address needed)
+#                                               # "odoh" — Oblivious DoH (see ODoH block below)
 # address = "9.9.9.9"                           # single upstream (plain UDP)
 # address = ["192.168.1.1", "9.9.9.9:5353"]    # multiple upstreams — SRTT picks fastest
 # address = "https://dns.quad9.net/dns-query"   # DNS-over-HTTPS (encrypted)
@@ -34,6 +35,22 @@ api_port = 5380
 #                                                # to the same upstream. Rescues packet loss (UDP),
 #                                                # dispatch spikes (DoH), TLS stalls (DoT).
 #                                                # Set to 0 to disable. Default: 10
+
+# ODoH (Oblivious DNS-over-HTTPS, RFC 9230). The relay sees your IP but
+# not the question; the target sees the question but not your IP. Numa
+# refuses same-operator relay+target configs by default (eTLD+1 check).
+# [upstream]
+# mode = "odoh"
+# relay = "https://odoh-relay.numa.rs/proxy"
+# target = "https://odoh.cloudflare-dns.com/dns-query"
+# strict = true                                 # default: refuse to downgrade to `fallback`
+#                                                # on relay failure. Set false to allow a
+#                                                # non-oblivious fallback path.
+# relay_ip = "178.104.229.30"                   # optional: pin IPs so numa doesn't leak the
+# target_ip = "104.16.249.249"                  # relay/target hostnames via the bootstrap
+#                                                # resolver on cold boot when numa is its
+#                                                # own system DNS. See docs/implementation/
+#                                                # bootstrap-resolver.md.
 # root_hints = [                                # only used in recursive mode
 #     "198.41.0.4",      # a.root-servers.net (Verisign)
 #     "199.9.14.201",    # b.root-servers.net (USC-ISI)
