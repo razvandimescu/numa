@@ -1,6 +1,7 @@
 /target
 /build-dir
 CLAUDE.md
+.claude/
 docs/
 site/blog/posts/
 ios/
