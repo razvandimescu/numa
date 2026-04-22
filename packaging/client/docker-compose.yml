@@ -1,0 +1,15 @@
+services:
+  numa:
+    image: ghcr.io/razvandimescu/numa:latest
+    command: ["/etc/numa/numa.toml"]
+    ports:
+      - "53:53/udp"
+      - "53:53/tcp"
+      - "5380:5380/tcp"    # dashboard + REST API
+    volumes:
+      - ./numa.toml:/etc/numa/numa.toml:ro
+      - numa_data:/var/lib/numa
+    restart: unless-stopped
+
+volumes:
+  numa_data:

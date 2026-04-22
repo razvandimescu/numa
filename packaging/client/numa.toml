@@ -1,0 +1,23 @@
+# Numa — ODoH client mode (docker-compose starter).
+# Sends every DNS query through an independent relay + target pair so
+# neither operator sees both your IP and your question. See
+# docs/implementation/odoh-integration.md for the protocol details and
+# packaging/client/README.md for deploy notes.
+
+[server]
+bind_addr = "0.0.0.0:53"
+api_bind_addr = "0.0.0.0"
+data_dir = "/var/lib/numa"
+
+[upstream]
+mode = "odoh"
+# Numa's own relay (Hetzner, systemd + Caddy). Swap to any other public
+# ODoH relay if you'd rather not depend on a single operator; the protocol
+# tolerates it, and Numa refuses same-operator relay+target by default.
+relay = "https://odoh-relay.numa.rs/relay"
+target = "https://odoh.cloudflare-dns.com/dns-query"
+# strict = true (default). Relay failure → SERVFAIL, never silent downgrade.
+
+[blocking]
+enabled = true
+# Default blocklist (Hagezi Pro). Edit the `lists` array to taste.

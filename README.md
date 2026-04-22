@@ -125,6 +125,10 @@ docker run -d --name numa --network host \
 
 Multi-arch: `linux/amd64` and `linux/arm64`.
 
+Turnkey compose recipes:
+- [`packaging/client/`](packaging/client/) — ODoH client mode (anonymous DNS), Numa + starter `numa.toml`.
+- [`packaging/relay/`](packaging/relay/) — public ODoH relay, Numa + Caddy + ACME.
+
 ## How It Compares
 
 | | Pi-hole | AdGuard Home | Unbound | Numa |
