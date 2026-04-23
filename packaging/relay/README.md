@@ -39,10 +39,3 @@ curl https://<hostname>/health
 
 Then point any ODoH client at `https://<hostname>/relay` and watch the
 counters tick.
-
-## Listing on the public ecosystem
-
-DNSCrypt's [v3/odoh-relays.md](https://github.com/DNSCrypt/dnscrypt-resolvers/blob/master/v3/odoh-relays.md)
-is the canonical list. The pruned 2025-09-16 commit shows one public ODoH
-relay survived the cull — running this compose file doubles global supply.
-Open a PR there once your relay has been up for ~24 hours.
