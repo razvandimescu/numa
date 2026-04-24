@@ -83,8 +83,13 @@ pub fn router(ctx: Arc<ServerCtx>) -> Router {
 }
 
 async fn dashboard() -> impl IntoResponse {
+    // Revalidate each load so browsers don't keep serving a stale
+    // dashboard across numa upgrades.
     (
-        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
         DASHBOARD_HTML,
     )
 }
@@ -1244,6 +1249,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.headers()
+                .get(header::CACHE_CONTROL)
+                .map(|v| v.to_str().unwrap()),
+            Some("no-cache"),
+            "dashboard must revalidate to avoid stale HTML across upgrades"
+        );
         let body = axum::body::to_bytes(resp.into_body(), 100000)
             .await
             .unwrap();
