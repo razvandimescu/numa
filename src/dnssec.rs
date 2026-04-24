@@ -882,6 +882,28 @@ fn record_rdata_canonical(record: &DnsRecord) -> Vec<u8> {
             rdata.extend(type_bitmap);
             rdata
         }
+        DnsRecord::SOA {
+            mname,
+            rname,
+            serial,
+            refresh,
+            retry,
+            expire,
+            minimum,
+            ..
+        } => {
+            let mname_wire = name_to_wire(mname);
+            let rname_wire = name_to_wire(rname);
+            let mut rdata = Vec::with_capacity(mname_wire.len() + rname_wire.len() + 20);
+            rdata.extend(&mname_wire);
+            rdata.extend(&rname_wire);
+            rdata.extend(&serial.to_be_bytes());
+            rdata.extend(&refresh.to_be_bytes());
+            rdata.extend(&retry.to_be_bytes());
+            rdata.extend(&expire.to_be_bytes());
+            rdata.extend(&minimum.to_be_bytes());
+            rdata
+        }
         DnsRecord::UNKNOWN { data, .. } => data.clone(),
         DnsRecord::RRSIG { .. } => Vec::new(),
     }

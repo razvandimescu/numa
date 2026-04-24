@@ -24,6 +24,17 @@ pub enum DnsRecord {
         host: String,
         ttl: u32,
     },
+    SOA {
+        domain: String,
+        mname: String,
+        rname: String,
+        serial: u32,
+        refresh: u32,
+        retry: u32,
+        expire: u32,
+        minimum: u32,
+        ttl: u32,
+    },
     CNAME {
         domain: String,
         host: String,
@@ -100,6 +111,7 @@ impl DnsRecord {
             | DnsRecord::RRSIG { domain, .. }
             | DnsRecord::NSEC { domain, .. }
             | DnsRecord::NSEC3 { domain, .. }
+            | DnsRecord::SOA { domain, .. }
             | DnsRecord::UNKNOWN { domain, .. } => domain,
         }
     }
@@ -111,6 +123,7 @@ impl DnsRecord {
             DnsRecord::NS { .. } => QueryType::NS,
             DnsRecord::CNAME { .. } => QueryType::CNAME,
             DnsRecord::MX { .. } => QueryType::MX,
+            DnsRecord::SOA { .. } => QueryType::SOA,
             DnsRecord::DNSKEY { .. } => QueryType::DNSKEY,
             DnsRecord::DS { .. } => QueryType::DS,
             DnsRecord::RRSIG { .. } => QueryType::RRSIG,
@@ -132,6 +145,7 @@ impl DnsRecord {
             | DnsRecord::RRSIG { ttl, .. }
             | DnsRecord::NSEC { ttl, .. }
             | DnsRecord::NSEC3 { ttl, .. }
+            | DnsRecord::SOA { ttl, .. }
             | DnsRecord::UNKNOWN { ttl, .. } => *ttl,
         }
     }
@@ -172,6 +186,12 @@ impl DnsRecord {
                     + next_hashed_owner.capacity()
                     + type_bitmap.capacity()
             }
+            DnsRecord::SOA {
+                domain,
+                mname,
+                rname,
+                ..
+            } => domain.capacity() + mname.capacity() + rname.capacity(),
             DnsRecord::UNKNOWN { domain, data, .. } => domain.capacity() + data.capacity(),
         }
     }
@@ -188,6 +208,7 @@ impl DnsRecord {
             | DnsRecord::RRSIG { ttl, .. }
             | DnsRecord::NSEC { ttl, .. }
             | DnsRecord::NSEC3 { ttl, .. }
+            | DnsRecord::SOA { ttl, .. }
             | DnsRecord::UNKNOWN { ttl, .. } => *ttl = new_ttl,
         }
     }
@@ -365,8 +386,31 @@ impl DnsRecord {
                     ttl,
                 })
             }
+            QueryType::SOA => {
+                // MNAME/RNAME compressible per RFC 1035 §3.3.13 — decompress to avoid stale pointers on re-emit.
+                let mut mname = String::with_capacity(64);
+                buffer.read_qname(&mut mname)?;
+                let mut rname = String::with_capacity(64);
+                buffer.read_qname(&mut rname)?;
+                let serial = buffer.read_u32()?;
+                let refresh = buffer.read_u32()?;
+                let retry = buffer.read_u32()?;
+                let expire = buffer.read_u32()?;
+                let minimum = buffer.read_u32()?;
+                Ok(DnsRecord::SOA {
+                    domain,
+                    mname,
+                    rname,
+                    serial,
+                    refresh,
+                    retry,
+                    expire,
+                    minimum,
+                    ttl,
+                })
+            }
             _ => {
-                // SOA, TXT, SRV, etc. — stored as opaque bytes until parsed natively
+                // TXT, SRV, HTTPS, SVCB, etc. — stored as opaque bytes until parsed natively
                 let data = buffer.get_range(buffer.pos(), data_len as usize)?.to_vec();
                 buffer.step(data_len as usize)?;
                 Ok(DnsRecord::UNKNOWN {
@@ -429,6 +473,30 @@ impl DnsRecord {
                 buffer.write_qname(host)?;
                 let size = buffer.pos() - (pos + 2);
                 buffer.set_u16(pos, size as u16)?;
+            }
+            DnsRecord::SOA {
+                ref domain,
+                ref mname,
+                ref rname,
+                serial,
+                refresh,
+                retry,
+                expire,
+                minimum,
+                ttl,
+            } => {
+                write_header(buffer, domain, QueryType::SOA.to_num(), ttl)?;
+                let rdlen_pos = buffer.pos();
+                buffer.write_u16(0)?;
+                buffer.write_qname(mname)?;
+                buffer.write_qname(rname)?;
+                buffer.write_u32(serial)?;
+                buffer.write_u32(refresh)?;
+                buffer.write_u32(retry)?;
+                buffer.write_u32(expire)?;
+                buffer.write_u32(minimum)?;
+                let rdlen = buffer.pos() - (rdlen_pos + 2);
+                buffer.set_u16(rdlen_pos, rdlen as u16)?;
             }
             DnsRecord::AAAA {
                 ref domain,
