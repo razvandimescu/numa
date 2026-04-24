@@ -126,6 +126,10 @@ jobs:
           # ssh://aur@aur.archlinux.org/<package-name>.git
           git clone ssh://aur@aur.archlinux.org/$AUR_PKGNAME.git aur-repo
 
+          # AUR's git server no longer advertises HEAD's symref, so clone
+          # lands in detached HEAD. Attach to master before committing.
+          git -C aur-repo checkout master
+
           cp PKGBUILD aur-repo/
           cd aur-repo
 
