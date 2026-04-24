@@ -408,6 +408,33 @@ fn cache_and_parse(
 /// Used for both stale-entry refresh and proactive cache warming.
 pub async fn refresh_entry(ctx: &ServerCtx, qname: &str, qtype: QueryType) {
     let query = DnsPacket::query(0, qname, qtype);
+
+    // Forwarding rules must win here, mirroring `resolve_query` — otherwise
+    // refresh re-resolves private zones through the default upstream and
+    // poisons the cache with NXDOMAIN.
+    if let Some(pool) = crate::system_dns::match_forwarding_rule(qname, &ctx.forwarding_rules) {
+        let mut buf = BytePacketBuffer::new();
+        if query.write(&mut buf).is_ok() {
+            if let Ok(wire) = forward_with_failover_raw(
+                buf.filled(),
+                pool,
+                &ctx.srtt,
+                ctx.timeout,
+                ctx.hedge_delay,
+            )
+            .await
+            {
+                ctx.cache.write().unwrap().insert_wire(
+                    qname,
+                    qtype,
+                    &wire,
+                    DnssecStatus::Indeterminate,
+                );
+            }
+        }
+        return;
+    }
+
     if ctx.upstream_mode == UpstreamMode::Recursive {
         if let Ok(resp) = crate::recursive::resolve_recursive(
             qname,
@@ -1244,14 +1271,8 @@ mod tests {
 
     #[tokio::test]
     async fn pipeline_filter_aaaa_leaves_a_queries_alone() {
-        let mut upstream_resp = DnsPacket::new();
-        upstream_resp.header.response = true;
-        upstream_resp.header.rescode = ResultCode::NOERROR;
-        upstream_resp.answers.push(DnsRecord::A {
-            domain: "example.com".to_string(),
-            addr: Ipv4Addr::new(93, 184, 216, 34),
-            ttl: 300,
-        });
+        let upstream_resp =
+            crate::testutil::a_record_response("example.com", Ipv4Addr::new(93, 184, 216, 34), 300);
         let upstream_addr = crate::testutil::mock_upstream(upstream_resp).await;
 
         let mut ctx = crate::testutil::test_ctx().await;
@@ -1471,14 +1492,8 @@ mod tests {
 
     #[tokio::test]
     async fn pipeline_forwarding_returns_upstream_answer() {
-        let mut upstream_resp = DnsPacket::new();
-        upstream_resp.header.response = true;
-        upstream_resp.header.rescode = ResultCode::NOERROR;
-        upstream_resp.answers.push(DnsRecord::A {
-            domain: "internal.corp".to_string(),
-            addr: Ipv4Addr::new(10, 1, 2, 3),
-            ttl: 600,
-        });
+        let upstream_resp =
+            crate::testutil::a_record_response("internal.corp", Ipv4Addr::new(10, 1, 2, 3), 600);
         let upstream_addr = crate::testutil::mock_upstream(upstream_resp).await;
 
         let mut ctx = crate::testutil::test_ctx().await;
@@ -1505,14 +1520,8 @@ mod tests {
     async fn pipeline_forwarding_fails_over_to_second_upstream() {
         let dead = crate::testutil::blackhole_upstream();
 
-        let mut live_resp = DnsPacket::new();
-        live_resp.header.response = true;
-        live_resp.header.rescode = ResultCode::NOERROR;
-        live_resp.answers.push(DnsRecord::A {
-            domain: "internal.corp".to_string(),
-            addr: Ipv4Addr::new(10, 9, 9, 9),
-            ttl: 600,
-        });
+        let live_resp =
+            crate::testutil::a_record_response("internal.corp", Ipv4Addr::new(10, 9, 9, 9), 600);
         let live = crate::testutil::mock_upstream(live_resp).await;
 
         let mut ctx = crate::testutil::test_ctx().await;
@@ -1534,14 +1543,8 @@ mod tests {
 
     #[tokio::test]
     async fn pipeline_default_pool_reports_upstream_path() {
-        let mut upstream_resp = DnsPacket::new();
-        upstream_resp.header.response = true;
-        upstream_resp.header.rescode = ResultCode::NOERROR;
-        upstream_resp.answers.push(DnsRecord::A {
-            domain: "example.com".to_string(),
-            addr: Ipv4Addr::new(93, 184, 216, 34),
-            ttl: 300,
-        });
+        let upstream_resp =
+            crate::testutil::a_record_response("example.com", Ipv4Addr::new(93, 184, 216, 34), 300);
         let upstream_addr = crate::testutil::mock_upstream(upstream_resp).await;
 
         let ctx = crate::testutil::test_ctx().await;
@@ -1555,5 +1558,68 @@ mod tests {
         assert_eq!(path, QueryPath::Upstream);
         assert_eq!(resp.header.rescode, ResultCode::NOERROR);
         assert_eq!(resp.answers.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn refresh_entry_honors_forwarding_rule() {
+        let rule_resp =
+            crate::testutil::a_record_response("internal.corp", Ipv4Addr::new(10, 0, 0, 42), 300);
+        let rule_upstream = crate::testutil::mock_upstream(rule_resp).await;
+
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.forwarding_rules = vec![ForwardingRule::new(
+            "corp".to_string(),
+            UpstreamPool::new(vec![Upstream::Udp(rule_upstream)], vec![]),
+        )];
+        // Default pool points at a blackhole — if the refresh queries it
+        // instead of the rule, the test fails because nothing is cached.
+        ctx.upstream_pool
+            .lock()
+            .unwrap()
+            .set_primary(vec![Upstream::Udp(crate::testutil::blackhole_upstream())]);
+        let ctx = Arc::new(ctx);
+
+        refresh_entry(&ctx, "internal.corp", QueryType::A).await;
+
+        let cached = ctx
+            .cache
+            .read()
+            .unwrap()
+            .lookup("internal.corp", QueryType::A)
+            .expect("refresh must populate cache via forwarding rule");
+        match &cached.answers[0] {
+            DnsRecord::A { addr, .. } => assert_eq!(*addr, Ipv4Addr::new(10, 0, 0, 42)),
+            other => panic!("expected A record, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn refresh_entry_prefers_forwarding_rule_over_recursive() {
+        let rule_resp =
+            crate::testutil::a_record_response("db.internal.corp", Ipv4Addr::new(10, 0, 0, 7), 300);
+        let rule_upstream = crate::testutil::mock_upstream(rule_resp).await;
+
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.upstream_mode = UpstreamMode::Recursive;
+        ctx.forwarding_rules = vec![ForwardingRule::new(
+            "corp".to_string(),
+            UpstreamPool::new(vec![Upstream::Udp(rule_upstream)], vec![]),
+        )];
+        // No root_hints — recursion would fail immediately, proving that
+        // the rule branch fired instead.
+        let ctx = Arc::new(ctx);
+
+        refresh_entry(&ctx, "db.internal.corp", QueryType::A).await;
+
+        let cached = ctx
+            .cache
+            .read()
+            .unwrap()
+            .lookup("db.internal.corp", QueryType::A)
+            .expect("recursive-mode refresh must still consult forwarding rules");
+        match &cached.answers[0] {
+            DnsRecord::A { addr, .. } => assert_eq!(*addr, Ipv4Addr::new(10, 0, 0, 7)),
+            other => panic!("expected A record, got {:?}", other),
+        }
     }
 }

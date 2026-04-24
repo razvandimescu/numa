@@ -12,11 +12,13 @@ use crate::cache::DnsCache;
 use crate::config::UpstreamMode;
 use crate::ctx::ServerCtx;
 use crate::forward::{Upstream, UpstreamPool};
+use crate::header::ResultCode;
 use crate::health::HealthMeta;
 use crate::lan::PeerStore;
 use crate::override_store::OverrideStore;
 use crate::packet::DnsPacket;
 use crate::query_log::QueryLog;
+use crate::record::DnsRecord;
 use crate::service_store::ServiceStore;
 use crate::srtt::SrttCache;
 use crate::stats::ServerStats;
@@ -65,6 +67,20 @@ pub async fn test_ctx() -> ServerCtx {
         mobile_port: 8765,
         filter_aaaa: false,
     }
+}
+
+/// Build a NOERROR response containing a single A record — the shape used
+/// repeatedly by pipeline/forwarding tests to seed `mock_upstream`.
+pub fn a_record_response(domain: &str, addr: Ipv4Addr, ttl: u32) -> DnsPacket {
+    let mut pkt = DnsPacket::new();
+    pkt.header.response = true;
+    pkt.header.rescode = ResultCode::NOERROR;
+    pkt.answers.push(DnsRecord::A {
+        domain: domain.to_string(),
+        addr,
+        ttl,
+    });
+    pkt
 }
 
 /// Spawn a UDP socket that replies to the first DNS query with the given
