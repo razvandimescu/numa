@@ -342,12 +342,13 @@ pub async fn run(config_path: String) -> crate::Result<()> {
     };
 
     // Title row: center within the box
+    let tag_line = "DNS that governs itself";
     let title = format!(
-        "{b}NUMA{r}  {it}DNS that governs itself{r}  {d}v{}{r}",
+        "{b}NUMA{r}  {it}{tag_line}{r}  {d}v{}{r}",
         env!("CARGO_PKG_VERSION")
     );
     // The title contains ANSI codes; visible length is ~38 chars. Pad to fill the box.
-    let title_visible_len = 4 + 2 + 24 + 2 + 1 + env!("CARGO_PKG_VERSION").len() + 1;
+    let title_visible_len = 4 + 2 + tag_line.len() + 2 + 1 + env!("CARGO_PKG_VERSION").len() + 1;
     let title_pad = w.saturating_sub(title_visible_len);
     eprintln!("\n{o}  ╔{bar_top}╗{r}");
     eprint!("{o}  ║{r} {title}");
