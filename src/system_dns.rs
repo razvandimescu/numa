@@ -467,100 +467,58 @@ struct WindowsInterfaceDns {
     servers: Vec<String>,
 }
 
+// PowerShell snippet that emits a JSON object keyed by adapter friendly name.
+// Locale-invariant: cmdlet property names don't translate, unlike the
+// `ipconfig /all` text we used to scrape — non-English Windows installs
+// matched zero adapter headers and `numa install` aborted with "no active
+// network interfaces found" (issue #146).
+#[cfg(windows)]
+const ENUMERATE_INTERFACES_PS: &str = r#"
+$ErrorActionPreference = 'Stop'
+$result = [ordered]@{}
+$adapters = Get-NetAdapter | Where-Object { $_.Status -eq 'Up' }
+foreach ($a in $adapters) {
+    $v4 = @(Get-DnsClientServerAddress -InterfaceIndex $a.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses
+    $v6 = @(Get-DnsClientServerAddress -InterfaceIndex $a.ifIndex -AddressFamily IPv6 -ErrorAction SilentlyContinue).ServerAddresses
+    $iface = Get-NetIPInterface -InterfaceIndex $a.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue
+    $dhcp = if ($iface) { $iface.Dhcp -eq 'Enabled' } else { $false }
+    $result[$a.Name] = @{ dhcp = $dhcp; servers = @($v4 + $v6) }
+}
+$result | ConvertTo-Json -Compress -Depth 4
+"#;
+
 #[cfg(any(windows, test))]
-fn parse_ipconfig_interfaces(text: &str) -> std::collections::HashMap<String, WindowsInterfaceDns> {
-    let mut interfaces = std::collections::HashMap::new();
-    let mut current_adapter: Option<String> = None;
-    let mut current_dhcp = false;
-    let mut current_dns: Vec<String> = Vec::new();
-    let mut in_dns_block = false;
-    let mut disconnected = false;
-
-    for line in text.lines() {
-        let trimmed = line.trim();
-
-        // Adapter section headers start at column 0
-        if !trimmed.is_empty() && !line.starts_with(' ') && !line.starts_with('\t') {
-            if let Some(name) = current_adapter.take() {
-                if !disconnected {
-                    interfaces.insert(
-                        name,
-                        WindowsInterfaceDns {
-                            dhcp: current_dhcp,
-                            servers: std::mem::take(&mut current_dns),
-                        },
-                    );
-                }
-                current_dns.clear();
-            }
-            in_dns_block = false;
-            current_dhcp = false;
-            disconnected = false;
-
-            // "XXX adapter YYY:" (English) / "XXX Adapter YYY:" (German)
-            let lower = trimmed.to_lowercase();
-            if let Some(pos) = lower.find(" adapter ") {
-                let after = &trimmed[pos + " adapter ".len()..];
-                let name = after.trim_end_matches(':').trim();
-                if !name.is_empty() {
-                    current_adapter = Some(name.to_string());
-                }
-            }
-        } else if current_adapter.is_some() {
-            if trimmed.contains("Media disconnected") || trimmed.contains("Medienstatus") {
-                disconnected = true;
-            } else if trimmed.contains("DHCP") && trimmed.contains(". .") {
-                current_dhcp = trimmed
-                    .split(':')
-                    .next_back()
-                    .map(|v| {
-                        let v = v.trim().to_lowercase();
-                        v == "yes" || v == "ja"
-                    })
-                    .unwrap_or(false);
-                in_dns_block = false;
-            } else if trimmed.contains("DNS Servers") || trimmed.contains("DNS-Server") {
-                in_dns_block = true;
-                if let Some(ip) = trimmed.split(':').next_back() {
-                    let ip = ip.trim();
-                    if ip.parse::<std::net::IpAddr>().is_ok() {
-                        current_dns.push(ip.to_string());
-                    }
-                }
-            } else if in_dns_block {
-                if trimmed.parse::<std::net::IpAddr>().is_ok() {
-                    current_dns.push(trimmed.to_string());
-                } else {
-                    in_dns_block = false;
-                }
-            }
-        }
+fn parse_powershell_interfaces(
+    json: &str,
+) -> Result<std::collections::HashMap<String, WindowsInterfaceDns>, String> {
+    let trimmed = json.trim();
+    if trimmed.is_empty() {
+        return Ok(std::collections::HashMap::new());
     }
-
-    if let Some(name) = current_adapter {
-        if !disconnected {
-            interfaces.insert(
-                name,
-                WindowsInterfaceDns {
-                    dhcp: current_dhcp,
-                    servers: current_dns,
-                },
-            );
-        }
-    }
-
-    interfaces
+    serde_json::from_str(trimmed).map_err(|e| format!("invalid powershell JSON: {}", e))
 }
 
 #[cfg(windows)]
 fn get_windows_interfaces() -> Result<std::collections::HashMap<String, WindowsInterfaceDns>, String>
 {
-    let output = std::process::Command::new("ipconfig")
-        .arg("/all")
+    let output = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            ENUMERATE_INTERFACES_PS,
+        ])
         .output()
-        .map_err(|e| format!("failed to run ipconfig /all: {}", e))?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    Ok(parse_ipconfig_interfaces(&text))
+        .map_err(|e| format!("failed to run powershell: {}", e))?;
+    if !output.status.success() {
+        return Err(format!(
+            "powershell adapter query failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    parse_powershell_interfaces(&String::from_utf8_lossy(&output.stdout))
 }
 
 #[cfg(windows)]
@@ -2033,20 +1991,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_ipconfig_dhcp_and_static() {
-        let sample = "\
-Ethernet adapter Ethernet:
-
-   DHCP Enabled. . . . . . . . . . . : Yes
-   DNS Servers . . . . . . . . . . . : 8.8.8.8
-                                        8.8.4.4
-
-Wireless LAN adapter Wi-Fi:
-
-   DHCP Enabled. . . . . . . . . . . : No
-   DNS Servers . . . . . . . . . . . : 1.1.1.1
-";
-        let result = parse_ipconfig_interfaces(sample);
+    fn parse_powershell_dhcp_and_static() {
+        // Shape emitted by ENUMERATE_INTERFACES_PS — adapter name keys, each
+        // value carries DHCP state and merged IPv4+IPv6 server list.
+        let sample = r#"{"Ethernet":{"dhcp":true,"servers":["8.8.8.8","8.8.4.4"]},"Wi-Fi":{"dhcp":false,"servers":["1.1.1.1"]}}"#;
+        let result = parse_powershell_interfaces(sample).expect("parse failed");
         assert_eq!(result.len(), 2);
         assert_eq!(
             result["Ethernet"],
@@ -2062,6 +2011,22 @@ Wireless LAN adapter Wi-Fi:
                 servers: vec!["1.1.1.1".into()],
             }
         );
+    }
+
+    #[test]
+    fn parse_powershell_empty_when_no_adapters_up() {
+        // Get-NetAdapter | Where Status=Up returns nothing → empty hashtable
+        // → ConvertTo-Json emits "{}". Must produce an empty map, not error,
+        // so install_windows() can surface the right "no active interfaces"
+        // message instead of a JSON parse failure.
+        assert!(parse_powershell_interfaces("{}").unwrap().is_empty());
+        assert!(parse_powershell_interfaces("").unwrap().is_empty());
+        assert!(parse_powershell_interfaces("   \n").unwrap().is_empty());
+    }
+
+    #[test]
+    fn parse_powershell_rejects_garbage() {
+        assert!(parse_powershell_interfaces("not json").is_err());
     }
 
     #[test]
@@ -2160,23 +2125,6 @@ Wireless LAN adapter Wi-Fi:
         let mixed = "nameserver 127.0.0.1\nnameserver 1.1.1.1\n";
         assert!(resolv_conf_has_real_upstream(mixed));
         assert!(!resolv_conf_is_numa_managed(mixed));
-    }
-
-    #[test]
-    fn parse_ipconfig_skips_disconnected() {
-        let sample = "\
-Ethernet adapter Ethernet 2:
-
-   Media State . . . . . . . . . . . : Media disconnected
-
-Wireless LAN adapter Wi-Fi:
-
-   DHCP Enabled. . . . . . . . . . . : Yes
-   DNS Servers . . . . . . . . . . . : 192.168.1.1
-";
-        let result = parse_ipconfig_interfaces(sample);
-        assert_eq!(result.len(), 1);
-        assert!(result.contains_key("Wi-Fi"));
     }
 
     #[test]
