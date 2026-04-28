@@ -724,6 +724,28 @@ mod tests {
     }
 
     #[test]
+    fn build_zone_map_accepts_ptr() {
+        let zones = vec![ZoneRecord {
+            domain: "1.0.168.192.in-addr.arpa".into(),
+            record_type: "PTR".into(),
+            value: "router.lan".into(),
+            ttl: 300,
+        }];
+        let map = build_zone_map(&zones).expect("PTR must load");
+        let records = map
+            .get("1.0.168.192.in-addr.arpa")
+            .and_then(|m| m.get(&QueryType::PTR))
+            .expect("PTR record present");
+        match &records[0] {
+            DnsRecord::PTR { host, ttl, .. } => {
+                assert_eq!(host, "router.lan");
+                assert_eq!(*ttl, 300);
+            }
+            other => panic!("expected PTR, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn api_binds_localhost_by_default() {
         assert_eq!(ServerConfig::default().api_bind_addr, "127.0.0.1");
     }
@@ -1381,6 +1403,14 @@ pub fn build_zone_map(zones: &[ZoneRecord]) -> Result<ZoneMap> {
             "CNAME" => (
                 QueryType::CNAME,
                 DnsRecord::CNAME {
+                    domain: domain.clone(),
+                    host: zone.value.clone(),
+                    ttl: zone.ttl,
+                },
+            ),
+            "PTR" => (
+                QueryType::PTR,
+                DnsRecord::PTR {
                     domain: domain.clone(),
                     host: zone.value.clone(),
                     ttl: zone.ttl,

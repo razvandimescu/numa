@@ -40,6 +40,11 @@ pub enum DnsRecord {
         host: String,
         ttl: u32,
     },
+    PTR {
+        domain: String,
+        host: String,
+        ttl: u32,
+    },
     MX {
         domain: String,
         priority: u16,
@@ -104,6 +109,7 @@ impl DnsRecord {
             DnsRecord::A { domain, .. }
             | DnsRecord::NS { domain, .. }
             | DnsRecord::CNAME { domain, .. }
+            | DnsRecord::PTR { domain, .. }
             | DnsRecord::MX { domain, .. }
             | DnsRecord::AAAA { domain, .. }
             | DnsRecord::DNSKEY { domain, .. }
@@ -122,6 +128,7 @@ impl DnsRecord {
             DnsRecord::AAAA { .. } => QueryType::AAAA,
             DnsRecord::NS { .. } => QueryType::NS,
             DnsRecord::CNAME { .. } => QueryType::CNAME,
+            DnsRecord::PTR { .. } => QueryType::PTR,
             DnsRecord::MX { .. } => QueryType::MX,
             DnsRecord::SOA { .. } => QueryType::SOA,
             DnsRecord::DNSKEY { .. } => QueryType::DNSKEY,
@@ -138,6 +145,7 @@ impl DnsRecord {
             DnsRecord::A { ttl, .. }
             | DnsRecord::NS { ttl, .. }
             | DnsRecord::CNAME { ttl, .. }
+            | DnsRecord::PTR { ttl, .. }
             | DnsRecord::MX { ttl, .. }
             | DnsRecord::AAAA { ttl, .. }
             | DnsRecord::DNSKEY { ttl, .. }
@@ -153,9 +161,9 @@ impl DnsRecord {
     pub fn heap_bytes(&self) -> usize {
         match self {
             DnsRecord::A { domain, .. } => domain.capacity(),
-            DnsRecord::NS { domain, host, .. } | DnsRecord::CNAME { domain, host, .. } => {
-                domain.capacity() + host.capacity()
-            }
+            DnsRecord::NS { domain, host, .. }
+            | DnsRecord::CNAME { domain, host, .. }
+            | DnsRecord::PTR { domain, host, .. } => domain.capacity() + host.capacity(),
             DnsRecord::MX { domain, host, .. } => domain.capacity() + host.capacity(),
             DnsRecord::AAAA { domain, .. } => domain.capacity(),
             DnsRecord::DNSKEY {
@@ -201,6 +209,7 @@ impl DnsRecord {
             DnsRecord::A { ttl, .. }
             | DnsRecord::NS { ttl, .. }
             | DnsRecord::CNAME { ttl, .. }
+            | DnsRecord::PTR { ttl, .. }
             | DnsRecord::MX { ttl, .. }
             | DnsRecord::AAAA { ttl, .. }
             | DnsRecord::DNSKEY { ttl, .. }
@@ -267,6 +276,15 @@ impl DnsRecord {
                 Ok(DnsRecord::CNAME {
                     domain,
                     host: cname,
+                    ttl,
+                })
+            }
+            QueryType::PTR => {
+                let mut ptr = String::with_capacity(64);
+                buffer.read_qname(&mut ptr)?;
+                Ok(DnsRecord::PTR {
+                    domain,
+                    host: ptr,
                     ttl,
                 })
             }
@@ -460,6 +478,18 @@ impl DnsRecord {
                 let size = buffer.pos() - (pos + 2);
                 buffer.set_u16(pos, size as u16)?;
             }
+            DnsRecord::PTR {
+                ref domain,
+                ref host,
+                ttl,
+            } => {
+                write_header(buffer, domain, QueryType::PTR.to_num(), ttl)?;
+                let pos = buffer.pos();
+                buffer.write_u16(0)?;
+                buffer.write_qname(host)?;
+                let size = buffer.pos() - (pos + 2);
+                buffer.set_u16(pos, size as u16)?;
+            }
             DnsRecord::MX {
                 ref domain,
                 priority,
@@ -637,6 +667,18 @@ mod tests {
         record.write(&mut buf).unwrap();
         buf.seek(0).unwrap();
         DnsRecord::read(&mut buf).unwrap()
+    }
+
+    #[test]
+    fn ptr_round_trip() {
+        let rec = DnsRecord::PTR {
+            domain: "9.9.9.9.in-addr.arpa".into(),
+            host: "dns.quad9.net".into(),
+            ttl: 3600,
+        };
+        let parsed = round_trip(&rec);
+        assert_eq!(rec, parsed);
+        assert_eq!(parsed.query_type(), QueryType::PTR);
     }
 
     #[test]
