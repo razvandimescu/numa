@@ -144,6 +144,13 @@ tld = "numa"
 # value = "127.0.0.1"
 # ttl = 60
 
+# Reverse-DNS (PTR) for LAN hosts — makes tcpdump/access logs readable
+# [[zones]]
+# domain = "1.0.168.192.in-addr.arpa"   # 192.168.0.1 reversed + .in-addr.arpa
+# record_type = "PTR"
+# value = "router.lan"
+# ttl = 300
+
 # DNSSEC signature validation (requires mode = "recursive")
 # [dnssec]
 # enabled = false             # opt-in: verify chain of trust from root KSK

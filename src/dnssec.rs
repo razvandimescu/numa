@@ -814,8 +814,9 @@ fn record_rdata_canonical(record: &DnsRecord) -> Vec<u8> {
     match record {
         DnsRecord::A { addr, .. } => addr.octets().to_vec(),
         DnsRecord::AAAA { addr, .. } => addr.octets().to_vec(),
-        DnsRecord::NS { host, .. } => name_to_wire(host),
-        DnsRecord::CNAME { host, .. } => name_to_wire(host),
+        DnsRecord::NS { host, .. }
+        | DnsRecord::CNAME { host, .. }
+        | DnsRecord::PTR { host, .. } => name_to_wire(host),
         DnsRecord::MX { priority, host, .. } => {
             let mut rdata = Vec::with_capacity(2 + host.len() + 2);
             rdata.extend(&priority.to_be_bytes());

@@ -364,6 +364,12 @@ domain = "mail.local"
 record_type = "MX"
 value = "10 smtp.local"
 ttl = 60
+
+[[zones]]
+domain = "1.0.168.192.in-addr.arpa"
+record_type = "PTR"
+value = "router.lan"
+ttl = 60
 CONF
 
 RUST_LOG=info "$BINARY" "$CONFIG" > "$LOG" 2>&1 &
@@ -380,6 +386,11 @@ check "Local A record (test.local)" \
 check "Local MX record (mail.local)" \
     "smtp.local" \
     "$($DIG mail.local MX +short)"
+
+# PTR in 192.168/16 — proves zone_map beats RFC 6303 NXDOMAIN shortcut
+check "Local PTR record (192.168.0.1 → router.lan)" \
+    "router.lan" \
+    "$($DIG -x 192.168.0.1 +short)"
 
 check "Non-local domain still resolves" \
     "." \
