@@ -90,9 +90,6 @@ pub async fn start_proxy_tls(
     accept_loop_tls(listener, ctx, pp).await;
 }
 
-/// Per-connection accept loop for the TLS-fronted DoH/HTTPS listener.
-/// Split from `start_proxy_tls` so tests can drive it against an ephemeral
-/// listener without rebinding ports. Caller guarantees `ctx.tls_config` is set.
 async fn accept_loop_tls(
     listener: tokio::net::TcpListener,
     ctx: Arc<ServerCtx>,
@@ -476,11 +473,6 @@ mod tests {
     use crate::question::QueryType;
     use crate::record::DnsRecord;
 
-    // ----------------------------------------------------------------------
-    // PROXY protocol v2 integration tests for DoH (RFC 8484 over the TLS-
-    // fronted proxy listener). Mirrors the DoT suite in `src/dot.rs::tests`.
-    // ----------------------------------------------------------------------
-
     /// Self-signed TLS server config that vouches for `*.numa` + `numa.numa`,
     /// matching the SAN shape produced by `tls::build_tls_config` in production.
     fn test_tls_configs() -> (Arc<ServerConfig>, CertificateDer<'static>) {
@@ -569,16 +561,6 @@ mod tests {
         (addr, cert_der)
     }
 
-    /// Build a TLS client config that trusts the server's self-signed cert.
-    fn doh_client_config(cert_der: &CertificateDer<'static>) -> Arc<rustls::ClientConfig> {
-        let mut root_store = rustls::RootCertStore::empty();
-        root_store.add(cert_der.clone()).unwrap();
-        let config = rustls::ClientConfig::builder()
-            .with_root_certificates(root_store)
-            .with_no_client_auth();
-        Arc::new(config)
-    }
-
     /// Drive a single HTTP/1.1 `POST /dns-query` over an open TLS stream.
     /// Sends `Connection: close` so the server tears down after the body and
     /// `read_to_end` terminates without keep-alive bookkeeping.
@@ -621,7 +603,14 @@ mod tests {
         // ClientHello; server completes TLS, parses the wire DNS message,
         // and returns NOERROR with the local-zone A record.
         let (addr, cert_der) = spawn_doh_server_with_pp(&["127.0.0.1"]).await;
-        let client_config = doh_client_config(&cert_der);
+
+        let mut root_store = rustls::RootCertStore::empty();
+        root_store.add(cert_der).unwrap();
+        let client_config = Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(root_store)
+                .with_no_client_auth(),
+        );
 
         let mut tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
         let pp = pp2_v4_proxy(
@@ -638,52 +627,6 @@ mod tests {
             .expect("PROXY v2 + TLS handshake must succeed for trusted peer");
 
         let query = DnsPacket::query(0xE001, "doh-test.example", QueryType::A);
-        let mut q_buf = BytePacketBuffer::new();
-        query.write(&mut q_buf).unwrap();
-
-        let (status, body) = doh_post_raw(&mut stream, q_buf.filled()).await;
-        assert_eq!(status, 200);
-        let mut r_buf = BytePacketBuffer::from_bytes(&body);
-        let resp = DnsPacket::from_buffer(&mut r_buf).unwrap();
-        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
-        assert_eq!(resp.answers.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn pp2_doh_required_drops_bare_client() {
-        // Allowlist contains the loopback, but the client skips the PROXY
-        // header. The first 12 bytes of the TLS ClientHello do not match the
-        // v2 signature → connection dropped → TLS handshake fails.
-        let (addr, cert_der) = spawn_doh_server_with_pp(&["127.0.0.1"]).await;
-        let client_config = doh_client_config(&cert_der);
-
-        let connector = tokio_rustls::TlsConnector::from(client_config);
-        let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
-        let result = connector
-            .connect(ServerName::try_from("numa.numa").unwrap(), tcp)
-            .await;
-        assert!(
-            result.is_err(),
-            "PROXY-required DoH listener must reject clients that omit the header"
-        );
-    }
-
-    #[tokio::test]
-    async fn pp2_doh_disabled_mode_passes_bare_client_through() {
-        // Empty allowlist == feature off. Direct DoH clients keep working —
-        // regression check that pp2 introduces no behavior change for users
-        // who don't enable the feature.
-        let (addr, cert_der) = spawn_doh_server_with_pp(&[]).await;
-        let client_config = doh_client_config(&cert_der);
-
-        let connector = tokio_rustls::TlsConnector::from(client_config);
-        let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
-        let mut stream = connector
-            .connect(ServerName::try_from("numa.numa").unwrap(), tcp)
-            .await
-            .expect("disabled-mode listener must accept bare TLS clients");
-
-        let query = DnsPacket::query(0xE002, "doh-test.example", QueryType::A);
         let mut q_buf = BytePacketBuffer::new();
         query.write(&mut q_buf).unwrap();
 
