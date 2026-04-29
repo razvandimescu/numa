@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ipnet::IpNet;
-use log::{debug, warn};
+use log::{debug, info, warn};
 use proxy_header::io::ProxiedStream;
 use proxy_header::ParseConfig;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -27,7 +27,6 @@ use crate::ctx::ServerCtx;
 #[derive(Clone, Debug)]
 pub struct PpConfig {
     pub from: Vec<IpNet>,
-    pub max_size: u16,
     pub header_timeout: Duration,
 }
 
@@ -56,13 +55,34 @@ impl PpConfig {
         }
         Ok(Some(PpConfig {
             from,
-            max_size: cfg.max_size,
             header_timeout: Duration::from_millis(cfg.header_timeout_ms),
         }))
     }
 
     fn allows(&self, peer: IpAddr) -> bool {
         self.from.iter().any(|n| n.contains(&peer))
+    }
+}
+
+/// Parse a listener's `proxy_protocol` config and log the outcome.
+/// Returns `Err(())` if the config is invalid (caller should disable the
+/// listener). Returns `Ok(None)` when the feature is off, `Ok(Some(_))`
+/// when enabled.
+#[allow(clippy::result_unit_err)]
+pub fn init(listener: &str, cfg: &ProxyProtocolConfig) -> Result<Option<Arc<PpConfig>>, ()> {
+    match PpConfig::from_config(cfg) {
+        Ok(Some(pp)) => {
+            info!(
+                "{listener}: PROXY v2 enabled, trusting {} CIDR(s)",
+                cfg.from.len()
+            );
+            Ok(Some(Arc::new(pp)))
+        }
+        Ok(None) => Ok(None),
+        Err(e) => {
+            warn!("{listener}: invalid proxy_protocol config ({e}) — listener disabled");
+            Err(())
+        }
     }
 }
 
@@ -203,7 +223,6 @@ mod tests {
     fn cfg(from: &[&str]) -> ProxyProtocolConfig {
         ProxyProtocolConfig {
             from: from.iter().map(|s| s.to_string()).collect(),
-            max_size: 512,
             header_timeout_ms: 5000,
         }
     }
@@ -216,14 +235,18 @@ mod tests {
 
     #[test]
     fn parses_exact_ipv4() {
-        let pp = PpConfig::from_config(&cfg(&["127.0.0.1"])).unwrap().unwrap();
+        let pp = PpConfig::from_config(&cfg(&["127.0.0.1"]))
+            .unwrap()
+            .unwrap();
         assert!(pp.allows("127.0.0.1".parse().unwrap()));
         assert!(!pp.allows("127.0.0.2".parse().unwrap()));
     }
 
     #[test]
     fn parses_ipv4_cidr() {
-        let pp = PpConfig::from_config(&cfg(&["10.0.0.0/8"])).unwrap().unwrap();
+        let pp = PpConfig::from_config(&cfg(&["10.0.0.0/8"]))
+            .unwrap()
+            .unwrap();
         assert!(pp.allows("10.255.255.255".parse().unwrap()));
         assert!(!pp.allows("11.0.0.1".parse().unwrap()));
     }

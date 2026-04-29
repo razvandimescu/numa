@@ -130,7 +130,6 @@ tld = "numa"
 # non-listed senders are dropped before any read.
 # [proxy.proxy_protocol]
 # from = ["10.0.0.0/8", "127.0.0.1"]  # CIDR allowlist of trusted L4 front-ends
-# max_size = 512                       # bytes; cap on the PROXY v2 header
 # header_timeout_ms = 5000             # ms; kill stalled-header connections fast
 
 # Pre-configured services (numa.numa is always added automatically)
@@ -178,7 +177,6 @@ tld = "numa"
 # PROXY v2 also attaches to DoT — same semantics as [proxy.proxy_protocol].
 # [dot.proxy_protocol]
 # from = ["10.0.0.0/8"]
-# max_size = 512
 # header_timeout_ms = 5000
 
 # LAN service discovery via mDNS (disabled by default — no network traffic unless enabled)

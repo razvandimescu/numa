@@ -571,9 +571,9 @@ impl Default for ProxyConfig {
 
 /// PROXY protocol v2 settings for an L4-fronted listener.
 ///
-/// Naming mirrors PowerDNS Recursor's `proxy-protocol-from` /
-/// `proxy-protocol-maximum-size` for least operator surprise. An empty
-/// `from` allowlist disables the feature on this listener.
+/// Naming mirrors PowerDNS Recursor's `proxy-protocol-from` for least
+/// operator surprise. An empty `from` allowlist disables the feature on
+/// this listener.
 #[derive(Deserialize, Clone, Debug)]
 pub struct ProxyProtocolConfig {
     /// CIDR allowlist of TCP peers permitted to send PROXY v2 headers.
@@ -583,11 +583,6 @@ pub struct ProxyProtocolConfig {
     /// are dropped before any read.
     #[serde(default)]
     pub from: Vec<String>,
-
-    /// Maximum declared PROXY v2 `addr_len`, in bytes. Default 512
-    /// matches dnsdist's `setProxyProtocolMaximumPayloadSize` default.
-    #[serde(default = "default_pp_max_size")]
-    pub max_size: u16,
 
     /// Header read timeout, in milliseconds. Default 5000 matches
     /// hyper-server. Separate knob from TLS HANDSHAKE_TIMEOUT — different
@@ -600,15 +595,11 @@ impl Default for ProxyProtocolConfig {
     fn default() -> Self {
         ProxyProtocolConfig {
             from: Vec::new(),
-            max_size: default_pp_max_size(),
             header_timeout_ms: default_pp_header_timeout_ms(),
         }
     }
 }
 
-fn default_pp_max_size() -> u16 {
-    512
-}
 fn default_pp_header_timeout_ms() -> u64 {
     5000
 }

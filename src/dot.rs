@@ -83,19 +83,9 @@ pub async fn start_dot(ctx: Arc<ServerCtx>, config: &DotConfig) {
         },
     };
 
-    let pp = match PpConfig::from_config(&config.proxy_protocol) {
-        Ok(p) => p,
-        Err(e) => {
-            warn!("DoT: invalid proxy_protocol config ({}) — DoT disabled", e);
-            return;
-        }
+    let Ok(pp) = pp2::init("DoT", &config.proxy_protocol) else {
+        return;
     };
-    if pp.is_some() {
-        info!(
-            "DoT: PROXY v2 enabled, trusting {} CIDR(s)",
-            config.proxy_protocol.from.len()
-        );
-    }
 
     let bind_addr: IpAddr = config
         .bind_addr
@@ -117,11 +107,10 @@ pub async fn start_dot(ctx: Arc<ServerCtx>, config: &DotConfig) {
 async fn accept_loop(
     listener: TcpListener,
     acceptor: TlsAcceptor,
-    pp: Option<PpConfig>,
+    pp: Option<Arc<PpConfig>>,
     ctx: Arc<ServerCtx>,
 ) {
     let semaphore = Arc::new(Semaphore::new(MAX_CONNECTIONS));
-    let pp = pp.map(Arc::new);
 
     loop {
         let (tcp_stream, tcp_peer) = match listener.accept().await {
@@ -428,9 +417,7 @@ mod tests {
 
     /// Spin up a DoT listener with a PROXY v2 allowlist. `pp_from` is the list
     /// of CIDRs/IPs trusted to send PROXY v2 headers; empty = feature disabled.
-    async fn spawn_dot_server_with_pp(
-        pp_from: &[&str],
-    ) -> (SocketAddr, CertificateDer<'static>) {
+    async fn spawn_dot_server_with_pp(pp_from: &[&str]) -> (SocketAddr, CertificateDer<'static>) {
         let (server_tls, cert_der) = test_tls_configs();
 
         let upstream_addr = crate::testutil::blackhole_upstream();
@@ -465,11 +452,10 @@ mod tests {
 
         let pp_cfg = crate::config::ProxyProtocolConfig {
             from: pp_from.iter().map(|s| s.to_string()).collect(),
-            // Use a short timeout so the truncated-header test doesn't drag.
+            // Short timeout so the truncated-header test doesn't drag.
             header_timeout_ms: 500,
-            ..Default::default()
         };
-        let pp = PpConfig::from_config(&pp_cfg).unwrap();
+        let pp = PpConfig::from_config(&pp_cfg).unwrap().map(Arc::new);
 
         tokio::spawn(accept_loop(listener, acceptor, pp, ctx));
 
@@ -670,13 +656,10 @@ mod tests {
             .unwrap();
         // After the listener's 500ms header timeout, the server closes us.
         let mut buf = [0u8; 16];
-        let read_res =
-            tokio::time::timeout(Duration::from_secs(2), tcp.read(&mut buf)).await;
+        let read_res = tokio::time::timeout(Duration::from_secs(2), tcp.read(&mut buf)).await;
         match read_res {
             Ok(Ok(0)) | Ok(Err(_)) => { /* expected: EOF or connection reset */ }
-            Ok(Ok(n)) => panic!(
-                "expected the server to drop the connection, got {n} bytes back"
-            ),
+            Ok(Ok(n)) => panic!("expected the server to drop the connection, got {n} bytes back"),
             Err(_) => panic!("server did not drop the connection within 2s"),
         }
     }
