@@ -526,8 +526,9 @@ pub async fn run(config_path: String) -> crate::Result<()> {
     if config.proxy.enabled && config.proxy.tls_port > 0 && ctx.tls_config.is_some() {
         let proxy_ctx = Arc::clone(&ctx);
         let tls_port = config.proxy.tls_port;
+        let pp_cfg = config.proxy.proxy_protocol.clone();
         tokio::spawn(async move {
-            crate::proxy::start_proxy_tls(proxy_ctx, tls_port, proxy_bind).await;
+            crate::proxy::start_proxy_tls(proxy_ctx, tls_port, proxy_bind, &pp_cfg).await;
         });
     }
 

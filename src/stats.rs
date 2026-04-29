@@ -106,6 +106,11 @@ pub struct ServerStats {
     upstream_transport_doh: u64,
     upstream_transport_dot: u64,
     upstream_transport_odoh: u64,
+    pub(crate) proxy_v2_accepted: u64,
+    pub(crate) proxy_v2_rejected_untrusted: u64,
+    pub(crate) proxy_v2_rejected_signature: u64,
+    pub(crate) proxy_v2_local_command: u64,
+    pub(crate) proxy_v2_timeout: u64,
     started_at: Instant,
 }
 
@@ -235,6 +240,11 @@ impl ServerStats {
             upstream_transport_doh: 0,
             upstream_transport_dot: 0,
             upstream_transport_odoh: 0,
+            proxy_v2_accepted: 0,
+            proxy_v2_rejected_untrusted: 0,
+            proxy_v2_rejected_signature: 0,
+            proxy_v2_local_command: 0,
+            proxy_v2_timeout: 0,
             started_at: Instant::now(),
         }
     }
@@ -303,6 +313,11 @@ impl ServerStats {
             upstream_transport_doh: self.upstream_transport_doh,
             upstream_transport_dot: self.upstream_transport_dot,
             upstream_transport_odoh: self.upstream_transport_odoh,
+            proxy_v2_accepted: self.proxy_v2_accepted,
+            proxy_v2_rejected_untrusted: self.proxy_v2_rejected_untrusted,
+            proxy_v2_rejected_signature: self.proxy_v2_rejected_signature,
+            proxy_v2_local_command: self.proxy_v2_local_command,
+            proxy_v2_timeout: self.proxy_v2_timeout,
         }
     }
 
@@ -353,4 +368,9 @@ pub struct StatsSnapshot {
     pub upstream_transport_doh: u64,
     pub upstream_transport_dot: u64,
     pub upstream_transport_odoh: u64,
+    pub proxy_v2_accepted: u64,
+    pub proxy_v2_rejected_untrusted: u64,
+    pub proxy_v2_rejected_signature: u64,
+    pub proxy_v2_local_command: u64,
+    pub proxy_v2_timeout: u64,
 }

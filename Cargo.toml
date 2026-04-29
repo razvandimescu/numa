@@ -37,6 +37,8 @@ rand_core = { version = "0.9", features = ["os_rng"] }
 rustls-pemfile = "2.2.0"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 webpki-roots = "1"
+proxy-header = { version = "0.1", features = ["tokio"] }
+ipnet = { version = "2", features = ["serde"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"

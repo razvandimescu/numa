@@ -14,7 +14,9 @@ use log::{debug, error, info, warn};
 use tokio::io::copy_bidirectional;
 use tokio_rustls::TlsAcceptor;
 
+use crate::config::ProxyProtocolConfig;
 use crate::ctx::ServerCtx;
+use crate::pp2::{self, PpConfig};
 
 type HttpClient = Client<hyper_util::client::legacy::connect::HttpConnector, Body>;
 
@@ -57,7 +59,12 @@ pub async fn start_proxy(ctx: Arc<ServerCtx>, port: u16, bind_addr: Ipv4Addr) {
     axum::serve(listener, app).await.unwrap();
 }
 
-pub async fn start_proxy_tls(ctx: Arc<ServerCtx>, port: u16, bind_addr: Ipv4Addr) {
+pub async fn start_proxy_tls(
+    ctx: Arc<ServerCtx>,
+    port: u16,
+    bind_addr: Ipv4Addr,
+    pp_cfg: &ProxyProtocolConfig,
+) {
     let addr: SocketAddr = (bind_addr, port).into();
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
@@ -76,6 +83,24 @@ pub async fn start_proxy_tls(ctx: Arc<ServerCtx>, port: u16, bind_addr: Ipv4Addr
         return;
     }
 
+    let pp = match PpConfig::from_config(pp_cfg) {
+        Ok(p) => p,
+        Err(e) => {
+            warn!(
+                "proxy: invalid proxy_protocol config ({}) — HTTPS proxy disabled",
+                e
+            );
+            return;
+        }
+    };
+    if pp.is_some() {
+        info!(
+            "proxy: PROXY v2 enabled, trusting {} CIDR(s)",
+            pp_cfg.from.len()
+        );
+    }
+    let pp = pp.map(Arc::new);
+
     let client: HttpClient = Client::builder(TokioExecutor::new())
         .http1_preserve_header_case(true)
         .build_http();
@@ -90,12 +115,12 @@ pub async fn start_proxy_tls(ctx: Arc<ServerCtx>, port: u16, bind_addr: Ipv4Addr
     // DoH route (RFC 8484) served only on the TLS listener.
     // DohState.remote_addr is set per-connection below.
     let doh_state = DohState {
-        ctx,
+        ctx: Arc::clone(&ctx),
         remote_addr: None,
     };
 
     loop {
-        let (tcp_stream, remote_addr) = match listener.accept().await {
+        let (tcp_stream, tcp_peer) = match listener.accept().await {
             Ok(conn) => conn,
             Err(e) => {
                 error!("TLS accept error: {}", e);
@@ -108,19 +133,30 @@ pub async fn start_proxy_tls(ctx: Arc<ServerCtx>, port: u16, bind_addr: Ipv4Addr
         let acceptor =
             TlsAcceptor::from(Arc::clone(&*tls_holder.tls_config.as_ref().unwrap().load()));
 
-        let mut conn_doh_state = doh_state.clone();
-        conn_doh_state.remote_addr = Some(remote_addr);
-
-        let app = Router::new()
-            .route(
-                "/dns-query",
-                post(crate::doh::doh_post).with_state(conn_doh_state),
-            )
-            .fallback(any(proxy_handler))
-            .with_state(proxy_state.clone());
+        let proxy_state = proxy_state.clone();
+        let doh_state = doh_state.clone();
+        let ctx_for_pp2 = Arc::clone(&ctx);
+        let pp = pp.clone();
 
         tokio::spawn(async move {
-            let tls_stream = match acceptor.accept(tcp_stream).await {
+            let Some((stream, remote_addr)) =
+                pp2::handshake(tcp_stream, tcp_peer, pp.as_deref(), &ctx_for_pp2).await
+            else {
+                return;
+            };
+
+            let mut conn_doh_state = doh_state;
+            conn_doh_state.remote_addr = Some(remote_addr);
+
+            let app = Router::new()
+                .route(
+                    "/dns-query",
+                    post(crate::doh::doh_post).with_state(conn_doh_state),
+                )
+                .fallback(any(proxy_handler))
+                .with_state(proxy_state);
+
+            let tls_stream = match acceptor.accept(stream).await {
                 Ok(s) => s,
                 Err(e) => {
                     debug!("TLS handshake failed from {}: {}", remote_addr, e);

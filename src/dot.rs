@@ -11,6 +11,7 @@ use tokio_rustls::TlsAcceptor;
 
 use crate::config::DotConfig;
 use crate::ctx::ServerCtx;
+use crate::pp2::{self, PpConfig};
 use crate::stats::Transport;
 use crate::tcp::handle_framed_dns_connection;
 
@@ -82,6 +83,20 @@ pub async fn start_dot(ctx: Arc<ServerCtx>, config: &DotConfig) {
         },
     };
 
+    let pp = match PpConfig::from_config(&config.proxy_protocol) {
+        Ok(p) => p,
+        Err(e) => {
+            warn!("DoT: invalid proxy_protocol config ({}) — DoT disabled", e);
+            return;
+        }
+    };
+    if pp.is_some() {
+        info!(
+            "DoT: PROXY v2 enabled, trusting {} CIDR(s)",
+            config.proxy_protocol.from.len()
+        );
+    }
+
     let bind_addr: IpAddr = config
         .bind_addr
         .parse()
@@ -96,14 +111,20 @@ pub async fn start_dot(ctx: Arc<ServerCtx>, config: &DotConfig) {
     };
     info!("DoT listening on {}", addr);
 
-    accept_loop(listener, TlsAcceptor::from(tls_config), ctx).await;
+    accept_loop(listener, TlsAcceptor::from(tls_config), pp, ctx).await;
 }
 
-async fn accept_loop(listener: TcpListener, acceptor: TlsAcceptor, ctx: Arc<ServerCtx>) {
+async fn accept_loop(
+    listener: TcpListener,
+    acceptor: TlsAcceptor,
+    pp: Option<PpConfig>,
+    ctx: Arc<ServerCtx>,
+) {
     let semaphore = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+    let pp = pp.map(Arc::new);
 
     loop {
-        let (tcp_stream, remote_addr) = match listener.accept().await {
+        let (tcp_stream, tcp_peer) = match listener.accept().await {
             Ok(conn) => conn,
             Err(e) => {
                 error!("DoT: TCP accept error: {}", e);
@@ -116,18 +137,25 @@ async fn accept_loop(listener: TcpListener, acceptor: TlsAcceptor, ctx: Arc<Serv
         let permit = match semaphore.clone().try_acquire_owned() {
             Ok(p) => p,
             Err(_) => {
-                debug!("DoT: connection limit reached, rejecting {}", remote_addr);
+                debug!("DoT: connection limit reached, rejecting {}", tcp_peer);
                 continue;
             }
         };
         let acceptor = acceptor.clone();
         let ctx = Arc::clone(&ctx);
+        let pp = pp.clone();
 
         tokio::spawn(async move {
             let _permit = permit; // held until task exits
 
+            let Some((stream, remote_addr)) =
+                pp2::handshake(tcp_stream, tcp_peer, pp.as_deref(), &ctx).await
+            else {
+                return;
+            };
+
             let tls_stream =
-                match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(tcp_stream)).await {
+                match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
                     Ok(Ok(s)) => s,
                     Ok(Err(e)) => {
                         debug!("DoT: TLS handshake failed from {}: {}", remote_addr, e);
@@ -243,7 +271,7 @@ mod tests {
         let tls_config = Arc::clone(&*ctx.tls_config.as_ref().unwrap().load());
         let acceptor = TlsAcceptor::from(tls_config);
 
-        tokio::spawn(accept_loop(listener, acceptor, ctx));
+        tokio::spawn(accept_loop(listener, acceptor, None, ctx));
 
         (addr, cert_der)
     }
@@ -392,5 +420,279 @@ mod tests {
         for h in handles {
             h.await.unwrap();
         }
+    }
+
+    // ----------------------------------------------------------------------
+    // PROXY protocol v2 integration tests (`docs/implementation/proxy-protocol-v2.md`).
+    // ----------------------------------------------------------------------
+
+    /// Spin up a DoT listener with a PROXY v2 allowlist. `pp_from` is the list
+    /// of CIDRs/IPs trusted to send PROXY v2 headers; empty = feature disabled.
+    async fn spawn_dot_server_with_pp(
+        pp_from: &[&str],
+    ) -> (SocketAddr, CertificateDer<'static>) {
+        let (server_tls, cert_der) = test_tls_configs();
+
+        let upstream_addr = crate::testutil::blackhole_upstream();
+
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.zone_map = {
+            let mut m = HashMap::new();
+            let mut inner = HashMap::new();
+            inner.insert(
+                QueryType::A,
+                vec![DnsRecord::A {
+                    domain: "dot-test.example".to_string(),
+                    addr: std::net::Ipv4Addr::new(10, 0, 0, 1),
+                    ttl: 300,
+                }],
+            );
+            m.insert("dot-test.example".to_string(), inner);
+            m
+        };
+        ctx.upstream_pool = Mutex::new(crate::forward::UpstreamPool::new(
+            vec![crate::forward::Upstream::Udp(upstream_addr)],
+            vec![],
+        ));
+        ctx.tls_config = Some(arc_swap::ArcSwap::from(server_tls));
+        let ctx = Arc::new(ctx);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let tls_config = Arc::clone(&*ctx.tls_config.as_ref().unwrap().load());
+        let acceptor = TlsAcceptor::from(tls_config);
+
+        let pp_cfg = crate::config::ProxyProtocolConfig {
+            from: pp_from.iter().map(|s| s.to_string()).collect(),
+            // Use a short timeout so the truncated-header test doesn't drag.
+            header_timeout_ms: 500,
+            ..Default::default()
+        };
+        let pp = PpConfig::from_config(&pp_cfg).unwrap();
+
+        tokio::spawn(accept_loop(listener, acceptor, pp, ctx));
+
+        (addr, cert_der)
+    }
+
+    /// Wire a PROXY v2 IPv4 PROXY-command header (28 bytes total: 16 fixed +
+    /// 12 address block).
+    fn pp2_v4_proxy(
+        src_ip: std::net::Ipv4Addr,
+        dst_ip: std::net::Ipv4Addr,
+        src_port: u16,
+        dst_port: u16,
+    ) -> Vec<u8> {
+        let mut h = Vec::with_capacity(28);
+        h.extend_from_slice(&[
+            0x0d, 0x0a, 0x0d, 0x0a, 0x00, 0x0d, 0x0a, 0x51, 0x55, 0x49, 0x54, 0x0a,
+        ]);
+        h.push(0x21); // v2 PROXY
+        h.push(0x11); // TCP/IPv4
+        h.extend_from_slice(&12u16.to_be_bytes());
+        h.extend_from_slice(&src_ip.octets());
+        h.extend_from_slice(&dst_ip.octets());
+        h.extend_from_slice(&src_port.to_be_bytes());
+        h.extend_from_slice(&dst_port.to_be_bytes());
+        h
+    }
+
+    /// Wire a PROXY v2 IPv6 PROXY-command header (52 bytes total: 16 fixed +
+    /// 36 address block). Used to verify cross-family parsing — peer is IPv4,
+    /// header declares IPv6.
+    fn pp2_v6_proxy(
+        src_ip: std::net::Ipv6Addr,
+        dst_ip: std::net::Ipv6Addr,
+        src_port: u16,
+        dst_port: u16,
+    ) -> Vec<u8> {
+        let mut h = Vec::with_capacity(52);
+        h.extend_from_slice(&[
+            0x0d, 0x0a, 0x0d, 0x0a, 0x00, 0x0d, 0x0a, 0x51, 0x55, 0x49, 0x54, 0x0a,
+        ]);
+        h.push(0x21); // v2 PROXY
+        h.push(0x21); // TCP/IPv6
+        h.extend_from_slice(&36u16.to_be_bytes());
+        h.extend_from_slice(&src_ip.octets());
+        h.extend_from_slice(&dst_ip.octets());
+        h.extend_from_slice(&src_port.to_be_bytes());
+        h.extend_from_slice(&dst_port.to_be_bytes());
+        h
+    }
+
+    /// Wire a PROXY v2 LOCAL-command header (16 bytes; no address block).
+    /// Sent by L4 front-ends as a connection-test heartbeat.
+    fn pp2_local() -> Vec<u8> {
+        let mut h = Vec::with_capacity(16);
+        h.extend_from_slice(&[
+            0x0d, 0x0a, 0x0d, 0x0a, 0x00, 0x0d, 0x0a, 0x51, 0x55, 0x49, 0x54, 0x0a,
+        ]);
+        h.push(0x20); // v2 LOCAL
+        h.push(0x00); // UNSPEC family/proto
+        h.extend_from_slice(&0u16.to_be_bytes()); // addr_len = 0
+        h
+    }
+
+    /// Open a TCP connection, write a raw PROXY v2 header, then complete the
+    /// TLS handshake. Returns `Ok(stream)` on success or `Err` on any failure.
+    async fn dot_connect_with_pp2(
+        addr: SocketAddr,
+        client_config: &Arc<rustls::ClientConfig>,
+        pp2_header: &[u8],
+    ) -> Result<tokio_rustls::client::TlsStream<tokio::net::TcpStream>, Box<dyn std::error::Error>>
+    {
+        let mut tcp = tokio::net::TcpStream::connect(addr).await?;
+        tcp.write_all(pp2_header).await?;
+        let connector = tokio_rustls::TlsConnector::from(Arc::clone(client_config));
+        let stream = connector
+            .connect(ServerName::try_from("numa.numa")?, tcp)
+            .await?;
+        Ok(stream)
+    }
+
+    #[tokio::test]
+    async fn pp2_dot_happy_path_ipv4() {
+        // Trusted client (127.0.0.1) sends a v4 PROXY header declaring an
+        // arbitrary upstream IP. Connection completes; query resolves.
+        let (addr, cert_der) = spawn_dot_server_with_pp(&["127.0.0.1"]).await;
+        let client_config = dot_client(&cert_der, dot_alpn());
+
+        let pp = pp2_v4_proxy(
+            "203.0.113.42".parse().unwrap(),
+            "10.0.0.5".parse().unwrap(),
+            54321,
+            853,
+        );
+        let mut stream = dot_connect_with_pp2(addr, &client_config, &pp)
+            .await
+            .expect("PROXY v2 + TLS handshake must succeed for trusted peer");
+
+        let query = DnsPacket::query(0xD001, "dot-test.example", QueryType::A);
+        let resp = dot_exchange(&mut stream, &query).await;
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+        assert_eq!(resp.answers.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn pp2_dot_required_drops_bare_client() {
+        // Allowlist contains the loopback, but the client sends a bare TLS
+        // ClientHello with no PROXY header. The first 12 bytes do not match
+        // the v2 signature → connection dropped → TLS handshake fails.
+        let (addr, cert_der) = spawn_dot_server_with_pp(&["127.0.0.1"]).await;
+        let client_config = dot_client(&cert_der, dot_alpn());
+
+        let connector = tokio_rustls::TlsConnector::from(client_config);
+        let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let result = connector
+            .connect(ServerName::try_from("numa.numa").unwrap(), tcp)
+            .await;
+        assert!(
+            result.is_err(),
+            "PROXY-required listener must reject clients that omit the header"
+        );
+    }
+
+    #[tokio::test]
+    async fn pp2_dot_untrusted_peer_dropped() {
+        // Allowlist contains a non-loopback range only. Connections from
+        // 127.0.0.1 must be dropped before any read.
+        let (addr, cert_der) = spawn_dot_server_with_pp(&["192.0.2.0/24"]).await;
+        let client_config = dot_client(&cert_der, dot_alpn());
+
+        // Even with a valid PROXY v2 header, the listener must drop us
+        // because our actual TCP peer (127.0.0.1) is not on the allowlist.
+        let pp = pp2_v4_proxy(
+            "203.0.113.42".parse().unwrap(),
+            "10.0.0.5".parse().unwrap(),
+            54321,
+            853,
+        );
+        let result = dot_connect_with_pp2(addr, &client_config, &pp).await;
+        assert!(
+            result.is_err(),
+            "untrusted TCP peer must be dropped before peeking at PROXY v2"
+        );
+    }
+
+    #[tokio::test]
+    async fn pp2_dot_cross_family_v4_peer_v6_header() {
+        // The TCP peer is 127.0.0.1 (IPv4), but the PROXY v2 header declares
+        // an IPv6 source. Real production case behind dnsdist on dual-stack
+        // hosts. Numa must accept the connection and propagate the IPv6
+        // source as the connection's remote_addr.
+        let (addr, cert_der) = spawn_dot_server_with_pp(&["127.0.0.1"]).await;
+        let client_config = dot_client(&cert_der, dot_alpn());
+
+        let pp = pp2_v6_proxy(
+            "2001:db8::1".parse().unwrap(),
+            "2001:db8::cafe".parse().unwrap(),
+            54321,
+            853,
+        );
+        let mut stream = dot_connect_with_pp2(addr, &client_config, &pp)
+            .await
+            .expect("cross-family PROXY v2 must parse");
+
+        let query = DnsPacket::query(0xD002, "dot-test.example", QueryType::A);
+        let resp = dot_exchange(&mut stream, &query).await;
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+    }
+
+    #[tokio::test]
+    async fn pp2_dot_local_command() {
+        // LOCAL is the proxy's connection heartbeat (no proxied client).
+        // Numa must accept the connection and use the actual TCP peer as
+        // remote_addr instead of trying to dereference an absent address.
+        let (addr, cert_der) = spawn_dot_server_with_pp(&["127.0.0.1"]).await;
+        let client_config = dot_client(&cert_der, dot_alpn());
+
+        let mut stream = dot_connect_with_pp2(addr, &client_config, &pp2_local())
+            .await
+            .expect("LOCAL command must keep the connection alive");
+
+        let query = DnsPacket::query(0xD003, "dot-test.example", QueryType::A);
+        let resp = dot_exchange(&mut stream, &query).await;
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+    }
+
+    #[tokio::test]
+    async fn pp2_dot_truncated_header_times_out() {
+        // Sender writes the first 8 bytes of the signature and then sits
+        // there. Numa's header timeout fires; the TLS handshake never
+        // happens. On the client side the read returns EOF / connection
+        // reset.
+        let (addr, _cert_der) = spawn_dot_server_with_pp(&["127.0.0.1"]).await;
+
+        let mut tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        tcp.write_all(&[0x0d, 0x0a, 0x0d, 0x0a, 0x00, 0x0d, 0x0a, 0x51])
+            .await
+            .unwrap();
+        // After the listener's 500ms header timeout, the server closes us.
+        let mut buf = [0u8; 16];
+        let read_res =
+            tokio::time::timeout(Duration::from_secs(2), tcp.read(&mut buf)).await;
+        match read_res {
+            Ok(Ok(0)) | Ok(Err(_)) => { /* expected: EOF or connection reset */ }
+            Ok(Ok(n)) => panic!(
+                "expected the server to drop the connection, got {n} bytes back"
+            ),
+            Err(_) => panic!("server did not drop the connection within 2s"),
+        }
+    }
+
+    #[tokio::test]
+    async fn pp2_dot_disabled_mode_passes_bare_client_through() {
+        // Empty allowlist == feature off. Direct clients (no header) keep
+        // working. This is the regression check that pp2 introduces no
+        // behavior change for users who don't enable the feature.
+        let (addr, cert_der) = spawn_dot_server_with_pp(&[]).await;
+        let client_config = dot_client(&cert_der, dot_alpn());
+        let mut stream = dot_connect(addr, &client_config).await;
+
+        let query = DnsPacket::query(0xD004, "dot-test.example", QueryType::A);
+        let resp = dot_exchange(&mut stream, &query).await;
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+        assert_eq!(resp.answers.len(), 1);
     }
 }

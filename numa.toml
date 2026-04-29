@@ -122,6 +122,17 @@ tls_port = 443
 tld = "numa"
 # bind_addr = "127.0.0.1"  # default; set to "0.0.0.0" for LAN access to .numa services
 
+# PROXY protocol v2 — preserves the real client IP when numa runs behind an
+# L4 front-end (dnsdist, HAProxy, nginx-stream, AWS NLB, GCP TCP LB). Empty
+# `from` allowlist (or omitted section) leaves the feature disabled.
+# A non-empty list puts the listener in PROXY-required mode: connections from
+# listed senders that omit the header are dropped, and connections from
+# non-listed senders are dropped before any read.
+# [proxy.proxy_protocol]
+# from = ["10.0.0.0/8", "127.0.0.1"]  # CIDR allowlist of trusted L4 front-ends
+# max_size = 512                       # bytes; cap on the PROXY v2 header
+# header_timeout_ms = 5000             # ms; kill stalled-header connections fast
+
 # Pre-configured services (numa.numa is always added automatically)
 # [[services]]
 # name = "frontend"
@@ -163,6 +174,12 @@ tld = "numa"
 # bind_addr = "0.0.0.0"       # IPv4 or IPv6; unspecified binds all interfaces
 # cert_path = "/etc/numa/dot.crt"  # PEM cert; omit to use self-signed (proxy CA if available)
 # key_path = "/etc/numa/dot.key"   # PEM private key; must be set together with cert_path
+
+# PROXY v2 also attaches to DoT — same semantics as [proxy.proxy_protocol].
+# [dot.proxy_protocol]
+# from = ["10.0.0.0/8"]
+# max_size = 512
+# header_timeout_ms = 5000
 
 # LAN service discovery via mDNS (disabled by default — no network traffic unless enabled)
 # [lan]
