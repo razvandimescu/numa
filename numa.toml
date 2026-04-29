@@ -106,7 +106,11 @@ api_port = 5380
 # [blocking]
 # enabled = true               # set to false to disable ad blocking
 # refresh_hours = 24
-# lists = ["https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/hosts/pro.txt"]
+# lists = [
+#     "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/hosts/pro.txt",
+#     "file:///etc/numa/local-blocklist.txt",  # local hosts-style file
+#     "/etc/numa/extra-blocks.txt",            # bare absolute path also works
+# ]
 # allowlist = ["example.com"]  # domains to never block
 
 [cache]
