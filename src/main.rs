@@ -31,16 +31,16 @@ fn main() -> numa::Result<()> {
 
     match arg1.as_str() {
         "install" => {
-            eprintln!("\x1b[1;38;2;192;98;58mNuma\x1b[0m — installing\n");
+            eprintln!("\x1b[1;38;5;166mNuma\x1b[0m — installing\n");
             return install_service().map_err(|e| e.into());
         }
         "uninstall" => {
-            eprintln!("\x1b[1;38;2;192;98;58mNuma\x1b[0m — uninstalling\n");
+            eprintln!("\x1b[1;38;5;166mNuma\x1b[0m — uninstalling\n");
             return uninstall_service().map_err(|e| e.into());
         }
         "service" => {
             let sub = std::env::args().nth(2).unwrap_or_default();
-            eprintln!("\x1b[1;38;2;192;98;58mNuma\x1b[0m — service management\n");
+            eprintln!("\x1b[1;38;5;166mNuma\x1b[0m — service management\n");
             return match sub.as_str() {
                 "start" => start_service().map_err(|e| e.into()),
                 "stop" => stop_service().map_err(|e| e.into()),
@@ -133,7 +133,7 @@ fn main() -> numa::Result<()> {
                 && !arg1.ends_with(".toml")
             {
                 eprintln!(
-                    "\x1b[1;38;2;192;98;58mNuma\x1b[0m — unknown command: \x1b[1m{}\x1b[0m\n",
+                    "\x1b[1;38;5;166mNuma\x1b[0m — unknown command: \x1b[1m{}\x1b[0m\n",
                     arg1
                 );
                 eprintln!("Run \x1b[1mnuma help\x1b[0m for a list of commands.");
@@ -213,7 +213,7 @@ fn print_lan_status(enabled: bool) {
     let label = if enabled { "enabled" } else { "disabled" };
     let color = if enabled { "32" } else { "33" };
     eprintln!(
-        "\x1b[1;38;2;192;98;58mNuma\x1b[0m — LAN discovery \x1b[{}m{}\x1b[0m",
+        "\x1b[1;38;5;166mNuma\x1b[0m — LAN discovery \x1b[{}m{}\x1b[0m",
         color, label
     );
     if enabled {

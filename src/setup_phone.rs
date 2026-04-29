@@ -60,7 +60,7 @@ pub async fn run() -> Result<(), String> {
     if !api_reachable {
         eprintln!();
         eprintln!(
-            "  \x1b[1;38;2;192;98;58mNuma\x1b[0m — mobile API is not reachable on port {}.",
+            "  \x1b[1;38;5;166mNuma\x1b[0m — mobile API is not reachable on port {}.",
             SETUP_PORT
         );
         eprintln!();
@@ -77,7 +77,7 @@ pub async fn run() -> Result<(), String> {
     let qr = render_qr(&url)?;
 
     eprintln!();
-    eprintln!("  \x1b[1;38;2;192;98;58mNuma Phone Setup\x1b[0m");
+    eprintln!("  \x1b[1;38;5;166mNuma Phone Setup\x1b[0m");
     eprintln!();
     eprintln!("  Profile URL: \x1b[36m{}\x1b[0m", url);
     eprintln!();

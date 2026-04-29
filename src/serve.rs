@@ -323,12 +323,12 @@ pub async fn run(config_path: String) -> crate::Result<()> {
     .unwrap_or(30);
     let w = (val_w + 12).max(42); // 10 label + 2 padding, min 42 for title
 
-    let o = "\x1b[38;2;192;98;58m"; // orange
-    let g = "\x1b[38;2;107;124;78m"; // green
-    let d = "\x1b[38;2;163;152;136m"; // dim
+    let o = "\x1b[38;5;166m"; // orange borders (256-color, ~192,98,58)
+    let g = "\x1b[38;5;101m"; // khaki/olive labels (256-color, ~107,124,78)
+    let d = "\x1b[38;5;138m"; // warm grey labels (256-color, ~163,152,136)
     let r = "\x1b[0m"; // reset
-    let b = "\x1b[1;38;2;192;98;58m"; // bold orange
-    let it = "\x1b[3;38;2;163;152;136m"; // italic dim
+    let b = "\x1b[1;38;5;166m"; // bold orange title (256-color)
+    let it = "\x1b[3;38;5;138m"; // italic warm grey subtitle
 
     let bar_top = "═".repeat(w);
     let bar_mid = "─".repeat(w);
@@ -387,7 +387,7 @@ pub async fn run(config_path: String) -> crate::Result<()> {
     if let Some(ref label) = proxy_label {
         row("Proxy", g, label);
         if config.proxy.bind_addr == "127.0.0.1" {
-            let y = "\x1b[38;2;204;176;59m"; // yellow
+            let y = "\x1b[33m"; // yellow
             row(
                 "",
                 y,
