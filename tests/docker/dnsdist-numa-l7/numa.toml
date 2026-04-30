@@ -1,0 +1,30 @@
+[server]
+bind_addr = "0.0.0.0:53"
+api_bind_addr = "0.0.0.0"
+api_port = 5380
+data_dir = "/var/lib/numa"
+
+# Trust the docker bridge subnet to send PROXY v2 headers on plain TCP.
+# dnsdist runs at 172.29.0.20 with tcpOnly=true + useProxyProtocol=true.
+[server.proxy_protocol]
+from = ["172.16.0.0/12"]
+header_timeout_ms = 5000
+
+[upstream]
+mode = "forward"
+address = "9.9.9.9"
+
+[cache]
+max_entries = 10000
+
+[blocking]
+enabled = false
+
+[proxy]
+enabled = false
+
+[mobile]
+enabled = false
+
+[dot]
+enabled = false

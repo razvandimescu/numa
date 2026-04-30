@@ -1,0 +1,54 @@
+# dnsdist L7 front-end → numa with PROXY v2 over plain TCP.
+#
+#   host dig +udp ──UDP──> dnsdist :53 ──TCP+PROXY v2──> numa :53 ──forward──> 9.9.9.9
+#
+# dnsdist's `tcpOnly=true + useProxyProtocol=true` transmuxes UDP from
+# clients into TCP toward numa with a PROXY v2 header at connection open.
+# Operators can deploy numa as a plain-DNS backend behind dnsdist and get
+# real client IPs in numa's logs without numa needing to support UDP
+# PROXY v2 (deferred per PR #156's "Out of scope").
+
+name: dnsdist-l7
+
+services:
+  numa:
+    build:
+      context: ../../..
+      dockerfile: Dockerfile
+    image: numa:dnsdist-l7-test
+    volumes:
+      - ./numa.toml:/etc/numa/numa.toml:ro
+      - numa_data:/var/lib/numa
+    command: ["/etc/numa/numa.toml"]
+    environment:
+      RUST_LOG: "info,numa::pp2=debug,numa::tcp=debug"
+    networks:
+      test:
+        ipv4_address: 172.29.0.10
+    expose:
+      - "53"
+    ports:
+      - "127.0.0.1:15381:5380/tcp"
+
+  dnsdist:
+    image: powerdns/dnsdist-20:2.0.0
+    volumes:
+      - ./dnsdist.conf:/etc/dnsdist/dnsdist.conf:ro
+    networks:
+      test:
+        ipv4_address: 172.29.0.20
+    ports:
+      - "127.0.0.1:15454:53/udp"
+      - "127.0.0.1:15454:53/tcp"
+    depends_on:
+      - numa
+
+networks:
+  test:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.29.0.0/24
+
+volumes:
+  numa_data:
