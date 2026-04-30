@@ -30,6 +30,7 @@ pub mod srtt;
 pub mod stats;
 pub mod svcb;
 pub mod system_dns;
+pub mod tcp;
 pub mod tls;
 pub mod wire;
 
