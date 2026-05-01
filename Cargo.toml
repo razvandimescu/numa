@@ -41,7 +41,7 @@ proxy-header = { version = "0.1", features = ["tokio"] }
 ipnet = { version = "2", features = ["serde"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-service = "0.7"
+windows-service = "0.8"
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
