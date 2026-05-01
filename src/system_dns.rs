@@ -18,7 +18,20 @@ fn print_recursive_hint() {
 }
 
 fn is_loopback_or_stub(addr: &str) -> bool {
-    matches!(addr, "127.0.0.1" | "127.0.0.53" | "0.0.0.0" | "::1" | "")
+    // fec0:0:0:ffff::1/2/3 are the deprecated IPv6 site-local stubs that
+    // Get-DnsClientServerAddress returns for any IPv6-enabled adapter
+    // without explicit DNS — they're not real upstreams.
+    matches!(
+        addr,
+        "127.0.0.1"
+            | "127.0.0.53"
+            | "0.0.0.0"
+            | "::1"
+            | "fec0:0:0:ffff::1"
+            | "fec0:0:0:ffff::2"
+            | "fec0:0:0:ffff::3"
+            | ""
+    )
 }
 
 /// A conditional forwarding rule: domains matching `suffix` are forwarded to `upstream`.
@@ -463,7 +476,6 @@ fn discover_windows() -> SystemDnsInfo {
 #[cfg(any(windows, test))]
 #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
 struct WindowsInterfaceDns {
-    dhcp: bool,
     servers: Vec<String>,
 }
 
@@ -480,13 +492,11 @@ $adapters = Get-NetAdapter | Where-Object { $_.Status -eq 'Up' }
 foreach ($a in $adapters) {
     $v4 = @(Get-DnsClientServerAddress -InterfaceIndex $a.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses
     $v6 = @(Get-DnsClientServerAddress -InterfaceIndex $a.ifIndex -AddressFamily IPv6 -ErrorAction SilentlyContinue).ServerAddresses
-    $iface = Get-NetIPInterface -InterfaceIndex $a.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue
-    $dhcp = if ($iface) { $iface.Dhcp -eq 'Enabled' } else { $false }
     # Drop nulls: ServerAddresses can be $null when an adapter has no
     # configured DNS for one family, and `$v4 + $null` appends a literal
     # null entry that ConvertTo-Json emits as JSON `null`, breaking the
     # `Vec<String>` deserialize on the Rust side.
-    $result[$a.Name] = @{ dhcp = $dhcp; servers = @(($v4 + $v6) | Where-Object { $_ }) }
+    $result[$a.Name] = @{ servers = @(($v4 + $v6) | Where-Object { $_ }) }
 }
 $result | ConvertTo-Json -Compress -Depth 4
 "#;
@@ -931,7 +941,14 @@ fn uninstall_windows() -> Result<(), String> {
         serde_json::from_str(&json).map_err(|e| format!("invalid backup file: {}", e))?;
 
     for (name, dns_info) in &original {
-        if dns_info.dhcp || dns_info.servers.is_empty() {
+        let real_servers: Vec<&str> = dns_info
+            .servers
+            .iter()
+            .map(String::as_str)
+            .filter(|s| !is_loopback_or_stub(s))
+            .collect();
+
+        if real_servers.is_empty() {
             let status = std::process::Command::new("netsh")
                 .args(["interface", "ipv4", "set", "dnsservers", name, "dhcp"])
                 .status()
@@ -951,7 +968,7 @@ fn uninstall_windows() -> Result<(), String> {
                     "dnsservers",
                     name,
                     "static",
-                    &dns_info.servers[0],
+                    real_servers[0],
                     "primary",
                 ])
                 .status()
@@ -962,7 +979,7 @@ fn uninstall_windows() -> Result<(), String> {
                 continue;
             }
 
-            for (i, server) in dns_info.servers.iter().skip(1).enumerate() {
+            for (i, server) in real_servers.iter().skip(1).enumerate() {
                 let _ = std::process::Command::new("netsh")
                     .args([
                         "interface",
@@ -979,7 +996,7 @@ fn uninstall_windows() -> Result<(), String> {
             eprintln!(
                 "  restored DNS for \"{}\" -> {}",
                 name,
-                dns_info.servers.join(", ")
+                real_servers.join(", ")
             );
         }
     }
@@ -1995,23 +2012,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_powershell_dhcp_and_static() {
+    fn parse_powershell_servers() {
         // Shape emitted by ENUMERATE_INTERFACES_PS — adapter name keys, each
-        // value carries DHCP state and merged IPv4+IPv6 server list.
-        let sample = r#"{"Ethernet":{"dhcp":true,"servers":["8.8.8.8","8.8.4.4"]},"Wi-Fi":{"dhcp":false,"servers":["1.1.1.1"]}}"#;
+        // value carries a merged IPv4+IPv6 server list. Legacy `dhcp` field
+        // (in pre-fix backups on disk) is silently ignored on read.
+        let sample = r#"{"Ethernet":{"servers":["8.8.8.8","8.8.4.4"]},"Wi-Fi":{"dhcp":true,"servers":["1.1.1.1"]}}"#;
         let result = parse_powershell_interfaces(sample).expect("parse failed");
         assert_eq!(result.len(), 2);
         assert_eq!(
             result["Ethernet"],
             WindowsInterfaceDns {
-                dhcp: true,
                 servers: vec!["8.8.8.8".into(), "8.8.4.4".into()],
             }
         );
         assert_eq!(
             result["Wi-Fi"],
             WindowsInterfaceDns {
-                dhcp: false,
                 servers: vec!["1.1.1.1".into()],
             }
         );
@@ -2038,7 +2054,7 @@ mod tests {
         // Locks in the PS-side null filter (Where-Object { $_ }) — a real
         // install on a dual-stack adapter without IPv6 DNS used to emit
         // `["10.0.0.1", null]`, failing deserialize at install time.
-        let sample = r#"{"Wi-Fi":{"dhcp":true,"servers":["1.1.1.1",null]}}"#;
+        let sample = r#"{"Wi-Fi":{"servers":["1.1.1.1",null]}}"#;
         assert!(parse_powershell_interfaces(sample).is_err());
     }
 
@@ -2094,15 +2110,27 @@ mod tests {
         map.insert(
             "Wi-Fi".into(),
             WindowsInterfaceDns {
-                dhcp: false,
                 servers: vec!["127.0.0.1".into()],
             },
         );
         map.insert(
             "Ethernet".into(),
             WindowsInterfaceDns {
-                dhcp: false,
                 servers: vec!["::1".into(), "0.0.0.0".into()],
+            },
+        );
+        assert!(!backup_has_real_upstream_windows(&map));
+
+        // fec0:0:0:ffff::1/2/3 leak into every VPN/virtual adapter via
+        // Get-DnsClientServerAddress.
+        map.insert(
+            "Tailscale".into(),
+            WindowsInterfaceDns {
+                servers: vec![
+                    "fec0:0:0:ffff::1".into(),
+                    "fec0:0:0:ffff::2".into(),
+                    "fec0:0:0:ffff::3".into(),
+                ],
             },
         );
         assert!(!backup_has_real_upstream_windows(&map));
@@ -2111,7 +2139,6 @@ mod tests {
         map.insert(
             "Ethernet 2".into(),
             WindowsInterfaceDns {
-                dhcp: false,
                 servers: vec!["192.168.1.1".into()],
             },
         );
