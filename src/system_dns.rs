@@ -474,8 +474,14 @@ fn discover_windows() -> SystemDnsInfo {
 }
 
 #[cfg(any(windows, test))]
-#[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Default, PartialEq)]
 struct WindowsInterfaceDns {
+    // Live adapter index, populated only by the in-memory enumeration. Not
+    // persisted: ifIndex isn't stable across reboots, so the on-disk backup
+    // stays keyed by the friendly name and looks the index up live at
+    // restore time.
+    #[serde(default, skip_serializing)]
+    if_index: u32,
     servers: Vec<String>,
 }
 
@@ -496,7 +502,7 @@ foreach ($a in $adapters) {
     # configured DNS for one family, and `$v4 + $null` appends a literal
     # null entry that ConvertTo-Json emits as JSON `null`, breaking the
     # `Vec<String>` deserialize on the Rust side.
-    $result[$a.Name] = @{ servers = @(($v4 + $v6) | Where-Object { $_ }) }
+    $result[$a.Name] = @{ if_index = $a.ifIndex; servers = @(($v4 + $v6) | Where-Object { $_ }) }
 }
 $result | ConvertTo-Json -Compress -Depth 4
 "#;
@@ -732,14 +738,20 @@ pub fn redirect_dns_to_localhost() -> Result<(), String> {
 fn redirect_dns_with_interfaces(
     interfaces: &std::collections::HashMap<String, WindowsInterfaceDns>,
 ) -> Result<(), String> {
-    for name in interfaces.keys() {
+    for (name, iface) in interfaces {
+        // netsh accepts either the friendly name or the interface index in
+        // the [name=] slot. Friendly names round-trip badly through
+        // ipconfig/PowerShell on non-English locales (#160 saw "Ethernet"
+        // returning ERROR_INVALID_NAME on Russian Win11) — ifIndex is an
+        // integer and locale-invariant.
+        let idx = iface.if_index.to_string();
         let status = std::process::Command::new("netsh")
             .args([
                 "interface",
                 "ipv4",
                 "set",
                 "dnsservers",
-                name,
+                &idx,
                 "static",
                 "127.0.0.1",
                 "primary",
@@ -940,7 +952,20 @@ fn uninstall_windows() -> Result<(), String> {
     let original: std::collections::HashMap<String, WindowsInterfaceDns> =
         serde_json::from_str(&json).map_err(|e| format!("invalid backup file: {}", e))?;
 
+    // Re-enumerate live adapters to get current ifIndex per name. The on-disk
+    // backup is keyed by friendly name (human-readable, stable across boots);
+    // ifIndex isn't stable, so we resolve it fresh and pass the integer to
+    // netsh — friendly names round-trip badly on non-English locales (#160).
+    let live = get_windows_interfaces()?;
+
     for (name, dns_info) in &original {
+        let Some(idx) = live.get(name).map(|i| i.if_index.to_string()) else {
+            // Adapter from the backup is no longer up — skip silently. netsh
+            // would have refused with "service not running" anyway, and the
+            // user's active interfaces are the only ones worth restoring.
+            continue;
+        };
+
         let real_servers: Vec<&str> = dns_info
             .servers
             .iter()
@@ -950,7 +975,7 @@ fn uninstall_windows() -> Result<(), String> {
 
         if real_servers.is_empty() {
             let status = std::process::Command::new("netsh")
-                .args(["interface", "ipv4", "set", "dnsservers", name, "dhcp"])
+                .args(["interface", "ipv4", "set", "dnsservers", &idx, "dhcp"])
                 .status()
                 .map_err(|e| format!("failed to restore DNS for {}: {}", name, e))?;
 
@@ -966,7 +991,7 @@ fn uninstall_windows() -> Result<(), String> {
                     "ipv4",
                     "set",
                     "dnsservers",
-                    name,
+                    &idx,
                     "static",
                     real_servers[0],
                     "primary",
@@ -986,7 +1011,7 @@ fn uninstall_windows() -> Result<(), String> {
                         "ipv4",
                         "add",
                         "dnsservers",
-                        name,
+                        &idx,
                         server,
                         &format!("index={}", i + 2),
                     ])
@@ -2014,23 +2039,37 @@ mod tests {
     #[test]
     fn parse_powershell_servers() {
         // Shape emitted by ENUMERATE_INTERFACES_PS — adapter name keys, each
-        // value carries a merged IPv4+IPv6 server list. Legacy `dhcp` field
-        // (in pre-fix backups on disk) is silently ignored on read.
-        let sample = r#"{"Ethernet":{"servers":["8.8.8.8","8.8.4.4"]},"Wi-Fi":{"dhcp":true,"servers":["1.1.1.1"]}}"#;
+        // value carries the live ifIndex and a merged IPv4+IPv6 server list.
+        // Legacy `dhcp` field (in pre-fix backups on disk) is silently
+        // ignored on read.
+        let sample = r#"{"Ethernet":{"if_index":12,"servers":["8.8.8.8","8.8.4.4"]},"Wi-Fi":{"dhcp":true,"if_index":7,"servers":["1.1.1.1"]}}"#;
         let result = parse_powershell_interfaces(sample).expect("parse failed");
         assert_eq!(result.len(), 2);
         assert_eq!(
             result["Ethernet"],
             WindowsInterfaceDns {
+                if_index: 12,
                 servers: vec!["8.8.8.8".into(), "8.8.4.4".into()],
             }
         );
         assert_eq!(
             result["Wi-Fi"],
             WindowsInterfaceDns {
+                if_index: 7,
                 servers: vec!["1.1.1.1".into()],
             }
         );
+    }
+
+    #[test]
+    fn parse_powershell_skips_missing_if_index_for_legacy_backup() {
+        // Backups written by pre-fix versions have no `if_index`; deserialize
+        // must succeed and default the field. Uninstall re-enumerates live
+        // adapters anyway, so a 0 here is harmless.
+        let sample = r#"{"Ethernet":{"servers":["8.8.8.8"]}}"#;
+        let result = parse_powershell_interfaces(sample).expect("parse failed");
+        assert_eq!(result["Ethernet"].if_index, 0);
+        assert_eq!(result["Ethernet"].servers, vec!["8.8.8.8".to_string()]);
     }
 
     #[test]
@@ -2111,12 +2150,14 @@ mod tests {
             "Wi-Fi".into(),
             WindowsInterfaceDns {
                 servers: vec!["127.0.0.1".into()],
+                ..Default::default()
             },
         );
         map.insert(
             "Ethernet".into(),
             WindowsInterfaceDns {
                 servers: vec!["::1".into(), "0.0.0.0".into()],
+                ..Default::default()
             },
         );
         assert!(!backup_has_real_upstream_windows(&map));
@@ -2131,6 +2172,7 @@ mod tests {
                     "fec0:0:0:ffff::2".into(),
                     "fec0:0:0:ffff::3".into(),
                 ],
+                ..Default::default()
             },
         );
         assert!(!backup_has_real_upstream_windows(&map));
@@ -2140,6 +2182,7 @@ mod tests {
             "Ethernet 2".into(),
             WindowsInterfaceDns {
                 servers: vec!["192.168.1.1".into()],
+                ..Default::default()
             },
         );
         assert!(backup_has_real_upstream_windows(&map));
