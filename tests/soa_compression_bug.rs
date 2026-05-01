@@ -79,13 +79,11 @@ fn compressed_soa_survives_numa_round_trip() {
 
     let hickory_in = hickory_proto::op::Message::from_vec(&upstream)
         .expect("hand-crafted upstream must be valid");
-    let soa_in_rd = hickory_in.name_servers()[0]
-        .data()
-        .clone()
-        .into_soa()
-        .expect("SOA rdata");
-    assert_eq!(soa_in_rd.mname().to_string(), "map.fastly.net.");
-    assert_eq!(soa_in_rd.rname().to_string(), "fastly.net.");
+    let hickory_proto::rr::RData::SOA(soa_in_rd) = hickory_in.authorities[0].data.clone() else {
+        panic!("expected SOA rdata");
+    };
+    assert_eq!(soa_in_rd.mname.to_string(), "map.fastly.net.");
+    assert_eq!(soa_in_rd.rname.to_string(), "fastly.net.");
 
     let mut in_buf = BytePacketBuffer::from_bytes(&upstream);
     let pkt = DnsPacket::from_buffer(&mut in_buf).expect("numa parses upstream");
@@ -99,17 +97,15 @@ fn compressed_soa_survives_numa_round_trip() {
     let hickory_out =
         hickory_proto::op::Message::from_vec(&out).expect("numa re-emission must parse strictly");
 
-    let soa_out_rd = hickory_out.name_servers()[0]
-        .data()
-        .clone()
-        .into_soa()
-        .expect("SOA rdata on output");
+    let hickory_proto::rr::RData::SOA(soa_out_rd) = hickory_out.authorities[0].data.clone() else {
+        panic!("expected SOA rdata on output");
+    };
 
-    assert_eq!(soa_out_rd.mname().to_string(), "map.fastly.net.");
-    assert_eq!(soa_out_rd.rname().to_string(), "fastly.net.");
-    assert_eq!(soa_out_rd.serial(), 1);
-    assert_eq!(soa_out_rd.refresh(), 7200);
-    assert_eq!(soa_out_rd.retry(), 3600);
-    assert_eq!(soa_out_rd.expire(), 1209600);
-    assert_eq!(soa_out_rd.minimum(), 1800);
+    assert_eq!(soa_out_rd.mname.to_string(), "map.fastly.net.");
+    assert_eq!(soa_out_rd.rname.to_string(), "fastly.net.");
+    assert_eq!(soa_out_rd.serial, 1);
+    assert_eq!(soa_out_rd.refresh, 7200);
+    assert_eq!(soa_out_rd.retry, 3600);
+    assert_eq!(soa_out_rd.expire, 1209600);
+    assert_eq!(soa_out_rd.minimum, 1800);
 }

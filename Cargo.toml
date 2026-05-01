@@ -47,8 +47,8 @@ windows-service = "0.7"
 criterion = { version = "0.8", features = ["html_reports"] }
 tower = { version = "0.5", features = ["util"] }
 http = "1"
-hickory-resolver = { version = "0.25", features = ["https-ring", "webpki-roots"] }
-hickory-proto = "0.25"
+hickory-resolver = { version = "0.26", features = ["https-ring", "webpki-roots"] }
+hickory-proto = "0.26"
 x509-parser = "0.18"
 
 [[bench]]

@@ -1,0 +1,12 @@
+# cargo-audit configuration. Only ignore advisories that have NO upstream
+# fix yet — anything fixable should be addressed by bumping the dependency.
+[advisories]
+ignore = [
+    # hickory-proto NSEC3 closest-encloser proof unbounded loop on cross-zone
+    # responses. No fixed upgrade available as of 2026-05-01 (advisory itself
+    # filed today). Tracked upstream:
+    # https://github.com/hickory-dns/hickory-dns/security/advisories/GHSA-3v94-mw7p-v465
+    # Impact for numa: dev-dep only (benches + one integration test). The
+    # shipped numa binary does not link hickory.
+    "RUSTSEC-2026-0118",
+]

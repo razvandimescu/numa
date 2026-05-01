@@ -792,6 +792,7 @@ fn run_diag(rt: &tokio::runtime::Runtime) {
         match &result {
             Ok(lookup) => {
                 let first = lookup
+                    .answers()
                     .iter()
                     .next()
                     .map(|r| format!("{r}"))
@@ -962,15 +963,16 @@ async fn query_doh_server(
 
 async fn build_hickory_resolver() -> hickory_resolver::TokioResolver {
     use hickory_resolver::config::*;
-    let ns = NameServerConfig {
-        socket_addr: "9.9.9.9:443".parse().unwrap(),
-        protocol: hickory_proto::xfer::Protocol::Https,
-        tls_dns_name: Some("dns.quad9.net".to_string()),
-        trust_negative_responses: true,
-        bind_addr: None,
-        http_endpoint: Some("/dns-query".to_string()),
-    };
-    let config = ResolverConfig::from_parts(None, vec![], NameServerConfigGroup::from(vec![ns]));
+    use std::sync::Arc;
+    let ns = NameServerConfig::new(
+        "9.9.9.9".parse().unwrap(),
+        true,
+        vec![ConnectionConfig::https(
+            Arc::from("dns.quad9.net"),
+            Some(Arc::from("/dns-query")),
+        )],
+    );
+    let config = ResolverConfig::from_parts(None, vec![], vec![ns]);
     let mut opts = ResolverOpts::default();
     opts.cache_size = 0;
     opts.num_concurrent_reqs = 1;
@@ -978,6 +980,7 @@ async fn build_hickory_resolver() -> hickory_resolver::TokioResolver {
     hickory_resolver::TokioResolver::builder_with_config(config, Default::default())
         .with_options(opts)
         .build()
+        .expect("hickory resolver build failed")
 }
 
 async fn query_hickory_doh(resolver: &hickory_resolver::TokioResolver, domain: &str) -> Option<()> {
