@@ -22,6 +22,12 @@ use tokio::net::TcpStream;
 use crate::config::ProxyProtocolConfig;
 use crate::ctx::ServerCtx;
 
+pub(crate) const PARSE_CFG: ParseConfig = ParseConfig {
+    allow_v1: false,
+    allow_v2: true,
+    include_tlvs: false,
+};
+
 /// Runtime form of [`ProxyProtocolConfig`]: parsed CIDR list + already-typed
 /// timeout. Built once per listener at startup.
 #[derive(Clone, Debug)]
@@ -59,7 +65,7 @@ impl PpConfig {
         }))
     }
 
-    fn allows(&self, peer: IpAddr) -> bool {
+    pub(crate) fn allows(&self, peer: IpAddr) -> bool {
         self.from.iter().any(|n| n.contains(&peer))
     }
 }
@@ -112,15 +118,9 @@ pub async fn handshake(
         return None;
     }
 
-    let parse_cfg = ParseConfig {
-        allow_v1: false,
-        allow_v2: true,
-        include_tlvs: false,
-    };
-
     let proxied = match tokio::time::timeout(
         pp.header_timeout,
-        ProxiedStream::create_from_tokio(tcp_stream, parse_cfg),
+        ProxiedStream::create_from_tokio(tcp_stream, PARSE_CFG),
     )
     .await
     {

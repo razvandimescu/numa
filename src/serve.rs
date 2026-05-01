@@ -216,10 +216,8 @@ pub async fn run(config_path: String) -> crate::Result<()> {
 
     spawn_background_services(&ctx, &config, &bootstrap_resolver, api_port)?;
 
-    // UDP DNS listener — same `[server.proxy_protocol]` allowlist as TCP.
-    // `start_tcp` already validated/logged this config; build the runtime
-    // form silently here and treat any parse error as "disabled" (TCP would
-    // have surfaced the same error to the operator).
+    // UDP DNS listener — shares `[server.proxy_protocol]` with TCP, which
+    // already logged any parse error. Silently disable on Err.
     let udp_pp = crate::pp2::PpConfig::from_config(&config.server.proxy_protocol)
         .ok()
         .flatten();
@@ -376,18 +374,9 @@ async fn udp_serve_loop(
             }
             Err(e) => return Err(e.into()),
         };
-        let (src_addr, dns_len) = match crate::pp2_udp::parse_if_trusted(
-            &buffer.buf[..len],
-            peer,
-            udp_pp,
-            ctx,
-        ) {
-            crate::pp2_udp::UdpPp::Bare => (peer, len),
-            crate::pp2_udp::UdpPp::Proxied { src, hdr_len } => {
-                buffer.buf.copy_within(hdr_len..len, 0);
-                (src, len - hdr_len)
-            }
-            crate::pp2_udp::UdpPp::Drop => continue,
+        let pp = crate::pp2_udp::parse_if_trusted(&buffer.buf[..len], peer, udp_pp, ctx);
+        let Some((src_addr, dns_len)) = pp.apply(&mut buffer.buf, len, peer) else {
+            continue;
         };
         let ctx = Arc::clone(ctx);
         tokio::spawn(async move {

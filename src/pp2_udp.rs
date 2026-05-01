@@ -1,78 +1,62 @@
-//! PROXY protocol v2 — slice-flavored parser for the UDP listener.
-//!
-//! The TCP path in [`crate::pp2`] wraps a stream and consumes the header
-//! before handing bytes to the DNS layer. UDP has no stream — each datagram
-//! is independent and carries its own PROXY header up front when the
-//! sender (e.g. dnsdist with `useProxyProtocol=true`) is configured to do
-//! so. This module parses that prefix from a single buffer and reports
-//! how many bytes to skip before the DNS message starts.
-//!
-//! The trust gate, allowlist semantics, and stats counters are shared
-//! with the TCP path: an empty `from` allowlist disables the feature on
-//! this listener; a non-empty allowlist puts the listener in
-//! PROXY-required mode for permitted senders.
-//!
-//! ## EDNS0 buffer math
-//!
-//! A PROXY v2 IPv4 address block consumes 28 bytes; IPv6 consumes 52.
-//! Operators running PROXY-on-UDP get correspondingly fewer DNS payload
-//! bytes per datagram before truncation kicks in. dnsdist already accounts
-//! for this in its own MTU calculations, but operators sizing custom EDNS0
-//! buffers should subtract the header bytes from the available budget.
+//! PROXY v2 slice parser for the UDP listener — datagram counterpart to
+//! [`crate::pp2`]'s stream wrapper. Trust gate, allowlist semantics, and
+//! stats counters are shared.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use log::debug;
-use proxy_header::{ParseConfig, ProxyHeader};
+use proxy_header::ProxyHeader;
 
 use crate::ctx::ServerCtx;
-use crate::pp2::PpConfig;
+use crate::pp2::{PpConfig, PARSE_CFG};
 
-/// Outcome of inspecting an inbound UDP datagram.
 #[derive(Debug, PartialEq, Eq)]
 pub enum UdpPp {
-    /// Pass the datagram through unmodified — feature disabled on this
-    /// listener.
     Bare,
-    /// Trusted sender prepended a valid PROXY v2 header. Use `src` as the
-    /// real client and skip the first `hdr_len` bytes of the buffer.
     Proxied { src: SocketAddr, hdr_len: usize },
-    /// Drop the datagram silently. Either the peer is not on the
-    /// allowlist, or the header was malformed.
     Drop,
 }
 
-/// Inspect the front of a UDP datagram for a PROXY v2 header.
-///
-/// Returns [`UdpPp::Bare`] when the feature is disabled on this listener
-/// (zero overhead — no signature peek). Otherwise enforces the same
-/// allowlist + signature-validity rules as the TCP handshake. Stats are
-/// recorded as a side effect.
+impl UdpPp {
+    /// Resolve to the (real client, dns-payload length) pair for the recv
+    /// loop. On `Proxied`, shifts the DNS payload to offset 0 so the caller
+    /// can pass `&buf[..len]` unchanged. Returns `None` to discard.
+    pub fn apply(
+        self,
+        buf: &mut [u8],
+        len: usize,
+        peer: SocketAddr,
+    ) -> Option<(SocketAddr, usize)> {
+        match self {
+            UdpPp::Bare => Some((peer, len)),
+            UdpPp::Proxied { src, hdr_len } => {
+                buf.copy_within(hdr_len..len, 0);
+                Some((src, len - hdr_len))
+            }
+            UdpPp::Drop => None,
+        }
+    }
+}
+
+/// Inspect a UDP datagram for a PROXY v2 prefix. Zero-overhead when the
+/// feature is disabled (early `Bare` return — no signature peek). Stats
+/// are recorded as a side effect.
 pub fn parse_if_trusted(
     bytes: &[u8],
     peer: SocketAddr,
     pp: Option<&PpConfig>,
     ctx: &Arc<ServerCtx>,
 ) -> UdpPp {
-    let pp = match pp {
-        Some(p) => p,
-        None => return UdpPp::Bare,
-    };
+    let Some(pp) = pp else { return UdpPp::Bare };
 
-    if !pp.from.iter().any(|n| n.contains(&peer.ip())) {
+    if !pp.allows(peer.ip()) {
         ctx.stats.lock().unwrap().proxy_v2_rejected_untrusted += 1;
         debug!("pp2_udp: untrusted peer {peer}, dropping");
         return UdpPp::Drop;
     }
 
-    let parse_cfg = ParseConfig {
-        allow_v1: false,
-        allow_v2: true,
-        include_tlvs: false,
-    };
-
-    let (header, hdr_len) = match ProxyHeader::parse(bytes, parse_cfg) {
+    let (header, hdr_len) = match ProxyHeader::parse(bytes, PARSE_CFG) {
         Ok(p) => p,
         Err(e) => {
             ctx.stats.lock().unwrap().proxy_v2_rejected_signature += 1;
@@ -90,7 +74,7 @@ pub fn parse_if_trusted(
             }
         }
         None => {
-            // LOCAL command (sender health probe); use peer as the real
+            // LOCAL command (sender health probe): use peer as the real
             // client and treat the rest of the datagram as DNS.
             ctx.stats.lock().unwrap().proxy_v2_local_command += 1;
             UdpPp::Proxied { src: peer, hdr_len }
@@ -195,5 +179,34 @@ mod tests {
             UdpPp::Drop
         );
         assert_eq!(ctx.stats.lock().unwrap().proxy_v2_rejected_signature, 1);
+    }
+
+    #[tokio::test]
+    async fn apply_bare_passes_through() {
+        let mut buf = *b"hello-world";
+        let peer: SocketAddr = "1.2.3.4:53".parse().unwrap();
+        assert_eq!(UdpPp::Bare.apply(&mut buf, 11, peer), Some((peer, 11)));
+        assert_eq!(&buf, b"hello-world");
+    }
+
+    #[tokio::test]
+    async fn apply_proxied_shifts_buffer_and_swaps_source() {
+        let mut buf = *b"PROXY-HDRdns-payload"; // 9-byte fake header
+        let peer: SocketAddr = "10.0.0.1:53".parse().unwrap();
+        let real: SocketAddr = "203.0.113.5:55000".parse().unwrap();
+        let r = UdpPp::Proxied {
+            src: real,
+            hdr_len: 9,
+        }
+        .apply(&mut buf, 20, peer);
+        assert_eq!(r, Some((real, 11)));
+        assert_eq!(&buf[..11], b"dns-payload");
+    }
+
+    #[tokio::test]
+    async fn apply_drop_returns_none() {
+        let mut buf = [0u8; 4];
+        let peer: SocketAddr = "1.2.3.4:53".parse().unwrap();
+        assert_eq!(UdpPp::Drop.apply(&mut buf, 4, peer), None);
     }
 }
