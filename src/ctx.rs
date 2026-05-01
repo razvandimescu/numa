@@ -521,6 +521,7 @@ pub async fn handle_query(
     mut buffer: BytePacketBuffer,
     raw_len: usize,
     src_addr: SocketAddr,
+    respond_to: SocketAddr,
     ctx: &Arc<ServerCtx>,
     transport: Transport,
 ) -> crate::Result<()> {
@@ -533,7 +534,7 @@ pub async fn handle_query(
     };
     match resolve_query(query, &buffer.buf[..raw_len], src_addr, ctx, transport).await {
         Ok((resp_buffer, _)) => {
-            ctx.socket.send_to(resp_buffer.filled(), src_addr).await?;
+            ctx.socket.send_to(resp_buffer.filled(), respond_to).await?;
         }
         Err(e) => {
             warn!("{} | RESOLVE ERROR | {}", src_addr, e);

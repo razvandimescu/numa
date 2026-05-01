@@ -378,9 +378,14 @@ async fn udp_serve_loop(
         let Some((src_addr, dns_len)) = pp.apply(&mut buffer.buf, len, peer) else {
             continue;
         };
+        // Response goes to the kernel UDP peer (e.g. dnsdist), not the
+        // PROXY-extracted logical source — otherwise the reply skips the
+        // front-end and never reaches the original client.
         let ctx = Arc::clone(ctx);
         tokio::spawn(async move {
-            if let Err(e) = handle_query(buffer, dns_len, src_addr, &ctx, Transport::Udp).await {
+            if let Err(e) =
+                handle_query(buffer, dns_len, src_addr, peer, &ctx, Transport::Udp).await
+            {
                 error!("{} | HANDLER ERROR | {}", src_addr, e);
             }
         });
