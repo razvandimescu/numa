@@ -216,7 +216,15 @@ pub async fn run(config_path: String) -> crate::Result<()> {
 
     spawn_background_services(&ctx, &config, &bootstrap_resolver, api_port)?;
 
-    udp_serve_loop(&ctx).await
+    // UDP DNS listener — same `[server.proxy_protocol]` allowlist as TCP.
+    // `start_tcp` already validated/logged this config; build the runtime
+    // form silently here and treat any parse error as "disabled" (TCP would
+    // have surfaced the same error to the operator).
+    let udp_pp = crate::pp2::PpConfig::from_config(&config.server.proxy_protocol)
+        .ok()
+        .flatten();
+
+    udp_serve_loop(&ctx, udp_pp.as_ref()).await
 }
 
 fn spawn_background_services(
@@ -353,11 +361,14 @@ fn spawn_background_services(
     Ok(())
 }
 
-async fn udp_serve_loop(ctx: &Arc<ServerCtx>) -> crate::Result<()> {
+async fn udp_serve_loop(
+    ctx: &Arc<ServerCtx>,
+    udp_pp: Option<&crate::pp2::PpConfig>,
+) -> crate::Result<()> {
     #[allow(clippy::infinite_loop)]
     loop {
         let mut buffer = BytePacketBuffer::new();
-        let (len, src_addr) = match ctx.socket.recv_from(&mut buffer.buf).await {
+        let (len, peer) = match ctx.socket.recv_from(&mut buffer.buf).await {
             Ok(r) => r,
             Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {
                 // Windows delivers ICMP port-unreachable as ConnectionReset on UDP sockets
@@ -365,9 +376,22 @@ async fn udp_serve_loop(ctx: &Arc<ServerCtx>) -> crate::Result<()> {
             }
             Err(e) => return Err(e.into()),
         };
+        let (src_addr, dns_len) = match crate::pp2_udp::parse_if_trusted(
+            &buffer.buf[..len],
+            peer,
+            udp_pp,
+            ctx,
+        ) {
+            crate::pp2_udp::UdpPp::Bare => (peer, len),
+            crate::pp2_udp::UdpPp::Proxied { src, hdr_len } => {
+                buffer.buf.copy_within(hdr_len..len, 0);
+                (src, len - hdr_len)
+            }
+            crate::pp2_udp::UdpPp::Drop => continue,
+        };
         let ctx = Arc::clone(ctx);
         tokio::spawn(async move {
-            if let Err(e) = handle_query(buffer, len, src_addr, &ctx, Transport::Udp).await {
+            if let Err(e) = handle_query(buffer, dns_len, src_addr, &ctx, Transport::Udp).await {
                 error!("{} | HANDLER ERROR | {}", src_addr, e);
             }
         });

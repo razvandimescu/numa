@@ -18,6 +18,7 @@ pub mod odoh;
 pub mod override_store;
 pub mod packet;
 pub mod pp2;
+pub mod pp2_udp;
 pub mod proxy;
 pub mod query_log;
 pub mod question;
