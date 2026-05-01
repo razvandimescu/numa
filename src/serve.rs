@@ -44,11 +44,6 @@ pub async fn run(config_path: String) -> crate::Result<()> {
 
     let root_hints = crate::recursive::parse_root_hints(&config.upstream.root_hints);
 
-    let recursive_pool = || {
-        let dummy = UpstreamPool::new(vec![Upstream::Udp("0.0.0.0:0".parse().unwrap())], vec![]);
-        (dummy, "recursive (root hints)".to_string())
-    };
-
     // Routes numa-originated HTTPS (DoH upstream, ODoH relay/target, blocklist
     // CDN) away from the system resolver so lookups don't loop back through
     // numa when it's its own system DNS.
@@ -65,87 +60,8 @@ pub async fn run(config_path: String) -> crate::Result<()> {
         resolver_overrides,
     ));
 
-    let (resolved_mode, upstream_auto, pool, upstream_label) = match config.upstream.mode {
-        crate::config::UpstreamMode::Auto => {
-            info!("auto mode: probing recursive resolution...");
-            if crate::recursive::probe_recursive(&root_hints).await {
-                info!("recursive probe succeeded — self-sovereign mode");
-                let (pool, label) = recursive_pool();
-                (crate::config::UpstreamMode::Recursive, false, pool, label)
-            } else {
-                log::warn!("recursive probe failed — falling back to Quad9 DoH");
-                let client = build_https_client_with_resolver(1, Some(bootstrap_resolver.clone()));
-                let url = DOH_FALLBACK.to_string();
-                let label = url.clone();
-                let pool = UpstreamPool::new(vec![Upstream::Doh { url, client }], vec![]);
-                (crate::config::UpstreamMode::Forward, false, pool, label)
-            }
-        }
-        crate::config::UpstreamMode::Recursive => {
-            let (pool, label) = recursive_pool();
-            (crate::config::UpstreamMode::Recursive, false, pool, label)
-        }
-        crate::config::UpstreamMode::Forward => {
-            let addrs = if config.upstream.address.is_empty() {
-                let detected = system_dns
-                    .default_upstream
-                    .or_else(crate::system_dns::detect_dhcp_dns)
-                    .unwrap_or_else(|| {
-                        info!("could not detect system DNS, falling back to Quad9 DoH");
-                        DOH_FALLBACK.to_string()
-                    });
-                vec![detected]
-            } else {
-                config.upstream.address.clone()
-            };
-
-            let primary = parse_upstream_list(
-                &addrs,
-                config.upstream.port,
-                Some(bootstrap_resolver.clone()),
-            )?;
-            let fallback = parse_upstream_list(
-                &config.upstream.fallback,
-                config.upstream.port,
-                Some(bootstrap_resolver.clone()),
-            )?;
-
-            let pool = UpstreamPool::new(primary, fallback);
-            let label = pool.label();
-            (
-                crate::config::UpstreamMode::Forward,
-                config.upstream.address.is_empty(),
-                pool,
-                label,
-            )
-        }
-        crate::config::UpstreamMode::Odoh => {
-            let odoh = config.upstream.odoh_upstream()?;
-            let client = build_https_client_with_resolver(1, Some(bootstrap_resolver.clone()));
-            let target_config = Arc::new(OdohConfigCache::new(
-                odoh.target_host.clone(),
-                client.clone(),
-            ));
-            let primary = vec![Upstream::Odoh {
-                relay_url: odoh.relay_url,
-                target_path: odoh.target_path,
-                client,
-                target_config,
-            }];
-            let fallback = if odoh.strict {
-                Vec::new()
-            } else {
-                parse_upstream_list(
-                    &config.upstream.fallback,
-                    config.upstream.port,
-                    Some(bootstrap_resolver.clone()),
-                )?
-            };
-            let pool = UpstreamPool::new(primary, fallback);
-            let label = pool.label();
-            (crate::config::UpstreamMode::Odoh, false, pool, label)
-        }
-    };
+    let (resolved_mode, upstream_auto, pool, upstream_label) =
+        resolve_upstream_pool(&config, &system_dns, &root_hints, &bootstrap_resolver).await?;
     let api_port = config.server.api_port;
 
     let mut blocklist = BlocklistStore::new();
@@ -283,8 +199,189 @@ pub async fn run(config_path: String) -> crate::Result<()> {
     });
 
     let zone_count: usize = ctx.zone_map.values().map(|m| m.len()).sum();
-    // Build banner rows, then size the box to fit the longest value
     let api_url = format!("http://localhost:{}", api_port);
+    print_banner(
+        &config,
+        &ctx,
+        &api_url,
+        &upstream_label,
+        zone_count,
+        doh_enabled,
+    );
+
+    info!(
+        "numa listening on {}, upstream {}, {} zone records, cache max {}, API on port {}",
+        config.server.bind_addr, upstream_label, zone_count, config.cache.max_entries, api_port,
+    );
+
+    spawn_background_services(&ctx, &config, &bootstrap_resolver, api_port)?;
+
+    udp_serve_loop(&ctx).await
+}
+
+fn spawn_background_services(
+    ctx: &Arc<ServerCtx>,
+    config: &crate::config::Config,
+    bootstrap_resolver: &Arc<NumaResolver>,
+    api_port: u16,
+) -> crate::Result<()> {
+    let blocklist_lists = config.blocking.lists.clone();
+    let refresh_hours = config.blocking.refresh_hours;
+    if config.blocking.enabled && !blocklist_lists.is_empty() {
+        let bl_ctx = Arc::clone(ctx);
+        let bl_resolver = bootstrap_resolver.clone();
+        tokio::spawn(async move {
+            load_blocklists(&bl_ctx, &blocklist_lists, Some(bl_resolver.clone())).await;
+
+            let mut interval = tokio::time::interval(Duration::from_secs(refresh_hours * 3600));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                info!("refreshing blocklists...");
+                load_blocklists(&bl_ctx, &blocklist_lists, Some(bl_resolver.clone())).await;
+            }
+        });
+    }
+
+    if ctx.upstream_mode == crate::config::UpstreamMode::Recursive {
+        let prime_ctx = Arc::clone(ctx);
+        let prime_tlds = config.upstream.prime_tlds.clone();
+        tokio::spawn(async move {
+            crate::recursive::prime_tld_cache(
+                &prime_ctx.cache,
+                &prime_ctx.root_hints,
+                &prime_tlds,
+                &prime_ctx.srtt,
+            )
+            .await;
+        });
+    }
+
+    if !config.cache.warm.is_empty() {
+        let warm_ctx = Arc::clone(ctx);
+        let warm_domains = config.cache.warm.clone();
+        tokio::spawn(async move {
+            cache_warm_loop(warm_ctx, warm_domains).await;
+        });
+    }
+
+    {
+        let keepalive_ctx = Arc::clone(ctx);
+        tokio::spawn(async move {
+            doh_keepalive_loop(keepalive_ctx).await;
+        });
+    }
+
+    let api_ctx = Arc::clone(ctx);
+    let api_addr: SocketAddr = format!("{}:{}", config.server.api_bind_addr, api_port).parse()?;
+    tokio::spawn(async move {
+        let app = crate::api::router(api_ctx);
+        let listener = tokio::net::TcpListener::bind(api_addr).await.unwrap();
+        info!("HTTP API listening on {}", api_addr);
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    // Mobile API: read-only subset for iOS/Android companion apps, LAN-bound
+    // by default. Only idempotent GETs; no state-mutating routes regardless
+    // of the main API's bind address.
+    if config.mobile.enabled {
+        let mobile_ctx = Arc::clone(ctx);
+        let mobile_bind = config.mobile.bind_addr.clone();
+        let mobile_port = config.mobile.port;
+        tokio::spawn(async move {
+            if let Err(e) = crate::mobile_api::start(mobile_ctx, mobile_bind, mobile_port).await {
+                log::warn!("Mobile API listener failed: {}", e);
+            }
+        });
+    }
+
+    let proxy_bind: std::net::Ipv4Addr = config
+        .proxy
+        .bind_addr
+        .parse()
+        .unwrap_or(std::net::Ipv4Addr::LOCALHOST);
+
+    if config.proxy.enabled {
+        let proxy_ctx = Arc::clone(ctx);
+        let proxy_port = config.proxy.port;
+        tokio::spawn(async move {
+            crate::proxy::start_proxy(proxy_ctx, proxy_port, proxy_bind).await;
+        });
+    }
+
+    if config.proxy.enabled && config.proxy.tls_port > 0 && ctx.tls_config.is_some() {
+        let proxy_ctx = Arc::clone(ctx);
+        let tls_port = config.proxy.tls_port;
+        let pp_cfg = config.proxy.proxy_protocol.clone();
+        tokio::spawn(async move {
+            crate::proxy::start_proxy_tls(proxy_ctx, tls_port, proxy_bind, &pp_cfg).await;
+        });
+    }
+
+    {
+        let watch_ctx = Arc::clone(ctx);
+        tokio::spawn(async move {
+            network_watch_loop(watch_ctx).await;
+        });
+    }
+
+    if config.lan.enabled {
+        let lan_ctx = Arc::clone(ctx);
+        let lan_config = config.lan.clone();
+        tokio::spawn(async move {
+            crate::lan::start_lan_discovery(lan_ctx, &lan_config).await;
+        });
+    }
+
+    if config.dot.enabled {
+        let dot_ctx = Arc::clone(ctx);
+        let dot_config = config.dot.clone();
+        tokio::spawn(async move {
+            crate::dot::start_dot(dot_ctx, &dot_config).await;
+        });
+    }
+
+    {
+        let tcp_ctx = Arc::clone(ctx);
+        let tcp_bind = config.server.bind_addr.clone();
+        let tcp_pp = config.server.proxy_protocol.clone();
+        tokio::spawn(async move {
+            crate::tcp::start_tcp(tcp_ctx, &tcp_bind, &tcp_pp).await;
+        });
+    }
+
+    Ok(())
+}
+
+async fn udp_serve_loop(ctx: &Arc<ServerCtx>) -> crate::Result<()> {
+    #[allow(clippy::infinite_loop)]
+    loop {
+        let mut buffer = BytePacketBuffer::new();
+        let (len, src_addr) = match ctx.socket.recv_from(&mut buffer.buf).await {
+            Ok(r) => r,
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {
+                // Windows delivers ICMP port-unreachable as ConnectionReset on UDP sockets
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        };
+        let ctx = Arc::clone(ctx);
+        tokio::spawn(async move {
+            if let Err(e) = handle_query(buffer, len, src_addr, &ctx, Transport::Udp).await {
+                error!("{} | HANDLER ERROR | {}", src_addr, e);
+            }
+        });
+    }
+}
+
+fn print_banner(
+    config: &crate::config::Config,
+    ctx: &ServerCtx,
+    api_url: &str,
+    upstream_label: &str,
+    zone_count: usize,
+    doh_enabled: bool,
+) {
     let proxy_label = if config.proxy.enabled {
         if config.proxy.tls_port > 0 {
             Some(format!(
@@ -321,14 +418,14 @@ pub async fn run(config_path: String) -> crate::Result<()> {
     .chain(proxy_label.as_ref().map(|s| s.len()))
     .max()
     .unwrap_or(30);
-    let w = (val_w + 12).max(42); // 10 label + 2 padding, min 42 for title
+    let w = (val_w + 12).max(42);
 
-    let o = "\x1b[38;2;192;98;58m"; // orange
-    let g = "\x1b[38;2;107;124;78m"; // green
-    let d = "\x1b[38;2;163;152;136m"; // dim
-    let r = "\x1b[0m"; // reset
-    let b = "\x1b[1;38;2;192;98;58m"; // bold orange
-    let it = "\x1b[3;38;2;163;152;136m"; // italic dim
+    let o = "\x1b[38;2;192;98;58m";
+    let g = "\x1b[38;2;107;124;78m";
+    let d = "\x1b[38;2;163;152;136m";
+    let r = "\x1b[0m";
+    let b = "\x1b[1;38;2;192;98;58m";
+    let it = "\x1b[3;38;2;163;152;136m";
 
     let bar_top = "═".repeat(w);
     let bar_mid = "─".repeat(w);
@@ -341,13 +438,11 @@ pub async fn run(config_path: String) -> crate::Result<()> {
         );
     };
 
-    // Title row: center within the box
     let tag_line = "DNS that governs itself";
     let title = format!(
         "{b}NUMA{r}  {it}{tag_line}{r}  {d}v{}{r}",
         env!("CARGO_PKG_VERSION")
     );
-    // The title contains ANSI codes; visible length is ~38 chars. Pad to fill the box.
     let title_visible_len = 4 + 2 + tag_line.len() + 2 + 1 + env!("CARGO_PKG_VERSION").len() + 1;
     let title_pad = w.saturating_sub(title_visible_len);
     eprintln!("\n{o}  ╔{bar_top}╗{r}");
@@ -355,15 +450,15 @@ pub async fn run(config_path: String) -> crate::Result<()> {
     eprintln!("{}{o}║{r}", " ".repeat(title_pad));
     eprintln!("{o}  ╠{bar_top}╣{r}");
     row("DNS", g, &config.server.bind_addr);
-    row("API", g, &api_url);
-    row("Dashboard", g, &api_url);
+    row("API", g, api_url);
+    row("Dashboard", g, api_url);
     row(
         "Upstream",
         g,
         if ctx.upstream_mode == crate::config::UpstreamMode::Recursive {
             "recursive (root hints)"
         } else {
-            &upstream_label
+            upstream_label
         },
     );
     row("Zones", g, &format!("{} records", zone_count));
@@ -387,7 +482,7 @@ pub async fn run(config_path: String) -> crate::Result<()> {
     if let Some(ref label) = proxy_label {
         row("Proxy", g, label);
         if config.proxy.bind_addr == "127.0.0.1" {
-            let y = "\x1b[38;2;204;176;59m"; // yellow
+            let y = "\x1b[38;2;204;176;59m";
             row(
                 "",
                 y,
@@ -423,170 +518,101 @@ pub async fn run(config_path: String) -> crate::Result<()> {
     row("Data", d, &data_label);
     row("Services", d, &services_label);
     eprintln!("{o}  ╚{bar_top}╝{r}\n");
+}
 
-    info!(
-        "numa listening on {}, upstream {}, {} zone records, cache max {}, API on port {}",
-        config.server.bind_addr, upstream_label, zone_count, config.cache.max_entries, api_port,
-    );
+async fn resolve_upstream_pool(
+    config: &crate::config::Config,
+    system_dns: &crate::system_dns::SystemDnsInfo,
+    root_hints: &[SocketAddr],
+    bootstrap_resolver: &Arc<NumaResolver>,
+) -> crate::Result<(crate::config::UpstreamMode, bool, UpstreamPool, String)> {
+    let recursive_pool = || {
+        let dummy = UpstreamPool::new(vec![Upstream::Udp("0.0.0.0:0".parse().unwrap())], vec![]);
+        (dummy, "recursive (root hints)".to_string())
+    };
 
-    // Download blocklists on startup
-    let blocklist_lists = config.blocking.lists.clone();
-    let refresh_hours = config.blocking.refresh_hours;
-    if config.blocking.enabled && !blocklist_lists.is_empty() {
-        let bl_ctx = Arc::clone(&ctx);
-        let bl_lists = blocklist_lists.clone();
-        let bl_resolver = bootstrap_resolver.clone();
-        tokio::spawn(async move {
-            load_blocklists(&bl_ctx, &bl_lists, Some(bl_resolver.clone())).await;
-
-            // Periodic refresh
-            let mut interval = tokio::time::interval(Duration::from_secs(refresh_hours * 3600));
-            interval.tick().await; // skip immediate tick
-            loop {
-                interval.tick().await;
-                info!("refreshing blocklists...");
-                load_blocklists(&bl_ctx, &bl_lists, Some(bl_resolver.clone())).await;
+    Ok(match config.upstream.mode {
+        crate::config::UpstreamMode::Auto => {
+            info!("auto mode: probing recursive resolution...");
+            if crate::recursive::probe_recursive(root_hints).await {
+                info!("recursive probe succeeded — self-sovereign mode");
+                let (pool, label) = recursive_pool();
+                (crate::config::UpstreamMode::Recursive, false, pool, label)
+            } else {
+                log::warn!("recursive probe failed — falling back to Quad9 DoH");
+                let client = build_https_client_with_resolver(1, Some(bootstrap_resolver.clone()));
+                let url = DOH_FALLBACK.to_string();
+                let label = url.clone();
+                let pool = UpstreamPool::new(vec![Upstream::Doh { url, client }], vec![]);
+                (crate::config::UpstreamMode::Forward, false, pool, label)
             }
-        });
-    }
+        }
+        crate::config::UpstreamMode::Recursive => {
+            let (pool, label) = recursive_pool();
+            (crate::config::UpstreamMode::Recursive, false, pool, label)
+        }
+        crate::config::UpstreamMode::Forward => {
+            let addrs = if config.upstream.address.is_empty() {
+                let detected = system_dns
+                    .default_upstream
+                    .clone()
+                    .or_else(crate::system_dns::detect_dhcp_dns)
+                    .unwrap_or_else(|| {
+                        info!("could not detect system DNS, falling back to Quad9 DoH");
+                        DOH_FALLBACK.to_string()
+                    });
+                vec![detected]
+            } else {
+                config.upstream.address.clone()
+            };
 
-    // Prime TLD cache (recursive mode only)
-    if ctx.upstream_mode == crate::config::UpstreamMode::Recursive {
-        let prime_ctx = Arc::clone(&ctx);
-        let prime_tlds = config.upstream.prime_tlds;
-        tokio::spawn(async move {
-            crate::recursive::prime_tld_cache(
-                &prime_ctx.cache,
-                &prime_ctx.root_hints,
-                &prime_tlds,
-                &prime_ctx.srtt,
+            let primary = parse_upstream_list(
+                &addrs,
+                config.upstream.port,
+                Some(bootstrap_resolver.clone()),
+            )?;
+            let fallback = parse_upstream_list(
+                &config.upstream.fallback,
+                config.upstream.port,
+                Some(bootstrap_resolver.clone()),
+            )?;
+
+            let pool = UpstreamPool::new(primary, fallback);
+            let label = pool.label();
+            (
+                crate::config::UpstreamMode::Forward,
+                config.upstream.address.is_empty(),
+                pool,
+                label,
             )
-            .await;
-        });
-    }
-
-    // Spawn cache warming for user-configured domains
-    if !config.cache.warm.is_empty() {
-        let warm_ctx = Arc::clone(&ctx);
-        let warm_domains = config.cache.warm.clone();
-        tokio::spawn(async move {
-            cache_warm_loop(warm_ctx, warm_domains).await;
-        });
-    }
-
-    // Spawn DoH connection keepalive — prevents idle TLS teardown
-    {
-        let keepalive_ctx = Arc::clone(&ctx);
-        tokio::spawn(async move {
-            doh_keepalive_loop(keepalive_ctx).await;
-        });
-    }
-
-    // Spawn HTTP API server
-    let api_ctx = Arc::clone(&ctx);
-    let api_addr: SocketAddr = format!("{}:{}", config.server.api_bind_addr, api_port).parse()?;
-    tokio::spawn(async move {
-        let app = crate::api::router(api_ctx);
-        let listener = tokio::net::TcpListener::bind(api_addr).await.unwrap();
-        info!("HTTP API listening on {}", api_addr);
-        axum::serve(listener, app).await.unwrap();
-    });
-
-    // Spawn Mobile API listener (read-only subset for iOS/Android companion
-    // apps, LAN-bound by default so phones can reach it). Only idempotent
-    // GETs; no state-mutating routes are exposed here regardless of
-    // the main API's bind address.
-    if config.mobile.enabled {
-        let mobile_ctx = Arc::clone(&ctx);
-        let mobile_bind = config.mobile.bind_addr.clone();
-        let mobile_port = config.mobile.port;
-        tokio::spawn(async move {
-            if let Err(e) = crate::mobile_api::start(mobile_ctx, mobile_bind, mobile_port).await {
-                log::warn!("Mobile API listener failed: {}", e);
-            }
-        });
-    }
-
-    let proxy_bind: std::net::Ipv4Addr = config
-        .proxy
-        .bind_addr
-        .parse()
-        .unwrap_or(std::net::Ipv4Addr::LOCALHOST);
-
-    // Spawn HTTP reverse proxy for .numa domains
-    if config.proxy.enabled {
-        let proxy_ctx = Arc::clone(&ctx);
-        let proxy_port = config.proxy.port;
-        tokio::spawn(async move {
-            crate::proxy::start_proxy(proxy_ctx, proxy_port, proxy_bind).await;
-        });
-    }
-
-    // Spawn HTTPS reverse proxy with TLS termination
-    if config.proxy.enabled && config.proxy.tls_port > 0 && ctx.tls_config.is_some() {
-        let proxy_ctx = Arc::clone(&ctx);
-        let tls_port = config.proxy.tls_port;
-        let pp_cfg = config.proxy.proxy_protocol.clone();
-        tokio::spawn(async move {
-            crate::proxy::start_proxy_tls(proxy_ctx, tls_port, proxy_bind, &pp_cfg).await;
-        });
-    }
-
-    // Spawn network change watcher (upstream re-detection, LAN IP update, peer flush)
-    {
-        let watch_ctx = Arc::clone(&ctx);
-        tokio::spawn(async move {
-            network_watch_loop(watch_ctx).await;
-        });
-    }
-
-    // Spawn LAN service discovery
-    if config.lan.enabled {
-        let lan_ctx = Arc::clone(&ctx);
-        let lan_config = config.lan.clone();
-        tokio::spawn(async move {
-            crate::lan::start_lan_discovery(lan_ctx, &lan_config).await;
-        });
-    }
-
-    // Spawn DNS-over-TLS listener (RFC 7858)
-    if config.dot.enabled {
-        let dot_ctx = Arc::clone(&ctx);
-        let dot_config = config.dot.clone();
-        tokio::spawn(async move {
-            crate::dot::start_dot(dot_ctx, &dot_config).await;
-        });
-    }
-
-    // Spawn DNS-over-TCP listener (RFC 1035 / RFC 7766)
-    {
-        let tcp_ctx = Arc::clone(&ctx);
-        let tcp_bind = config.server.bind_addr.clone();
-        let tcp_pp = config.server.proxy_protocol.clone();
-        tokio::spawn(async move {
-            crate::tcp::start_tcp(tcp_ctx, &tcp_bind, &tcp_pp).await;
-        });
-    }
-
-    // UDP DNS listener
-    #[allow(clippy::infinite_loop)]
-    loop {
-        let mut buffer = BytePacketBuffer::new();
-        let (len, src_addr) = match ctx.socket.recv_from(&mut buffer.buf).await {
-            Ok(r) => r,
-            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {
-                // Windows delivers ICMP port-unreachable as ConnectionReset on UDP sockets
-                continue;
-            }
-            Err(e) => return Err(e.into()),
-        };
-        let ctx = Arc::clone(&ctx);
-        tokio::spawn(async move {
-            if let Err(e) = handle_query(buffer, len, src_addr, &ctx, Transport::Udp).await {
-                error!("{} | HANDLER ERROR | {}", src_addr, e);
-            }
-        });
-    }
+        }
+        crate::config::UpstreamMode::Odoh => {
+            let odoh = config.upstream.odoh_upstream()?;
+            let client = build_https_client_with_resolver(1, Some(bootstrap_resolver.clone()));
+            let target_config = Arc::new(OdohConfigCache::new(
+                odoh.target_host.clone(),
+                client.clone(),
+            ));
+            let primary = vec![Upstream::Odoh {
+                relay_url: odoh.relay_url,
+                target_path: odoh.target_path,
+                client,
+                target_config,
+            }];
+            let fallback = if odoh.strict {
+                Vec::new()
+            } else {
+                parse_upstream_list(
+                    &config.upstream.fallback,
+                    config.upstream.port,
+                    Some(bootstrap_resolver.clone()),
+                )?
+            };
+            let pool = UpstreamPool::new(primary, fallback);
+            let label = pool.label();
+            (crate::config::UpstreamMode::Odoh, false, pool, label)
+        }
+    })
 }
 
 async fn network_watch_loop(ctx: Arc<ServerCtx>) {

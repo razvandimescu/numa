@@ -128,6 +128,77 @@ fn is_port_53(bind_addr: &str) -> bool {
 }
 
 #[cfg(target_os = "macos")]
+#[derive(Default)]
+struct ScutilState {
+    rules: Vec<ForwardingRule>,
+    default_upstream: Option<String>,
+    current_domain: Option<String>,
+    current_nameserver: Option<String>,
+    is_supplemental: bool,
+}
+
+#[cfg(target_os = "macos")]
+impl ScutilState {
+    fn flush(&mut self) {
+        if let (Some(domain), Some(ns), true) = (
+            self.current_domain.take(),
+            self.current_nameserver.take(),
+            self.is_supplemental,
+        ) {
+            if let Some(rule) = make_rule(&domain, &ns) {
+                self.rules.push(rule);
+            }
+        }
+        self.is_supplemental = false;
+    }
+
+    fn set_domain(&mut self, line: &str) {
+        let Some(val) = line.split(':').nth(1) else {
+            return;
+        };
+        let domain = val.trim().trim_end_matches('.').to_lowercase();
+        if !domain.is_empty()
+            && domain != "local"
+            && !domain.ends_with("in-addr.arpa")
+            && !domain.ends_with("ip6.arpa")
+        {
+            self.current_domain = Some(domain);
+        }
+    }
+
+    fn set_nameserver(&mut self, line: &str) {
+        let Some(val) = line.split(':').nth(1) else {
+            return;
+        };
+        let ns = val.trim().to_string();
+        if ns.parse::<std::net::Ipv4Addr>().is_err() {
+            return;
+        }
+        if !self.is_supplemental && self.default_upstream.is_none() && !is_loopback_or_stub(&ns) {
+            self.default_upstream = Some(ns.clone());
+        }
+        self.current_nameserver = Some(ns);
+    }
+
+    /// Returns true when the parser should stop.
+    fn handle_line(&mut self, line: &str) -> bool {
+        if line.starts_with("resolver #") {
+            self.flush();
+        } else if line.starts_with("domain") && line.contains(':') {
+            self.set_domain(line);
+        } else if line.starts_with("nameserver[0]") && line.contains(':') {
+            self.set_nameserver(line);
+        } else if line.starts_with("flags") && line.contains("Supplemental") {
+            self.is_supplemental = true;
+        } else if line.starts_with("DNS configuration (for scoped") {
+            self.flush();
+            return true;
+        }
+        false
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn discover_macos() -> SystemDnsInfo {
     use log::{debug, warn};
 
@@ -143,76 +214,19 @@ fn discover_macos() -> SystemDnsInfo {
     };
 
     let text = String::from_utf8_lossy(&output.stdout);
-    let mut rules = Vec::new();
-    let mut default_upstream: Option<String> = None;
-
-    let mut current_domain: Option<String> = None;
-    let mut current_nameserver: Option<String> = None;
-    let mut is_supplemental = false;
-
+    let mut state = ScutilState::default();
     for line in text.lines() {
-        let line = line.trim();
-
-        if line.starts_with("resolver #") {
-            // Emit previous supplemental block as forwarding rule
-            if let (Some(domain), Some(ns), true) = (
-                current_domain.take(),
-                current_nameserver.take(),
-                is_supplemental,
-            ) {
-                if let Some(rule) = make_rule(&domain, &ns) {
-                    rules.push(rule);
-                }
-            }
-            current_domain = None;
-            current_nameserver = None;
-            is_supplemental = false;
-        } else if line.starts_with("domain") && line.contains(':') {
-            if let Some(val) = line.split(':').nth(1) {
-                let domain = val.trim().trim_end_matches('.').to_lowercase();
-                if !domain.is_empty()
-                    && domain != "local"
-                    && !domain.ends_with("in-addr.arpa")
-                    && !domain.ends_with("ip6.arpa")
-                {
-                    current_domain = Some(domain);
-                }
-            }
-        } else if line.starts_with("nameserver[0]") && line.contains(':') {
-            if let Some(val) = line.split(':').nth(1) {
-                let ns = val.trim().to_string();
-                if ns.parse::<std::net::Ipv4Addr>().is_ok() {
-                    current_nameserver = Some(ns.clone());
-                    // Capture first non-supplemental, non-loopback nameserver as default upstream
-                    if !is_supplemental && default_upstream.is_none() && !is_loopback_or_stub(&ns) {
-                        default_upstream = Some(ns);
-                    }
-                }
-            }
-        } else if line.starts_with("flags") && line.contains("Supplemental") {
-            is_supplemental = true;
-        } else if line.starts_with("DNS configuration (for scoped") {
-            if let (Some(domain), Some(ns), true) = (
-                current_domain.take(),
-                current_nameserver.take(),
-                is_supplemental,
-            ) {
-                if let Some(rule) = make_rule(&domain, &ns) {
-                    rules.push(rule);
-                }
-            }
+        if state.handle_line(line.trim()) {
             break;
         }
     }
+    state.flush();
 
-    // Emit last block
-    if let (Some(domain), Some(ns), true) = (current_domain, current_nameserver, is_supplemental) {
-        if let Some(rule) = make_rule(&domain, &ns) {
-            rules.push(rule);
-        }
-    }
-
-    // Sort longest suffix first for most-specific matching
+    let ScutilState {
+        mut rules,
+        default_upstream,
+        ..
+    } = state;
     rules.sort_by_key(|r| std::cmp::Reverse(r.suffix.len()));
 
     for rule in &rules {

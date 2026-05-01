@@ -106,172 +106,13 @@ pub async fn resolve_query(
     //        -> .tld proxy -> blocklist -> cache -> forwarding -> recursive/upstream
     // Each lock is scoped to avoid holding MutexGuard across await points.
     let mut upstream_transport: Option<crate::stats::UpstreamTransport> = None;
-    let (response, path, dnssec) = {
-        let override_record = ctx.overrides.read().unwrap().lookup(&qname);
-        if let Some(record) = override_record {
-            let mut resp = DnsPacket::response_from(&query, ResultCode::NOERROR);
-            resp.answers.push(record);
-            (resp, QueryPath::Overridden, DnssecStatus::Indeterminate)
-        } else if qname == "localhost" || qname.ends_with(".localhost") {
-            // RFC 6761: .localhost always resolves to loopback
-            let mut resp = DnsPacket::response_from(&query, ResultCode::NOERROR);
-            resp.answers.push(sinkhole_record(
-                &qname,
-                qtype,
-                std::net::Ipv4Addr::LOCALHOST,
-                std::net::Ipv6Addr::LOCALHOST,
-                300,
-            ));
-            (resp, QueryPath::Local, DnssecStatus::Indeterminate)
-        } else if let Some(records) = ctx.zone_map.get(qname.as_str()).and_then(|m| m.get(&qtype)) {
-            let mut resp = DnsPacket::response_from(&query, ResultCode::NOERROR);
-            resp.answers = records.clone();
-            (resp, QueryPath::Local, DnssecStatus::Indeterminate)
-        } else if is_special_use_domain(&qname)
-            && crate::system_dns::match_forwarding_rule(&qname, &ctx.forwarding_rules).is_none()
-        {
-            // RFC 6761/8880: answer locally unless a forwarding rule covers this zone.
-            let resp = special_use_response(&query, &qname, qtype);
-            (resp, QueryPath::Local, DnssecStatus::Indeterminate)
-        } else if !ctx.proxy_tld_suffix.is_empty()
-            && (qname.ends_with(&ctx.proxy_tld_suffix) || qname == ctx.proxy_tld)
-        {
-            // Resolve .numa: remote clients get LAN IP (can't reach 127.0.0.1), local get loopback
-            let service_name = qname.strip_suffix(&ctx.proxy_tld_suffix).unwrap_or(&qname);
-            let is_remote = !src_addr.ip().is_loopback();
-            let resolve_ip = {
-                let local = ctx.services.lock().unwrap();
-                if local.lookup(service_name).is_some() {
-                    if is_remote {
-                        *ctx.lan_ip.lock().unwrap()
-                    } else {
-                        std::net::Ipv4Addr::LOCALHOST
-                    }
-                } else {
-                    let mut peers = ctx.lan_peers.lock().unwrap();
-                    peers
-                        .lookup(service_name)
-                        .and_then(|(ip, _)| match ip {
-                            std::net::IpAddr::V4(v4) => Some(v4),
-                            _ => None,
-                        })
-                        .unwrap_or(std::net::Ipv4Addr::LOCALHOST)
-                }
-            };
-            let v6 = if resolve_ip == std::net::Ipv4Addr::LOCALHOST {
-                std::net::Ipv6Addr::LOCALHOST
-            } else {
-                resolve_ip.to_ipv6_mapped()
-            };
-            let mut resp = DnsPacket::response_from(&query, ResultCode::NOERROR);
-            resp.answers
-                .push(sinkhole_record(&qname, qtype, resolve_ip, v6, 300));
-            (resp, QueryPath::Local, DnssecStatus::Indeterminate)
-        } else if ctx.blocklist.read().unwrap().is_blocked(&qname) {
-            let mut resp = DnsPacket::response_from(&query, ResultCode::NOERROR);
-            resp.answers.push(sinkhole_record(
-                &qname,
-                qtype,
-                std::net::Ipv4Addr::UNSPECIFIED,
-                std::net::Ipv6Addr::UNSPECIFIED,
-                60,
-            ));
-            (resp, QueryPath::Blocked, DnssecStatus::Indeterminate)
-        } else if qtype == QueryType::AAAA && ctx.filter_aaaa {
-            // RFC 2308 NODATA: NOERROR with empty answer section. Prevents
-            // Happy Eyeballs clients from waiting on an AAAA they'll never use
-            // on IPv4-only networks. NXDOMAIN would be wrong (it'd imply the
-            // name doesn't exist for A either).
-            let resp = DnsPacket::response_from(&query, ResultCode::NOERROR);
-            (resp, QueryPath::Local, DnssecStatus::Indeterminate)
-        } else {
-            let cached = ctx.cache.read().unwrap().lookup_with_status(&qname, qtype);
-            if let Some((cached, cached_dnssec, freshness)) = cached {
-                if freshness.needs_refresh() {
-                    let key = (qname.clone(), qtype);
-                    let already = !ctx.refreshing.lock().unwrap().insert(key.clone());
-                    if !already {
-                        let ctx = Arc::clone(ctx);
-                        tokio::spawn(async move {
-                            refresh_entry(&ctx, &key.0, key.1).await;
-                            ctx.refreshing.lock().unwrap().remove(&key);
-                        });
-                    }
-                }
-                let mut resp = cached;
-                resp.header.id = query.header.id;
-                if cached_dnssec == DnssecStatus::Secure {
-                    resp.header.authed_data = true;
-                }
-                (resp, QueryPath::Cached, cached_dnssec)
-            } else if let Some(pool) =
-                crate::system_dns::match_forwarding_rule(&qname, &ctx.forwarding_rules)
-            {
-                // Conditional forwarding takes priority over recursive mode
-                // (e.g. Tailscale .ts.net, VPC private zones)
-                let key = (qname.clone(), qtype);
-                let (resp, path, err) =
-                    resolve_coalesced(&ctx.inflight, key, &query, QueryPath::Forwarded, || async {
-                        let wire = forward_with_failover_raw(
-                            raw_wire,
-                            pool,
-                            &ctx.srtt,
-                            ctx.timeout,
-                            ctx.hedge_delay,
-                        )
-                        .await?;
-                        cache_and_parse(ctx, &qname, qtype, &wire)
-                    })
-                    .await;
-                log_coalesced_outcome(src_addr, qtype, &qname, path, err.as_deref(), "FORWARD");
-                if path == QueryPath::Forwarded {
-                    upstream_transport = pool.preferred().map(|u| u.transport());
-                }
-                (resp, path, DnssecStatus::Indeterminate)
-            } else if ctx.upstream_mode == UpstreamMode::Recursive {
-                // Recursive resolution makes UDP hops to roots/TLDs/auths;
-                // tag as Udp so the dashboard can aggregate plaintext-wire
-                // egress honestly. Only mark on success — errors stay None.
-                let key = (qname.clone(), qtype);
-                let (resp, path, err) =
-                    resolve_coalesced(&ctx.inflight, key, &query, QueryPath::Recursive, || {
-                        crate::recursive::resolve_recursive(
-                            &qname,
-                            qtype,
-                            &ctx.cache,
-                            &query,
-                            &ctx.root_hints,
-                            &ctx.srtt,
-                        )
-                    })
-                    .await;
-                log_coalesced_outcome(src_addr, qtype, &qname, path, err.as_deref(), "RECURSIVE");
-                if path == QueryPath::Recursive {
-                    upstream_transport = Some(crate::stats::UpstreamTransport::Udp);
-                }
-                (resp, path, DnssecStatus::Indeterminate)
-            } else {
-                let pool = ctx.upstream_pool.lock().unwrap().clone();
-                let key = (qname.clone(), qtype);
-                let (resp, path, err) =
-                    resolve_coalesced(&ctx.inflight, key, &query, QueryPath::Upstream, || async {
-                        let wire = forward_with_failover_raw(
-                            raw_wire,
-                            &pool,
-                            &ctx.srtt,
-                            ctx.timeout,
-                            ctx.hedge_delay,
-                        )
-                        .await?;
-                        cache_and_parse(ctx, &qname, qtype, &wire)
-                    })
-                    .await;
-                log_coalesced_outcome(src_addr, qtype, &qname, path, err.as_deref(), "UPSTREAM");
-                if path == QueryPath::Upstream {
-                    upstream_transport = pool.preferred().map(|u| u.transport());
-                }
-                (resp, path, DnssecStatus::Indeterminate)
-            }
+    let (response, path, dnssec) = match resolve_local(&query, src_addr, &qname, qtype, ctx) {
+        Some(result) => result,
+        None => {
+            let (resp, path, dnssec, ut) =
+                resolve_remote(&query, raw_wire, src_addr, &qname, qtype, ctx).await;
+            upstream_transport = ut;
+            (resp, path, dnssec)
         }
     };
 
@@ -388,6 +229,210 @@ pub async fn resolve_query(
     });
 
     Ok((resp_buffer, path))
+}
+
+/// Local resolution pipeline: overrides, .localhost, zones, special-use, .numa
+/// proxy TLD, blocklist, AAAA filter. Returns `None` to fall through to remote
+/// resolution (cache/forwarding/recursive/upstream).
+fn resolve_local(
+    query: &DnsPacket,
+    src_addr: SocketAddr,
+    qname: &str,
+    qtype: QueryType,
+    ctx: &ServerCtx,
+) -> Option<(DnsPacket, QueryPath, DnssecStatus)> {
+    if let Some(record) = ctx.overrides.read().unwrap().lookup(qname) {
+        let mut resp = DnsPacket::response_from(query, ResultCode::NOERROR);
+        resp.answers.push(record);
+        return Some((resp, QueryPath::Overridden, DnssecStatus::Indeterminate));
+    }
+    if qname == "localhost" || qname.ends_with(".localhost") {
+        // RFC 6761: .localhost always resolves to loopback
+        let mut resp = DnsPacket::response_from(query, ResultCode::NOERROR);
+        resp.answers.push(sinkhole_record(
+            qname,
+            qtype,
+            std::net::Ipv4Addr::LOCALHOST,
+            std::net::Ipv6Addr::LOCALHOST,
+            300,
+        ));
+        return Some((resp, QueryPath::Local, DnssecStatus::Indeterminate));
+    }
+    if let Some(records) = ctx.zone_map.get(qname).and_then(|m| m.get(&qtype)) {
+        let mut resp = DnsPacket::response_from(query, ResultCode::NOERROR);
+        resp.answers = records.clone();
+        return Some((resp, QueryPath::Local, DnssecStatus::Indeterminate));
+    }
+    if is_special_use_domain(qname)
+        && crate::system_dns::match_forwarding_rule(qname, &ctx.forwarding_rules).is_none()
+    {
+        // RFC 6761/8880: answer locally unless a forwarding rule covers this zone.
+        let resp = special_use_response(query, qname, qtype);
+        return Some((resp, QueryPath::Local, DnssecStatus::Indeterminate));
+    }
+    if !ctx.proxy_tld_suffix.is_empty()
+        && (qname.ends_with(&ctx.proxy_tld_suffix) || qname == ctx.proxy_tld)
+    {
+        return Some(resolve_proxy_tld(query, src_addr, qname, qtype, ctx));
+    }
+    if ctx.blocklist.read().unwrap().is_blocked(qname) {
+        let mut resp = DnsPacket::response_from(query, ResultCode::NOERROR);
+        resp.answers.push(sinkhole_record(
+            qname,
+            qtype,
+            std::net::Ipv4Addr::UNSPECIFIED,
+            std::net::Ipv6Addr::UNSPECIFIED,
+            60,
+        ));
+        return Some((resp, QueryPath::Blocked, DnssecStatus::Indeterminate));
+    }
+    if qtype == QueryType::AAAA && ctx.filter_aaaa {
+        // RFC 2308 NODATA: NOERROR with empty answer section. Prevents
+        // Happy Eyeballs clients from waiting on an AAAA they'll never use
+        // on IPv4-only networks.
+        let resp = DnsPacket::response_from(query, ResultCode::NOERROR);
+        return Some((resp, QueryPath::Local, DnssecStatus::Indeterminate));
+    }
+    None
+}
+
+/// Resolve .numa: remote clients get LAN IP (can't reach 127.0.0.1), local get loopback.
+fn resolve_proxy_tld(
+    query: &DnsPacket,
+    src_addr: SocketAddr,
+    qname: &str,
+    qtype: QueryType,
+    ctx: &ServerCtx,
+) -> (DnsPacket, QueryPath, DnssecStatus) {
+    let service_name = qname.strip_suffix(&ctx.proxy_tld_suffix).unwrap_or(qname);
+    let is_remote = !src_addr.ip().is_loopback();
+    let resolve_ip = {
+        let local = ctx.services.lock().unwrap();
+        if local.lookup(service_name).is_some() {
+            if is_remote {
+                *ctx.lan_ip.lock().unwrap()
+            } else {
+                std::net::Ipv4Addr::LOCALHOST
+            }
+        } else {
+            let mut peers = ctx.lan_peers.lock().unwrap();
+            peers
+                .lookup(service_name)
+                .and_then(|(ip, _)| match ip {
+                    std::net::IpAddr::V4(v4) => Some(v4),
+                    _ => None,
+                })
+                .unwrap_or(std::net::Ipv4Addr::LOCALHOST)
+        }
+    };
+    let v6 = if resolve_ip == std::net::Ipv4Addr::LOCALHOST {
+        std::net::Ipv6Addr::LOCALHOST
+    } else {
+        resolve_ip.to_ipv6_mapped()
+    };
+    let mut resp = DnsPacket::response_from(query, ResultCode::NOERROR);
+    resp.answers
+        .push(sinkhole_record(qname, qtype, resolve_ip, v6, 300));
+    (resp, QueryPath::Local, DnssecStatus::Indeterminate)
+}
+
+/// Remote resolution: cache → conditional forwarding → recursive/upstream.
+async fn resolve_remote(
+    query: &DnsPacket,
+    raw_wire: &[u8],
+    src_addr: SocketAddr,
+    qname: &str,
+    qtype: QueryType,
+    ctx: &Arc<ServerCtx>,
+) -> (
+    DnsPacket,
+    QueryPath,
+    DnssecStatus,
+    Option<crate::stats::UpstreamTransport>,
+) {
+    let cached = ctx.cache.read().unwrap().lookup_with_status(qname, qtype);
+    if let Some((cached, cached_dnssec, freshness)) = cached {
+        if freshness.needs_refresh() {
+            let key = (qname.to_string(), qtype);
+            let already = !ctx.refreshing.lock().unwrap().insert(key.clone());
+            if !already {
+                let ctx = Arc::clone(ctx);
+                tokio::spawn(async move {
+                    refresh_entry(&ctx, &key.0, key.1).await;
+                    ctx.refreshing.lock().unwrap().remove(&key);
+                });
+            }
+        }
+        let mut resp = cached;
+        resp.header.id = query.header.id;
+        if cached_dnssec == DnssecStatus::Secure {
+            resp.header.authed_data = true;
+        }
+        return (resp, QueryPath::Cached, cached_dnssec, None);
+    }
+
+    if let Some(pool) = crate::system_dns::match_forwarding_rule(qname, &ctx.forwarding_rules) {
+        // Conditional forwarding takes priority over recursive mode
+        // (e.g. Tailscale .ts.net, VPC private zones)
+        let key = (qname.to_string(), qtype);
+        let (resp, path, err) =
+            resolve_coalesced(&ctx.inflight, key, query, QueryPath::Forwarded, || async {
+                let wire = forward_with_failover_raw(
+                    raw_wire,
+                    pool,
+                    &ctx.srtt,
+                    ctx.timeout,
+                    ctx.hedge_delay,
+                )
+                .await?;
+                cache_and_parse(ctx, qname, qtype, &wire)
+            })
+            .await;
+        log_coalesced_outcome(src_addr, qtype, qname, path, err.as_deref(), "FORWARD");
+        let upstream_transport = (path == QueryPath::Forwarded)
+            .then(|| pool.preferred().map(|u| u.transport()))
+            .flatten();
+        return (resp, path, DnssecStatus::Indeterminate, upstream_transport);
+    }
+
+    if ctx.upstream_mode == UpstreamMode::Recursive {
+        // Recursive resolution makes UDP hops to roots/TLDs/auths;
+        // tag as Udp so the dashboard can aggregate plaintext-wire
+        // egress honestly. Only mark on success — errors stay None.
+        let key = (qname.to_string(), qtype);
+        let (resp, path, err) =
+            resolve_coalesced(&ctx.inflight, key, query, QueryPath::Recursive, || {
+                crate::recursive::resolve_recursive(
+                    qname,
+                    qtype,
+                    &ctx.cache,
+                    query,
+                    &ctx.root_hints,
+                    &ctx.srtt,
+                )
+            })
+            .await;
+        log_coalesced_outcome(src_addr, qtype, qname, path, err.as_deref(), "RECURSIVE");
+        let upstream_transport =
+            (path == QueryPath::Recursive).then_some(crate::stats::UpstreamTransport::Udp);
+        return (resp, path, DnssecStatus::Indeterminate, upstream_transport);
+    }
+
+    let pool = ctx.upstream_pool.lock().unwrap().clone();
+    let key = (qname.to_string(), qtype);
+    let (resp, path, err) =
+        resolve_coalesced(&ctx.inflight, key, query, QueryPath::Upstream, || async {
+            let wire =
+                forward_with_failover_raw(raw_wire, &pool, &ctx.srtt, ctx.timeout, ctx.hedge_delay)
+                    .await?;
+            cache_and_parse(ctx, qname, qtype, &wire)
+        })
+        .await;
+    log_coalesced_outcome(src_addr, qtype, qname, path, err.as_deref(), "UPSTREAM");
+    let upstream_transport = (path == QueryPath::Upstream)
+        .then(|| pool.preferred().map(|u| u.transport()))
+        .flatten();
+    (resp, path, DnssecStatus::Indeterminate, upstream_transport)
 }
 
 fn cache_and_parse(

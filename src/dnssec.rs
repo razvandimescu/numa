@@ -61,6 +61,31 @@ static TRUST_ANCHORS: LazyLock<Vec<DnsRecord>> = LazyLock::new(|| {
     }]
 });
 
+struct ValidationCtx<'a> {
+    cache: &'a RwLock<DnsCache>,
+    root_hints: &'a [std::net::SocketAddr],
+    srtt: &'a RwLock<SrttCache>,
+    trust_anchors: &'a [DnsRecord],
+    stats: &'a Mutex<ValidationStats>,
+}
+
+enum RrsetVerdict {
+    Verified,
+    Bogus,
+}
+
+enum RrsigOutcome {
+    Verified,
+    ChainBogus,
+    NoMatchingKey,
+}
+
+enum KeyOutcome {
+    Verified,
+    ChainBogus,
+    Skip,
+}
+
 /// Top-level validation: verify the DNSSEC chain of trust for a response.
 pub async fn validate_response(
     response: &DnsPacket,
@@ -82,180 +107,33 @@ pub async fn validate_response(
         .collect();
 
     if all_rrsigs.is_empty() {
-        let mut s = stats.into_inner().unwrap_or_else(|e| e.into_inner());
-        s.elapsed_ms = start.elapsed().as_millis() as u64;
-        return (DnssecStatus::Insecure, s);
+        return finish(start, stats, DnssecStatus::Insecure);
     }
 
-    // Prefetch DNSKEYs for all signer zones
-    let mut signer_zones: Vec<String> = Vec::new();
-    for r in &all_rrsigs {
-        if let DnsRecord::RRSIG { signer_name, .. } = r {
-            let lower = signer_name.to_lowercase();
-            if !signer_zones.contains(&lower) {
-                signer_zones.push(lower);
-            }
-        }
-    }
-    for zone in &signer_zones {
-        fetch_dnskeys(zone, cache, root_hints, srtt, &stats).await;
-    }
+    let ctx = ValidationCtx {
+        cache,
+        root_hints,
+        srtt,
+        trust_anchors,
+        stats: &stats,
+    };
 
-    // Group answer records into RRsets (by domain + type, excluding RRSIGs)
+    prefetch_signer_dnskeys(&all_rrsigs, &ctx).await;
+
     let rrsets = group_rrsets(&response.answers);
 
     for (name, qtype, rrset) in &rrsets {
-        let matching_rrsigs: Vec<&&DnsRecord> = all_rrsigs
-            .iter()
-            .filter(|r| {
-                if let DnsRecord::RRSIG {
-                    domain,
-                    type_covered,
-                    ..
-                } = r
-                {
-                    domain.eq_ignore_ascii_case(name)
-                        && QueryType::from_num(*type_covered) == *qtype
-                } else {
-                    false
-                }
-            })
-            .collect();
-
+        let matching_rrsigs = matching_rrsigs_for(&all_rrsigs, name, *qtype);
         if matching_rrsigs.is_empty() {
             continue; // No RRSIG for this RRset — might be Insecure
         }
-
-        let mut any_verified = false;
-        for rrsig in &matching_rrsigs {
-            if let DnsRecord::RRSIG {
-                signer_name,
-                key_tag,
-                algorithm,
-                ..
-            } = rrsig
-            {
-                let dnskey_response =
-                    fetch_dnskeys(signer_name, cache, root_hints, srtt, &stats).await;
-                let dnskeys: Vec<&DnsRecord> = dnskey_response
-                    .iter()
-                    .filter(|r| matches!(r, DnsRecord::DNSKEY { .. }))
-                    .collect();
-                if dnskeys.is_empty() {
-                    trace!("dnssec: no DNSKEY found for signer '{}'", signer_name);
-                    continue;
-                }
-
-                trace!(
-                    "dnssec: verifying {} {:?} | signer={} key_tag={} algo={} | {} DNSKEYs available",
-                    name, qtype, signer_name, key_tag, algorithm, dnskeys.len()
-                );
-
-                for dk in &dnskeys {
-                    if let DnsRecord::DNSKEY {
-                        flags,
-                        protocol,
-                        algorithm: dk_algo,
-                        public_key,
-                        ..
-                    } = dk
-                    {
-                        let tag = compute_key_tag(*flags, *protocol, *dk_algo, public_key);
-                        if *dk_algo != *algorithm {
-                            trace!(
-                                "dnssec:   DNSKEY tag={} algo={} — algo mismatch (want {})",
-                                tag,
-                                dk_algo,
-                                algorithm
-                            );
-                            continue;
-                        }
-                        if tag != *key_tag {
-                            trace!(
-                                "dnssec:   DNSKEY tag={} — tag mismatch (want {})",
-                                tag,
-                                key_tag
-                            );
-                            continue;
-                        }
-
-                        // Check RRSIG time validity (RFC 4035 §5.3.1)
-                        if let DnsRecord::RRSIG {
-                            expiration,
-                            inception,
-                            ..
-                        } = rrsig
-                        {
-                            if !is_rrsig_time_valid(*expiration, *inception) {
-                                trace!("dnssec:   RRSIG expired or not yet valid (inception={} expiration={})", inception, expiration);
-                                continue;
-                            }
-                        }
-
-                        trace!("dnssec:   DNSKEY tag={} algo={} flags={} — matched, verifying signature ({} bytes)", tag, dk_algo, flags, public_key.len());
-                        let signed_data = build_signed_data(rrsig, rrset);
-                        if let DnsRecord::RRSIG { signature, .. } = rrsig {
-                            let ok =
-                                verify_signature(*algorithm, public_key, &signed_data, signature);
-                            trace!(
-                                "dnssec:   verify result: {} (signed_data={} bytes, sig={} bytes)",
-                                ok,
-                                signed_data.len(),
-                                signature.len()
-                            );
-                            if ok {
-                                // Validate the DNSKEY itself via chain of trust
-                                let chain_status = validate_chain(
-                                    signer_name,
-                                    &dnskey_response,
-                                    cache,
-                                    root_hints,
-                                    srtt,
-                                    trust_anchors,
-                                    0,
-                                    &stats,
-                                )
-                                .await;
-
-                                trace!(
-                                    "dnssec:   chain_status for '{}': {:?}",
-                                    signer_name,
-                                    chain_status
-                                );
-                                match chain_status {
-                                    DnssecStatus::Secure => {
-                                        any_verified = true;
-                                        break;
-                                    }
-                                    DnssecStatus::Bogus => {
-                                        let mut s =
-                                            stats.into_inner().unwrap_or_else(|e| e.into_inner());
-                                        s.elapsed_ms = start.elapsed().as_millis() as u64;
-                                        return (DnssecStatus::Bogus, s);
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            if any_verified {
-                break;
-            }
-        }
-
-        if !any_verified && !matching_rrsigs.is_empty() {
+        if let RrsetVerdict::Bogus = verify_rrset(name, *qtype, rrset, &matching_rrsigs, &ctx).await
+        {
             debug!("dnssec: no valid signature for {} {:?}", name, qtype);
-            let mut s = stats.into_inner().unwrap_or_else(|e| e.into_inner());
-            s.elapsed_ms = start.elapsed().as_millis() as u64;
-            return (DnssecStatus::Bogus, s);
+            return finish(start, stats, DnssecStatus::Bogus);
         }
     }
 
-    let mut s = stats.into_inner().unwrap_or_else(|e| e.into_inner());
-    s.elapsed_ms = start.elapsed().as_millis() as u64;
     if rrsets.is_empty() {
         // NXDOMAIN or NODATA — check authority section for NSEC/NSEC3 proofs
         let (qname, qtype_num) = response
@@ -273,10 +151,222 @@ pub async fn validate_response(
             is_nxdomain,
             cache,
         );
-        return (denial, s);
+        return finish(start, stats, denial);
     }
 
-    (DnssecStatus::Secure, s)
+    finish(start, stats, DnssecStatus::Secure)
+}
+
+fn finish(
+    start: Instant,
+    stats: Mutex<ValidationStats>,
+    status: DnssecStatus,
+) -> (DnssecStatus, ValidationStats) {
+    let mut s = stats.into_inner().unwrap_or_else(|e| e.into_inner());
+    s.elapsed_ms = start.elapsed().as_millis() as u64;
+    (status, s)
+}
+
+async fn prefetch_signer_dnskeys(all_rrsigs: &[&DnsRecord], ctx: &ValidationCtx<'_>) {
+    let mut signer_zones: Vec<String> = Vec::new();
+    for r in all_rrsigs {
+        if let DnsRecord::RRSIG { signer_name, .. } = r {
+            let lower = signer_name.to_lowercase();
+            if !signer_zones.contains(&lower) {
+                signer_zones.push(lower);
+            }
+        }
+    }
+    for zone in &signer_zones {
+        fetch_dnskeys(zone, ctx.cache, ctx.root_hints, ctx.srtt, ctx.stats).await;
+    }
+}
+
+fn matching_rrsigs_for<'a>(
+    all_rrsigs: &[&'a DnsRecord],
+    name: &str,
+    qtype: QueryType,
+) -> Vec<&'a DnsRecord> {
+    all_rrsigs
+        .iter()
+        .copied()
+        .filter(|r| {
+            if let DnsRecord::RRSIG {
+                domain,
+                type_covered,
+                ..
+            } = r
+            {
+                domain.eq_ignore_ascii_case(name) && QueryType::from_num(*type_covered) == qtype
+            } else {
+                false
+            }
+        })
+        .collect()
+}
+
+async fn verify_rrset(
+    name: &str,
+    qtype: QueryType,
+    rrset: &[&DnsRecord],
+    matching_rrsigs: &[&DnsRecord],
+    ctx: &ValidationCtx<'_>,
+) -> RrsetVerdict {
+    for rrsig in matching_rrsigs {
+        match try_verify_rrsig(rrsig, name, qtype, rrset, ctx).await {
+            RrsigOutcome::Verified => return RrsetVerdict::Verified,
+            RrsigOutcome::ChainBogus => return RrsetVerdict::Bogus,
+            RrsigOutcome::NoMatchingKey => continue,
+        }
+    }
+    RrsetVerdict::Bogus
+}
+
+async fn try_verify_rrsig(
+    rrsig: &DnsRecord,
+    name: &str,
+    qtype: QueryType,
+    rrset: &[&DnsRecord],
+    ctx: &ValidationCtx<'_>,
+) -> RrsigOutcome {
+    let DnsRecord::RRSIG {
+        signer_name,
+        key_tag,
+        algorithm,
+        ..
+    } = rrsig
+    else {
+        return RrsigOutcome::NoMatchingKey;
+    };
+
+    let dnskey_response =
+        fetch_dnskeys(signer_name, ctx.cache, ctx.root_hints, ctx.srtt, ctx.stats).await;
+    let dnskeys: Vec<&DnsRecord> = dnskey_response
+        .iter()
+        .filter(|r| matches!(r, DnsRecord::DNSKEY { .. }))
+        .collect();
+    if dnskeys.is_empty() {
+        trace!("dnssec: no DNSKEY found for signer '{}'", signer_name);
+        return RrsigOutcome::NoMatchingKey;
+    }
+
+    trace!(
+        "dnssec: verifying {} {:?} | signer={} key_tag={} algo={} | {} DNSKEYs available",
+        name,
+        qtype,
+        signer_name,
+        key_tag,
+        algorithm,
+        dnskeys.len()
+    );
+
+    for dk in &dnskeys {
+        match try_verify_with_key(dk, rrsig, rrset, signer_name, &dnskey_response, ctx).await {
+            KeyOutcome::Verified => return RrsigOutcome::Verified,
+            KeyOutcome::ChainBogus => return RrsigOutcome::ChainBogus,
+            KeyOutcome::Skip => continue,
+        }
+    }
+    RrsigOutcome::NoMatchingKey
+}
+
+async fn try_verify_with_key(
+    dk: &DnsRecord,
+    rrsig: &DnsRecord,
+    rrset: &[&DnsRecord],
+    signer_name: &str,
+    dnskey_response: &[DnsRecord],
+    ctx: &ValidationCtx<'_>,
+) -> KeyOutcome {
+    let DnsRecord::DNSKEY {
+        flags,
+        protocol,
+        algorithm: dk_algo,
+        public_key,
+        ..
+    } = dk
+    else {
+        return KeyOutcome::Skip;
+    };
+    let DnsRecord::RRSIG {
+        algorithm,
+        key_tag,
+        expiration,
+        inception,
+        signature,
+        ..
+    } = rrsig
+    else {
+        return KeyOutcome::Skip;
+    };
+
+    let tag = compute_key_tag(*flags, *protocol, *dk_algo, public_key);
+    if *dk_algo != *algorithm {
+        trace!(
+            "dnssec:   DNSKEY tag={} algo={} — algo mismatch (want {})",
+            tag,
+            dk_algo,
+            algorithm
+        );
+        return KeyOutcome::Skip;
+    }
+    if tag != *key_tag {
+        trace!(
+            "dnssec:   DNSKEY tag={} — tag mismatch (want {})",
+            tag,
+            key_tag
+        );
+        return KeyOutcome::Skip;
+    }
+    if !is_rrsig_time_valid(*expiration, *inception) {
+        trace!(
+            "dnssec:   RRSIG expired or not yet valid (inception={} expiration={})",
+            inception,
+            expiration
+        );
+        return KeyOutcome::Skip;
+    }
+
+    trace!(
+        "dnssec:   DNSKEY tag={} algo={} flags={} — matched, verifying signature ({} bytes)",
+        tag,
+        dk_algo,
+        flags,
+        public_key.len()
+    );
+    let signed_data = build_signed_data(rrsig, rrset);
+    let ok = verify_signature(*algorithm, public_key, &signed_data, signature);
+    trace!(
+        "dnssec:   verify result: {} (signed_data={} bytes, sig={} bytes)",
+        ok,
+        signed_data.len(),
+        signature.len()
+    );
+    if !ok {
+        return KeyOutcome::Skip;
+    }
+
+    let chain_status = validate_chain(
+        signer_name,
+        dnskey_response,
+        ctx.cache,
+        ctx.root_hints,
+        ctx.srtt,
+        ctx.trust_anchors,
+        0,
+        ctx.stats,
+    )
+    .await;
+    trace!(
+        "dnssec:   chain_status for '{}': {:?}",
+        signer_name,
+        chain_status
+    );
+    match chain_status {
+        DnssecStatus::Secure => KeyOutcome::Verified,
+        DnssecStatus::Bogus => KeyOutcome::ChainBogus,
+        _ => KeyOutcome::Skip,
+    }
 }
 
 /// Walk the chain of trust from zone DNSKEY up to root trust anchor.

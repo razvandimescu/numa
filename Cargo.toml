@@ -66,3 +66,6 @@ harness = false
 [[bench]]
 name = "recursive_compare"
 harness = false
+
+[lints.clippy]
+cognitive_complexity = "warn"
