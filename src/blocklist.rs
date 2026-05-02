@@ -86,7 +86,7 @@ impl BlocklistStore {
                 return false;
             }
         }
-        let domain = Self::normalize(domain);
+        let domain = normalize(domain);
         if Self::find_in_set(&domain, &self.allowlist).is_some() {
             return false;
         }
@@ -104,7 +104,7 @@ impl BlocklistStore {
             }
         }
 
-        let domain = Self::normalize(domain);
+        let domain = normalize(domain);
 
         if let Some(matched) = Self::find_in_set(&domain, &self.allowlist) {
             let reason = if matched == domain {
@@ -125,10 +125,6 @@ impl BlocklistStore {
         }
 
         BlockCheckResult::not_blocked()
-    }
-
-    fn normalize(domain: &str) -> String {
-        domain.to_lowercase().trim_end_matches('.').to_string()
     }
 
     fn find_in_set<'a>(domain: &'a str, set: &HashSet<String>) -> Option<&'a str> {
@@ -176,11 +172,11 @@ impl BlocklistStore {
     }
 
     pub fn add_to_allowlist(&mut self, domain: &str) {
-        self.allowlist.insert(Self::normalize(domain));
+        self.allowlist.insert(normalize(domain));
     }
 
     pub fn remove_from_allowlist(&mut self, domain: &str) -> bool {
-        self.allowlist.remove(&Self::normalize(domain))
+        self.allowlist.remove(&normalize(domain))
     }
 
     pub fn allowlist(&self) -> Vec<String> {
@@ -217,34 +213,36 @@ pub fn parse_blocklist(text: &str) -> HashSet<String> {
             continue;
         }
 
-        // Handle hosts-file format: "0.0.0.0 domain" or "127.0.0.1 domain" (space or tab)
-        let domain = if line.starts_with("0.0.0.0")
-            || line.starts_with("127.0.0.1")
-            || line.starts_with("::")
-        {
-            line.split_whitespace()
-                .nth(1)
-                .unwrap_or("")
-                .trim_end_matches('.')
-        } else if line.contains(' ') || line.contains('\t') {
+        if line.starts_with("0.0.0.0") || line.starts_with("127.0.0.1") || line.starts_with("::") {
+            // BSD hosts(5): an IP followed by N aliases; '#' starts an inline comment.
+            let payload = line.split('#').next().unwrap_or(line);
+            for alias in payload.split_whitespace().skip(1) {
+                insert_if_valid(&mut domains, alias);
+            }
             continue;
-        } else {
-            // Plain domain or adblock filter syntax
-            let d = line.trim_start_matches("*.").trim_start_matches("||");
-            let d = d.split('$').next().unwrap_or(d); // strip adblock $options
-            d.trim_end_matches('^').trim_end_matches('.')
-        };
-
-        let domain = domain.to_lowercase();
-        if !domain.is_empty()
-            && domain.contains('.')
-            && domain != "localhost"
-            && domain != "localhost.localdomain"
-        {
-            domains.insert(domain);
         }
+
+        if line.contains(' ') || line.contains('\t') {
+            continue;
+        }
+
+        // Plain domain or adblock filter syntax.
+        let d = line.trim_start_matches("*.").trim_start_matches("||");
+        let d = d.split('$').next().unwrap_or(d); // strip adblock $options
+        insert_if_valid(&mut domains, d.trim_end_matches('^'));
     }
     domains
+}
+
+fn normalize(domain: &str) -> String {
+    domain.to_lowercase().trim_end_matches('.').to_string()
+}
+
+fn insert_if_valid(set: &mut HashSet<String>, raw: &str) {
+    let d = normalize(raw);
+    if !d.is_empty() && d.contains('.') && d != "localhost" && d != "localhost.localdomain" {
+        set.insert(d);
+    }
 }
 
 #[cfg(test)]
@@ -343,6 +341,53 @@ mod tests {
     }
 
     #[test]
+    fn parses_multi_alias_hosts_line() {
+        let domains = parse_blocklist("0.0.0.0 a.com b.com c.com\n");
+        assert_eq!(domains.len(), 3);
+        assert!(domains.contains("a.com"));
+        assert!(domains.contains("b.com"));
+        assert!(domains.contains("c.com"));
+    }
+
+    #[test]
+    fn parses_hosts_inline_comment() {
+        let domains = parse_blocklist("0.0.0.0 a.com b.com  # trailing note\n");
+        assert_eq!(domains.len(), 2);
+        assert!(domains.contains("a.com"));
+        assert!(domains.contains("b.com"));
+    }
+
+    #[test]
+    fn excludes_localhost_aliases_in_hosts_line() {
+        let domains = parse_blocklist("127.0.0.1 localhost localhost.localdomain my.local.dev\n");
+        assert_eq!(domains.len(), 1);
+        assert!(domains.contains("my.local.dev"));
+    }
+
+    #[test]
+    fn local_path_recognises_file_url() {
+        assert_eq!(
+            local_path("file:///etc/numa/local.txt"),
+            Some(std::path::PathBuf::from("/etc/numa/local.txt"))
+        );
+    }
+
+    #[test]
+    fn local_path_recognises_bare_absolute_unix() {
+        #[cfg(unix)]
+        assert_eq!(
+            local_path("/etc/numa/local.txt"),
+            Some(std::path::PathBuf::from("/etc/numa/local.txt"))
+        );
+    }
+
+    #[test]
+    fn local_path_ignores_http_url() {
+        assert!(local_path("https://example.com/list.txt").is_none());
+        assert!(local_path("http://example.com/list.txt").is_none());
+    }
+
+    #[test]
     fn heap_bytes_grows_with_domains() {
         let mut store = BlocklistStore::new();
         let empty = store.heap_bytes();
@@ -369,12 +414,30 @@ pub async fn download_blocklists(
     }
     let client = builder.build().unwrap_or_default();
 
-    let fetches = lists.iter().map(|url| {
+    let fetches = lists.iter().map(|source| {
         let client = &client;
         async move {
-            let text = fetch_with_retry(client, url).await?;
-            info!("downloaded blocklist: {} ({} bytes)", url, text.len());
-            Some((url.clone(), text))
+            let text = if let Some(path) = local_path(source) {
+                match tokio::fs::read_to_string(&path).await {
+                    Ok(t) => {
+                        info!("loaded local blocklist: {} ({} bytes)", source, t.len());
+                        t
+                    }
+                    Err(e) => {
+                        warn!(
+                            "blocklist {} unreadable: {} — skipping",
+                            source,
+                            format_error_chain(&e)
+                        );
+                        return None;
+                    }
+                }
+            } else {
+                let t = fetch_with_retry(client, source).await?;
+                info!("downloaded blocklist: {} ({} bytes)", source, t.len());
+                t
+            };
+            Some((source.clone(), text))
         }
     });
     futures::future::join_all(fetches)
@@ -382,6 +445,16 @@ pub async fn download_blocklists(
         .into_iter()
         .flatten()
         .collect()
+}
+
+fn local_path(source: &str) -> Option<std::path::PathBuf> {
+    if let Some(rest) = source.strip_prefix("file://") {
+        return Some(std::path::PathBuf::from(rest));
+    }
+    if std::path::Path::new(source).is_absolute() {
+        return Some(std::path::PathBuf::from(source));
+    }
+    None
 }
 
 async fn fetch_with_retry(client: &reqwest::Client, url: &str) -> Option<String> {
@@ -484,6 +557,57 @@ mod retry_tests {
         let url = format!("http://{addr}/");
         let result = fetch_with_retry_delays(&client, &url, &delays).await;
         assert_eq!(result.as_deref(), Some(body));
+    }
+
+    fn unique_temp_path(prefix: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}_{nanos}.txt"))
+    }
+
+    #[tokio::test]
+    async fn download_blocklists_reads_file_url() {
+        let path = unique_temp_path("numa_blocklist");
+        tokio::fs::write(&path, "0.0.0.0 a.com b.com\n")
+            .await
+            .unwrap();
+
+        let url = format!("file://{}", path.display());
+        let result = download_blocklists(std::slice::from_ref(&url), None).await;
+        let _ = tokio::fs::remove_file(&path).await;
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, url);
+        let domains = parse_blocklist(&result[0].1);
+        assert!(domains.contains("a.com"));
+        assert!(domains.contains("b.com"));
+    }
+
+    #[tokio::test]
+    async fn download_blocklists_reads_bare_absolute_path() {
+        let path = unique_temp_path("numa_blocklist_bare");
+        tokio::fs::write(&path, "ads.example.com\n").await.unwrap();
+
+        let source = path.display().to_string();
+        let result = download_blocklists(std::slice::from_ref(&source), None).await;
+        let _ = tokio::fs::remove_file(&path).await;
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, source);
+        assert!(result[0].1.contains("ads.example.com"));
+    }
+
+    #[tokio::test]
+    async fn download_blocklists_skips_missing_local_file() {
+        let path = unique_temp_path("numa_blocklist_missing");
+        let url = format!(
+            "file:///does/not/exist/{}",
+            path.file_name().unwrap().to_string_lossy()
+        );
+        let result = download_blocklists(&[url], None).await;
+        assert!(result.is_empty());
     }
 
     #[tokio::test]
