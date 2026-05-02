@@ -18,7 +18,20 @@ fn print_recursive_hint() {
 }
 
 fn is_loopback_or_stub(addr: &str) -> bool {
-    matches!(addr, "127.0.0.1" | "127.0.0.53" | "0.0.0.0" | "::1" | "")
+    // fec0:0:0:ffff::1/2/3 are the deprecated IPv6 site-local stubs that
+    // Get-DnsClientServerAddress returns for any IPv6-enabled adapter
+    // without explicit DNS — they're not real upstreams.
+    matches!(
+        addr,
+        "127.0.0.1"
+            | "127.0.0.53"
+            | "0.0.0.0"
+            | "::1"
+            | "fec0:0:0:ffff::1"
+            | "fec0:0:0:ffff::2"
+            | "fec0:0:0:ffff::3"
+            | ""
+    )
 }
 
 /// A conditional forwarding rule: domains matching `suffix` are forwarded to `upstream`.
@@ -477,7 +490,11 @@ fn discover_windows() -> SystemDnsInfo {
 #[cfg(any(windows, test))]
 #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
 struct WindowsInterfaceDns {
-    dhcp: bool,
+    // Passed to netsh's [name=] slot since friendly names fail with
+    // ERROR_INVALID_NAME on non-English locales (#160). Resolved live at
+    // restore time — ifIndex isn't stable across reboots.
+    #[serde(default, skip_serializing)]
+    if_index: u32,
     servers: Vec<String>,
 }
 
@@ -494,13 +511,11 @@ $adapters = Get-NetAdapter | Where-Object { $_.Status -eq 'Up' }
 foreach ($a in $adapters) {
     $v4 = @(Get-DnsClientServerAddress -InterfaceIndex $a.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses
     $v6 = @(Get-DnsClientServerAddress -InterfaceIndex $a.ifIndex -AddressFamily IPv6 -ErrorAction SilentlyContinue).ServerAddresses
-    $iface = Get-NetIPInterface -InterfaceIndex $a.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue
-    $dhcp = if ($iface) { $iface.Dhcp -eq 'Enabled' } else { $false }
     # Drop nulls: ServerAddresses can be $null when an adapter has no
     # configured DNS for one family, and `$v4 + $null` appends a literal
     # null entry that ConvertTo-Json emits as JSON `null`, breaking the
     # `Vec<String>` deserialize on the Rust side.
-    $result[$a.Name] = @{ dhcp = $dhcp; servers = @(($v4 + $v6) | Where-Object { $_ }) }
+    $result[$a.Name] = @{ if_index = $a.ifIndex; servers = @(($v4 + $v6) | Where-Object { $_ }) }
 }
 $result | ConvertTo-Json -Compress -Depth 4
 "#;
@@ -733,22 +748,21 @@ pub fn redirect_dns_to_localhost() -> Result<(), String> {
 }
 
 #[cfg(windows)]
+fn run_netsh_ipv4(args: &[&str]) -> std::io::Result<std::process::ExitStatus> {
+    std::process::Command::new("netsh")
+        .arg("interface")
+        .arg("ipv4")
+        .args(args)
+        .status()
+}
+
+#[cfg(windows)]
 fn redirect_dns_with_interfaces(
     interfaces: &std::collections::HashMap<String, WindowsInterfaceDns>,
 ) -> Result<(), String> {
-    for name in interfaces.keys() {
-        let status = std::process::Command::new("netsh")
-            .args([
-                "interface",
-                "ipv4",
-                "set",
-                "dnsservers",
-                name,
-                "static",
-                "127.0.0.1",
-                "primary",
-            ])
-            .status()
+    for (name, iface) in interfaces {
+        let idx = iface.if_index.to_string();
+        let status = run_netsh_ipv4(&["set", "dnsservers", &idx, "static", "127.0.0.1", "primary"])
             .map_err(|e| format!("failed to set DNS for {}: {}", name, e))?;
 
         if status.success() {
@@ -944,11 +958,25 @@ fn uninstall_windows() -> Result<(), String> {
     let original: std::collections::HashMap<String, WindowsInterfaceDns> =
         serde_json::from_str(&json).map_err(|e| format!("invalid backup file: {}", e))?;
 
+    let live = get_windows_interfaces()?;
+    let mut skipped: Vec<&str> = Vec::new();
+
     for (name, dns_info) in &original {
-        if dns_info.dhcp || dns_info.servers.is_empty() {
-            let status = std::process::Command::new("netsh")
-                .args(["interface", "ipv4", "set", "dnsservers", name, "dhcp"])
-                .status()
+        let Some(idx) = live.get(name).map(|i| i.if_index.to_string()) else {
+            eprintln!("  warning: adapter \"{}\" not currently up; skipped", name);
+            skipped.push(name.as_str());
+            continue;
+        };
+
+        let real_servers: Vec<&str> = dns_info
+            .servers
+            .iter()
+            .map(String::as_str)
+            .filter(|s| !is_loopback_or_stub(s))
+            .collect();
+
+        if real_servers.is_empty() {
+            let status = run_netsh_ipv4(&["set", "dnsservers", &idx, "dhcp"])
                 .map_err(|e| format!("failed to restore DNS for {}: {}", name, e))?;
 
             if status.success() {
@@ -957,52 +985,54 @@ fn uninstall_windows() -> Result<(), String> {
                 eprintln!("  warning: failed to restore DNS for \"{}\"", name);
             }
         } else {
-            let status = std::process::Command::new("netsh")
-                .args([
-                    "interface",
-                    "ipv4",
-                    "set",
-                    "dnsservers",
-                    name,
-                    "static",
-                    &dns_info.servers[0],
-                    "primary",
-                ])
-                .status()
-                .map_err(|e| format!("failed to restore DNS for {}: {}", name, e))?;
+            let status = run_netsh_ipv4(&[
+                "set",
+                "dnsservers",
+                &idx,
+                "static",
+                real_servers[0],
+                "primary",
+            ])
+            .map_err(|e| format!("failed to restore DNS for {}: {}", name, e))?;
 
             if !status.success() {
                 eprintln!("  warning: failed to restore primary DNS for \"{}\"", name);
                 continue;
             }
 
-            for (i, server) in dns_info.servers.iter().skip(1).enumerate() {
-                let _ = std::process::Command::new("netsh")
-                    .args([
-                        "interface",
-                        "ipv4",
-                        "add",
-                        "dnsservers",
-                        name,
-                        server,
-                        &format!("index={}", i + 2),
-                    ])
-                    .status();
+            for (i, server) in real_servers.iter().skip(1).enumerate() {
+                let _ = run_netsh_ipv4(&[
+                    "add",
+                    "dnsservers",
+                    &idx,
+                    server,
+                    &format!("index={}", i + 2),
+                ]);
             }
 
             eprintln!(
                 "  restored DNS for \"{}\" -> {}",
                 name,
-                dns_info.servers.join(", ")
+                real_servers.join(", ")
             );
         }
     }
 
-    std::fs::remove_file(&path).ok();
-
-    // Re-enable Dnscache
+    // Keep the backup if any adapter wasn't reachable — an offline
+    // uninstall would otherwise leave the registry pinned at 127.0.0.1
+    // with no recovery state for when the network returns.
     enable_dnscache();
-    eprintln!("\n  System DNS restored. DNS Client re-enabled.");
+    if skipped.is_empty() {
+        std::fs::remove_file(&path).ok();
+        eprintln!("\n  System DNS restored. DNS Client re-enabled.");
+    } else {
+        eprintln!(
+            "\n  Partial restore. Backup kept at {} — re-run 'numa uninstall' after reconnecting: {}",
+            path.display(),
+            skipped.join(", ")
+        );
+        eprintln!("  DNS Client re-enabled.");
+    }
     eprintln!("  Reboot to fully restore the DNS Client service.\n");
     Ok(())
 }
@@ -2009,26 +2039,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_powershell_dhcp_and_static() {
+    fn parse_powershell_servers() {
         // Shape emitted by ENUMERATE_INTERFACES_PS — adapter name keys, each
-        // value carries DHCP state and merged IPv4+IPv6 server list.
-        let sample = r#"{"Ethernet":{"dhcp":true,"servers":["8.8.8.8","8.8.4.4"]},"Wi-Fi":{"dhcp":false,"servers":["1.1.1.1"]}}"#;
+        // value carries the live ifIndex and a merged IPv4+IPv6 server list.
+        // Legacy `dhcp` field (in pre-fix backups on disk) is silently
+        // ignored on read.
+        let sample = r#"{"Ethernet":{"if_index":12,"servers":["8.8.8.8","8.8.4.4"]},"Wi-Fi":{"dhcp":true,"if_index":7,"servers":["1.1.1.1"]}}"#;
         let result = parse_powershell_interfaces(sample).expect("parse failed");
         assert_eq!(result.len(), 2);
         assert_eq!(
             result["Ethernet"],
             WindowsInterfaceDns {
-                dhcp: true,
+                if_index: 12,
                 servers: vec!["8.8.8.8".into(), "8.8.4.4".into()],
             }
         );
         assert_eq!(
             result["Wi-Fi"],
             WindowsInterfaceDns {
-                dhcp: false,
+                if_index: 7,
                 servers: vec!["1.1.1.1".into()],
             }
         );
+    }
+
+    #[test]
+    fn parse_powershell_legacy_backup_without_if_index() {
+        let sample = r#"{"Ethernet":{"servers":["8.8.8.8"]}}"#;
+        let result = parse_powershell_interfaces(sample).expect("parse failed");
+        assert_eq!(result["Ethernet"].if_index, 0);
+        assert_eq!(result["Ethernet"].servers, vec!["8.8.8.8".to_string()]);
     }
 
     #[test]
@@ -2052,7 +2092,7 @@ mod tests {
         // Locks in the PS-side null filter (Where-Object { $_ }) — a real
         // install on a dual-stack adapter without IPv6 DNS used to emit
         // `["10.0.0.1", null]`, failing deserialize at install time.
-        let sample = r#"{"Wi-Fi":{"dhcp":true,"servers":["1.1.1.1",null]}}"#;
+        let sample = r#"{"Wi-Fi":{"servers":["1.1.1.1",null]}}"#;
         assert!(parse_powershell_interfaces(sample).is_err());
     }
 
@@ -2108,15 +2148,30 @@ mod tests {
         map.insert(
             "Wi-Fi".into(),
             WindowsInterfaceDns {
-                dhcp: false,
                 servers: vec!["127.0.0.1".into()],
+                if_index: 0,
             },
         );
         map.insert(
             "Ethernet".into(),
             WindowsInterfaceDns {
-                dhcp: false,
                 servers: vec!["::1".into(), "0.0.0.0".into()],
+                if_index: 0,
+            },
+        );
+        assert!(!backup_has_real_upstream_windows(&map));
+
+        // fec0:0:0:ffff::1/2/3 leak into every VPN/virtual adapter via
+        // Get-DnsClientServerAddress.
+        map.insert(
+            "Tailscale".into(),
+            WindowsInterfaceDns {
+                servers: vec![
+                    "fec0:0:0:ffff::1".into(),
+                    "fec0:0:0:ffff::2".into(),
+                    "fec0:0:0:ffff::3".into(),
+                ],
+                if_index: 0,
             },
         );
         assert!(!backup_has_real_upstream_windows(&map));
@@ -2125,8 +2180,8 @@ mod tests {
         map.insert(
             "Ethernet 2".into(),
             WindowsInterfaceDns {
-                dhcp: false,
                 servers: vec!["192.168.1.1".into()],
+                if_index: 0,
             },
         );
         assert!(backup_has_real_upstream_windows(&map));
