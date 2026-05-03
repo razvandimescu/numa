@@ -637,6 +637,115 @@ fn backup_has_real_upstream_windows(
         .any(|iface| iface.servers.iter().any(|s| !is_loopback_or_stub(s)))
 }
 
+#[cfg(any(windows, test))]
+#[derive(Debug, PartialEq, Eq)]
+enum SkipReason {
+    AdapterNotPresent,
+}
+
+#[cfg(any(windows, test))]
+#[derive(Debug, PartialEq, Eq)]
+enum ConfigKind {
+    Static {
+        primary: String,
+        secondaries: Vec<String>,
+    },
+    Dhcp,
+}
+
+#[cfg(any(windows, test))]
+#[derive(Debug, PartialEq, Eq)]
+enum RestoreAction {
+    Configure {
+        name: String,
+        if_index: u32,
+        family: AddressFamily,
+        kind: ConfigKind,
+    },
+    Skip {
+        name: String,
+        reason: SkipReason,
+    },
+}
+
+#[cfg(any(windows, test))]
+fn plan_windows_restore(
+    backup: &std::collections::HashMap<String, WindowsInterfaceDns>,
+    live: &std::collections::HashMap<String, WindowsInterfaceDns>,
+) -> Vec<RestoreAction> {
+    let mut actions = Vec::new();
+    let mut names: Vec<&String> = backup.keys().collect();
+    names.sort();
+    for name in names {
+        let dns = &backup[name];
+        let Some(live_iface) = live.get(name) else {
+            actions.push(RestoreAction::Skip {
+                name: name.clone(),
+                reason: SkipReason::AdapterNotPresent,
+            });
+            continue;
+        };
+        let if_index = live_iface.if_index;
+
+        let (v4, v6): (Vec<String>, Vec<String>) = dns
+            .servers
+            .iter()
+            .filter(|s| !is_loopback_or_stub(s))
+            .cloned()
+            .partition(|s| s.parse::<std::net::Ipv4Addr>().is_ok());
+
+        actions.push(configure(name, if_index, AddressFamily::V4, v4));
+        actions.push(configure(name, if_index, AddressFamily::V6, v6));
+    }
+    actions
+}
+
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AddressFamily {
+    V4,
+    V6,
+}
+
+#[cfg(windows)]
+impl AddressFamily {
+    fn netsh_arg(self) -> &'static str {
+        match self {
+            AddressFamily::V4 => "ipv4",
+            AddressFamily::V6 => "ipv6",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            AddressFamily::V4 => "IPv4",
+            AddressFamily::V6 => "IPv6",
+        }
+    }
+}
+
+#[cfg(any(windows, test))]
+fn configure(
+    name: &str,
+    if_index: u32,
+    family: AddressFamily,
+    servers: Vec<String>,
+) -> RestoreAction {
+    let kind = match servers.split_first() {
+        None => ConfigKind::Dhcp,
+        Some((primary, rest)) => ConfigKind::Static {
+            primary: primary.clone(),
+            secondaries: rest.to_vec(),
+        },
+    };
+    RestoreAction::Configure {
+        name: name.to_string(),
+        if_index,
+        family,
+        kind,
+    }
+}
+
 #[cfg(windows)]
 fn install_windows() -> Result<(), String> {
     let mut interfaces = get_windows_interfaces()?;
@@ -748,10 +857,10 @@ pub fn redirect_dns_to_localhost() -> Result<(), String> {
 }
 
 #[cfg(windows)]
-fn run_netsh_ipv4(args: &[&str]) -> std::io::Result<std::process::ExitStatus> {
+fn run_netsh(family: AddressFamily, args: &[&str]) -> std::io::Result<std::process::ExitStatus> {
     std::process::Command::new("netsh")
         .arg("interface")
-        .arg("ipv4")
+        .arg(family.netsh_arg())
         .args(args)
         .status()
 }
@@ -762,8 +871,11 @@ fn redirect_dns_with_interfaces(
 ) -> Result<(), String> {
     for (name, iface) in interfaces {
         let idx = iface.if_index.to_string();
-        let status = run_netsh_ipv4(&["set", "dnsservers", &idx, "static", "127.0.0.1", "primary"])
-            .map_err(|e| format!("failed to set DNS for {}: {}", name, e))?;
+        let status = run_netsh(
+            AddressFamily::V4,
+            &["set", "dnsservers", &idx, "static", "127.0.0.1", "primary"],
+        )
+        .map_err(|e| format!("failed to set DNS for {}: {}", name, e))?;
 
         if status.success() {
             eprintln!("  set DNS for \"{}\" -> 127.0.0.1", name);
@@ -775,6 +887,131 @@ fn redirect_dns_with_interfaces(
         }
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn apply_restore_action(action: &RestoreAction) -> Result<String, String> {
+    match action {
+        RestoreAction::Configure {
+            name,
+            if_index,
+            family,
+            kind:
+                ConfigKind::Static {
+                    primary,
+                    secondaries,
+                },
+        } => apply_static(*family, name, *if_index, primary, secondaries),
+        RestoreAction::Configure {
+            name,
+            if_index,
+            family,
+            kind: ConfigKind::Dhcp,
+        } => apply_dhcp(*family, name, *if_index),
+        RestoreAction::Skip {
+            name,
+            reason: SkipReason::AdapterNotPresent,
+        } => Err(format!("adapter \"{}\" not currently up; skipped", name)),
+    }
+}
+
+#[cfg(windows)]
+fn apply_static(
+    family: AddressFamily,
+    name: &str,
+    if_index: u32,
+    primary: &str,
+    secondaries: &[String],
+) -> Result<String, String> {
+    let idx = if_index.to_string();
+    // validate=no — we trust the backup; validation issues an outbound DNS
+    // probe that fails on UDP-restricted networks (#147) and aborts the set.
+    let status = run_netsh(
+        family,
+        &[
+            "set",
+            "dnsservers",
+            &idx,
+            "static",
+            primary,
+            "primary",
+            "validate=no",
+        ],
+    )
+    .map_err(|e| {
+        format!(
+            "failed to set {} DNS for \"{}\": {}",
+            family.label(),
+            name,
+            e
+        )
+    })?;
+    if !status.success() {
+        return Err(format!(
+            "netsh failed to set {} primary {} for \"{}\"",
+            family.label(),
+            primary,
+            name
+        ));
+    }
+
+    for (i, server) in secondaries.iter().enumerate() {
+        let idx_arg = format!("index={}", i + 2);
+        let status = run_netsh(
+            family,
+            &["add", "dnsservers", &idx, server, &idx_arg, "validate=no"],
+        )
+        .map_err(|e| {
+            format!(
+                "failed to add {} DNS for \"{}\": {}",
+                family.label(),
+                name,
+                e
+            )
+        })?;
+        if !status.success() {
+            return Err(format!(
+                "netsh failed to add {} {} for \"{}\"",
+                family.label(),
+                server,
+                name
+            ));
+        }
+    }
+
+    let mut all = vec![primary.to_string()];
+    all.extend_from_slice(secondaries);
+    Ok(format!(
+        "restored {} DNS for \"{}\" -> {}",
+        family.label(),
+        name,
+        all.join(", ")
+    ))
+}
+
+#[cfg(windows)]
+fn apply_dhcp(family: AddressFamily, name: &str, if_index: u32) -> Result<String, String> {
+    let idx = if_index.to_string();
+    let status = run_netsh(family, &["set", "dnsservers", &idx, "dhcp"]).map_err(|e| {
+        format!(
+            "failed to reset {} DNS for \"{}\": {}",
+            family.label(),
+            name,
+            e
+        )
+    })?;
+    if !status.success() {
+        return Err(format!(
+            "netsh failed to reset {} DNS for \"{}\"",
+            family.label(),
+            name
+        ));
+    }
+    Ok(format!(
+        "reset {} DNS for \"{}\" -> DHCP",
+        family.label(),
+        name
+    ))
 }
 
 /// Copy the currently-running binary to the service install location. SCM
@@ -959,62 +1196,16 @@ fn uninstall_windows() -> Result<(), String> {
         serde_json::from_str(&json).map_err(|e| format!("invalid backup file: {}", e))?;
 
     let live = get_windows_interfaces()?;
-    let mut skipped: Vec<&str> = Vec::new();
+    let plan = plan_windows_restore(&original, &live);
+    let mut skipped: Vec<String> = Vec::new();
 
-    for (name, dns_info) in &original {
-        let Some(idx) = live.get(name).map(|i| i.if_index.to_string()) else {
-            eprintln!("  warning: adapter \"{}\" not currently up; skipped", name);
-            skipped.push(name.as_str());
-            continue;
-        };
-
-        let real_servers: Vec<&str> = dns_info
-            .servers
-            .iter()
-            .map(String::as_str)
-            .filter(|s| !is_loopback_or_stub(s))
-            .collect();
-
-        if real_servers.is_empty() {
-            let status = run_netsh_ipv4(&["set", "dnsservers", &idx, "dhcp"])
-                .map_err(|e| format!("failed to restore DNS for {}: {}", name, e))?;
-
-            if status.success() {
-                eprintln!("  restored DNS for \"{}\" -> DHCP", name);
-            } else {
-                eprintln!("  warning: failed to restore DNS for \"{}\"", name);
-            }
-        } else {
-            let status = run_netsh_ipv4(&[
-                "set",
-                "dnsservers",
-                &idx,
-                "static",
-                real_servers[0],
-                "primary",
-            ])
-            .map_err(|e| format!("failed to restore DNS for {}: {}", name, e))?;
-
-            if !status.success() {
-                eprintln!("  warning: failed to restore primary DNS for \"{}\"", name);
-                continue;
-            }
-
-            for (i, server) in real_servers.iter().skip(1).enumerate() {
-                let _ = run_netsh_ipv4(&[
-                    "add",
-                    "dnsservers",
-                    &idx,
-                    server,
-                    &format!("index={}", i + 2),
-                ]);
-            }
-
-            eprintln!(
-                "  restored DNS for \"{}\" -> {}",
-                name,
-                real_servers.join(", ")
-            );
+    for action in &plan {
+        match apply_restore_action(action) {
+            Ok(msg) => eprintln!("  {}", msg),
+            Err(e) => eprintln!("  warning: {}", e),
+        }
+        if let RestoreAction::Skip { name, .. } = action {
+            skipped.push(name.clone());
         }
     }
 
@@ -2185,6 +2376,153 @@ mod tests {
             },
         );
         assert!(backup_has_real_upstream_windows(&map));
+    }
+
+    fn iface(if_index: u32, servers: &[&str]) -> WindowsInterfaceDns {
+        WindowsInterfaceDns {
+            if_index,
+            servers: servers.iter().map(|s| (*s).to_string()).collect(),
+        }
+    }
+
+    fn static_action(
+        name: &str,
+        if_index: u32,
+        family: AddressFamily,
+        primary: &str,
+        secondaries: &[&str],
+    ) -> RestoreAction {
+        RestoreAction::Configure {
+            name: name.into(),
+            if_index,
+            family,
+            kind: ConfigKind::Static {
+                primary: primary.into(),
+                secondaries: secondaries.iter().map(|s| (*s).to_string()).collect(),
+            },
+        }
+    }
+
+    fn dhcp_action(name: &str, if_index: u32, family: AddressFamily) -> RestoreAction {
+        RestoreAction::Configure {
+            name: name.into(),
+            if_index,
+            family,
+            kind: ConfigKind::Dhcp,
+        }
+    }
+
+    #[test]
+    fn plan_restore_splits_v4_and_v6_families() {
+        let mut backup = std::collections::HashMap::new();
+        backup.insert(
+            "Ethernet".into(),
+            iface(
+                0,
+                &[
+                    "8.8.8.8",
+                    "1.1.1.1",
+                    "2001:4860:4860::8888",
+                    "2606:4700:4700::1111",
+                ],
+            ),
+        );
+        let mut live = std::collections::HashMap::new();
+        live.insert("Ethernet".into(), iface(12, &[]));
+
+        assert_eq!(
+            plan_windows_restore(&backup, &live),
+            vec![
+                static_action("Ethernet", 12, AddressFamily::V4, "8.8.8.8", &["1.1.1.1"]),
+                static_action(
+                    "Ethernet",
+                    12,
+                    AddressFamily::V6,
+                    "2001:4860:4860::8888",
+                    &["2606:4700:4700::1111"],
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn plan_restore_empty_backup_resets_both_families_to_dhcp() {
+        let mut backup = std::collections::HashMap::new();
+        backup.insert("Tailscale".into(), iface(0, &[]));
+        let mut live = std::collections::HashMap::new();
+        live.insert("Tailscale".into(), iface(7, &[]));
+
+        assert_eq!(
+            plan_windows_restore(&backup, &live),
+            vec![
+                dhcp_action("Tailscale", 7, AddressFamily::V4),
+                dhcp_action("Tailscale", 7, AddressFamily::V6),
+            ]
+        );
+    }
+
+    #[test]
+    fn plan_restore_v4_only_backup_dhcps_v6() {
+        let mut backup = std::collections::HashMap::new();
+        backup.insert("Ethernet".into(), iface(0, &["192.168.1.1"]));
+        let mut live = std::collections::HashMap::new();
+        live.insert("Ethernet".into(), iface(12, &[]));
+
+        assert_eq!(
+            plan_windows_restore(&backup, &live),
+            vec![
+                static_action("Ethernet", 12, AddressFamily::V4, "192.168.1.1", &[]),
+                dhcp_action("Ethernet", 12, AddressFamily::V6),
+            ]
+        );
+    }
+
+    #[test]
+    fn plan_restore_skips_adapter_not_present() {
+        let mut backup = std::collections::HashMap::new();
+        backup.insert("Tailscale".into(), iface(0, &["100.100.100.100"]));
+        let live = std::collections::HashMap::new();
+
+        assert_eq!(
+            plan_windows_restore(&backup, &live),
+            vec![RestoreAction::Skip {
+                name: "Tailscale".into(),
+                reason: SkipReason::AdapterNotPresent,
+            }]
+        );
+    }
+
+    #[test]
+    fn plan_restore_filters_loopback_and_stub_addresses() {
+        let mut backup = std::collections::HashMap::new();
+        backup.insert(
+            "Ethernet".into(),
+            iface(
+                0,
+                &[
+                    "127.0.0.1",
+                    "8.8.8.8",
+                    "fec0:0:0:ffff::1",
+                    "2001:4860:4860::8888",
+                ],
+            ),
+        );
+        let mut live = std::collections::HashMap::new();
+        live.insert("Ethernet".into(), iface(12, &[]));
+
+        assert_eq!(
+            plan_windows_restore(&backup, &live),
+            vec![
+                static_action("Ethernet", 12, AddressFamily::V4, "8.8.8.8", &[]),
+                static_action(
+                    "Ethernet",
+                    12,
+                    AddressFamily::V6,
+                    "2001:4860:4860::8888",
+                    &[]
+                ),
+            ]
+        );
     }
 
     #[test]
