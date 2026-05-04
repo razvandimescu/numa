@@ -667,7 +667,6 @@ struct RestorePlan {
     name: String,
     if_index: u32,
     family: AddressFamily,
-    // Empty list means "reset this family to DHCP" — see apply_restore.
     servers: Vec<String>,
 }
 
@@ -686,17 +685,16 @@ fn plan_windows_restore(
             continue;
         };
         let if_index = live_iface.if_index;
+        let servers = &backup[name].servers;
         // v6 emission gates on the *unfiltered* backup having any v6 entries —
         // even the fec0:0:0:ffff::1/2/3 stubs count, since they're returned
         // only when v6 is enabled on the adapter. No v6 entries at all
         // means v6 was disabled, and `netsh interface ipv6 set ... dhcp`
         // would error on disabled adapters.
-        let v6_was_enabled = backup[name]
-            .servers
+        let v6_was_enabled = servers
             .iter()
             .any(|s| s.parse::<std::net::Ipv6Addr>().is_ok());
-        let (v4, v6): (Vec<String>, Vec<String>) = backup[name]
-            .servers
+        let (v4, v6): (Vec<String>, Vec<String>) = servers
             .iter()
             .filter(|s| !is_loopback_or_stub(s))
             .cloned()
@@ -936,13 +934,15 @@ fn apply_static(
         }
     }
 
-    let mut all = vec![primary.to_string()];
-    all.extend_from_slice(secondaries);
+    let all = std::iter::once(primary)
+        .chain(secondaries.iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(", ");
     Ok(format!(
         "restored {} DNS for \"{}\" -> {}",
         family.label(),
         name,
-        all.join(", ")
+        all
     ))
 }
 
