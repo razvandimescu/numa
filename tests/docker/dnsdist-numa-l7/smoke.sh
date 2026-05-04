@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Smoke test for dnsdist L7 → numa over plain TCP with PROXY v2.
-# Client sends UDP to dnsdist; dnsdist transmuxes to TCP and prepends a
-# PROXY v2 header at connection open.
+# Smoke test for dnsdist L7 → numa over UDP with PROXY v2.
+# Client sends UDP to dnsdist; dnsdist forwards UDP to numa and prepends
+# a PROXY v2 header to every backend datagram.
 #
 # Asserts:
 #   1. dig +udp through dnsdist returns a real answer.
-#   2. numa's transport.tcp counter increments (proves dnsdist→numa hop
-#      is TCP, not UDP — i.e. tcpOnly=true is in effect).
+#   2. numa's transport.udp counter increments (proves dnsdist→numa hop
+#      stays on UDP — no tcpOnly transmux, the PROXY header rides UDP).
 #   3. numa's proxy_protocol.accepted increments (proves the PROXY header
 #      was parsed and the real client IP propagated).
 #   4. No rejections or timeouts on numa's pp2 layer.
@@ -34,7 +34,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "── dnsdist L7 → numa PROXY v2 smoke test ──"
+echo "── dnsdist L7 → numa UDP+PROXY v2 smoke test ──"
 
 echo "  building & starting stack..."
 docker compose up -d --build >/dev/null
@@ -81,19 +81,19 @@ read -r after_pp after_tcp after_udp rejected < <(curl -fsS http://127.0.0.1:153
 [ "$after_pp" -gt "$baseline_pp" ] || fail "proxy_protocol.accepted did not increment ($baseline_pp → $after_pp) — pp2 hook not firing"
 pass "proxy_protocol.accepted incremented: $baseline_pp → $after_pp"
 
-[ "$after_tcp" -gt "$baseline_tcp" ] || fail "transport.tcp did not increment ($baseline_tcp → $after_tcp) — dnsdist not transmuxing UDP→TCP, or tcpOnly=true not in effect"
-pass "transport.tcp incremented (dnsdist transmuxed UDP→TCP): $baseline_tcp → $after_tcp"
+[ "$after_udp" -gt "$baseline_udp" ] || fail "transport.udp did not increment ($baseline_udp → $after_udp) — dnsdist→numa UDP path is not delivering"
+pass "transport.udp incremented (dnsdist→numa stayed on UDP): $baseline_udp → $after_udp"
 
 [ "$rejected" = "0" ] || fail "rejected/timeout counters non-zero: $rejected"
 pass "no pp2 rejections or timeouts"
 
-# Sanity check: numa should not see UDP from the dnsdist→numa hop, since
-# tcpOnly=true forces TCP. transport.udp can still increment from health
-# probes / cache warming, so we only assert "didn't grow more than transport.tcp".
+# Sanity: with no tcpOnly, the UDP path should carry every per-query
+# datagram. transport.tcp may still tick from incidental probes, but it
+# must not outpace UDP growth.
 udp_growth=$((after_udp - baseline_udp))
 tcp_growth=$((after_tcp - baseline_tcp))
-[ "$tcp_growth" -ge "$udp_growth" ] || fail "transport.udp grew faster than transport.tcp ($udp_growth vs $tcp_growth) — tcpOnly=true may not be in effect"
-pass "transport.tcp growth ($tcp_growth) ≥ transport.udp growth ($udp_growth) — UDP→TCP transmux confirmed"
+[ "$udp_growth" -ge "$tcp_growth" ] || fail "transport.tcp grew faster than transport.udp ($tcp_growth vs $udp_growth) — UDP path may be silently transmuxing"
+pass "transport.udp growth ($udp_growth) ≥ transport.tcp growth ($tcp_growth) — UDP+PROXY v2 path confirmed"
 
 echo
 echo -e "${GREEN}all checks passed${RESET}"

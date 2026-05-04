@@ -216,7 +216,13 @@ pub async fn run(config_path: String) -> crate::Result<()> {
 
     spawn_background_services(&ctx, &config, &bootstrap_resolver, api_port)?;
 
-    udp_serve_loop(&ctx).await
+    // UDP DNS listener — shares `[server.proxy_protocol]` with TCP, which
+    // already logged any parse error. Silently disable on Err.
+    let udp_pp = crate::pp2::PpConfig::from_config(&config.server.proxy_protocol)
+        .ok()
+        .flatten();
+
+    udp_serve_loop(&ctx, udp_pp.as_ref()).await
 }
 
 fn spawn_background_services(
@@ -353,11 +359,14 @@ fn spawn_background_services(
     Ok(())
 }
 
-async fn udp_serve_loop(ctx: &Arc<ServerCtx>) -> crate::Result<()> {
+async fn udp_serve_loop(
+    ctx: &Arc<ServerCtx>,
+    udp_pp: Option<&crate::pp2::PpConfig>,
+) -> crate::Result<()> {
     #[allow(clippy::infinite_loop)]
     loop {
         let mut buffer = BytePacketBuffer::new();
-        let (len, src_addr) = match ctx.socket.recv_from(&mut buffer.buf).await {
+        let (len, peer) = match ctx.socket.recv_from(&mut buffer.buf).await {
             Ok(r) => r,
             Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {
                 // Windows delivers ICMP port-unreachable as ConnectionReset on UDP sockets
@@ -365,9 +374,18 @@ async fn udp_serve_loop(ctx: &Arc<ServerCtx>) -> crate::Result<()> {
             }
             Err(e) => return Err(e.into()),
         };
+        let pp = crate::pp2_udp::parse_if_trusted(&buffer.buf[..len], peer, udp_pp, ctx);
+        let Some((src_addr, dns_len)) = pp.apply(&mut buffer.buf, len, peer) else {
+            continue;
+        };
+        // Response goes to the kernel UDP peer (e.g. dnsdist), not the
+        // PROXY-extracted logical source — otherwise the reply skips the
+        // front-end and never reaches the original client.
         let ctx = Arc::clone(ctx);
         tokio::spawn(async move {
-            if let Err(e) = handle_query(buffer, len, src_addr, &ctx, Transport::Udp).await {
+            if let Err(e) =
+                handle_query(buffer, dns_len, src_addr, peer, &ctx, Transport::Udp).await
+            {
                 error!("{} | HANDLER ERROR | {}", src_addr, e);
             }
         });
