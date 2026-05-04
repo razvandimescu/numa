@@ -3,6 +3,8 @@ use numa::system_dns::{
     uninstall_service,
 };
 
+const NO_SYSTEM_DNS_FLAG: &str = "--no-system-dns";
+
 fn main() -> numa::Result<()> {
     // Handle CLI subcommands
     let arg1 = std::env::args().nth(1).unwrap_or_default();
@@ -29,10 +31,12 @@ fn main() -> numa::Result<()> {
         .format_timestamp_millis()
         .init();
 
+    let skip_system_dns = std::env::args().any(|a| a == NO_SYSTEM_DNS_FLAG);
+
     match arg1.as_str() {
         "install" => {
             eprintln!("\x1b[1;38;2;192;98;58mNuma\x1b[0m — installing\n");
-            return install_service().map_err(|e| e.into());
+            return install_service(skip_system_dns).map_err(|e| e.into());
         }
         "uninstall" => {
             eprintln!("\x1b[1;38;2;192;98;58mNuma\x1b[0m — uninstalling\n");
@@ -42,7 +46,7 @@ fn main() -> numa::Result<()> {
             let sub = std::env::args().nth(2).unwrap_or_default();
             eprintln!("\x1b[1;38;2;192;98;58mNuma\x1b[0m — service management\n");
             return match sub.as_str() {
-                "start" => start_service().map_err(|e| e.into()),
+                "start" => start_service(skip_system_dns).map_err(|e| e.into()),
                 "stop" => stop_service().map_err(|e| e.into()),
                 "restart" => restart_service().map_err(|e| e.into()),
                 "status" => service_status().map_err(|e| e.into()),
@@ -110,8 +114,16 @@ fn main() -> numa::Result<()> {
             eprintln!("Commands:");
             eprintln!("  (none)          Start the DNS server (default)");
             eprintln!("  install         Set system DNS to 127.0.0.1 (requires sudo)");
+            eprintln!(
+                "                  {}  Install service only; leave system DNS alone",
+                NO_SYSTEM_DNS_FLAG
+            );
             eprintln!("  uninstall       Restore original system DNS settings");
             eprintln!("  service start   Install as system service (auto-start on boot)");
+            eprintln!(
+                "                  {}  Same as 'install {}'",
+                NO_SYSTEM_DNS_FLAG, NO_SYSTEM_DNS_FLAG
+            );
             eprintln!("  service stop    Uninstall the system service");
             eprintln!("  service restart Restart the service with updated binary");
             eprintln!("  service status  Check if the service is running");
