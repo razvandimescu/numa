@@ -638,69 +638,6 @@ fn backup_has_real_upstream_windows(
 }
 
 #[cfg(any(windows, test))]
-#[derive(Debug, PartialEq, Eq)]
-enum SkipReason {
-    AdapterNotPresent,
-}
-
-#[cfg(any(windows, test))]
-#[derive(Debug, PartialEq, Eq)]
-enum ConfigKind {
-    Static {
-        primary: String,
-        secondaries: Vec<String>,
-    },
-    Dhcp,
-}
-
-#[cfg(any(windows, test))]
-#[derive(Debug, PartialEq, Eq)]
-enum RestoreAction {
-    Configure {
-        name: String,
-        if_index: u32,
-        family: AddressFamily,
-        kind: ConfigKind,
-    },
-    Skip {
-        name: String,
-        reason: SkipReason,
-    },
-}
-
-#[cfg(any(windows, test))]
-fn plan_windows_restore(
-    backup: &std::collections::HashMap<String, WindowsInterfaceDns>,
-    live: &std::collections::HashMap<String, WindowsInterfaceDns>,
-) -> Vec<RestoreAction> {
-    let mut actions = Vec::new();
-    let mut names: Vec<&String> = backup.keys().collect();
-    names.sort();
-    for name in names {
-        let dns = &backup[name];
-        let Some(live_iface) = live.get(name) else {
-            actions.push(RestoreAction::Skip {
-                name: name.clone(),
-                reason: SkipReason::AdapterNotPresent,
-            });
-            continue;
-        };
-        let if_index = live_iface.if_index;
-
-        let (v4, v6): (Vec<String>, Vec<String>) = dns
-            .servers
-            .iter()
-            .filter(|s| !is_loopback_or_stub(s))
-            .cloned()
-            .partition(|s| s.parse::<std::net::Ipv4Addr>().is_ok());
-
-        actions.push(configure(name, if_index, AddressFamily::V4, v4));
-        actions.push(configure(name, if_index, AddressFamily::V6, v6));
-    }
-    actions
-}
-
-#[cfg(any(windows, test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AddressFamily {
     V4,
@@ -725,25 +662,50 @@ impl AddressFamily {
 }
 
 #[cfg(any(windows, test))]
-fn configure(
-    name: &str,
+#[derive(Debug, PartialEq, Eq)]
+struct RestorePlan {
+    name: String,
     if_index: u32,
     family: AddressFamily,
+    // Empty list means "reset this family to DHCP" — see apply_restore.
     servers: Vec<String>,
-) -> RestoreAction {
-    let kind = match servers.split_first() {
-        None => ConfigKind::Dhcp,
-        Some((primary, rest)) => ConfigKind::Static {
-            primary: primary.clone(),
-            secondaries: rest.to_vec(),
-        },
-    };
-    RestoreAction::Configure {
-        name: name.to_string(),
-        if_index,
-        family,
-        kind,
+}
+
+#[cfg(any(windows, test))]
+fn plan_windows_restore(
+    backup: &std::collections::HashMap<String, WindowsInterfaceDns>,
+    live: &std::collections::HashMap<String, WindowsInterfaceDns>,
+) -> (Vec<RestorePlan>, Vec<String>) {
+    let mut plans = Vec::new();
+    let mut missing = Vec::new();
+    let mut names: Vec<&String> = backup.keys().collect();
+    names.sort();
+    for name in names {
+        let Some(live_iface) = live.get(name) else {
+            missing.push(name.clone());
+            continue;
+        };
+        let if_index = live_iface.if_index;
+        let (v4, v6): (Vec<String>, Vec<String>) = backup[name]
+            .servers
+            .iter()
+            .filter(|s| !is_loopback_or_stub(s))
+            .cloned()
+            .partition(|s| s.parse::<std::net::Ipv4Addr>().is_ok());
+        plans.push(RestorePlan {
+            name: name.clone(),
+            if_index,
+            family: AddressFamily::V4,
+            servers: v4,
+        });
+        plans.push(RestorePlan {
+            name: name.clone(),
+            if_index,
+            family: AddressFamily::V6,
+            servers: v6,
+        });
     }
+    (plans, missing)
 }
 
 #[cfg(windows)]
@@ -890,28 +852,12 @@ fn redirect_dns_with_interfaces(
 }
 
 #[cfg(windows)]
-fn apply_restore_action(action: &RestoreAction) -> Result<String, String> {
-    match action {
-        RestoreAction::Configure {
-            name,
-            if_index,
-            family,
-            kind:
-                ConfigKind::Static {
-                    primary,
-                    secondaries,
-                },
-        } => apply_static(*family, name, *if_index, primary, secondaries),
-        RestoreAction::Configure {
-            name,
-            if_index,
-            family,
-            kind: ConfigKind::Dhcp,
-        } => apply_dhcp(*family, name, *if_index),
-        RestoreAction::Skip {
-            name,
-            reason: SkipReason::AdapterNotPresent,
-        } => Err(format!("adapter \"{}\" not currently up; skipped", name)),
+fn apply_restore(plan: &RestorePlan) -> Result<String, String> {
+    match plan.servers.split_first() {
+        Some((primary, rest)) => {
+            apply_static(plan.family, &plan.name, plan.if_index, primary, rest)
+        }
+        None => apply_dhcp(plan.family, &plan.name, plan.if_index),
     }
 }
 
@@ -1196,16 +1142,15 @@ fn uninstall_windows() -> Result<(), String> {
         serde_json::from_str(&json).map_err(|e| format!("invalid backup file: {}", e))?;
 
     let live = get_windows_interfaces()?;
-    let plan = plan_windows_restore(&original, &live);
-    let mut skipped: Vec<String> = Vec::new();
+    let (plan, skipped) = plan_windows_restore(&original, &live);
 
+    for name in &skipped {
+        eprintln!("  warning: adapter \"{}\" not currently up; skipped", name);
+    }
     for action in &plan {
-        match apply_restore_action(action) {
+        match apply_restore(action) {
             Ok(msg) => eprintln!("  {}", msg),
             Err(e) => eprintln!("  warning: {}", e),
-        }
-        if let RestoreAction::Skip { name, .. } = action {
-            skipped.push(name.clone());
         }
     }
 
@@ -2385,30 +2330,12 @@ mod tests {
         }
     }
 
-    fn static_action(
-        name: &str,
-        if_index: u32,
-        family: AddressFamily,
-        primary: &str,
-        secondaries: &[&str],
-    ) -> RestoreAction {
-        RestoreAction::Configure {
+    fn plan(name: &str, if_index: u32, family: AddressFamily, servers: &[&str]) -> RestorePlan {
+        RestorePlan {
             name: name.into(),
             if_index,
             family,
-            kind: ConfigKind::Static {
-                primary: primary.into(),
-                secondaries: secondaries.iter().map(|s| (*s).to_string()).collect(),
-            },
-        }
-    }
-
-    fn dhcp_action(name: &str, if_index: u32, family: AddressFamily) -> RestoreAction {
-        RestoreAction::Configure {
-            name: name.into(),
-            if_index,
-            family,
-            kind: ConfigKind::Dhcp,
+            servers: servers.iter().map(|s| (*s).to_string()).collect(),
         }
     }
 
@@ -2432,63 +2359,30 @@ mod tests {
 
         assert_eq!(
             plan_windows_restore(&backup, &live),
-            vec![
-                static_action("Ethernet", 12, AddressFamily::V4, "8.8.8.8", &["1.1.1.1"]),
-                static_action(
-                    "Ethernet",
-                    12,
-                    AddressFamily::V6,
-                    "2001:4860:4860::8888",
-                    &["2606:4700:4700::1111"],
-                ),
-            ]
+            (
+                vec![
+                    plan("Ethernet", 12, AddressFamily::V4, &["8.8.8.8", "1.1.1.1"]),
+                    plan(
+                        "Ethernet",
+                        12,
+                        AddressFamily::V6,
+                        &["2001:4860:4860::8888", "2606:4700:4700::1111"],
+                    ),
+                ],
+                vec![],
+            ),
         );
     }
 
     #[test]
-    fn plan_restore_empty_backup_resets_both_families_to_dhcp() {
-        let mut backup = std::collections::HashMap::new();
-        backup.insert("Tailscale".into(), iface(0, &[]));
-        let mut live = std::collections::HashMap::new();
-        live.insert("Tailscale".into(), iface(7, &[]));
-
-        assert_eq!(
-            plan_windows_restore(&backup, &live),
-            vec![
-                dhcp_action("Tailscale", 7, AddressFamily::V4),
-                dhcp_action("Tailscale", 7, AddressFamily::V6),
-            ]
-        );
-    }
-
-    #[test]
-    fn plan_restore_v4_only_backup_dhcps_v6() {
-        let mut backup = std::collections::HashMap::new();
-        backup.insert("Ethernet".into(), iface(0, &["192.168.1.1"]));
-        let mut live = std::collections::HashMap::new();
-        live.insert("Ethernet".into(), iface(12, &[]));
-
-        assert_eq!(
-            plan_windows_restore(&backup, &live),
-            vec![
-                static_action("Ethernet", 12, AddressFamily::V4, "192.168.1.1", &[]),
-                dhcp_action("Ethernet", 12, AddressFamily::V6),
-            ]
-        );
-    }
-
-    #[test]
-    fn plan_restore_skips_adapter_not_present() {
+    fn plan_restore_returns_missing_adapter_names() {
         let mut backup = std::collections::HashMap::new();
         backup.insert("Tailscale".into(), iface(0, &["100.100.100.100"]));
         let live = std::collections::HashMap::new();
 
         assert_eq!(
             plan_windows_restore(&backup, &live),
-            vec![RestoreAction::Skip {
-                name: "Tailscale".into(),
-                reason: SkipReason::AdapterNotPresent,
-            }]
+            (vec![], vec!["Tailscale".into()]),
         );
     }
 
@@ -2512,16 +2406,13 @@ mod tests {
 
         assert_eq!(
             plan_windows_restore(&backup, &live),
-            vec![
-                static_action("Ethernet", 12, AddressFamily::V4, "8.8.8.8", &[]),
-                static_action(
-                    "Ethernet",
-                    12,
-                    AddressFamily::V6,
-                    "2001:4860:4860::8888",
-                    &[]
-                ),
-            ]
+            (
+                vec![
+                    plan("Ethernet", 12, AddressFamily::V4, &["8.8.8.8"]),
+                    plan("Ethernet", 12, AddressFamily::V6, &["2001:4860:4860::8888"]),
+                ],
+                vec![],
+            ),
         );
     }
 
