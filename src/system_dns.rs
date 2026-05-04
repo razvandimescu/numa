@@ -686,6 +686,15 @@ fn plan_windows_restore(
             continue;
         };
         let if_index = live_iface.if_index;
+        // v6 emission gates on the *unfiltered* backup having any v6 entries —
+        // even the fec0:0:0:ffff::1/2/3 stubs count, since they're returned
+        // only when v6 is enabled on the adapter. No v6 entries at all
+        // means v6 was disabled, and `netsh interface ipv6 set ... dhcp`
+        // would error on disabled adapters.
+        let v6_was_enabled = backup[name]
+            .servers
+            .iter()
+            .any(|s| s.parse::<std::net::Ipv6Addr>().is_ok());
         let (v4, v6): (Vec<String>, Vec<String>) = backup[name]
             .servers
             .iter()
@@ -698,12 +707,14 @@ fn plan_windows_restore(
             family: AddressFamily::V4,
             servers: v4,
         });
-        plans.push(RestorePlan {
-            name: name.clone(),
-            if_index,
-            family: AddressFamily::V6,
-            servers: v6,
-        });
+        if v6_was_enabled {
+            plans.push(RestorePlan {
+                name: name.clone(),
+                if_index,
+                family: AddressFamily::V6,
+                servers: v6,
+            });
+        }
     }
     (plans, missing)
 }
@@ -1147,25 +1158,36 @@ fn uninstall_windows() -> Result<(), String> {
     for name in &skipped {
         eprintln!("  warning: adapter \"{}\" not currently up; skipped", name);
     }
+    let mut apply_failed = false;
     for action in &plan {
         match apply_restore(action) {
             Ok(msg) => eprintln!("  {}", msg),
-            Err(e) => eprintln!("  warning: {}", e),
+            Err(e) => {
+                eprintln!("  warning: {}", e);
+                apply_failed = true;
+            }
         }
     }
 
-    // Keep the backup if any adapter wasn't reachable — an offline
-    // uninstall would otherwise leave the registry pinned at 127.0.0.1
-    // with no recovery state for when the network returns.
+    // Keep the backup if anything went wrong — adapter offline (re-runnable
+    // after reconnect) or netsh non-zero exit (re-runnable after manual
+    // diagnosis). Removing it would leave the registry pinned at 127.0.0.1
+    // with no recovery state.
     enable_dnscache();
-    if skipped.is_empty() {
+    if skipped.is_empty() && !apply_failed {
         std::fs::remove_file(&path).ok();
         eprintln!("\n  System DNS restored. DNS Client re-enabled.");
-    } else {
+    } else if !skipped.is_empty() {
         eprintln!(
             "\n  Partial restore. Backup kept at {} — re-run 'numa uninstall' after reconnecting: {}",
             path.display(),
             skipped.join(", ")
+        );
+        eprintln!("  DNS Client re-enabled.");
+    } else {
+        eprintln!(
+            "\n  Partial restore. Backup kept at {} — check the warnings above and re-run 'numa uninstall'.",
+            path.display()
         );
         eprintln!("  DNS Client re-enabled.");
     }
@@ -2383,6 +2405,44 @@ mod tests {
         assert_eq!(
             plan_windows_restore(&backup, &live),
             (vec![], vec!["Tailscale".into()]),
+        );
+    }
+
+    #[test]
+    fn plan_restore_skips_v6_when_disabled_in_backup() {
+        let mut backup = std::collections::HashMap::new();
+        backup.insert("Ethernet".into(), iface(0, &["192.168.1.1"]));
+        let mut live = std::collections::HashMap::new();
+        live.insert("Ethernet".into(), iface(12, &[]));
+
+        assert_eq!(
+            plan_windows_restore(&backup, &live),
+            (
+                vec![plan("Ethernet", 12, AddressFamily::V4, &["192.168.1.1"])],
+                vec![],
+            ),
+        );
+    }
+
+    #[test]
+    fn plan_restore_emits_v6_dhcp_when_only_v6_stubs_in_backup() {
+        let mut backup = std::collections::HashMap::new();
+        backup.insert(
+            "Ethernet".into(),
+            iface(0, &["192.168.1.1", "fec0:0:0:ffff::1"]),
+        );
+        let mut live = std::collections::HashMap::new();
+        live.insert("Ethernet".into(), iface(12, &[]));
+
+        assert_eq!(
+            plan_windows_restore(&backup, &live),
+            (
+                vec![
+                    plan("Ethernet", 12, AddressFamily::V4, &["192.168.1.1"]),
+                    plan("Ethernet", 12, AddressFamily::V6, &[]),
+                ],
+                vec![],
+            ),
         );
     }
 
