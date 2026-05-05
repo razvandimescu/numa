@@ -637,14 +637,14 @@ fn backup_has_real_upstream_windows(
         .any(|iface| iface.servers.iter().any(|s| !is_loopback_or_stub(s)))
 }
 
+/// Capture pre-numa DNS state for `uninstall` to restore. Returns `Ok(true)`
+/// when a fresh backup was written; `Ok(false)` when an existing useful
+/// backup was preserved (re-install on numa-managed state).
 #[cfg(windows)]
-fn install_windows() -> Result<(), String> {
-    let mut interfaces = get_windows_interfaces()?;
-    if interfaces.is_empty() {
-        return Err("no active network interfaces found".to_string());
-    }
-
-    let path = windows_backup_path();
+fn write_windows_backup(
+    path: &std::path::Path,
+    interfaces: &mut std::collections::HashMap<String, WindowsInterfaceDns>,
+) -> Result<bool, String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("failed to create {}: {}", parent.display(), e))?;
@@ -653,7 +653,7 @@ fn install_windows() -> Result<(), String> {
     // Preserve an existing useful backup rather than overwriting it with
     // numa-managed state (which would be self-referential after uninstall).
     let existing: Option<std::collections::HashMap<String, WindowsInterfaceDns>> =
-        std::fs::read_to_string(&path)
+        std::fs::read_to_string(path)
             .ok()
             .and_then(|json| serde_json::from_str(&json).ok());
     let has_useful_existing = existing
@@ -663,16 +663,33 @@ fn install_windows() -> Result<(), String> {
 
     if has_useful_existing {
         eprintln!("  Existing DNS backup preserved at {}", path.display());
-    } else {
-        // Filter loopback/stub addresses before saving so a fresh backup
-        // captured from already-numa-managed state isn't self-referential.
-        for iface in interfaces.values_mut() {
-            iface.servers.retain(|s| !is_loopback_or_stub(s));
-        }
-        let json = serde_json::to_string_pretty(&interfaces)
-            .map_err(|e| format!("failed to serialize backup: {}", e))?;
-        std::fs::write(&path, json).map_err(|e| format!("failed to write backup: {}", e))?;
+        return Ok(false);
     }
+
+    // Filter loopback/stub addresses before saving so a fresh backup
+    // captured from already-numa-managed state isn't self-referential.
+    for iface in interfaces.values_mut() {
+        iface.servers.retain(|s| !is_loopback_or_stub(s));
+    }
+    let json = serde_json::to_string_pretty(&interfaces)
+        .map_err(|e| format!("failed to serialize backup: {}", e))?;
+    std::fs::write(path, json).map_err(|e| format!("failed to write backup: {}", e))?;
+    Ok(true)
+}
+
+#[cfg(windows)]
+fn install_windows(skip_system_dns: bool) -> Result<(), String> {
+    let mut interfaces = get_windows_interfaces()?;
+    if interfaces.is_empty() {
+        return Err("no active network interfaces found".to_string());
+    }
+
+    let path = windows_backup_path();
+    let wrote_fresh_backup = if skip_system_dns {
+        false
+    } else {
+        write_windows_backup(&path, &mut interfaces)?
+    };
 
     // On re-install, stop the running service first so the binary can be
     // overwritten and port 53 is released for the Dnscache probe.
@@ -694,7 +711,9 @@ fn install_windows() -> Result<(), String> {
         // would kill DNS. The service will call redirect_dns_to_localhost()
         // on its first startup after reboot.
     } else {
-        redirect_dns_with_interfaces(&interfaces)?;
+        if !skip_system_dns {
+            redirect_dns_with_interfaces(&interfaces)?;
+        }
 
         match start_service_scm() {
             Ok(_) => eprintln!("  Service started."),
@@ -706,7 +725,9 @@ fn install_windows() -> Result<(), String> {
     }
 
     eprintln!();
-    if !has_useful_existing {
+    if skip_system_dns {
+        eprintln!("{}", SKIP_DNS_NOTICE);
+    } else if wrote_fresh_backup {
         eprintln!("  Original DNS saved to {}", path.display());
     }
     eprintln!("  Run 'numa uninstall' to restore.\n");
@@ -953,8 +974,25 @@ fn uninstall_windows() -> Result<(), String> {
     delete_service_scm();
     remove_service_binary();
     let path = windows_backup_path();
-    let json = std::fs::read_to_string(&path)
-        .map_err(|e| format!("no backup found at {}: {}", path.display(), e))?;
+    let json = match std::fs::read_to_string(&path) {
+        Ok(j) => j,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Install was --no-system-dns (or backup never written): there
+            // is nothing to restore. Still re-enable Dnscache so the host
+            // is back to a stock configuration.
+            enable_dnscache();
+            eprintln!("  No system DNS backup found — system DNS was not managed by numa.");
+            eprintln!("  DNS Client re-enabled. Reboot to fully restore the DNS Client service.\n");
+            return Ok(());
+        }
+        Err(e) => {
+            return Err(format!(
+                "failed to read backup at {}: {}",
+                path.display(),
+                e
+            ))
+        }
+    };
     let original: std::collections::HashMap<String, WindowsInterfaceDns> =
         serde_json::from_str(&json).map_err(|e| format!("invalid backup file: {}", e))?;
 
@@ -1191,8 +1229,20 @@ fn uninstall_macos() -> Result<(), String> {
     use std::collections::HashMap;
 
     let path = backup_path();
-    let json = std::fs::read_to_string(&path)
-        .map_err(|e| format!("no backup found at {}: {}", path.display(), e))?;
+    let json = match std::fs::read_to_string(&path) {
+        Ok(j) => j,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("  No system DNS backup found — system DNS was not managed by numa.\n");
+            return Ok(());
+        }
+        Err(e) => {
+            return Err(format!(
+                "failed to read backup at {}: {}",
+                path.display(),
+                e
+            ))
+        }
+    };
 
     let original: HashMap<String, Vec<String>> =
         serde_json::from_str(&json).map_err(|e| format!("invalid backup file: {}", e))?;
@@ -1244,16 +1294,27 @@ const PLIST_DEST: &str = "/Library/LaunchDaemons/com.numa.dns.plist";
 #[cfg(target_os = "linux")]
 const SYSTEMD_UNIT: &str = "/etc/systemd/system/numa.service";
 
+const SKIP_DNS_NOTICE: &str =
+    "  --no-system-dns: system DNS unchanged. Point clients at 127.0.0.1 yourself.";
+
 /// Install Numa as a system service that starts on boot and auto-restarts.
-pub fn install_service() -> Result<(), String> {
+///
+/// `skip_system_dns = true` registers the service but leaves the host's DNS
+/// configuration untouched (no backup written, no `127.0.0.1` redirect). The
+/// operator is responsible for routing traffic to numa themselves — front-end
+/// proxy, browser DoH, etc.
+pub fn install_service(skip_system_dns: bool) -> Result<(), String> {
     #[cfg(target_os = "macos")]
-    let result = install_service_macos();
+    let result = install_service_macos(skip_system_dns);
     #[cfg(target_os = "linux")]
-    let result = install_service_linux();
+    let result = install_service_linux(skip_system_dns);
     #[cfg(windows)]
-    let result = install_windows();
+    let result = install_windows(skip_system_dns);
     #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
-    let result = Err::<(), String>("service installation not supported on this OS".to_string());
+    let result = {
+        let _ = skip_system_dns;
+        Err::<(), String>("service installation not supported on this OS".to_string())
+    };
 
     if result.is_ok() {
         if let Err(e) = trust_ca() {
@@ -1266,27 +1327,29 @@ pub fn install_service() -> Result<(), String> {
 
 /// Start the service. If already installed, just starts it via the platform
 /// service manager. If not installed, falls through to a full install.
-pub fn start_service() -> Result<(), String> {
+pub fn start_service(skip_system_dns: bool) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        install_service()
+        install_service(skip_system_dns)
     }
     #[cfg(target_os = "linux")]
     {
-        install_service()
+        install_service(skip_system_dns)
     }
     #[cfg(windows)]
     {
         if is_service_registered() {
+            let _ = skip_system_dns;
             start_service_scm()?;
             eprintln!("  Service started.\n");
             Ok(())
         } else {
-            install_service()
+            install_service(skip_system_dns)
         }
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     {
+        let _ = skip_system_dns;
         Err("service start not supported on this OS".to_string())
     }
 }
@@ -1430,7 +1493,7 @@ fn replace_exe_path(service: &str) -> Result<String, String> {
 }
 
 #[cfg(target_os = "macos")]
-fn install_service_macos() -> Result<(), String> {
+fn install_service_macos(skip_system_dns: bool) -> Result<(), String> {
     // Create log directory
     std::fs::create_dir_all("/usr/local/var/log")
         .map_err(|e| format!("failed to create log dir: {}", e))?;
@@ -1478,7 +1541,9 @@ fn install_service_macos() -> Result<(), String> {
         );
     }
 
-    if let Err(e) = install_macos() {
+    if skip_system_dns {
+        eprintln!("{}", SKIP_DNS_NOTICE);
+    } else if let Err(e) = install_macos() {
         eprintln!("  warning: failed to configure system DNS: {}", e);
     }
 
@@ -1739,7 +1804,7 @@ fn install_service_binary_linux() -> Result<std::path::PathBuf, String> {
 }
 
 #[cfg(target_os = "linux")]
-fn install_service_linux() -> Result<(), String> {
+fn install_service_linux(skip_system_dns: bool) -> Result<(), String> {
     let exe = install_service_binary_linux()?;
     let unit = include_str!("../numa.service").replace("{{exe_path}}", &exe.to_string_lossy());
     std::fs::write(SYSTEMD_UNIT, unit)
@@ -1749,7 +1814,9 @@ fn install_service_linux() -> Result<(), String> {
     run_systemctl(&["enable", "numa"])?;
 
     // Configure system DNS before starting numa so resolved releases port 53 first
-    if let Err(e) = install_linux() {
+    if skip_system_dns {
+        eprintln!("{}", SKIP_DNS_NOTICE);
+    } else if let Err(e) = install_linux() {
         eprintln!("  warning: failed to configure system DNS: {}", e);
     }
 
