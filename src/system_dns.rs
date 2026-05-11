@@ -717,15 +717,14 @@ fn plan_windows_restore(
     (plans, missing)
 }
 
-/// Run the loopback-DHCP recovery sweep with a freshly-queried live snapshot.
-/// Used by uninstall to ensure no adapter is left stranded at 127.0.0.1 after
-/// the targeted restore can't run or partially fails. Non-fatal: warnings only.
+/// Force any live adapter stranded at loopback/stub DNS back to DHCP. Safety
+/// net for uninstall paths that can't run a targeted restore.
 #[cfg(windows)]
 fn run_loopback_recovery() {
     let live = match get_windows_interfaces() {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("  warning: could not query adapters for recovery sweep: {}", e);
+            eprintln!("  warning: could not query adapters for recovery: {}", e);
             return;
         }
     };
@@ -740,45 +739,30 @@ fn run_loopback_recovery() {
     }
 }
 
-/// Safety net: build "set DHCP" plans for any live adapter currently pointed at
-/// loopback/stub DNS only. Used when a normal restore can't run (no backup) or
-/// failed (netsh error, adapter renamed). Without this, uninstall would leave
-/// the user stranded at 127.0.0.1 with numa already gone — broken internet.
+/// Build DHCP plans for live adapters whose DNS is loopback/stub only.
+/// Synthesises a "backup" of loopback servers so `plan_windows_restore`'s
+/// loopback filter strips everything → empty-servers plans → DHCP via apply().
 #[cfg(any(windows, test))]
 fn plan_loopback_recovery(
     live: &std::collections::HashMap<String, WindowsInterfaceDns>,
 ) -> Vec<RestorePlan> {
-    let mut plans = Vec::new();
-    let mut names: Vec<&String> = live.keys().collect();
-    names.sort();
-    for name in names {
-        let iface = &live[name];
-        if iface.servers.is_empty() {
-            continue; // already DHCP
-        }
-        if !iface.servers.iter().all(|s| is_loopback_or_stub(s)) {
-            continue; // has a real upstream — leave alone
-        }
-        let v6_in_use = iface
-            .servers
-            .iter()
-            .any(|s| s.parse::<std::net::Ipv6Addr>().is_ok());
-        plans.push(RestorePlan {
-            name: name.clone(),
-            if_index: iface.if_index,
-            family: AddressFamily::V4,
-            servers: vec![],
-        });
-        if v6_in_use {
-            plans.push(RestorePlan {
-                name: name.clone(),
-                if_index: iface.if_index,
-                family: AddressFamily::V6,
-                servers: vec![],
-            });
-        }
-    }
-    plans
+    let synth: std::collections::HashMap<String, WindowsInterfaceDns> = live
+        .iter()
+        .filter(|(_, iface)| {
+            !iface.servers.is_empty()
+                && iface.servers.iter().all(|s| is_loopback_or_stub(s))
+        })
+        .map(|(name, iface)| {
+            (
+                name.clone(),
+                WindowsInterfaceDns {
+                    if_index: 0,
+                    servers: iface.servers.clone(),
+                },
+            )
+        })
+        .collect();
+    plan_windows_restore(&synth, live).0
 }
 
 /// Capture pre-numa DNS state for `uninstall` to restore. Returns `Ok(true)`
@@ -1204,10 +1188,7 @@ fn uninstall_windows() -> Result<(), String> {
     let json = match std::fs::read_to_string(&path) {
         Ok(j) => j,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // Install was --no-system-dns (or backup never written / deleted):
-            // no targeted restore is possible. But adapters may still point at
-            // 127.0.0.1 from a prior install — force them back to DHCP so the
-            // user isn't left without internet.
+            // No backup — sweep any adapters still on loopback back to DHCP.
             run_loopback_recovery();
             enable_dnscache();
             eprintln!("  No system DNS backup found — system DNS was not managed by numa.");
@@ -1242,10 +1223,7 @@ fn uninstall_windows() -> Result<(), String> {
         }
     }
 
-    // Safety net for the failure cases: if the targeted restore left any
-    // adapter still pointed at loopback (netsh failure, or live adapter not
-    // present in the backup), force those to DHCP so internet isn't broken.
-    // Re-query live state so we don't fight the apply loop above.
+    // Re-queries live state so we don't fight successful applies above.
     if apply_failed || !skipped.is_empty() {
         run_loopback_recovery();
     }
