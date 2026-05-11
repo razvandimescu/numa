@@ -731,10 +731,7 @@ fn run_loopback_recovery() {
     for action in plan_loopback_recovery(&live) {
         match action.apply() {
             Ok(msg) => eprintln!("  recovery: {}", msg),
-            Err(e) => eprintln!(
-                "  warning: recovery failed for \"{}\": {}",
-                action.name, e
-            ),
+            Err(e) => eprintln!("  warning: recovery failed for \"{}\": {}", action.name, e),
         }
     }
 }
@@ -749,8 +746,7 @@ fn plan_loopback_recovery(
     let synth: std::collections::HashMap<String, WindowsInterfaceDns> = live
         .iter()
         .filter(|(_, iface)| {
-            !iface.servers.is_empty()
-                && iface.servers.iter().all(|s| is_loopback_or_stub(s))
+            !iface.servers.is_empty() && iface.servers.iter().all(|s| is_loopback_or_stub(s))
         })
         .map(|(name, iface)| {
             (
