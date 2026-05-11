@@ -717,6 +717,70 @@ fn plan_windows_restore(
     (plans, missing)
 }
 
+/// Run the loopback-DHCP recovery sweep with a freshly-queried live snapshot.
+/// Used by uninstall to ensure no adapter is left stranded at 127.0.0.1 after
+/// the targeted restore can't run or partially fails. Non-fatal: warnings only.
+#[cfg(windows)]
+fn run_loopback_recovery() {
+    let live = match get_windows_interfaces() {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("  warning: could not query adapters for recovery sweep: {}", e);
+            return;
+        }
+    };
+    for action in plan_loopback_recovery(&live) {
+        match action.apply() {
+            Ok(msg) => eprintln!("  recovery: {}", msg),
+            Err(e) => eprintln!(
+                "  warning: recovery failed for \"{}\": {}",
+                action.name, e
+            ),
+        }
+    }
+}
+
+/// Safety net: build "set DHCP" plans for any live adapter currently pointed at
+/// loopback/stub DNS only. Used when a normal restore can't run (no backup) or
+/// failed (netsh error, adapter renamed). Without this, uninstall would leave
+/// the user stranded at 127.0.0.1 with numa already gone — broken internet.
+#[cfg(any(windows, test))]
+fn plan_loopback_recovery(
+    live: &std::collections::HashMap<String, WindowsInterfaceDns>,
+) -> Vec<RestorePlan> {
+    let mut plans = Vec::new();
+    let mut names: Vec<&String> = live.keys().collect();
+    names.sort();
+    for name in names {
+        let iface = &live[name];
+        if iface.servers.is_empty() {
+            continue; // already DHCP
+        }
+        if !iface.servers.iter().all(|s| is_loopback_or_stub(s)) {
+            continue; // has a real upstream — leave alone
+        }
+        let v6_in_use = iface
+            .servers
+            .iter()
+            .any(|s| s.parse::<std::net::Ipv6Addr>().is_ok());
+        plans.push(RestorePlan {
+            name: name.clone(),
+            if_index: iface.if_index,
+            family: AddressFamily::V4,
+            servers: vec![],
+        });
+        if v6_in_use {
+            plans.push(RestorePlan {
+                name: name.clone(),
+                if_index: iface.if_index,
+                family: AddressFamily::V6,
+                servers: vec![],
+            });
+        }
+    }
+    plans
+}
+
 /// Capture pre-numa DNS state for `uninstall` to restore. Returns `Ok(true)`
 /// when a fresh backup was written; `Ok(false)` when an existing useful
 /// backup was preserved (re-install on numa-managed state).
@@ -1140,9 +1204,11 @@ fn uninstall_windows() -> Result<(), String> {
     let json = match std::fs::read_to_string(&path) {
         Ok(j) => j,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // Install was --no-system-dns (or backup never written): there
-            // is nothing to restore. Still re-enable Dnscache so the host
-            // is back to a stock configuration.
+            // Install was --no-system-dns (or backup never written / deleted):
+            // no targeted restore is possible. But adapters may still point at
+            // 127.0.0.1 from a prior install — force them back to DHCP so the
+            // user isn't left without internet.
+            run_loopback_recovery();
             enable_dnscache();
             eprintln!("  No system DNS backup found — system DNS was not managed by numa.");
             eprintln!("  DNS Client re-enabled. Reboot to fully restore the DNS Client service.\n");
@@ -1174,6 +1240,14 @@ fn uninstall_windows() -> Result<(), String> {
                 apply_failed = true;
             }
         }
+    }
+
+    // Safety net for the failure cases: if the targeted restore left any
+    // adapter still pointed at loopback (netsh failure, or live adapter not
+    // present in the backup), force those to DHCP so internet isn't broken.
+    // Re-query live state so we don't fight the apply loop above.
+    if apply_failed || !skipped.is_empty() {
+        run_loopback_recovery();
     }
 
     // Keep the backup if anything went wrong — adapter offline (re-runnable
@@ -2604,6 +2678,76 @@ mod tests {
                 ],
                 vec![],
             ),
+        );
+    }
+
+    #[test]
+    fn loopback_recovery_emits_dhcp_for_loopback_only_adapters() {
+        let mut live = std::collections::HashMap::new();
+        live.insert("Wi-Fi".into(), iface(12, &["127.0.0.1"]));
+
+        assert_eq!(
+            plan_loopback_recovery(&live),
+            vec![plan("Wi-Fi", 12, AddressFamily::V4, &[])],
+        );
+    }
+
+    #[test]
+    fn loopback_recovery_skips_adapters_with_real_upstream() {
+        let mut live = std::collections::HashMap::new();
+        live.insert("Wi-Fi".into(), iface(12, &["127.0.0.1", "8.8.8.8"]));
+
+        assert_eq!(plan_loopback_recovery(&live), vec![]);
+    }
+
+    #[test]
+    fn loopback_recovery_skips_already_dhcp_adapters() {
+        let mut live = std::collections::HashMap::new();
+        live.insert("Wi-Fi".into(), iface(12, &[]));
+
+        assert_eq!(plan_loopback_recovery(&live), vec![]);
+    }
+
+    #[test]
+    fn loopback_recovery_emits_v6_when_v6_loopback_present() {
+        let mut live = std::collections::HashMap::new();
+        live.insert("Wi-Fi".into(), iface(12, &["127.0.0.1", "::1"]));
+
+        assert_eq!(
+            plan_loopback_recovery(&live),
+            vec![
+                plan("Wi-Fi", 12, AddressFamily::V4, &[]),
+                plan("Wi-Fi", 12, AddressFamily::V6, &[]),
+            ],
+        );
+    }
+
+    #[test]
+    fn loopback_recovery_skips_v6_when_only_v4_loopback() {
+        let mut live = std::collections::HashMap::new();
+        live.insert("Wi-Fi".into(), iface(12, &["127.0.0.1"]));
+
+        // No v6 plan — v6 stack on the adapter may be disabled, and
+        // `netsh interface ipv6 set ... dhcp` would error in that case.
+        assert_eq!(
+            plan_loopback_recovery(&live),
+            vec![plan("Wi-Fi", 12, AddressFamily::V4, &[])],
+        );
+    }
+
+    #[test]
+    fn loopback_recovery_handles_multiple_adapters_sorted() {
+        let mut live = std::collections::HashMap::new();
+        live.insert("Wi-Fi".into(), iface(12, &["127.0.0.1"]));
+        live.insert("Ethernet".into(), iface(8, &["127.0.0.1"]));
+        live.insert("Tailscale".into(), iface(20, &["100.100.100.100"]));
+
+        assert_eq!(
+            plan_loopback_recovery(&live),
+            vec![
+                plan("Ethernet", 8, AddressFamily::V4, &[]),
+                plan("Wi-Fi", 12, AddressFamily::V4, &[]),
+            ],
         );
     }
 
