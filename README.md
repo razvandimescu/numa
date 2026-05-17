@@ -30,6 +30,9 @@ cargo install numa
 
 # Docker
 docker run -d --name numa --network host ghcr.io/razvandimescu/numa
+
+# Nix
+nix run github:razvandimescu/numa
 ```
 
 ```bash

@@ -1,0 +1,41 @@
+{
+  description = "";
+
+  inputs.flake-utils.url = "github:numtide/flake-utils";
+
+  outputs = {
+    self,
+    nixpkgs,
+    flake-utils,
+  }:
+    flake-utils.lib.eachDefaultSystem (
+      system: let
+        pkgs = nixpkgs.legacyPackages.${system};
+      in {
+        packages = rec {
+          numa = pkgs.callPackage (
+            {
+              rustPlatform,
+              lib,
+            }:
+              rustPlatform.buildRustPackage {
+                pname = "numa";
+                version = "0.17.0";
+                src = ./.;
+                cargoLock = {lockFile = ./Cargo.lock;};
+                meta = {
+                  description = "Portable DNS resolver in Rust";
+                  homepage = "https://numa.rs";
+                  license = lib.licenses.mit;
+                };
+              }
+          ) {};
+          default = numa;
+        };
+        apps = rec {
+          numa = flake-utils.lib.mkApp {drv = self.packages.${system}.numa;};
+          default = numa;
+        };
+      }
+    );
+}
