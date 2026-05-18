@@ -138,21 +138,9 @@ pub async fn run(config_path: String) -> crate::Result<()> {
 
     let ca_pem = std::fs::read_to_string(resolved_data_dir.join("ca.pem")).ok();
 
-    let socket = match UdpSocket::bind(&config.server.bind_addr).await {
-        Ok(s) => s,
-        Err(e) => {
-            if let Some(advisory) =
-                crate::system_dns::try_port53_advisory(&config.server.bind_addr, &e)
-            {
-                eprint!("{}", advisory);
-                std::process::exit(1);
-            }
-            return Err(e.into());
-        }
-    };
+    let sockets = bind_udp_listeners(&config.server.bind_addr).await?;
 
     let ctx = Arc::new(ServerCtx {
-        socket,
         zone_map: build_zone_map(&config.zones)?,
         cache: RwLock::new(DnsCache::new(
             config.cache.max_entries,
@@ -211,7 +199,11 @@ pub async fn run(config_path: String) -> crate::Result<()> {
 
     info!(
         "numa listening on {}, upstream {}, {} zone records, cache max {}, API on port {}",
-        config.server.bind_addr, upstream_label, zone_count, config.cache.max_entries, api_port,
+        config.server.bind_addr.join(", "),
+        upstream_label,
+        zone_count,
+        config.cache.max_entries,
+        api_port,
     );
 
     spawn_background_services(&ctx, &config, &bootstrap_resolver, api_port)?;
@@ -222,7 +214,32 @@ pub async fn run(config_path: String) -> crate::Result<()> {
         .ok()
         .flatten();
 
-    udp_serve_loop(&ctx, udp_pp.as_ref()).await
+    let mut handles = Vec::with_capacity(sockets.len());
+    for socket in sockets {
+        let ctx = Arc::clone(&ctx);
+        let pp = udp_pp.clone();
+        handles.push(tokio::spawn(async move {
+            udp_serve_loop(&ctx, socket, pp.as_ref()).await
+        }));
+    }
+    let (first, _, _) = futures::future::select_all(handles).await;
+    first?
+}
+
+/// First port-53 bind failure routes through `try_port53_advisory` so the
+/// "another resolver owns :53" UX still fires; any other bind error is fatal.
+async fn bind_udp_listeners(addrs: &[String]) -> crate::Result<Vec<Arc<UdpSocket>>> {
+    let mut sockets = Vec::with_capacity(addrs.len());
+    for addr in addrs {
+        let sock = UdpSocket::bind(addr).await.inspect_err(|e| {
+            if let Some(advisory) = crate::system_dns::try_port53_advisory(addr, e) {
+                eprint!("{}", advisory);
+                std::process::exit(1);
+            }
+        })?;
+        sockets.push(Arc::new(sock));
+    }
+    Ok(sockets)
 }
 
 fn spawn_background_services(
@@ -347,9 +364,9 @@ fn spawn_background_services(
         });
     }
 
-    {
+    for tcp_bind in &config.server.bind_addr {
         let tcp_ctx = Arc::clone(ctx);
-        let tcp_bind = config.server.bind_addr.clone();
+        let tcp_bind = tcp_bind.clone();
         let tcp_pp = config.server.proxy_protocol.clone();
         tokio::spawn(async move {
             crate::tcp::start_tcp(tcp_ctx, &tcp_bind, &tcp_pp).await;
@@ -361,12 +378,13 @@ fn spawn_background_services(
 
 async fn udp_serve_loop(
     ctx: &Arc<ServerCtx>,
+    socket: Arc<UdpSocket>,
     udp_pp: Option<&crate::pp2::PpConfig>,
 ) -> crate::Result<()> {
     #[allow(clippy::infinite_loop)]
     loop {
         let mut buffer = BytePacketBuffer::new();
-        let (len, peer) = match ctx.socket.recv_from(&mut buffer.buf).await {
+        let (len, peer) = match socket.recv_from(&mut buffer.buf).await {
             Ok(r) => r,
             Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {
                 // Windows delivers ICMP port-unreachable as ConnectionReset on UDP sockets
@@ -382,9 +400,18 @@ async fn udp_serve_loop(
         // PROXY-extracted logical source — otherwise the reply skips the
         // front-end and never reaches the original client.
         let ctx = Arc::clone(ctx);
+        let reply_socket = Arc::clone(&socket);
         tokio::spawn(async move {
-            if let Err(e) =
-                handle_query(buffer, dns_len, src_addr, peer, &ctx, Transport::Udp).await
+            if let Err(e) = handle_query(
+                buffer,
+                dns_len,
+                src_addr,
+                peer,
+                &ctx,
+                &reply_socket,
+                Transport::Udp,
+            )
+            .await
             {
                 error!("{} | HANDLER ERROR | {}", src_addr, e);
             }
@@ -422,6 +449,7 @@ fn print_banner(
     };
     let data_label = ctx.data_dir.display().to_string();
     let services_label = ctx.config_dir.join("services.json").display().to_string();
+    let bind_label = config.server.bind_addr.join(", ");
 
     let tag_line = "DNS that governs itself";
     let v = crate::version();
@@ -431,7 +459,7 @@ fn print_banner(
     // title row (variable-length once the version carries a +SHA suffix)
     // would overflow.
     let val_w = [
-        config.server.bind_addr.len(),
+        bind_label.len(),
         api_url.len(),
         upstream_label.len(),
         config_label.len(),
@@ -468,7 +496,7 @@ fn print_banner(
     eprint!("{o}  ║{r} {title}");
     eprintln!("{}{o}║{r}", " ".repeat(title_pad));
     eprintln!("{o}  ╠{bar_top}╣{r}");
-    row("DNS", g, &config.server.bind_addr);
+    row("DNS", g, &bind_label);
     row("API", g, api_url);
     row("Dashboard", g, api_url);
     row(

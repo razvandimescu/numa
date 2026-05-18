@@ -83,8 +83,8 @@ pub fn merge_forwarding_rules(
 
 #[derive(Deserialize)]
 pub struct ServerConfig {
-    #[serde(default = "default_bind_addr")]
-    pub bind_addr: String,
+    #[serde(default = "default_bind_addrs", deserialize_with = "string_or_vec")]
+    pub bind_addr: Vec<String>,
     #[serde(default = "default_api_port")]
     pub api_port: u16,
     #[serde(default = "default_api_bind_addr")]
@@ -110,7 +110,7 @@ pub struct ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         ServerConfig {
-            bind_addr: default_bind_addr(),
+            bind_addr: default_bind_addrs(),
             api_port: default_api_port(),
             api_bind_addr: default_api_bind_addr(),
             data_dir: None,
@@ -129,11 +129,11 @@ fn default_api_bind_addr() -> String {
 #[cfg(windows)]
 pub const NUMA_LOOPBACK_IP: &str = "127.0.0.2";
 
-fn default_bind_addr() -> String {
+fn default_bind_addrs() -> Vec<String> {
     #[cfg(windows)]
-    return format!("{}:53", NUMA_LOOPBACK_IP);
+    return vec![format!("{}:53", NUMA_LOOPBACK_IP)];
     #[cfg(not(windows))]
-    return "0.0.0.0:53".to_string();
+    return vec!["0.0.0.0:53".to_string()];
 }
 
 pub const DEFAULT_API_PORT: u16 = 5380;
@@ -979,6 +979,23 @@ mod tests {
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.server.api_bind_addr, "0.0.0.0");
         assert_eq!(config.proxy.bind_addr, "0.0.0.0");
+    }
+
+    #[test]
+    fn server_bind_addr_accepts_string_or_list() {
+        let single: Config = toml::from_str(
+            r#"[server]
+            bind_addr = "127.0.0.1:53""#,
+        )
+        .unwrap();
+        assert_eq!(single.server.bind_addr, vec!["127.0.0.1:53"]);
+
+        let list: Config = toml::from_str(
+            r#"[server]
+            bind_addr = ["127.0.0.1:53", "10.0.0.1:53"]"#,
+        )
+        .unwrap();
+        assert_eq!(list.server.bind_addr, vec!["127.0.0.1:53", "10.0.0.1:53"]);
     }
 
     #[test]

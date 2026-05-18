@@ -25,9 +25,7 @@ use crate::stats::ServerStats;
 /// Minimal `ServerCtx` for tests. Override fields after construction
 /// (all fields are `pub`), then wrap in `Arc`.
 pub async fn test_ctx() -> ServerCtx {
-    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     ServerCtx {
-        socket,
         zone_map: ZoneMap::default(),
         cache: RwLock::new(DnsCache::new(100, 60, 86400)),
         refreshing: Mutex::new(HashSet::new()),

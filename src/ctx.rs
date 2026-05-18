@@ -33,7 +33,6 @@ use crate::stats::{QueryPath, ServerStats, Transport};
 use crate::system_dns::ForwardingRule;
 
 pub struct ServerCtx {
-    pub socket: UdpSocket,
     pub zone_map: ZoneMap,
     /// std::sync::RwLock (not tokio) — locks must never be held across .await points.
     pub cache: RwLock<DnsCache>,
@@ -542,6 +541,7 @@ pub async fn handle_query(
     src_addr: SocketAddr,
     respond_to: SocketAddr,
     ctx: &Arc<ServerCtx>,
+    reply_socket: &Arc<UdpSocket>,
     transport: Transport,
 ) -> crate::Result<()> {
     let query = match DnsPacket::from_buffer(&mut buffer) {
@@ -553,7 +553,9 @@ pub async fn handle_query(
     };
     match resolve_query(query, &buffer.buf[..raw_len], src_addr, ctx, transport).await {
         Ok((resp_buffer, _)) => {
-            ctx.socket.send_to(resp_buffer.filled(), respond_to).await?;
+            reply_socket
+                .send_to(resp_buffer.filled(), respond_to)
+                .await?;
         }
         Err(e) => {
             warn!("{} | RESOLVE ERROR | {}", src_addr, e);
@@ -2145,5 +2147,54 @@ mod tests {
 
         assert!(resp.header.truncated_message, "TC bit must be set");
         assert!(resp.edns.is_some(), "TC response must mirror client's OPT");
+    }
+
+    #[tokio::test]
+    async fn handle_query_reply_leaves_provided_socket() {
+        use tokio::net::UdpSocket;
+
+        let sock_a = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let sock_b = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let addr_a = sock_a.local_addr().unwrap();
+        let addr_b = sock_b.local_addr().unwrap();
+
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let client_addr = client.local_addr().unwrap();
+
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.zone_map = crate::config::ZoneMap::from_exact(vec![DnsRecord::A {
+            domain: "multi.test".into(),
+            addr: Ipv4Addr::new(10, 0, 0, 1),
+            ttl: 60,
+        }]);
+        let ctx = Arc::new(ctx);
+
+        let query = DnsPacket::query(0xBEEF, "multi.test", QueryType::A);
+        let mut tmp = BytePacketBuffer::new();
+        query.write(&mut tmp).unwrap();
+        let wire = tmp.buf[..tmp.pos].to_vec();
+
+        let mut rbuf = [0u8; 512];
+        for (sock, addr) in [(&sock_a, addr_a), (&sock_b, addr_b)] {
+            handle_query(
+                BytePacketBuffer::from_bytes(&wire),
+                wire.len(),
+                client_addr,
+                client_addr,
+                &ctx,
+                sock,
+                Transport::Udp,
+            )
+            .await
+            .unwrap();
+            let (_, src) = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                client.recv_from(&mut rbuf),
+            )
+            .await
+            .expect("reply within 1s")
+            .unwrap();
+            assert_eq!(src, addr, "reply must come from the receiving socket");
+        }
     }
 }

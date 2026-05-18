@@ -1,5 +1,5 @@
 [server]
-bind_addr = "0.0.0.0:53"
+bind_addr = "0.0.0.0:53"           # or a list: ["10.0.0.1:53", "127.0.0.1:53"]
 api_port = 5380
 # api_bind_addr = "127.0.0.1"  # default; set to "0.0.0.0" for LAN dashboard access
 # data_dir = "/var/lib/numa"  # where numa stores TLS CA and cert material
