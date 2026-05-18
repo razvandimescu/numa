@@ -1,5 +1,5 @@
 {
-  description = "";
+  description = "Portable DNS resolver in Rust";
 
   inputs.flake-utils.url = "github:numtide/flake-utils";
 
@@ -20,7 +20,7 @@
             }:
               rustPlatform.buildRustPackage {
                 pname = "numa";
-                version = "0.17.0";
+                version = (lib.importTOML ./Cargo.toml).package.version;
                 src = ./.;
                 cargoLock = {lockFile = ./Cargo.lock;};
                 meta = {
