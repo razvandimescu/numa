@@ -229,14 +229,21 @@ pub async fn run(config_path: String) -> crate::Result<()> {
 /// First port-53 bind failure routes through `try_port53_advisory` so the
 /// "another resolver owns :53" UX still fires; any other bind error is fatal.
 async fn bind_udp_listeners(addrs: &[String]) -> crate::Result<Vec<Arc<UdpSocket>>> {
+    if addrs.is_empty() {
+        return Err("server.bind_addr is empty — set at least one address".into());
+    }
     let mut sockets = Vec::with_capacity(addrs.len());
     for addr in addrs {
-        let sock = UdpSocket::bind(addr).await.inspect_err(|e| {
-            if let Some(advisory) = crate::system_dns::try_port53_advisory(addr, e) {
-                eprint!("{}", advisory);
-                std::process::exit(1);
+        let sock = match UdpSocket::bind(addr).await {
+            Ok(s) => s,
+            Err(e) => {
+                if let Some(advisory) = crate::system_dns::try_port53_advisory(addr, &e) {
+                    eprint!("{}", advisory);
+                    std::process::exit(1);
+                }
+                return Err(e.into());
             }
-        })?;
+        };
         sockets.push(Arc::new(sock));
     }
     Ok(sockets)
@@ -790,5 +797,16 @@ async fn cache_warm_loop(ctx: Arc<ServerCtx>, domains: Vec<String>) {
                 warm_domain(&ctx, domain).await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn bind_udp_listeners_rejects_empty() {
+        let err = bind_udp_listeners(&[]).await.unwrap_err();
+        assert!(err.to_string().contains("bind_addr is empty"));
     }
 }
