@@ -192,9 +192,10 @@ fn daemon_data_dir() -> std::path::PathBuf {
             std::path::Path::new("/var/lib/numa").exists(),
         ))
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(not(target_os = "linux"))]
     {
-        // macOS uses the Homebrew prefix convention; no FHS migration needed.
+        // macOS (Homebrew) and FreeBSD/other BSDs (ports/pkg) share the
+        // `/usr/local/var` convention; no FHS migration needed.
         std::path::PathBuf::from("/usr/local/var/numa")
     }
 }

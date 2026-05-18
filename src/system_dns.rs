@@ -1113,6 +1113,13 @@ const SYSTEMD_UNIT: &str = "/etc/systemd/system/numa.service";
 const SKIP_DNS_NOTICE: &str =
     "  --no-system-dns: system DNS unchanged. Point clients at 127.0.0.1 yourself.";
 
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+fn unsupported_os_err(op: &str) -> String {
+    format!(
+        "{op} not supported on this OS — run `numa` directly under an rc.d/init script and set /etc/resolv.conf to 127.0.0.1 manually"
+    )
+}
+
 /// Install Numa as a system service that starts on boot and auto-restarts.
 ///
 /// `skip_system_dns = true` registers the service but leaves the host's DNS
@@ -1129,7 +1136,7 @@ pub fn install_service(skip_system_dns: bool) -> Result<(), String> {
     #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     let result = {
         let _ = skip_system_dns;
-        Err::<(), String>("service installation not supported on this OS".to_string())
+        Err::<(), String>(unsupported_os_err("service installation"))
     };
 
     if result.is_ok() {
@@ -1166,7 +1173,7 @@ pub fn start_service(skip_system_dns: bool) -> Result<(), String> {
     #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     {
         let _ = skip_system_dns;
-        Err("service start not supported on this OS".to_string())
+        Err(unsupported_os_err("service start"))
     }
 }
 
@@ -1195,7 +1202,7 @@ pub fn stop_service() -> Result<(), String> {
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     {
-        Err("service stop not supported on this OS".to_string())
+        Err(unsupported_os_err("service stop"))
     }
 }
 
@@ -1217,7 +1224,7 @@ pub fn uninstall_service() -> Result<(), String> {
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     {
-        Err("service uninstallation not supported on this OS".to_string())
+        Err(unsupported_os_err("service uninstallation"))
     }
 }
 
@@ -1245,7 +1252,7 @@ pub fn restart_service() -> Result<(), String> {
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     {
-        Err("service restart not supported on this OS".to_string())
+        Err(unsupported_os_err("service restart"))
     }
 }
 
@@ -1318,7 +1325,7 @@ pub fn service_status() -> Result<(), String> {
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     {
-        Err("service status not supported on this OS".to_string())
+        Err(unsupported_os_err("service status"))
     }
 }
 
