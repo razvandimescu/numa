@@ -1,3 +1,4 @@
+pub mod acl;
 pub mod api;
 pub mod blocklist;
 pub mod bootstrap_resolver;

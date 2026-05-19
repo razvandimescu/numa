@@ -19,6 +19,17 @@ api_port = 5380
                               # still configure v6 records for local services.
                               # Default: false.
 
+# Client-IP allowlist applied to every DNS query surface (UDP/53, TCP/53,
+# DoT, DoH). Mirrors PowerDNS Recursor's `allow-from`. Empty list (default)
+# = allow anyone that can reach the listener. Set this whenever numa is
+# bound to a WAN-routable interface, or it becomes an open recursive
+# resolver. Loopback is always allowed regardless of this list, so the
+# local stub resolver keeps working even if you mis-CIDR your LAN.
+# UDP queries from non-allowed peers are silently dropped (no
+# amplification, no fingerprint). TCP/DoT/DoH connections are closed
+# before the TLS handshake; DoH returns 403.
+# allow_from = ["10.0.0.0/8", "192.168.0.0/16", "fd00::/8"]
+
 # [upstream]
 # mode = "forward"                              # "forward" (default) — relay to upstream
 #                                               # "recursive" — resolve from root hints (no address needed)

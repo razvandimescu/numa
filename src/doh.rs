@@ -21,6 +21,14 @@ pub async fn doh_post(State(state): State<super::proxy::DohState>, req: Request)
         return StatusCode::NOT_FOUND.into_response();
     }
 
+    // ACL applies to the DNS query surface only — service-proxy routes on
+    // the same TLS listener are unaffected.
+    if let Some(addr) = state.remote_addr {
+        if !state.ctx.allow_from.allows(addr.ip()) {
+            return StatusCode::FORBIDDEN.into_response();
+        }
+    }
+
     let content_type = req
         .headers()
         .get(hyper::header::CONTENT_TYPE)

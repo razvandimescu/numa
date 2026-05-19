@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use log::{error, info};
+use log::{debug, error, info};
 use tokio::net::UdpSocket;
 
 use crate::blocklist::{download_blocklists, parse_blocklist, BlocklistStore};
@@ -122,6 +122,17 @@ pub async fn run(config_path: String) -> crate::Result<()> {
 
     let ca_pem = std::fs::read_to_string(resolved_data_dir.join("ca.pem")).ok();
 
+    let allow_from = crate::acl::AllowFromAcl::from_entries(&config.server.allow_from)
+        .map_err(|e| format!("invalid [server].allow_from: {e}"))?;
+    if allow_from.is_enabled() {
+        let n = config.server.allow_from.len();
+        info!(
+            "client-IP allow_from enabled — {} entr{} (loopback always allowed)",
+            n,
+            if n == 1 { "y" } else { "ies" }
+        );
+    }
+
     let sockets = bind_udp_listeners(&config.server.bind_addr).await?;
 
     let ctx = Arc::new(ServerCtx {
@@ -169,6 +180,7 @@ pub async fn run(config_path: String) -> crate::Result<()> {
         mobile_enabled: config.mobile.enabled,
         mobile_port: config.mobile.port,
         filter_aaaa: config.server.filter_aaaa,
+        allow_from,
     });
 
     let zone_count: usize = ctx.zone_map.len();
@@ -388,6 +400,11 @@ async fn udp_serve_loop(
         let Some((src_addr, dns_len)) = pp.apply(&mut buffer.buf, len, peer) else {
             continue;
         };
+        if !ctx.allow_from.allows(src_addr.ip()) {
+            // Silent drop: no reply means no amplification, no fingerprint.
+            debug!("UDP: dropping {} — not in allow_from", src_addr);
+            continue;
+        }
         // Response goes to the kernel UDP peer (e.g. dnsdist), not the
         // PROXY-extracted logical source — otherwise the reply skips the
         // front-end and never reaches the original client.

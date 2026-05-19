@@ -123,6 +123,12 @@ async fn accept_loop(
                 return;
             };
 
+            if !ctx.allow_from.allows(remote_addr.ip()) {
+                // Close before TLS handshake — no fingerprint, no cert exposure.
+                debug!("DoT: dropping {} — not in allow_from", remote_addr);
+                return;
+            }
+
             let tls_stream =
                 match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
                     Ok(Ok(s)) => s,
