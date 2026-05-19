@@ -9,27 +9,47 @@
 *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
 :root {
-  --bg-deep: #f5f0e8;
-  --bg-surface: #ece5da;
-  --bg-elevated: #e3dbce;
-  --bg-card: #faf7f2;
-  --amber: #c0623a;
-  --amber-dim: #9e4e2d;
-  --teal: #6b7c4e;
-  --teal-dim: #566540;
-  --violet: #64748b;
-  --violet-dim: #4a5568;
-  --emerald: #527a52;
-  --rose: #b5443a;
-  --cyan: #4a7c8a;
-  --text-primary: #2c2418;
-  --text-secondary: #6b5e4f;
-  --text-dim: #a39888;
-  --border: rgba(0, 0, 0, 0.08);
-  --border-amber: rgba(192, 98, 58, 0.22);
+  --bg-deep: oklch(0.9568 0.0119 79.78);
+  --bg-surface: oklch(0.9244 0.0166 79.35);
+  --bg-elevated: oklch(0.8942 0.0196 80.11);
+  --bg-card: oklch(0.9771 0.0074 80.72);
+  --amber: oklch(0.6002 0.1323 42.71);
+  --amber-dim: oklch(0.5169 0.1162 42.1);
+  --teal: oklch(0.5604 0.0699 125.09);
+  --violet: oklch(0.5544 0.0407 257.42);
+  --violet-dim: oklch(0.4474 0.0343 261.32);
+  --emerald: oklch(0.5385 0.0761 144.43);
+  --rose: oklch(0.5398 0.1489 28.1);
+  --cyan: oklch(0.5565 0.058 217.67);
+  --text-primary: oklch(0.2657 0.0241 77.51);
+  --text-secondary: oklch(0.49 0.0286 71.07);
+  --text-dim: oklch(0.6847 0.0263 77.37);
+  --text-on-btn: oklch(1 0 0);
+  --border: oklch(0 0 0 / 8%);
   --font-display: 'Instrument Serif', Georgia, serif;
   --font-body: 'DM Sans', system-ui, sans-serif;
   --font-mono: 'JetBrains Mono', 'SF Mono', monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg-deep: oklch(0 0 0);
+    --bg-surface: oklch(0.25 0.01 230);
+    --bg-elevated: oklch(0.4 0.01 230);
+    --bg-card: oklch(0.15 0.005 230);
+    --amber: oklch(0.7 0.17 42);
+    --amber-dim: oklch(0.6 0.17 42);
+    --teal: oklch(0.7 0.09 125);
+    --violet: oklch(0.7 0.09 260);
+    --violet-dim: oklch(0.6 0.09 260);
+    --emerald: oklch(0.6 0.08 144);
+    --rose: oklch(0.7 0.2 28);
+    --cyan: oklch(0.7 0.06 200);
+    --text-primary: oklch(0.8 0.02 230);
+    --text-secondary: oklch(0.7 0.02 230);
+    --text-dim: oklch(0.6 0.02 230);
+    --border: oklch(0 0 0 / 20%);
+  }
 }
 
 html { font-size: 15px; }
@@ -286,20 +306,19 @@ body {
   font-size: 0.65rem;
   font-weight: 500;
 }
-.path-tag.FORWARD { background: rgba(192, 98, 58, 0.12); color: var(--amber-dim); }
-.path-tag.UPSTREAM { background: rgba(160, 120, 72, 0.12); color: var(--amber-dim); }
-.path-tag.RECURSIVE { background: rgba(74, 124, 138, 0.12); color: var(--cyan); }
-.path-tag.CACHED { background: rgba(107, 124, 78, 0.12); color: var(--teal-dim); }
-.path-tag.LOCAL { background: rgba(100, 116, 139, 0.12); color: var(--violet-dim); }
-.path-tag.OVERRIDE { background: rgba(82, 122, 82, 0.12); color: var(--emerald); }
-.path-tag.SERVFAIL { background: rgba(181, 68, 58, 0.12); color: var(--rose); }
-.path-tag.BLOCKED { background: rgba(163, 152, 136, 0.15); color: var(--text-dim); }
-.path-tag.COALESCED { background: rgba(138, 104, 158, 0.12); color: var(--violet-dim); }
-.path-tag.UDP { background: rgba(163, 152, 136, 0.15); color: var(--text-dim); }
-.path-tag.TCP { background: rgba(100, 116, 139, 0.12); color: var(--violet-dim); }
-.path-tag.DOT { background: rgba(82, 122, 82, 0.12); color: var(--emerald); }
-.path-tag.DOH { background: rgba(107, 124, 78, 0.12); color: var(--teal); }
-.src-tag { font-size: 0.6rem; color: var(--text-dim); letter-spacing: 0.02em; }
+.path-tag.FORWARD,
+.path-tag.UPSTREAM  { background: color-mix(in oklch, var(--amber)   12%, transparent); color: var(--amber); }
+.path-tag.RECURSIVE { background: color-mix(in oklch, var(--cyan)    12%, transparent); color: var(--cyan); }
+.path-tag.CACHED,
+.path-tag.DOH       { background: color-mix(in oklch, var(--teal)    12%, transparent); color: var(--teal); }
+.path-tag.LOCAL,
+.path-tag.COALESCED,
+.path-tag.TCP       { background: color-mix(in oklch, var(--violet)  12%, transparent); color: var(--violet); }
+.path-tag.OVERRIDE,
+.path-tag.DOT       { background: color-mix(in oklch, var(--emerald) 12%, transparent); color: var(--emerald); }
+.path-tag.SERVFAIL  { background: color-mix(in oklch, var(--rose)    12%, transparent); color: var(--rose); }
+.path-tag.BLOCKED,
+.path-tag.UDP       { background: color-mix(in oklch, var(--text-dim) 15%, transparent); color: var(--text-dim); }
 
 /* Sidebar panels */
 .sidebar {
@@ -404,8 +423,8 @@ body {
   border-radius: 3px;
   margin-left: 0.3rem;
 }
-.lan-badge.shared { background: rgba(82, 122, 82, 0.12); color: var(--emerald); }
-.lan-badge.local-only { background: rgba(192, 98, 58, 0.12); color: var(--amber-dim); }
+.lan-badge.shared     { background: color-mix(in oklch, var(--emerald) 12%, transparent); color: var(--emerald); }
+.lan-badge.local-only { background: color-mix(in oklch, var(--amber)   12%, transparent); color: var(--amber); }
 
 /* Override form */
 .override-form {
@@ -455,7 +474,7 @@ body {
 .btn:active { opacity: 0.7; }
 .btn-add {
   background: var(--emerald);
-  color: white;
+  color: var(--text-on-btn);
 }
 .btn-delete {
   background: none;
@@ -469,7 +488,7 @@ body {
 }
 .btn-delete:hover {
   color: var(--rose);
-  background: rgba(181, 68, 58, 0.08);
+  background: color-mix(in oklch, var(--rose) 8%, transparent);
 }
 .override-item-header {
   display: flex;
@@ -481,6 +500,8 @@ body {
   color: var(--rose);
   display: none;
 }
+.check-result-blocked { background: color-mix(in oklch, var(--rose)    10%, transparent); color: var(--rose); }
+.check-result-allowed { background: color-mix(in oklch, var(--emerald) 10%, transparent); color: var(--emerald); }
 
 /* Memory sidebar panel */
 .memory-bar {
@@ -572,7 +593,7 @@ body {
   <div style="display:flex;align-items:center;gap:1.2rem;">
     <div id="phoneSetup" style="position:relative;display:none;">
       <button class="btn" onclick="togglePhoneSetup()" style="background:var(--bg-surface);color:var(--text-secondary);font-family:var(--font-mono);font-size:0.7rem;padding:0.35rem 0.6rem;border:1px solid var(--border);" title="Set up phone">Phone Setup</button>
-      <div id="phoneSetupPopover" style="display:none;position:absolute;top:calc(100% + 8px);right:0;z-index:100;background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:1.2rem;width:260px;box-shadow:0 4px 20px rgba(0,0,0,0.08);">
+      <div id="phoneSetupPopover" style="display:none;position:absolute;top:calc(100% + 8px);right:0;z-index:100;background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:1.2rem;width:260px;box-shadow: 0 4px 20px var(--border);">
         <div style="font-size:0.7rem;font-weight:600;text-transform:uppercase;letter-spacing:0.1em;color:var(--text-secondary);margin-bottom:0.8rem;">Phone Setup</div>
         <div id="qrContainer" style="display:flex;justify-content:center;margin-bottom:0.8rem;"></div>
         <div id="phoneSetupLink" style="display:none;text-align:center;margin-bottom:0.8rem;"></div>
@@ -584,8 +605,8 @@ body {
         </div>
       </div>
     </div>
-    <button class="btn" id="pauseBtn" style="background:var(--amber);color:white;font-family:var(--font-mono);font-size:0.7rem;display:none;">Pause 5m</button>
-    <button class="btn" id="toggleBtn" onclick="toggleBlocking()" style="background:var(--rose);color:white;font-family:var(--font-mono);font-size:0.7rem;display:none;"></button>
+    <button class="btn" id="pauseBtn" style="background:var(--amber);color:var(--text-on-btn);font-family:var(--font-mono);font-size:0.7rem;display:none;">Pause 5m</button>
+    <button class="btn" id="toggleBtn" onclick="toggleBlocking()" style="background:var(--rose);color:var(--text-on-btn);font-family:var(--font-mono);font-size:0.7rem;display:none;"></button>
     <div class="status-badge">
       <span class="status-dot" id="statusDot"></span>
       <span id="statusText">connecting...</span>
@@ -774,7 +795,7 @@ body {
           <form class="override-form" onsubmit="return checkDomain(event)" style="margin-bottom:0;border-bottom:none;padding-bottom:0;">
             <div class="override-form-row">
               <input type="text" id="checkDomainInput" placeholder="Is this domain blocked?" required style="flex:3">
-              <button type="submit" class="btn" style="background:var(--violet);color:white;flex-shrink:0;">Check</button>
+              <button type="submit" class="btn" style="background:var(--violet);color:var(--text-on-btn);flex-shrink:0;">Check</button>
             </div>
           </form>
           <div id="checkResult" style="display:none;margin-top:0.6rem;padding:0.5rem 0.6rem;border-radius:5px;font-family:var(--font-mono);font-size:0.72rem;"></div>
@@ -863,7 +884,7 @@ function togglePhoneSetup() {
       const linkEl = document.getElementById('phoneSetupLink');
       const host = window.location.hostname;
       linkEl.style.display = 'block';
-      linkEl.innerHTML = `<a href="http://${host}:${mobilePort}/mobileconfig" style="display:inline-block;padding:0.5rem 1rem;background:var(--amber);color:white;border-radius:6px;text-decoration:none;font-family:var(--font-mono);font-size:0.75rem;">Install Profile</a>`;
+      linkEl.innerHTML = `<a href="http://${host}:${mobilePort}/mobileconfig" style="display:inline-block;padding:0.5rem 1rem;background:var(--amber);color:var(--text-on-btn);border-radius:6px;text-decoration:none;font-family:var(--font-mono);font-size:0.75rem;">Install Profile</a>`;
     } else {
       fetch(API + '/qr').then(r => r.text()).then(svg => {
         document.getElementById('qrContainer').innerHTML = svg;
@@ -1336,21 +1357,18 @@ async function checkDomain(event) {
     const result = await fetchJSON('/blocking/check/' + encodeURIComponent(domain));
     el.style.display = 'block';
     if (result.blocked) {
-      el.style.background = 'rgba(181, 68, 58, 0.1)';
-      el.style.color = 'var(--rose)';
+      el.className = 'check-result-blocked';
       el.innerHTML = `<strong>Blocked</strong> — ${h(result.reason)}` +
         (result.matched_rule ? `<br>Rule: <code>${h(result.matched_rule)}</code>` : '') +
         ` <button class="btn-delete" onclick="allowDomain('${h(domain)}')" style="color:var(--emerald);font-size:0.7rem;margin-left:0.4rem;">allow</button>`;
     } else {
-      el.style.background = 'rgba(82, 122, 82, 0.1)';
-      el.style.color = 'var(--emerald)';
+      el.className = 'check-result-allowed';
       el.innerHTML = `<strong>Allowed</strong> — ${h(result.reason)}` +
         (result.matched_rule ? `<br>Rule: <code>${h(result.matched_rule)}</code>` : '');
     }
   } catch (err) {
     el.style.display = 'block';
-    el.style.background = 'rgba(181, 68, 58, 0.1)';
-    el.style.color = 'var(--rose)';
+    el.className = 'check-result-blocked';
     el.textContent = 'Error: ' + err.message;
   }
   return false;
@@ -1407,7 +1425,7 @@ function renderAllowlist(entries) {
     `).join('') : '<div class="empty-state">No exceptions</div>'}
     <form onsubmit="return addAllowlistDomain(event)" style="display:flex;gap:0.4rem;margin-top:0.4rem;">
       <input type="text" id="allowDomainInput" placeholder="domain to allow" required style="flex:1;font-family:var(--font-mono);font-size:0.75rem;padding:0.35rem 0.5rem;border:1px solid var(--border);border-radius:4px;background:var(--bg-surface);color:var(--text-primary);outline:none;">
-      <button type="submit" class="btn" style="background:var(--emerald);color:white;flex-shrink:0;">Allow</button>
+      <button type="submit" class="btn" style="background:var(--emerald);color:var(--text-on-btn);flex-shrink:0;">Allow</button>
     </form>
   `;
 }
