@@ -355,23 +355,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn load_pem_tls_config_round_trip() {
-        let dir = std::env::temp_dir().join(format!("numa-test-pem-{}", std::process::id()));
+    fn fresh_temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("numa-test-{}-{}", tag, std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
 
+    fn write_self_signed_pem_pair(dir: &Path, dns: &str) -> (PathBuf, PathBuf) {
         let key_pair = KeyPair::generate().unwrap();
         let mut params = CertificateParams::default();
         params
             .subject_alt_names
-            .push(SanType::DnsName("example.test".try_into().unwrap()));
+            .push(SanType::DnsName(dns.try_into().unwrap()));
         let cert = params.self_signed(&key_pair).unwrap();
-
         let cert_path = dir.join("cert.pem");
         let key_path = dir.join("key.pem");
         std::fs::write(&cert_path, cert.pem()).unwrap();
         std::fs::write(&key_path, key_pair.serialize_pem()).unwrap();
+        (cert_path, key_path)
+    }
+
+    #[test]
+    fn load_pem_tls_config_round_trip() {
+        let dir = fresh_temp_dir("pem");
+        let (cert_path, key_path) = write_self_signed_pem_pair(&dir, "example.test");
 
         let config =
             load_pem_tls_config(&cert_path, &key_path, Vec::new()).expect("load self-signed pair");
@@ -383,21 +391,10 @@ mod tests {
     #[tokio::test]
     async fn regenerate_tls_is_noop_in_byo_mode() {
         let mut ctx = crate::testutil::test_ctx().await;
-        let dir = std::env::temp_dir().join(format!("numa-test-byo-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = fresh_temp_dir("byo");
         ctx.data_dir = dir.clone();
 
-        let key_pair = KeyPair::generate().unwrap();
-        let mut params = CertificateParams::default();
-        params
-            .subject_alt_names
-            .push(SanType::DnsName("byo.test".try_into().unwrap()));
-        let cert = params.self_signed(&key_pair).unwrap();
-        let cert_path = dir.join("cert.pem");
-        let key_path = dir.join("key.pem");
-        std::fs::write(&cert_path, cert.pem()).unwrap();
-        std::fs::write(&key_path, key_pair.serialize_pem()).unwrap();
+        let (cert_path, key_path) = write_self_signed_pem_pair(&dir, "byo.test");
         let user_cfg = load_pem_tls_config(&cert_path, &key_path, Vec::new()).unwrap();
 
         ctx.tls_config = Some(arc_swap::ArcSwap::from(Arc::clone(&user_cfg)));
@@ -416,9 +413,7 @@ mod tests {
 
     #[test]
     fn load_pem_tls_config_rejects_empty_cert() {
-        let dir = std::env::temp_dir().join(format!("numa-test-pem-empty-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = fresh_temp_dir("pem-empty");
         let cert_path = dir.join("cert.pem");
         let key_path = dir.join("key.pem");
         std::fs::write(&cert_path, b"").unwrap();
