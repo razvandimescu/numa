@@ -126,6 +126,14 @@ tls_port = 443
 tld = "numa"
 # bind_addr = "127.0.0.1"  # default; set to "0.0.0.0" for LAN access to .numa services
 
+# Bring-your-own TLS cert (e.g. Let's Encrypt). When both paths are set,
+# numa serves this cert instead of the self-signed local CA — no per-device
+# trust install needed. Requires `tld` to be a domain you actually own
+# (Let's Encrypt won't issue for `.numa`). Renew externally (certbot,
+# acme.sh, etc.) and restart numa to pick up the new cert.
+# cert_path = "/etc/letsencrypt/live/example.com/fullchain.pem"
+# key_path  = "/etc/letsencrypt/live/example.com/privkey.pem"
+
 # PROXY protocol v2 — preserves the real client IP when numa runs behind an
 # L4 front-end (dnsdist, HAProxy, nginx-stream, AWS NLB, GCP TCP LB). Empty
 # `from` allowlist (or omitted section) leaves the feature disabled.

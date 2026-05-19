@@ -567,6 +567,13 @@ pub struct ProxyConfig {
     pub tld: String,
     #[serde(default = "default_proxy_bind_addr")]
     pub bind_addr: String,
+    /// Path to a TLS certificate (PEM). When set together with `key_path`,
+    /// the HTTPS proxy serves this cert instead of the local-CA-issued one
+    /// — lets users bring their own Let's Encrypt / external cert.
+    #[serde(default)]
+    pub cert_path: Option<PathBuf>,
+    #[serde(default)]
+    pub key_path: Option<PathBuf>,
     #[serde(default)]
     pub proxy_protocol: ProxyProtocolConfig,
 }
@@ -579,6 +586,8 @@ impl Default for ProxyConfig {
             tls_port: default_proxy_tls_port(),
             tld: default_proxy_tld(),
             bind_addr: default_proxy_bind_addr(),
+            cert_path: None,
+            key_path: None,
             proxy_protocol: ProxyProtocolConfig::default(),
         }
     }
@@ -940,6 +949,31 @@ mod tests {
     #[test]
     fn proxy_binds_localhost_by_default() {
         assert_eq!(ProxyConfig::default().bind_addr, "127.0.0.1");
+    }
+
+    #[test]
+    fn proxy_cert_and_key_paths_default_to_none() {
+        let cfg = ProxyConfig::default();
+        assert!(cfg.cert_path.is_none());
+        assert!(cfg.key_path.is_none());
+    }
+
+    #[test]
+    fn proxy_cert_and_key_paths_parse() {
+        let toml_str = r#"
+[proxy]
+cert_path = "/etc/numa/proxy/cert.pem"
+key_path = "/etc/numa/proxy/key.pem"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.proxy.cert_path.as_deref().unwrap().to_str().unwrap(),
+            "/etc/numa/proxy/cert.pem"
+        );
+        assert_eq!(
+            config.proxy.key_path.as_deref().unwrap().to_str().unwrap(),
+            "/etc/numa/proxy/key.pem"
+        );
     }
 
     #[test]
