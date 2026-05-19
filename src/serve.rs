@@ -125,11 +125,9 @@ pub async fn run(config_path: String) -> crate::Result<()> {
     let allow_from = crate::acl::AllowFromAcl::from_entries(&config.server.allow_from)
         .map_err(|e| format!("invalid [server].allow_from: {e}"))?;
     if allow_from.is_enabled() {
-        let n = config.server.allow_from.len();
         info!(
-            "client-IP allow_from enabled — {} entr{} (loopback always allowed)",
-            n,
-            if n == 1 { "y" } else { "ies" }
+            "client-IP allow_from enabled with {} entries (loopback always allowed)",
+            config.server.allow_from.len()
         );
     }
 

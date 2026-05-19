@@ -105,12 +105,7 @@ pub struct ServerConfig {
     /// listener in PROXY-required mode.
     #[serde(default)]
     pub proxy_protocol: ProxyProtocolConfig,
-    /// Client-IP allowlist applied to every DNS query surface (UDP/53,
-    /// TCP/53, DoT, DoH). Mirrors PowerDNS Recursor's `allow-from`.
-    /// Empty list (default) = feature disabled, numa answers anyone that
-    /// can reach the listener — fine on a LAN bind, dangerous on
-    /// `0.0.0.0:53` exposed to the WAN. Loopback is always allowed
-    /// regardless of this list, so the local stub resolver keeps working.
+    /// CIDR allowlist applied at every DNS surface. Empty = disabled.
     #[serde(default)]
     pub allow_from: Vec<String>,
 }

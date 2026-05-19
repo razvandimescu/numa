@@ -82,9 +82,6 @@ pub struct ServerCtx {
     /// answer) instead of hitting cache/forwarding/upstream. Local data
     /// (overrides, zones, .numa proxy, blocklist sinkhole) is unaffected.
     pub filter_aaaa: bool,
-    /// Client-IP allowlist for every DNS query surface (UDP/53, TCP/53,
-    /// DoT, DoH). Empty = allow all (default, current behavior). Loopback
-    /// is always allowed by the type, regardless of contents.
     pub allow_from: crate::acl::AllowFromAcl,
 }
 

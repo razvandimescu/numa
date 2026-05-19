@@ -1,22 +1,29 @@
-//! Client-IP allowlist for the DNS query surfaces (UDP/53, TCP/53, DoT,
-//! DoH). Prevents numa being abused as a public open recursive resolver
-//! when bound to a WAN interface.
-//!
-//! Naming mirrors PowerDNS Recursor's `allow-from`. Empty list = feature
-//! disabled (allow all). Non-empty = listed CIDRs/IPs are allowed,
-//! everyone else is dropped pre-handshake.
-//!
-//! **Loopback is always allowed**, regardless of `allow_from`. The local
-//! machine's stub resolver (and the dashboard's `dig @127.0.0.1` probes)
-//! must keep working even when the ACL is misconfigured.
-//!
-//! When PROXY v2 is in play, the ACL checks the resolved client IP
-//! (post-header), not the L4 hop. That's the whole point of PP2.
+//! Client-IP allowlist for DNS query surfaces. Loopback is always allowed
+//! regardless of `allow_from` — local stub resolvers must keep working
+//! even when the ACL is misconfigured. Under PROXY v2 the check runs on
+//! the resolved client IP (post-header), not the L4 hop.
 
 use std::net::IpAddr;
 
 use ipnet::IpNet;
 use log::warn;
+
+pub(crate) fn parse_cidr_list(entries: &[String], context: &str) -> Result<Vec<IpNet>, String> {
+    let mut nets = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let net: IpNet = entry
+            .parse()
+            .or_else(|_| entry.parse::<IpAddr>().map(IpNet::from))
+            .map_err(|_| format!("invalid CIDR or IP in {context}: {entry:?}"))?;
+        if matches!(&net, IpNet::V4(n) if n.prefix_len() == 0)
+            || matches!(&net, IpNet::V6(n) if n.prefix_len() == 0)
+        {
+            warn!("{context} contains world-routable {entry} — any IP on the Internet will match");
+        }
+        nets.push(net);
+    }
+    Ok(nets)
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct AllowFromAcl {
@@ -25,23 +32,9 @@ pub struct AllowFromAcl {
 
 impl AllowFromAcl {
     pub fn from_entries(entries: &[String]) -> Result<Self, String> {
-        let mut nets = Vec::with_capacity(entries.len());
-        for entry in entries {
-            let net: IpNet = entry
-                .parse()
-                .or_else(|_| entry.parse::<IpAddr>().map(IpNet::from))
-                .map_err(|_| format!("invalid CIDR or IP in allow_from: {entry:?}"))?;
-            if matches!(&net, IpNet::V4(n) if n.prefix_len() == 0)
-                || matches!(&net, IpNet::V6(n) if n.prefix_len() == 0)
-            {
-                warn!(
-                    "allow_from contains {} — any IP on the Internet will be permitted to query numa",
-                    entry
-                );
-            }
-            nets.push(net);
-        }
-        Ok(AllowFromAcl { nets })
+        Ok(AllowFromAcl {
+            nets: parse_cidr_list(entries, "allow_from")?,
+        })
     }
 
     pub fn allows(&self, peer: IpAddr) -> bool {
