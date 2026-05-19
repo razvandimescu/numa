@@ -78,7 +78,10 @@ impl UdpListener {
         src: Option<IpAddr>,
     ) -> io::Result<usize> {
         match self {
-            Self::Plain(s) => s.send_to(buf, dst).await,
+            Self::Plain(s) => {
+                let _ = src;
+                s.send_to(buf, dst).await
+            }
             #[cfg(unix)]
             Self::PktInfo(s) => s.send_to(buf, dst, src).await,
         }

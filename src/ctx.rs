@@ -536,6 +536,7 @@ pub async fn refresh_entry(ctx: &ServerCtx, qname: &str, qtype: QueryType) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_query(
     mut buffer: BytePacketBuffer,
     raw_len: usize,
