@@ -34,6 +34,7 @@ pub mod svcb;
 pub mod system_dns;
 pub mod tcp;
 pub mod tls;
+pub mod udp_listener;
 pub mod wire;
 
 #[cfg(windows)]

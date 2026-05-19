@@ -10,7 +10,6 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use log::{error, info};
-use tokio::net::UdpSocket;
 
 use crate::blocklist::{download_blocklists, parse_blocklist, BlocklistStore};
 use crate::bootstrap_resolver::NumaResolver;
@@ -27,6 +26,7 @@ use crate::query_log::QueryLog;
 use crate::service_store::ServiceStore;
 use crate::stats::{ServerStats, Transport};
 use crate::system_dns::discover_system_dns;
+use crate::udp_listener::UdpListener;
 
 const QUAD9_IP: &str = "9.9.9.9";
 const DOH_FALLBACK: &str = "https://9.9.9.9/dns-query";
@@ -228,13 +228,13 @@ pub async fn run(config_path: String) -> crate::Result<()> {
 
 /// First port-53 bind failure routes through `try_port53_advisory` so the
 /// "another resolver owns :53" UX still fires; any other bind error is fatal.
-async fn bind_udp_listeners(addrs: &[String]) -> crate::Result<Vec<Arc<UdpSocket>>> {
+async fn bind_udp_listeners(addrs: &[String]) -> crate::Result<Vec<Arc<UdpListener>>> {
     if addrs.is_empty() {
         return Err("server.bind_addr is empty — set at least one address".into());
     }
     let mut sockets = Vec::with_capacity(addrs.len());
     for addr in addrs {
-        let sock = match UdpSocket::bind(addr).await {
+        let listener = match UdpListener::bind(addr).await {
             Ok(s) => s,
             Err(e) => {
                 if let Some(advisory) = crate::system_dns::try_port53_advisory(addr, &e) {
@@ -244,7 +244,7 @@ async fn bind_udp_listeners(addrs: &[String]) -> crate::Result<Vec<Arc<UdpSocket
                 return Err(e.into());
             }
         };
-        sockets.push(Arc::new(sock));
+        sockets.push(Arc::new(listener));
     }
     Ok(sockets)
 }
@@ -385,13 +385,13 @@ fn spawn_background_services(
 
 async fn udp_serve_loop(
     ctx: &Arc<ServerCtx>,
-    socket: Arc<UdpSocket>,
+    socket: Arc<UdpListener>,
     udp_pp: Option<&crate::pp2::PpConfig>,
 ) -> crate::Result<()> {
     #[allow(clippy::infinite_loop)]
     loop {
         let mut buffer = BytePacketBuffer::new();
-        let (len, peer) = match socket.recv_from(&mut buffer.buf).await {
+        let (len, peer, local_dst) = match socket.recv_from(&mut buffer.buf).await {
             Ok(r) => r,
             Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {
                 // Windows delivers ICMP port-unreachable as ConnectionReset on UDP sockets
@@ -406,6 +406,9 @@ async fn udp_serve_loop(
         // Response goes to the kernel UDP peer (e.g. dnsdist), not the
         // PROXY-extracted logical source — otherwise the reply skips the
         // front-end and never reaches the original client.
+        // `local_dst` (captured via IP_PKTINFO/IP_RECVDSTADDR/IPV6_PKTINFO on
+        // wildcard binds) pins the reply source so multi-homed hosts don't
+        // reply from the wrong IP (issue #227).
         let ctx = Arc::clone(ctx);
         let reply_socket = Arc::clone(&socket);
         tokio::spawn(async move {
@@ -414,6 +417,7 @@ async fn udp_serve_loop(
                 dns_len,
                 src_addr,
                 peer,
+                local_dst,
                 &ctx,
                 &reply_socket,
                 Transport::Udp,

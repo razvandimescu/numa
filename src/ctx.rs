@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime};
@@ -7,8 +7,9 @@ use std::time::{Duration, Instant, SystemTime};
 use arc_swap::ArcSwap;
 use log::{debug, error, info, warn};
 use rustls::ServerConfig;
-use tokio::net::UdpSocket;
 use tokio::sync::broadcast;
+
+use crate::udp_listener::UdpListener;
 
 type InflightMap = HashMap<(String, QueryType), broadcast::Sender<Option<DnsPacket>>>;
 
@@ -540,8 +541,9 @@ pub async fn handle_query(
     raw_len: usize,
     src_addr: SocketAddr,
     respond_to: SocketAddr,
+    local_dst: Option<IpAddr>,
     ctx: &Arc<ServerCtx>,
-    reply_socket: &Arc<UdpSocket>,
+    reply_socket: &Arc<UdpListener>,
     transport: Transport,
 ) -> crate::Result<()> {
     let query = match DnsPacket::from_buffer(&mut buffer) {
@@ -554,7 +556,7 @@ pub async fn handle_query(
     match resolve_query(query, &buffer.buf[..raw_len], src_addr, ctx, transport).await {
         Ok((resp_buffer, _)) => {
             reply_socket
-                .send_to(resp_buffer.filled(), respond_to)
+                .send_to(resp_buffer.filled(), respond_to, local_dst)
                 .await?;
         }
         Err(e) => {
@@ -2151,14 +2153,12 @@ mod tests {
 
     #[tokio::test]
     async fn handle_query_reply_leaves_provided_socket() {
-        use tokio::net::UdpSocket;
-
-        let sock_a = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
-        let sock_b = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let sock_a = Arc::new(UdpListener::bind("127.0.0.1:0").await.unwrap());
+        let sock_b = Arc::new(UdpListener::bind("127.0.0.1:0").await.unwrap());
         let addr_a = sock_a.local_addr().unwrap();
         let addr_b = sock_b.local_addr().unwrap();
 
-        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let client_addr = client.local_addr().unwrap();
 
         let mut ctx = crate::testutil::test_ctx().await;
@@ -2181,6 +2181,7 @@ mod tests {
                 wire.len(),
                 client_addr,
                 client_addr,
+                None,
                 &ctx,
                 sock,
                 Transport::Udp,
