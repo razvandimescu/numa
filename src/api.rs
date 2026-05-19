@@ -781,6 +781,8 @@ async fn blocking_allowlist_remove(
 struct ServiceResponse {
     name: String,
     target_port: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_host: Option<String>,
     url: String,
     healthy: bool,
     lan_accessible: bool,
@@ -793,10 +795,12 @@ struct ServiceResponse {
 struct CreateServiceRequest {
     name: String,
     target_port: u16,
+    #[serde(default)]
+    target_host: Option<String>,
 }
 
 async fn list_services(State(ctx): State<Arc<ServerCtx>>) -> Json<Vec<ServiceResponse>> {
-    let entries: Vec<_> = {
+    let entries: Vec<(crate::service_store::ServiceEntry, &'static str)> = {
         let store = ctx.services.lock().unwrap();
         store
             .list()
@@ -807,12 +811,7 @@ async fn list_services(State(ctx): State<Arc<ServerCtx>>) -> Json<Vec<ServiceRes
                 } else {
                     "api"
                 };
-                (
-                    e.name.clone(),
-                    e.target_port,
-                    e.routes.clone(),
-                    source.to_string(),
-                )
+                (e.clone(), source)
             })
             .collect()
     };
@@ -820,38 +819,34 @@ async fn list_services(State(ctx): State<Arc<ServerCtx>>) -> Json<Vec<ServiceRes
 
     let lan_ip = crate::lan::detect_lan_ip();
 
-    let check_futures: Vec<_> = entries
-        .iter()
-        .map(|(_, port, _, _)| {
-            let port = *port;
-            let localhost = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-            let lan_addr = lan_ip.map(|ip| std::net::SocketAddr::new(ip.into(), port));
-            async move {
-                let healthy = check_tcp(localhost).await;
-                let lan_accessible = match lan_addr {
-                    Some(addr) => check_tcp(addr).await,
-                    None => false,
-                };
-                (healthy, lan_accessible)
-            }
-        })
-        .collect();
+    let check_futures = entries.iter().map(|(e, _)| {
+        let port = e.target_port;
+        let host = e.target_host.clone().unwrap_or_else(|| "localhost".into());
+        let lan_addr = lan_ip.map(|ip| std::net::SocketAddr::new(ip.into(), port));
+        async move {
+            let healthy = check_tcp((host.as_str(), port)).await;
+            let lan_accessible = match lan_addr {
+                Some(addr) => check_tcp(addr).await,
+                None => false,
+            };
+            (healthy, lan_accessible)
+        }
+    });
     let check_results = futures::future::join_all(check_futures).await;
 
-    let results: Vec<_> = entries
+    let results = entries
         .into_iter()
         .zip(check_results)
-        .map(
-            |((name, port, routes, source), (healthy, lan_accessible))| ServiceResponse {
-                url: format!("http://{}.{}", name, tld),
-                name,
-                target_port: port,
-                healthy,
-                lan_accessible,
-                routes,
-                source,
-            },
-        )
+        .map(|((e, source), (healthy, lan_accessible))| ServiceResponse {
+            url: format!("http://{}.{}", e.name, tld),
+            name: e.name,
+            target_port: e.target_port,
+            target_host: e.target_host,
+            healthy,
+            lan_accessible,
+            routes: e.routes,
+            source: source.to_string(),
+        })
         .collect();
     Json(results)
 }
@@ -878,18 +873,42 @@ async fn create_service(
     if req.target_port == 0 {
         return Err((StatusCode::BAD_REQUEST, "target_port must be > 0".into()));
     }
+    let target_host = match req.target_host.as_deref().map(str::trim) {
+        Some("") | Some("localhost") | Some("127.0.0.1") | None => None,
+        Some(h) => {
+            if h.len() > 253 {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "target_host must be at most 253 characters".into(),
+                ));
+            }
+            // Reject control chars + whitespace + obvious scheme/path bleed.
+            if h.chars()
+                .any(|c| c.is_control() || c.is_whitespace() || c == '/' || c == ':')
+            {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "target_host must be a bare hostname or IP (no scheme, port, or path)".into(),
+                ));
+            }
+            Some(h.to_string())
+        }
+    };
 
     let tld = &ctx.proxy_tld;
     let is_new = !ctx.services.lock().unwrap().has_name(&name);
-    ctx.services.lock().unwrap().insert(&name, req.target_port);
+    ctx.services
+        .lock()
+        .unwrap()
+        .insert(&name, req.target_port, target_host.clone());
     if is_new {
         crate::tls::regenerate_tls(&ctx);
     }
 
-    let localhost = std::net::SocketAddr::from(([127, 0, 0, 1], req.target_port));
+    let probe_host = target_host.as_deref().unwrap_or("localhost");
     let lan_addr =
         crate::lan::detect_lan_ip().map(|ip| std::net::SocketAddr::new(ip.into(), req.target_port));
-    let (healthy, lan_accessible) = tokio::join!(check_tcp(localhost), async {
+    let (healthy, lan_accessible) = tokio::join!(check_tcp((probe_host, req.target_port)), async {
         match lan_addr {
             Some(a) => check_tcp(a).await,
             None => false,
@@ -901,6 +920,7 @@ async fn create_service(
             url: format!("http://{}.{}", name, tld),
             name,
             target_port: req.target_port,
+            target_host,
             healthy,
             lan_accessible,
             routes: Vec::new(),
@@ -1046,10 +1066,10 @@ fn serve_font(data: &'static [u8]) -> impl IntoResponse {
     )
 }
 
-async fn check_tcp(addr: std::net::SocketAddr) -> bool {
+async fn check_tcp<A: tokio::net::ToSocketAddrs>(target: A) -> bool {
     tokio::time::timeout(
         std::time::Duration::from_millis(100),
-        tokio::net::TcpStream::connect(addr),
+        tokio::net::TcpStream::connect(target),
     )
     .await
     .map(|r| r.is_ok())
@@ -1256,6 +1276,117 @@ mod tests {
             .unwrap();
         let body = axum::body::to_bytes(resp.into_body(), 10000).await.unwrap();
         assert!(!String::from_utf8_lossy(&body).contains("testapp"));
+    }
+
+    #[tokio::test]
+    async fn create_service_accepts_target_host() {
+        let ctx = test_ctx().await;
+        let a = router(ctx.clone());
+
+        let resp = a
+            .clone()
+            .oneshot(
+                Request::post("/services")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"name":"nas","target_port":80,"target_host":"192.168.1.50"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(resp.into_body(), 10000).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["target_host"], "192.168.1.50");
+
+        // Round-trip via list
+        let resp = a
+            .oneshot(Request::get("/services").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 10000).await.unwrap();
+        let list: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let entry = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == "nas")
+            .expect("listed service");
+        assert_eq!(entry["target_host"], "192.168.1.50");
+    }
+
+    #[tokio::test]
+    async fn create_service_strips_default_target_host() {
+        // "localhost", "127.0.0.1", and the empty/whitespace string all
+        // collapse to the default (None) so listings stay clean.
+        for (i, host) in ["localhost", "127.0.0.1", "", "   "].iter().enumerate() {
+            let ctx = test_ctx().await;
+            let a = router(ctx);
+            let name = format!("app{}", i);
+            let body = format!(
+                r#"{{"name":"{}","target_port":3000,"target_host":"{}"}}"#,
+                name, host
+            );
+            let resp = a
+                .oneshot(
+                    Request::post("/services")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::CREATED, "host={:?}", host);
+            let resp_body = axum::body::to_bytes(resp.into_body(), 10000).await.unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
+            assert!(
+                json.get("target_host").map(|v| v.is_null()).unwrap_or(true),
+                "host={:?} should collapse to default but got: {}",
+                host,
+                json
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn create_service_rejects_overlong_target_host() {
+        let ctx = test_ctx().await;
+        let a = router(ctx);
+        let long_host = "a".repeat(254);
+        let body = format!(
+            r#"{{"name":"app","target_port":80,"target_host":"{}"}}"#,
+            long_host
+        );
+        let resp = a
+            .oneshot(
+                Request::post("/services")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_service_rejects_target_host_with_scheme() {
+        let ctx = test_ctx().await;
+        let a = router(ctx);
+
+        let resp = a
+            .oneshot(
+                Request::post("/services")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"name":"app","target_port":80,"target_host":"http://x.y"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

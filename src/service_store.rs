@@ -9,6 +9,8 @@ pub struct ServiceEntry {
     pub name: String,
     pub target_port: u16,
     #[serde(default)]
+    pub target_host: Option<String>,
+    #[serde(default)]
     pub routes: Vec<RouteEntry>,
 }
 
@@ -78,7 +80,13 @@ impl ServiceStore {
     }
 
     /// Insert a service from numa.toml config (not persisted)
-    pub fn insert_from_config(&mut self, name: &str, target_port: u16, routes: Vec<RouteEntry>) {
+    pub fn insert_from_config(
+        &mut self,
+        name: &str,
+        target_port: u16,
+        target_host: Option<String>,
+        routes: Vec<RouteEntry>,
+    ) {
         let key = name.to_lowercase();
         self.config_services.insert(key.clone());
         self.entries.insert(
@@ -86,19 +94,21 @@ impl ServiceStore {
             ServiceEntry {
                 name: key,
                 target_port,
+                target_host,
                 routes,
             },
         );
     }
 
     /// Insert a user-defined service (persisted to ~/.config/numa/services.json)
-    pub fn insert(&mut self, name: &str, target_port: u16) {
+    pub fn insert(&mut self, name: &str, target_port: u16, target_host: Option<String>) {
         let key = name.to_lowercase();
         self.entries.insert(
             key.clone(),
             ServiceEntry {
                 name: key,
                 target_port,
+                target_host,
                 routes: Vec::new(),
             },
         );
@@ -228,6 +238,7 @@ mod tests {
         ServiceEntry {
             name: "app".into(),
             target_port: port,
+            target_host: None,
             routes,
         }
     }
@@ -324,7 +335,7 @@ mod tests {
     #[test]
     fn add_route_to_existing_service() {
         let mut store = test_store();
-        store.insert_from_config("app", 3000, vec![]);
+        store.insert_from_config("app", 3000, None, vec![]);
         assert!(store.add_route("app", "/api".into(), 4000, false));
         let entry = store.lookup("app").unwrap();
         assert_eq!(entry.routes.len(), 1);
@@ -340,7 +351,7 @@ mod tests {
     #[test]
     fn add_route_deduplicates_by_path() {
         let mut store = test_store();
-        store.insert_from_config("app", 3000, vec![]);
+        store.insert_from_config("app", 3000, None, vec![]);
         store.add_route("app", "/api".into(), 4000, false);
         store.add_route("app", "/api".into(), 5000, true);
         let entry = store.lookup("app").unwrap();
@@ -352,7 +363,7 @@ mod tests {
     #[test]
     fn remove_route_returns_true_when_found() {
         let mut store = test_store();
-        store.insert_from_config("app", 3000, vec![route("/api", 4000, false)]);
+        store.insert_from_config("app", 3000, None, vec![route("/api", 4000, false)]);
         assert!(store.remove_route("app", "/api"));
         assert!(store.lookup("app").unwrap().routes.is_empty());
     }
@@ -360,14 +371,14 @@ mod tests {
     #[test]
     fn remove_route_returns_false_when_missing() {
         let mut store = test_store();
-        store.insert_from_config("app", 3000, vec![]);
+        store.insert_from_config("app", 3000, None, vec![]);
         assert!(!store.remove_route("app", "/nope"));
     }
 
     #[test]
     fn lookup_is_case_insensitive() {
         let mut store = test_store();
-        store.insert_from_config("MyApp", 3000, vec![]);
+        store.insert_from_config("MyApp", 3000, None, vec![]);
         assert!(store.lookup("myapp").is_some());
         assert!(store.lookup("MYAPP").is_some());
     }

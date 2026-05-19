@@ -1391,7 +1391,7 @@ mod tests {
     #[tokio::test]
     async fn pipeline_tld_proxy_resolves_service() {
         let ctx = crate::testutil::test_ctx().await;
-        ctx.services.lock().unwrap().insert("grafana", 3000);
+        ctx.services.lock().unwrap().insert("grafana", 3000, None);
         let ctx = Arc::new(ctx);
 
         let (resp, path) = resolve_in_test(&ctx, "grafana.numa", QueryType::A).await;

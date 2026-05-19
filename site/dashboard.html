@@ -727,6 +727,9 @@ body {
               <input type="text" id="svcName" placeholder="service name" required style="flex:2">
               <input type="number" id="svcPort" placeholder="port (e.g. 3000)" required min="1" max="65535" style="flex:1">
             </div>
+            <div class="override-form-row">
+              <input type="text" id="svcHost" placeholder="target host (optional, defaults to localhost)" style="flex:3">
+            </div>
             <button type="submit" class="btn btn-add">Add Service</button>
             <div class="override-error" id="serviceError"></div>
           </form>
@@ -1463,7 +1466,7 @@ function renderServices(entries) {
       <span class="health-dot ${e.healthy ? 'up' : 'down'}" title="${e.healthy ? 'running' : 'not reachable'}"></span>
       <div class="service-info">
         <div class="service-name"><a href="${h(e.url)}" target="_blank">${name}.${h(proxyTld)}</a>${lanBadge}</div>
-        <div class="service-port">localhost:${parseInt(e.target_port)||0} &rarr; proxied</div>
+        <div class="service-port">${h(e.target_host || 'localhost')}:${parseInt(e.target_port)||0} &rarr; proxied</div>
         ${routeLines}
         ${e.name === 'numa' ? '' : `<div style="margin-top:0.3rem;"><button onclick="toggleRouteForm('${name}')" style="font-size:0.7rem;padding:0.1rem 0.4rem;background:var(--emerald);color:var(--bg);border:none;border-radius:4px;cursor:pointer;">+ route</button><div id="routeForm-${name}" style="display:none;margin-top:0.3rem;"><div style="display:flex;gap:0.3rem;align-items:center;"><input type="text" id="routePath-${name}" placeholder="/path" style="flex:2;padding:0.25rem 0.4rem;font-size:0.75rem;"><input type="number" id="routePort-${name}" value="${parseInt(e.target_port)||0}" min="1" max="65535" style="flex:1;padding:0.25rem 0.4rem;font-size:0.75rem;"><label style="font-size:0.7rem;color:var(--text-dim);display:flex;align-items:center;gap:0.2rem;"><input type="checkbox" id="routeStrip-${name}">strip</label><button onclick="addRoute('${name}')" style="font-size:0.7rem;padding:0.2rem 0.5rem;background:var(--emerald);color:var(--bg);border:none;border-radius:4px;cursor:pointer;">add</button></div><div class="override-error" id="routeError-${name}" style="display:none;font-size:0.7rem;"></div></div></div>`}
       </div>
@@ -1516,10 +1519,12 @@ async function addService(event) {
   const errEl = document.getElementById('serviceError');
   errEl.style.display = 'none';
   try {
+    const host = document.getElementById('svcHost').value.trim();
     const body = {
       name: document.getElementById('svcName').value.trim(),
       target_port: parseInt(document.getElementById('svcPort').value) || 0,
     };
+    if (host) body.target_host = host;
     const res = await fetch(API + '/services', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1531,6 +1536,7 @@ async function addService(event) {
     }
     document.getElementById('svcName').value = '';
     document.getElementById('svcPort').value = '';
+    document.getElementById('svcHost').value = '';
     refresh();
   } catch (err) {
     errEl.textContent = err.message;

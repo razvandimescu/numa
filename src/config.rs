@@ -641,6 +641,8 @@ pub struct ServiceConfig {
     pub name: String,
     pub target_port: u16,
     #[serde(default)]
+    pub target_host: Option<String>,
+    #[serde(default)]
     pub routes: Vec<crate::service_store::RouteEntry>,
 }
 

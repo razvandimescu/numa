@@ -144,6 +144,7 @@ tld = "numa"
 # [[services]]
 # name = "api"
 # target_port = 8000
+# target_host = "192.168.1.50"  # optional, defaults to localhost
 
 # Example zone records:
 # [[zones]]

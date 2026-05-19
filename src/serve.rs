@@ -74,9 +74,14 @@ pub async fn run(config_path: String) -> crate::Result<()> {
 
     // Build service store: config services + persisted user services
     let mut service_store = ServiceStore::new();
-    service_store.insert_from_config("numa", config.server.api_port, Vec::new());
+    service_store.insert_from_config("numa", config.server.api_port, None, Vec::new());
     for svc in &config.services {
-        service_store.insert_from_config(&svc.name, svc.target_port, svc.routes.clone());
+        service_store.insert_from_config(
+            &svc.name,
+            svc.target_port,
+            svc.target_host.clone(),
+            svc.routes.clone(),
+        );
     }
     service_store.load_persisted();
 

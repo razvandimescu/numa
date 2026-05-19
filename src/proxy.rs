@@ -335,7 +335,11 @@ async fn proxy_handler(State(state): State<ProxyState>, req: Request) -> axum::r
         let store = state.ctx.services.lock().unwrap();
         if let Some(entry) = store.lookup(&service_name) {
             let (port, path) = entry.resolve_route(&request_path);
-            ("localhost".to_string(), port, path)
+            let host = entry
+                .target_host
+                .clone()
+                .unwrap_or_else(|| "localhost".into());
+            (host, port, path)
         } else {
             let mut peers = state.ctx.lan_peers.lock().unwrap();
             match peers.lookup(&service_name) {
