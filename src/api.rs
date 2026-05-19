@@ -1087,6 +1087,39 @@ mod tests {
         Arc::new(crate::testutil::test_ctx().await)
     }
 
+    async fn get_req(app: &Router, path: &str) -> http::Response<Body> {
+        app.clone()
+            .oneshot(Request::get(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    async fn delete_req(app: &Router, path: &str) -> http::Response<Body> {
+        app.clone()
+            .oneshot(Request::delete(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    async fn post_json(app: &Router, path: &str, body: &str) -> http::Response<Body> {
+        app.clone()
+            .oneshot(
+                Request::post(path)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn body_json(resp: http::Response<Body>) -> serde_json::Value {
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
     #[tokio::test]
     async fn health_returns_ok() {
         let ctx = test_ctx().await;
@@ -1133,88 +1166,34 @@ mod tests {
 
     #[tokio::test]
     async fn overrides_crud() {
-        let ctx = test_ctx().await;
-        let a = router(ctx.clone());
+        let a = router(test_ctx().await);
 
-        // Create
-        let resp = a
-            .clone()
-            .oneshot(
-                Request::post("/overrides")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"domain":"test.dev","target":"1.2.3.4","duration_secs":60}"#,
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let resp = post_json(
+            &a,
+            "/overrides",
+            r#"{"domain":"test.dev","target":"1.2.3.4","duration_secs":60}"#,
+        )
+        .await;
         assert!(resp.status().is_success());
 
-        // List
-        let resp = a
-            .clone()
-            .oneshot(Request::get("/overrides").body(Body::empty()).unwrap())
+        let body = axum::body::to_bytes(get_req(&a, "/overrides").await.into_body(), 10000)
             .await
             .unwrap();
-        let body = axum::body::to_bytes(resp.into_body(), 10000).await.unwrap();
         assert!(String::from_utf8_lossy(&body).contains("test.dev"));
 
-        // Get
-        let resp = a
-            .clone()
-            .oneshot(
-                Request::get("/overrides/test.dev")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+        assert_eq!(get_req(&a, "/overrides/test.dev").await.status(), 200);
+        assert!(delete_req(&a, "/overrides/test.dev")
             .await
-            .unwrap();
-        assert_eq!(resp.status(), 200);
-
-        // Delete
-        let resp = a
-            .clone()
-            .oneshot(
-                Request::delete("/overrides/test.dev")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert!(resp.status().is_success());
-
-        // Verify deleted
-        let resp = a
-            .oneshot(
-                Request::get("/overrides/test.dev")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), 404);
+            .status()
+            .is_success());
+        assert_eq!(get_req(&a, "/overrides/test.dev").await.status(), 404);
     }
 
     #[tokio::test]
     async fn cache_list_and_flush() {
-        let ctx = test_ctx().await;
-        let a = router(ctx.clone());
-
-        // List (empty)
-        let resp = a
-            .clone()
-            .oneshot(Request::get("/cache").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), 200);
-
-        // Flush
-        let resp = a
-            .oneshot(Request::delete("/cache").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert!(resp.status().is_success());
+        let a = router(test_ctx().await);
+        assert_eq!(get_req(&a, "/cache").await.status(), 200);
+        assert!(delete_req(&a, "/cache").await.status().is_success());
     }
 
     #[tokio::test]
@@ -1232,81 +1211,41 @@ mod tests {
 
     #[tokio::test]
     async fn services_crud() {
-        let ctx = test_ctx().await;
-        let a = router(ctx);
+        let a = router(test_ctx().await);
 
-        // Add service
-        let resp = a
-            .clone()
-            .oneshot(
-                Request::post("/services")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"name":"testapp","target_port":3000}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let resp = post_json(&a, "/services", r#"{"name":"testapp","target_port":3000}"#).await;
         assert!(resp.status().is_success());
 
-        // List
-        let resp = a
-            .clone()
-            .oneshot(Request::get("/services").body(Body::empty()).unwrap())
+        let body = axum::body::to_bytes(get_req(&a, "/services").await.into_body(), 10000)
             .await
             .unwrap();
-        let body = axum::body::to_bytes(resp.into_body(), 10000).await.unwrap();
         assert!(String::from_utf8_lossy(&body).contains("testapp"));
 
-        // Delete
-        let resp = a
-            .clone()
-            .oneshot(
-                Request::delete("/services/testapp")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+        assert!(delete_req(&a, "/services/testapp")
             .await
-            .unwrap();
-        assert!(resp.status().is_success());
+            .status()
+            .is_success());
 
-        // Verify deleted
-        let resp = a
-            .oneshot(Request::get("/services").body(Body::empty()).unwrap())
+        let body = axum::body::to_bytes(get_req(&a, "/services").await.into_body(), 10000)
             .await
             .unwrap();
-        let body = axum::body::to_bytes(resp.into_body(), 10000).await.unwrap();
         assert!(!String::from_utf8_lossy(&body).contains("testapp"));
     }
 
     #[tokio::test]
     async fn create_service_accepts_target_host() {
-        let ctx = test_ctx().await;
-        let a = router(ctx.clone());
+        let a = router(test_ctx().await);
 
-        let resp = a
-            .clone()
-            .oneshot(
-                Request::post("/services")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"name":"nas","target_port":80,"target_host":"192.168.1.50"}"#,
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let resp = post_json(
+            &a,
+            "/services",
+            r#"{"name":"nas","target_port":80,"target_host":"192.168.1.50"}"#,
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::CREATED);
-        let body = axum::body::to_bytes(resp.into_body(), 10000).await.unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["target_host"], "192.168.1.50");
+        assert_eq!(body_json(resp).await["target_host"], "192.168.1.50");
 
-        // Round-trip via list
-        let resp = a
-            .oneshot(Request::get("/services").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        let body = axum::body::to_bytes(resp.into_body(), 10000).await.unwrap();
-        let list: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let list = body_json(get_req(&a, "/services").await).await;
         let entry = list
             .as_array()
             .unwrap()
@@ -1321,25 +1260,14 @@ mod tests {
         // "localhost", "127.0.0.1", and the empty/whitespace string all
         // collapse to the default (None) so listings stay clean.
         for (i, host) in ["localhost", "127.0.0.1", "", "   "].iter().enumerate() {
-            let ctx = test_ctx().await;
-            let a = router(ctx);
-            let name = format!("app{}", i);
+            let a = router(test_ctx().await);
             let body = format!(
-                r#"{{"name":"{}","target_port":3000,"target_host":"{}"}}"#,
-                name, host
+                r#"{{"name":"app{}","target_port":3000,"target_host":"{}"}}"#,
+                i, host
             );
-            let resp = a
-                .oneshot(
-                    Request::post("/services")
-                        .header("content-type", "application/json")
-                        .body(Body::from(body))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
+            let resp = post_json(&a, "/services", &body).await;
             assert_eq!(resp.status(), StatusCode::CREATED, "host={:?}", host);
-            let resp_body = axum::body::to_bytes(resp.into_body(), 10000).await.unwrap();
-            let json: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
+            let json = body_json(resp).await;
             assert!(
                 json.get("target_host").map(|v| v.is_null()).unwrap_or(true),
                 "host={:?} should collapse to default but got: {}",
@@ -1351,41 +1279,24 @@ mod tests {
 
     #[tokio::test]
     async fn create_service_rejects_overlong_target_host() {
-        let ctx = test_ctx().await;
-        let a = router(ctx);
-        let long_host = "a".repeat(254);
+        let a = router(test_ctx().await);
         let body = format!(
             r#"{{"name":"app","target_port":80,"target_host":"{}"}}"#,
-            long_host
+            "a".repeat(254)
         );
-        let resp = a
-            .oneshot(
-                Request::post("/services")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let resp = post_json(&a, "/services", &body).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
     async fn create_service_rejects_target_host_with_scheme() {
-        let ctx = test_ctx().await;
-        let a = router(ctx);
-
-        let resp = a
-            .oneshot(
-                Request::post("/services")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"name":"app","target_port":80,"target_host":"http://x.y"}"#,
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let a = router(test_ctx().await);
+        let resp = post_json(
+            &a,
+            "/services",
+            r#"{"name":"app","target_port":80,"target_host":"http://x.y"}"#,
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
