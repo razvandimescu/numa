@@ -8,7 +8,6 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use arc_swap::ArcSwap;
 use log::{error, info};
 use tokio::net::UdpSocket;
 
@@ -100,39 +99,8 @@ pub async fn run(config_path: String) -> crate::Result<()> {
         .clone()
         .unwrap_or_else(crate::data_dir);
 
-    // Build initial TLS config before ServerCtx (so ArcSwap is ready at construction)
-    let (initial_tls, tls_byo) = if config.proxy.enabled && config.proxy.tls_port > 0 {
-        match (&config.proxy.cert_path, &config.proxy.key_path) {
-            (Some(cert), Some(key)) => match crate::tls::load_pem_tls_config(cert, key, Vec::new())
-            {
-                Ok(cfg) => {
-                    log::info!(
-                        "HTTPS proxy: serving user-provided cert from {}",
-                        cert.display()
-                    );
-                    (Some(ArcSwap::from(cfg)), true)
-                }
-                Err(e) => {
-                    log::warn!(
-                        "TLS setup failed, HTTPS proxy disabled: cert={} key={}: {}",
-                        cert.display(),
-                        key.display(),
-                        e
-                    );
-                    (None, false)
-                }
-            },
-            (Some(_), None) | (None, Some(_)) => {
-                log::error!(
-                    "[proxy] cert_path and key_path must both be set — HTTPS proxy disabled"
-                );
-                (None, false)
-            }
-            (None, None) => build_local_ca_tls(&config, &service_store, &resolved_data_dir),
-        }
-    } else {
-        (None, false)
-    };
+    let (initial_tls, tls_byo) =
+        crate::tls::build_proxy_tls(&config, &service_store, &resolved_data_dir);
 
     let doh_enabled = initial_tls.is_some();
     let health_meta = crate::health::HealthMeta::build(
@@ -236,25 +204,6 @@ pub async fn run(config_path: String) -> crate::Result<()> {
     }
     let (first, _, _) = futures::future::select_all(handles).await;
     first?
-}
-
-fn build_local_ca_tls(
-    config: &crate::config::Config,
-    service_store: &ServiceStore,
-    data_dir: &std::path::Path,
-) -> (Option<ArcSwap<rustls::ServerConfig>>, bool) {
-    let names = service_store.names();
-    match crate::tls::build_tls_config(&config.proxy.tld, &names, Vec::new(), data_dir) {
-        Ok(cfg) => (Some(ArcSwap::from(cfg)), false),
-        Err(e) => {
-            if let Some(advisory) = crate::tls::try_data_dir_advisory(&e, data_dir) {
-                eprint!("{}", advisory);
-            } else {
-                log::warn!("TLS setup failed, HTTPS proxy disabled: {}", e);
-            }
-            (None, false)
-        }
-    }
 }
 
 /// First port-53 bind failure routes through `try_port53_advisory` so the

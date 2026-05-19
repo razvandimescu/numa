@@ -2,9 +2,12 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use log::{info, warn};
+use arc_swap::ArcSwap;
+use log::{error, info, warn};
 
+use crate::config::Config;
 use crate::ctx::ServerCtx;
+use crate::service_store::ServiceStore;
 use rcgen::{
     BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair, KeyUsagePurpose, SanType,
 };
@@ -43,6 +46,56 @@ pub fn regenerate_tls(ctx: &ServerCtx) {
             info!("TLS cert regenerated for {} services", names.len());
         }
         Err(e) => warn!("TLS regeneration failed: {}", e),
+    }
+}
+
+/// Decide the HTTPS proxy's initial TLS config: BYO cert if both paths
+/// are set, local-CA otherwise. Returns `(_, true)` for BYO so callers
+/// know to suppress regeneration.
+pub fn build_proxy_tls(
+    config: &Config,
+    service_store: &ServiceStore,
+    data_dir: &Path,
+) -> (Option<ArcSwap<ServerConfig>>, bool) {
+    if !config.proxy.enabled || config.proxy.tls_port == 0 {
+        return (None, false);
+    }
+    match (&config.proxy.cert_path, &config.proxy.key_path) {
+        (Some(cert), Some(key)) => match load_pem_tls_config(cert, key, Vec::new()) {
+            Ok(cfg) => {
+                info!(
+                    "HTTPS proxy: serving user-provided cert from {}",
+                    cert.display()
+                );
+                (Some(ArcSwap::from(cfg)), true)
+            }
+            Err(e) => {
+                warn!(
+                    "HTTPS proxy disabled: failed to load {}: {}",
+                    cert.display(),
+                    e
+                );
+                (None, false)
+            }
+        },
+        (Some(_), None) | (None, Some(_)) => {
+            error!("[proxy] cert_path and key_path must both be set — HTTPS proxy disabled");
+            (None, false)
+        }
+        (None, None) => {
+            let names = service_store.names();
+            match build_tls_config(&config.proxy.tld, &names, Vec::new(), data_dir) {
+                Ok(cfg) => (Some(ArcSwap::from(cfg)), false),
+                Err(e) => {
+                    if let Some(advisory) = try_data_dir_advisory(&e, data_dir) {
+                        eprint!("{}", advisory);
+                    } else {
+                        warn!("TLS setup failed, HTTPS proxy disabled: {}", e);
+                    }
+                    (None, false)
+                }
+            }
+        }
     }
 }
 
