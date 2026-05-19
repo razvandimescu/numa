@@ -59,9 +59,7 @@ pub struct ServerCtx {
     pub config_dir: PathBuf,
     pub data_dir: PathBuf,
     pub tls_config: Option<ArcSwap<ServerConfig>>,
-    /// True when `tls_config` holds a user-supplied cert (`[proxy]
-    /// cert_path`/`key_path`). Suppresses cert regeneration on service
-    /// add/remove — numa doesn't own the cert and can't reissue it.
+    /// Set when `tls_config` is a user-supplied cert; suppresses regeneration.
     pub tls_byo: bool,
     pub upstream_mode: UpstreamMode,
     pub root_hints: Vec<SocketAddr>,

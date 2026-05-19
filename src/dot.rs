@@ -53,7 +53,11 @@ pub async fn start_dot(ctx: Arc<ServerCtx>, config: &DotConfig) {
                 return;
             }
         },
-        _ => match self_signed_tls(&ctx) {
+        (Some(_), None) | (None, Some(_)) => {
+            error!("[dot] cert_path and key_path must both be set — DoT disabled");
+            return;
+        }
+        (None, None) => match self_signed_tls(&ctx) {
             Some(cfg) => cfg,
             None => return,
         },

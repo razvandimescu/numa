@@ -567,9 +567,6 @@ pub struct ProxyConfig {
     pub tld: String,
     #[serde(default = "default_proxy_bind_addr")]
     pub bind_addr: String,
-    /// Path to a TLS certificate (PEM). When set together with `key_path`,
-    /// the HTTPS proxy serves this cert instead of the local-CA-issued one
-    /// — lets users bring their own Let's Encrypt / external cert.
     #[serde(default)]
     pub cert_path: Option<PathBuf>,
     #[serde(default)]

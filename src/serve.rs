@@ -123,10 +123,10 @@ pub async fn run(config_path: String) -> crate::Result<()> {
                 }
             },
             (Some(_), None) | (None, Some(_)) => {
-                log::warn!(
-                    "[proxy] cert_path and key_path must both be set — falling back to local CA"
+                log::error!(
+                    "[proxy] cert_path and key_path must both be set — HTTPS proxy disabled"
                 );
-                build_local_ca_tls(&config, &service_store, &resolved_data_dir)
+                (None, false)
             }
             (None, None) => build_local_ca_tls(&config, &service_store, &resolved_data_dir),
         }
