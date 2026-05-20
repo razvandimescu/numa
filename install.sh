@@ -17,9 +17,10 @@ esac
 # Detect architecture
 ARCH="$(uname -m)"
 case "$ARCH" in
-  x86_64|amd64)  ARCH_NAME="x86_64" ;;
-  arm64|aarch64) ARCH_NAME="aarch64" ;;
-  *)             echo "Unsupported architecture: $ARCH"; exit 1 ;;
+  x86_64|amd64)         ARCH_NAME="x86_64" ;;
+  arm64|aarch64)        ARCH_NAME="aarch64" ;;
+  armv6l|armv7l)        ARCH_NAME="armv6" ;;
+  *)                    echo "Unsupported architecture: $ARCH"; exit 1 ;;
 esac
 
 ASSET="numa-${OS_NAME}-${ARCH_NAME}.tar.gz"
