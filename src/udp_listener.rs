@@ -105,10 +105,20 @@ fn disable_udp_gro(sock: &std::net::UdpSocket) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::Ipv4Addr;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+    use std::time::Duration;
+
+    async fn recv_reply(client: &tokio::net::UdpSocket) -> (Vec<u8>, SocketAddr) {
+        let mut buf = [0u8; 64];
+        let (n, src) = tokio::time::timeout(Duration::from_secs(1), client.recv_from(&mut buf))
+            .await
+            .expect("reply within 1s")
+            .unwrap();
+        (buf[..n].to_vec(), src)
+    }
 
     #[tokio::test]
-    async fn wildcard_v4_echoes_source_on_loopback() {
+    async fn specific_bind_v4_round_trip() {
         let server = UdpListener::bind("127.0.0.1:0").await.unwrap();
         let server_addr = server.local_addr().unwrap();
 
@@ -119,21 +129,79 @@ mod tests {
         let (n, peer, dst) = server.recv_from(&mut buf).await.unwrap();
         assert_eq!(&buf[..n], b"hi");
         assert!(matches!(peer.ip(), IpAddr::V4(ip) if ip == Ipv4Addr::LOCALHOST));
-        assert_eq!(dst, Some(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+        // quinn-udp populates dst_ip even on specific binds; either Some(LOCALHOST) or None is acceptable.
+        assert!(dst.is_none() || dst == Some(IpAddr::V4(Ipv4Addr::LOCALHOST)));
 
-        server
-            .send_to(b"yo", peer, Some(IpAddr::V4(Ipv4Addr::LOCALHOST)))
-            .await
-            .unwrap();
-        let mut rbuf = [0u8; 64];
-        let (m, reply_src) = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            client.recv_from(&mut rbuf),
-        )
-        .await
-        .expect("reply within 1s")
-        .unwrap();
-        assert_eq!(&rbuf[..m], b"yo");
+        server.send_to(b"yo", peer, dst).await.unwrap();
+        let (payload, reply_src) = recv_reply(&client).await;
+        assert_eq!(payload, b"yo");
         assert_eq!(reply_src, server_addr);
+    }
+
+    #[tokio::test]
+    async fn wildcard_bind_v4_pins_reply_source() {
+        let server = UdpListener::bind("0.0.0.0:0").await.unwrap();
+        let server_port = server.local_addr().unwrap().port();
+
+        let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let target = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), server_port);
+        client.send_to(b"hi", target).await.unwrap();
+
+        let mut buf = [0u8; 64];
+        let (n, peer, dst) = server.recv_from(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"hi");
+        assert_eq!(
+            dst,
+            Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            "wildcard bind must capture per-packet dst via PKTINFO cmsg"
+        );
+
+        server.send_to(b"yo", peer, dst).await.unwrap();
+        let (payload, reply_src) = recv_reply(&client).await;
+        assert_eq!(payload, b"yo");
+        assert_eq!(
+            reply_src.ip(),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            "reply must come from the IP the query arrived on, not 0.0.0.0"
+        );
+        assert_eq!(reply_src.port(), server_port);
+    }
+
+    #[tokio::test]
+    async fn wildcard_bind_v6_pins_reply_source() {
+        let server = match UdpListener::bind("[::]:0").await {
+            Ok(s) => s,
+            Err(e) if e.kind() == io::ErrorKind::AddrNotAvailable => {
+                eprintln!("skipping: IPv6 not available ({e})");
+                return;
+            }
+            Err(e) => panic!("bind [::]:0 failed: {e}"),
+        };
+        let server_port = server.local_addr().unwrap().port();
+
+        let client = match tokio::net::UdpSocket::bind("[::1]:0").await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("skipping: IPv6 loopback not available ({e})");
+                return;
+            }
+        };
+        let target = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), server_port);
+        client.send_to(b"hi", target).await.unwrap();
+
+        let mut buf = [0u8; 64];
+        let (n, peer, dst) = server.recv_from(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"hi");
+        assert_eq!(
+            dst,
+            Some(IpAddr::V6(Ipv6Addr::LOCALHOST)),
+            "wildcard v6 bind must capture per-packet dst via IPV6_PKTINFO cmsg"
+        );
+
+        server.send_to(b"yo", peer, dst).await.unwrap();
+        let (payload, reply_src) = recv_reply(&client).await;
+        assert_eq!(payload, b"yo");
+        assert_eq!(reply_src.ip(), IpAddr::V6(Ipv6Addr::LOCALHOST));
+        assert_eq!(reply_src.port(), server_port);
     }
 }
