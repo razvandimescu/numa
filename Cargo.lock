@@ -1683,6 +1683,7 @@ dependencies = [
  "proxy-header",
  "psl",
  "qrcode",
+ "quinn-udp",
  "rand_core 0.9.5",
  "rcgen",
  "reqwest",
