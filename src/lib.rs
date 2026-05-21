@@ -4,6 +4,7 @@ pub mod blocklist;
 pub mod bootstrap_resolver;
 pub mod buffer;
 pub mod cache;
+pub mod client_policy;
 pub mod config;
 pub mod ctx;
 pub mod dnssec;

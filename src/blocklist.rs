@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use log::{info, warn};
 
+#[derive(Debug)]
 pub struct BlocklistStore {
     domains: HashSet<String>,
     allowlist: HashSet<String>,
@@ -234,7 +235,7 @@ pub fn parse_blocklist(text: &str) -> HashSet<String> {
     domains
 }
 
-fn normalize(domain: &str) -> String {
+pub(crate) fn normalize(domain: &str) -> String {
     domain.to_lowercase().trim_end_matches('.').to_string()
 }
 

@@ -66,6 +66,7 @@ pub async fn test_ctx() -> ServerCtx {
         mobile_port: 8765,
         filter_aaaa: false,
         allow_from: crate::acl::AllowFromAcl::default(),
+        client_policy: crate::client_policy::ClientPolicySet::default(),
     }
 }
 

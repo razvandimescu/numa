@@ -131,6 +131,15 @@ pub async fn run(config_path: String) -> crate::Result<()> {
         );
     }
 
+    let client_policy = crate::client_policy::ClientPolicySet::from_configs(&config.client_policy)
+        .map_err(|e| format!("invalid [[client_policy]]: {e}"))?;
+    if client_policy.is_enabled() {
+        info!(
+            "per-client policies enabled: {} rule(s) (loopback always passthrough)",
+            client_policy.rule_count()
+        );
+    }
+
     let sockets = bind_udp_listeners(&config.server.bind_addr).await?;
 
     let ctx = Arc::new(ServerCtx {
@@ -179,6 +188,7 @@ pub async fn run(config_path: String) -> crate::Result<()> {
         mobile_port: config.mobile.port,
         filter_aaaa: config.server.filter_aaaa,
         allow_from,
+        client_policy,
     });
 
     let zone_count: usize = ctx.zone_map.len();

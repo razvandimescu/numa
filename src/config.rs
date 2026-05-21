@@ -35,6 +35,8 @@ pub struct Config {
     pub mobile: MobileConfig,
     #[serde(default)]
     pub forwarding: Vec<ForwardingRuleConfig>,
+    #[serde(default)]
+    pub client_policy: Vec<crate::client_policy::ClientPolicyConfig>,
 }
 
 #[derive(Deserialize, Clone, Debug)]

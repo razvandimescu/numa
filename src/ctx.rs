@@ -84,6 +84,7 @@ pub struct ServerCtx {
     /// (overrides, zones, .numa proxy, blocklist sinkhole) is unaffected.
     pub filter_aaaa: bool,
     pub allow_from: crate::acl::AllowFromAcl,
+    pub client_policy: crate::client_policy::ClientPolicySet,
 }
 
 /// Transport-agnostic DNS resolution. Runs the full pipeline (overrides, blocklist,
@@ -281,7 +282,25 @@ fn resolve_local(
     {
         return Some(resolve_proxy_tld(query, src_addr, qname, qtype, ctx));
     }
-    if ctx.blocklist.read().unwrap().is_blocked(qname) {
+    let mut policy_allow = false;
+    if ctx.client_policy.is_enabled() {
+        match ctx.client_policy.evaluate(src_addr.ip(), qname) {
+            crate::client_policy::Decision::Block => {
+                let mut resp = DnsPacket::response_from(query, ResultCode::NOERROR);
+                resp.answers.push(sinkhole_record(
+                    qname,
+                    qtype,
+                    std::net::Ipv4Addr::UNSPECIFIED,
+                    std::net::Ipv6Addr::UNSPECIFIED,
+                    60,
+                ));
+                return Some((resp, QueryPath::Blocked, DnssecStatus::Indeterminate));
+            }
+            crate::client_policy::Decision::Allow => policy_allow = true,
+            crate::client_policy::Decision::Passthrough => {}
+        }
+    }
+    if !policy_allow && ctx.blocklist.read().unwrap().is_blocked(qname) {
         let mut resp = DnsPacket::response_from(query, ResultCode::NOERROR);
         resp.answers.push(sinkhole_record(
             qname,
@@ -1670,6 +1689,127 @@ mod tests {
             }
             other => panic!("expected UNKNOWN record, got {:?}", other),
         }
+    }
+
+    async fn resolve_from_src(
+        ctx: &Arc<ServerCtx>,
+        src: SocketAddr,
+        domain: &str,
+        qtype: QueryType,
+    ) -> (DnsPacket, QueryPath) {
+        let query = DnsPacket::query(0xBEEF, domain, qtype);
+        let mut buf = BytePacketBuffer::new();
+        query.write(&mut buf).unwrap();
+        let raw = &buf.buf[..buf.pos];
+        let (resp_buf, path) = resolve_query(query, raw, src, ctx, Transport::Udp)
+            .await
+            .unwrap();
+        let mut resp_parse_buf = BytePacketBuffer::from_bytes(resp_buf.filled());
+        let resp = DnsPacket::from_buffer(&mut resp_parse_buf).unwrap();
+        (resp, path)
+    }
+
+    fn ctx_with_policy(
+        clients: &[&str],
+        block: &[&str],
+        allow: &[&str],
+    ) -> crate::client_policy::ClientPolicySet {
+        crate::client_policy::ClientPolicySet::from_configs(&[
+            crate::client_policy::ClientPolicyConfig {
+                clients: clients.iter().map(|s| s.to_string()).collect(),
+                block: block.iter().map(|s| s.to_string()).collect(),
+                allow: allow.iter().map(|s| s.to_string()).collect(),
+            },
+        ])
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn pipeline_client_policy_blocks_matching_client() {
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.client_policy = ctx_with_policy(&["192.168.1.50/32"], &["youtube.com"], &[]);
+        let ctx = Arc::new(ctx);
+
+        let blocked_src: SocketAddr = "192.168.1.50:5000".parse().unwrap();
+        let (resp, path) = resolve_from_src(&ctx, blocked_src, "m.youtube.com", QueryType::A).await;
+        assert_eq!(path, QueryPath::Blocked);
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+        match &resp.answers[0] {
+            DnsRecord::A { addr, .. } => assert_eq!(*addr, Ipv4Addr::UNSPECIFIED),
+            other => panic!("expected sinkhole A record, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn pipeline_client_policy_skips_unmatched_client() {
+        // Different client IP — policy must not apply. Falls through to
+        // forwarding, so we set up an upstream that confirms the query escaped.
+        let upstream_resp =
+            crate::testutil::a_record_response("youtube.com", Ipv4Addr::new(8, 8, 8, 8), 60);
+        let upstream_addr = crate::testutil::mock_upstream(upstream_resp).await;
+
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.client_policy = ctx_with_policy(&["192.168.1.50/32"], &["youtube.com"], &[]);
+        ctx.forwarding_rules = vec![ForwardingRule::new(
+            "youtube.com".to_string(),
+            UpstreamPool::new(vec![Upstream::Udp(upstream_addr)], vec![]),
+        )];
+        let ctx = Arc::new(ctx);
+
+        let other_src: SocketAddr = "192.168.1.99:5000".parse().unwrap();
+        let (resp, path) = resolve_from_src(&ctx, other_src, "youtube.com", QueryType::A).await;
+        assert_eq!(path, QueryPath::Forwarded);
+        match &resp.answers[0] {
+            DnsRecord::A { addr, .. } => assert_eq!(*addr, Ipv4Addr::new(8, 8, 8, 8)),
+            other => panic!("expected forwarded A record, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn pipeline_client_policy_allow_bypasses_global_blocklist() {
+        // Domain is in the global blocklist; client has an allow rule for it.
+        let upstream_resp =
+            crate::testutil::a_record_response("ads.example.com", Ipv4Addr::new(1, 2, 3, 4), 60);
+        let upstream_addr = crate::testutil::mock_upstream(upstream_resp).await;
+
+        let mut ctx = crate::testutil::test_ctx().await;
+        let mut domains = std::collections::HashSet::new();
+        domains.insert("ads.example.com".to_string());
+        ctx.blocklist.write().unwrap().swap_domains(domains, vec![]);
+        ctx.client_policy = ctx_with_policy(&["192.168.1.50"], &[], &["ads.example.com"]);
+        ctx.forwarding_rules = vec![ForwardingRule::new(
+            "example.com".to_string(),
+            UpstreamPool::new(vec![Upstream::Udp(upstream_addr)], vec![]),
+        )];
+        let ctx = Arc::new(ctx);
+
+        let exempt_src: SocketAddr = "192.168.1.50:5000".parse().unwrap();
+        let (resp, path) =
+            resolve_from_src(&ctx, exempt_src, "ads.example.com", QueryType::A).await;
+        assert_eq!(path, QueryPath::Forwarded);
+        match &resp.answers[0] {
+            DnsRecord::A { addr, .. } => assert_eq!(*addr, Ipv4Addr::new(1, 2, 3, 4)),
+            other => panic!(
+                "expected forwarded A record (allow bypass), got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn pipeline_client_policy_loopback_falls_through_to_global_blocklist() {
+        // A policy that would block this domain for 127/8 must NOT trap the
+        // local stub resolver — loopback is always passthrough. Global
+        // blocklist still applies.
+        let mut ctx = crate::testutil::test_ctx().await;
+        let mut domains = std::collections::HashSet::new();
+        domains.insert("ads.tracker.test".to_string());
+        ctx.blocklist.write().unwrap().swap_domains(domains, vec![]);
+        ctx.client_policy = ctx_with_policy(&["127.0.0.0/8"], &["unrelated.test"], &[]);
+        let ctx = Arc::new(ctx);
+
+        let (_, path) = resolve_in_test(&ctx, "ads.tracker.test", QueryType::A).await;
+        assert_eq!(path, QueryPath::Blocked, "global blocklist still applies");
     }
 
     #[tokio::test]
