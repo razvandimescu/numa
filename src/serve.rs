@@ -406,9 +406,7 @@ async fn udp_serve_loop(
         // Response goes to the kernel UDP peer (e.g. dnsdist), not the
         // PROXY-extracted logical source — otherwise the reply skips the
         // front-end and never reaches the original client.
-        // `local_dst` (captured via IP_PKTINFO/IP_RECVDSTADDR/IPV6_PKTINFO on
-        // wildcard binds) pins the reply source so multi-homed hosts don't
-        // reply from the wrong IP (issue #227).
+        // `local_dst` pins the reply source on multi-homed wildcard binds.
         let ctx = Arc::clone(ctx);
         let reply_socket = Arc::clone(&socket);
         tokio::spawn(async move {

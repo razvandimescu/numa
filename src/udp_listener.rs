@@ -1,9 +1,7 @@
-//! UDP listener that preserves the per-packet destination IP on multi-homed
-//! wildcard binds (issue #227), via quinn-udp's portable PKTINFO/RECVDSTADDR/
-//! IPV6_PKTINFO handling. `dst_ip` returned by `recv_from` should be threaded
-//! back into `send_to` so the reply source matches the IP that received the
-//! query — otherwise the kernel picks the primary, RFC-compliant clients drop
-//! the reply as "unexpected source".
+//! UDP listener that returns the per-packet destination IP from `recv_from`,
+//! so the caller can thread it back into `send_to` and reply from the same
+//! IP the query arrived on. Otherwise the kernel picks the primary on a
+//! wildcard bind and replies are dropped as "unexpected source".
 
 use std::io::{self, IoSliceMut};
 use std::net::{IpAddr, SocketAddr};
