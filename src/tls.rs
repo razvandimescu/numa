@@ -2,9 +2,12 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use log::{info, warn};
+use arc_swap::ArcSwap;
+use log::{error, info, warn};
 
+use crate::config::Config;
 use crate::ctx::ServerCtx;
+use crate::service_store::ServiceStore;
 use rcgen::{
     BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair, KeyUsagePurpose, SanType,
 };
@@ -28,6 +31,10 @@ pub fn regenerate_tls(ctx: &ServerCtx) {
         Some(t) => t,
         None => return,
     };
+    if ctx.tls_byo {
+        // User-provided cert: numa doesn't own it, can't reissue.
+        return;
+    }
 
     let mut names: HashSet<String> = ctx.services.lock().unwrap().names().into_iter().collect();
     names.extend(ctx.lan_peers.lock().unwrap().names());
@@ -40,6 +47,87 @@ pub fn regenerate_tls(ctx: &ServerCtx) {
         }
         Err(e) => warn!("TLS regeneration failed: {}", e),
     }
+}
+
+/// Decide the HTTPS proxy's initial TLS config: BYO cert if both paths
+/// are set, local-CA otherwise. Returns `(_, true)` for BYO so callers
+/// know to suppress regeneration.
+pub fn build_proxy_tls(
+    config: &Config,
+    service_store: &ServiceStore,
+    data_dir: &Path,
+) -> (Option<ArcSwap<ServerConfig>>, bool) {
+    if !config.proxy.enabled || config.proxy.tls_port == 0 {
+        return (None, false);
+    }
+    match (&config.proxy.cert_path, &config.proxy.key_path) {
+        (Some(cert), Some(key)) => match load_pem_tls_config(cert, key, Vec::new()) {
+            Ok(cfg) => {
+                info!(
+                    "HTTPS proxy: serving user-provided cert from {}",
+                    cert.display()
+                );
+                (Some(ArcSwap::from(cfg)), true)
+            }
+            Err(e) => {
+                warn!(
+                    "HTTPS proxy disabled: failed to load {}: {}",
+                    cert.display(),
+                    e
+                );
+                (None, false)
+            }
+        },
+        (Some(_), None) | (None, Some(_)) => {
+            error!("[proxy] cert_path and key_path must both be set — HTTPS proxy disabled");
+            (None, false)
+        }
+        (None, None) => {
+            let names = service_store.names();
+            match build_tls_config(&config.proxy.tld, &names, Vec::new(), data_dir) {
+                Ok(cfg) => (Some(ArcSwap::from(cfg)), false),
+                Err(e) => {
+                    if let Some(advisory) = try_data_dir_advisory(&e, data_dir) {
+                        eprint!("{}", advisory);
+                    } else {
+                        warn!("TLS setup failed, HTTPS proxy disabled: {}", e);
+                    }
+                    (None, false)
+                }
+            }
+        }
+    }
+}
+
+/// Load a TLS server config from user-supplied cert + key PEM files.
+/// Shared by the HTTPS proxy and DoT listener for their respective BYO
+/// cert paths. `alpn` is advertised in the ServerHello — empty for the
+/// proxy (negotiates per-connection), `[b"dot"]` for DoT (RFC 7858 §3.2).
+pub fn load_pem_tls_config(
+    cert_path: &Path,
+    key_path: &Path,
+    alpn: Vec<Vec<u8>>,
+) -> crate::Result<Arc<ServerConfig>> {
+    // rustls needs a CryptoProvider installed before ServerConfig::builder().
+    // Idempotent: returns Err if one is already installed (which we ignore).
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let cert_pem = std::fs::read(cert_path)?;
+    let key_pem = std::fs::read(key_path)?;
+
+    let certs: Vec<_> = rustls_pemfile::certs(&mut &cert_pem[..]).collect::<Result<_, _>>()?;
+    if certs.is_empty() {
+        return Err(format!("no certificates found in {}", cert_path.display()).into());
+    }
+    let key = rustls_pemfile::private_key(&mut &key_pem[..])?
+        .ok_or_else(|| format!("no private key found in {}", key_path.display()))?;
+
+    let mut config = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)?;
+    config.alpn_protocols = alpn;
+
+    Ok(Arc::new(config))
 }
 
 /// Advisory for TLS-setup failures caused by a non-writable data dir;
@@ -315,6 +403,81 @@ mod tests {
         assert!(
             ips.contains(&std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)),
             "missing ::1 SAN"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn fresh_temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("numa-test-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_self_signed_pem_pair(dir: &Path, dns: &str) -> (PathBuf, PathBuf) {
+        let key_pair = KeyPair::generate().unwrap();
+        let mut params = CertificateParams::default();
+        params
+            .subject_alt_names
+            .push(SanType::DnsName(dns.try_into().unwrap()));
+        let cert = params.self_signed(&key_pair).unwrap();
+        let cert_path = dir.join("cert.pem");
+        let key_path = dir.join("key.pem");
+        std::fs::write(&cert_path, cert.pem()).unwrap();
+        std::fs::write(&key_path, key_pair.serialize_pem()).unwrap();
+        (cert_path, key_path)
+    }
+
+    #[test]
+    fn load_pem_tls_config_round_trip() {
+        let dir = fresh_temp_dir("pem");
+        let (cert_path, key_path) = write_self_signed_pem_pair(&dir, "example.test");
+
+        let config =
+            load_pem_tls_config(&cert_path, &key_path, Vec::new()).expect("load self-signed pair");
+        assert!(config.alpn_protocols.is_empty(), "proxy ALPN stays empty");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn regenerate_tls_is_noop_in_byo_mode() {
+        let mut ctx = crate::testutil::test_ctx().await;
+        let dir = fresh_temp_dir("byo");
+        ctx.data_dir = dir.clone();
+
+        let (cert_path, key_path) = write_self_signed_pem_pair(&dir, "byo.test");
+        let user_cfg = load_pem_tls_config(&cert_path, &key_path, Vec::new()).unwrap();
+
+        ctx.tls_config = Some(arc_swap::ArcSwap::from(Arc::clone(&user_cfg)));
+        ctx.tls_byo = true;
+
+        regenerate_tls(&ctx);
+
+        let after = ctx.tls_config.as_ref().unwrap().load_full();
+        assert!(
+            Arc::ptr_eq(&user_cfg, &after),
+            "BYO cert must not be replaced by regenerate_tls"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_pem_tls_config_rejects_empty_cert() {
+        let dir = fresh_temp_dir("pem-empty");
+        let cert_path = dir.join("cert.pem");
+        let key_path = dir.join("key.pem");
+        std::fs::write(&cert_path, b"").unwrap();
+        std::fs::write(&key_path, b"").unwrap();
+
+        let err = load_pem_tls_config(&cert_path, &key_path, Vec::new())
+            .expect_err("empty PEM must fail");
+        assert!(
+            err.to_string().contains("no certificates found"),
+            "unexpected error: {}",
+            err
         );
 
         let _ = std::fs::remove_dir_all(&dir);

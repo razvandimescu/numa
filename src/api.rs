@@ -781,6 +781,8 @@ async fn blocking_allowlist_remove(
 struct ServiceResponse {
     name: String,
     target_port: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_host: Option<String>,
     url: String,
     healthy: bool,
     lan_accessible: bool,
@@ -793,10 +795,12 @@ struct ServiceResponse {
 struct CreateServiceRequest {
     name: String,
     target_port: u16,
+    #[serde(default)]
+    target_host: Option<String>,
 }
 
 async fn list_services(State(ctx): State<Arc<ServerCtx>>) -> Json<Vec<ServiceResponse>> {
-    let entries: Vec<_> = {
+    let entries: Vec<(crate::service_store::ServiceEntry, &'static str)> = {
         let store = ctx.services.lock().unwrap();
         store
             .list()
@@ -807,12 +811,7 @@ async fn list_services(State(ctx): State<Arc<ServerCtx>>) -> Json<Vec<ServiceRes
                 } else {
                     "api"
                 };
-                (
-                    e.name.clone(),
-                    e.target_port,
-                    e.routes.clone(),
-                    source.to_string(),
-                )
+                (e.clone(), source)
             })
             .collect()
     };
@@ -820,38 +819,34 @@ async fn list_services(State(ctx): State<Arc<ServerCtx>>) -> Json<Vec<ServiceRes
 
     let lan_ip = crate::lan::detect_lan_ip();
 
-    let check_futures: Vec<_> = entries
-        .iter()
-        .map(|(_, port, _, _)| {
-            let port = *port;
-            let localhost = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-            let lan_addr = lan_ip.map(|ip| std::net::SocketAddr::new(ip.into(), port));
-            async move {
-                let healthy = check_tcp(localhost).await;
-                let lan_accessible = match lan_addr {
-                    Some(addr) => check_tcp(addr).await,
-                    None => false,
-                };
-                (healthy, lan_accessible)
-            }
-        })
-        .collect();
+    let check_futures = entries.iter().map(|(e, _)| {
+        let port = e.target_port;
+        let host = e.target_host.clone().unwrap_or_else(|| "localhost".into());
+        let lan_addr = lan_ip.map(|ip| std::net::SocketAddr::new(ip.into(), port));
+        async move {
+            let healthy = check_tcp((host.as_str(), port)).await;
+            let lan_accessible = match lan_addr {
+                Some(addr) => check_tcp(addr).await,
+                None => false,
+            };
+            (healthy, lan_accessible)
+        }
+    });
     let check_results = futures::future::join_all(check_futures).await;
 
-    let results: Vec<_> = entries
+    let results = entries
         .into_iter()
         .zip(check_results)
-        .map(
-            |((name, port, routes, source), (healthy, lan_accessible))| ServiceResponse {
-                url: format!("http://{}.{}", name, tld),
-                name,
-                target_port: port,
-                healthy,
-                lan_accessible,
-                routes,
-                source,
-            },
-        )
+        .map(|((e, source), (healthy, lan_accessible))| ServiceResponse {
+            url: format!("http://{}.{}", e.name, tld),
+            name: e.name,
+            target_port: e.target_port,
+            target_host: e.target_host,
+            healthy,
+            lan_accessible,
+            routes: e.routes,
+            source: source.to_string(),
+        })
         .collect();
     Json(results)
 }
@@ -878,18 +873,42 @@ async fn create_service(
     if req.target_port == 0 {
         return Err((StatusCode::BAD_REQUEST, "target_port must be > 0".into()));
     }
+    let target_host = match req.target_host.as_deref().map(str::trim) {
+        Some("") | Some("localhost") | Some("127.0.0.1") | None => None,
+        Some(h) => {
+            if h.len() > 253 {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "target_host must be at most 253 characters".into(),
+                ));
+            }
+            // Reject control chars + whitespace + obvious scheme/path bleed.
+            if h.chars()
+                .any(|c| c.is_control() || c.is_whitespace() || c == '/' || c == ':')
+            {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "target_host must be a bare hostname or IP (no scheme, port, or path)".into(),
+                ));
+            }
+            Some(h.to_string())
+        }
+    };
 
     let tld = &ctx.proxy_tld;
     let is_new = !ctx.services.lock().unwrap().has_name(&name);
-    ctx.services.lock().unwrap().insert(&name, req.target_port);
+    ctx.services
+        .lock()
+        .unwrap()
+        .insert(&name, req.target_port, target_host.clone());
     if is_new {
         crate::tls::regenerate_tls(&ctx);
     }
 
-    let localhost = std::net::SocketAddr::from(([127, 0, 0, 1], req.target_port));
+    let probe_host = target_host.as_deref().unwrap_or("localhost");
     let lan_addr =
         crate::lan::detect_lan_ip().map(|ip| std::net::SocketAddr::new(ip.into(), req.target_port));
-    let (healthy, lan_accessible) = tokio::join!(check_tcp(localhost), async {
+    let (healthy, lan_accessible) = tokio::join!(check_tcp((probe_host, req.target_port)), async {
         match lan_addr {
             Some(a) => check_tcp(a).await,
             None => false,
@@ -901,6 +920,7 @@ async fn create_service(
             url: format!("http://{}.{}", name, tld),
             name,
             target_port: req.target_port,
+            target_host,
             healthy,
             lan_accessible,
             routes: Vec::new(),
@@ -1046,10 +1066,10 @@ fn serve_font(data: &'static [u8]) -> impl IntoResponse {
     )
 }
 
-async fn check_tcp(addr: std::net::SocketAddr) -> bool {
+async fn check_tcp<A: tokio::net::ToSocketAddrs>(target: A) -> bool {
     tokio::time::timeout(
         std::time::Duration::from_millis(100),
-        tokio::net::TcpStream::connect(addr),
+        tokio::net::TcpStream::connect(target),
     )
     .await
     .map(|r| r.is_ok())
@@ -1065,6 +1085,39 @@ mod tests {
 
     async fn test_ctx() -> Arc<ServerCtx> {
         Arc::new(crate::testutil::test_ctx().await)
+    }
+
+    async fn get_req(app: &Router, path: &str) -> http::Response<Body> {
+        app.clone()
+            .oneshot(Request::get(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    async fn delete_req(app: &Router, path: &str) -> http::Response<Body> {
+        app.clone()
+            .oneshot(Request::delete(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    async fn post_json(app: &Router, path: &str, body: &str) -> http::Response<Body> {
+        app.clone()
+            .oneshot(
+                Request::post(path)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn body_json(resp: http::Response<Body>) -> serde_json::Value {
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).unwrap()
     }
 
     #[tokio::test]
@@ -1113,88 +1166,34 @@ mod tests {
 
     #[tokio::test]
     async fn overrides_crud() {
-        let ctx = test_ctx().await;
-        let a = router(ctx.clone());
+        let a = router(test_ctx().await);
 
-        // Create
-        let resp = a
-            .clone()
-            .oneshot(
-                Request::post("/overrides")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"domain":"test.dev","target":"1.2.3.4","duration_secs":60}"#,
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let resp = post_json(
+            &a,
+            "/overrides",
+            r#"{"domain":"test.dev","target":"1.2.3.4","duration_secs":60}"#,
+        )
+        .await;
         assert!(resp.status().is_success());
 
-        // List
-        let resp = a
-            .clone()
-            .oneshot(Request::get("/overrides").body(Body::empty()).unwrap())
+        let body = axum::body::to_bytes(get_req(&a, "/overrides").await.into_body(), 10000)
             .await
             .unwrap();
-        let body = axum::body::to_bytes(resp.into_body(), 10000).await.unwrap();
         assert!(String::from_utf8_lossy(&body).contains("test.dev"));
 
-        // Get
-        let resp = a
-            .clone()
-            .oneshot(
-                Request::get("/overrides/test.dev")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+        assert_eq!(get_req(&a, "/overrides/test.dev").await.status(), 200);
+        assert!(delete_req(&a, "/overrides/test.dev")
             .await
-            .unwrap();
-        assert_eq!(resp.status(), 200);
-
-        // Delete
-        let resp = a
-            .clone()
-            .oneshot(
-                Request::delete("/overrides/test.dev")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert!(resp.status().is_success());
-
-        // Verify deleted
-        let resp = a
-            .oneshot(
-                Request::get("/overrides/test.dev")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), 404);
+            .status()
+            .is_success());
+        assert_eq!(get_req(&a, "/overrides/test.dev").await.status(), 404);
     }
 
     #[tokio::test]
     async fn cache_list_and_flush() {
-        let ctx = test_ctx().await;
-        let a = router(ctx.clone());
-
-        // List (empty)
-        let resp = a
-            .clone()
-            .oneshot(Request::get("/cache").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), 200);
-
-        // Flush
-        let resp = a
-            .oneshot(Request::delete("/cache").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert!(resp.status().is_success());
+        let a = router(test_ctx().await);
+        assert_eq!(get_req(&a, "/cache").await.status(), 200);
+        assert!(delete_req(&a, "/cache").await.status().is_success());
     }
 
     #[tokio::test]
@@ -1212,50 +1211,93 @@ mod tests {
 
     #[tokio::test]
     async fn services_crud() {
-        let ctx = test_ctx().await;
-        let a = router(ctx);
+        let a = router(test_ctx().await);
 
-        // Add service
-        let resp = a
-            .clone()
-            .oneshot(
-                Request::post("/services")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"name":"testapp","target_port":3000}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let resp = post_json(&a, "/services", r#"{"name":"testapp","target_port":3000}"#).await;
         assert!(resp.status().is_success());
 
-        // List
-        let resp = a
-            .clone()
-            .oneshot(Request::get("/services").body(Body::empty()).unwrap())
+        let body = axum::body::to_bytes(get_req(&a, "/services").await.into_body(), 10000)
             .await
             .unwrap();
-        let body = axum::body::to_bytes(resp.into_body(), 10000).await.unwrap();
         assert!(String::from_utf8_lossy(&body).contains("testapp"));
 
-        // Delete
-        let resp = a
-            .clone()
-            .oneshot(
-                Request::delete("/services/testapp")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+        assert!(delete_req(&a, "/services/testapp")
             .await
-            .unwrap();
-        assert!(resp.status().is_success());
+            .status()
+            .is_success());
 
-        // Verify deleted
-        let resp = a
-            .oneshot(Request::get("/services").body(Body::empty()).unwrap())
+        let body = axum::body::to_bytes(get_req(&a, "/services").await.into_body(), 10000)
             .await
             .unwrap();
-        let body = axum::body::to_bytes(resp.into_body(), 10000).await.unwrap();
         assert!(!String::from_utf8_lossy(&body).contains("testapp"));
+    }
+
+    #[tokio::test]
+    async fn create_service_accepts_target_host() {
+        let a = router(test_ctx().await);
+
+        let resp = post_json(
+            &a,
+            "/services",
+            r#"{"name":"nas","target_port":80,"target_host":"192.168.1.50"}"#,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(body_json(resp).await["target_host"], "192.168.1.50");
+
+        let list = body_json(get_req(&a, "/services").await).await;
+        let entry = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == "nas")
+            .expect("listed service");
+        assert_eq!(entry["target_host"], "192.168.1.50");
+    }
+
+    #[tokio::test]
+    async fn create_service_strips_default_target_host() {
+        // "localhost", "127.0.0.1", and the empty/whitespace string all
+        // collapse to the default (None) so listings stay clean.
+        for (i, host) in ["localhost", "127.0.0.1", "", "   "].iter().enumerate() {
+            let a = router(test_ctx().await);
+            let body = format!(
+                r#"{{"name":"app{}","target_port":3000,"target_host":"{}"}}"#,
+                i, host
+            );
+            let resp = post_json(&a, "/services", &body).await;
+            assert_eq!(resp.status(), StatusCode::CREATED, "host={:?}", host);
+            let json = body_json(resp).await;
+            assert!(
+                json.get("target_host").map(|v| v.is_null()).unwrap_or(true),
+                "host={:?} should collapse to default but got: {}",
+                host,
+                json
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn create_service_rejects_overlong_target_host() {
+        let a = router(test_ctx().await);
+        let body = format!(
+            r#"{{"name":"app","target_port":80,"target_host":"{}"}}"#,
+            "a".repeat(254)
+        );
+        let resp = post_json(&a, "/services", &body).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_service_rejects_target_host_with_scheme() {
+        let a = router(test_ctx().await);
+        let resp = post_json(
+            &a,
+            "/services",
+            r#"{"name":"app","target_port":80,"target_host":"http://x.y"}"#,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

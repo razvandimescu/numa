@@ -87,6 +87,11 @@ async fn accept_loop(listener: TcpListener, pp: Option<Arc<PpConfig>>, ctx: Arc<
                 return;
             };
 
+            if !ctx.allow_from.allows(remote_addr.ip()) {
+                debug!("TCP: dropping {} — not in allow_from", remote_addr);
+                return;
+            }
+
             handle_framed_dns_connection(stream, remote_addr, &ctx, Transport::Tcp).await;
         });
     }

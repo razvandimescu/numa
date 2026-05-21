@@ -19,6 +19,13 @@ api_port = 5380
                               # still configure v6 records for local services.
                               # Default: false.
 
+# ── Client-IP allowlist ────────────────────────────────────────────
+# Required on WAN-facing binds, or numa becomes an open recursive
+# resolver. Loopback always allowed. Denied peers: silent UDP drop,
+# TLS close pre-handshake, DoH 403.
+#
+# allow_from = ["10.0.0.0/8", "192.168.0.0/16", "fd00::/8"]
+
 # [upstream]
 # mode = "forward"                              # "forward" (default) — relay to upstream
 #                                               # "recursive" — resolve from root hints (no address needed)
@@ -126,15 +133,21 @@ tls_port = 443
 tld = "numa"
 # bind_addr = "127.0.0.1"  # default; set to "0.0.0.0" for LAN access to .numa services
 
-# PROXY protocol v2 — preserves the real client IP when numa runs behind an
-# L4 front-end (dnsdist, HAProxy, nginx-stream, AWS NLB, GCP TCP LB). Empty
-# `from` allowlist (or omitted section) leaves the feature disabled.
-# A non-empty list puts the listener in PROXY-required mode: connections from
-# listed senders that omit the header are dropped, and connections from
-# non-listed senders are dropped before any read.
+# ── Bring-your-own TLS cert ────────────────────────────────────────
+# Skip per-device CA install. `tld` must be a domain you own. Renew
+# externally; restart to pick up.
+#
+# cert_path = "/etc/letsencrypt/live/example.com/fullchain.pem"
+# key_path  = "/etc/letsencrypt/live/example.com/privkey.pem"
+
+# ── PROXY protocol v2 ──────────────────────────────────────────────
+# Preserve the real client IP behind an L4 front-end (dnsdist,
+# HAProxy, AWS NLB). Non-empty `from` is required-mode: connections
+# outside the allowlist, or missing the header, are dropped.
+#
 # [proxy.proxy_protocol]
-# from = ["10.0.0.0/8", "127.0.0.1"]  # CIDR allowlist of trusted L4 front-ends
-# header_timeout_ms = 5000             # ms; kill stalled-header connections fast
+# from = ["10.0.0.0/8", "127.0.0.1"]  # trusted L4 front-ends
+# header_timeout_ms = 5000             # kill stalled-header connections
 
 # Pre-configured services (numa.numa is always added automatically)
 # [[services]]
@@ -144,6 +157,7 @@ tld = "numa"
 # [[services]]
 # name = "api"
 # target_port = 8000
+# target_host = "192.168.1.50"  # optional, defaults to localhost
 
 # Example zone records:
 # [[zones]]
@@ -187,7 +201,9 @@ tld = "numa"
 # cert_path = "/etc/numa/dot.crt"  # PEM cert; omit to use self-signed (proxy CA if available)
 # key_path = "/etc/numa/dot.key"   # PEM private key; must be set together with cert_path
 
-# PROXY v2 also attaches to DoT — same semantics as [proxy.proxy_protocol].
+# ── PROXY v2 on DoT ────────────────────────────────────────────────
+# Same semantics as [proxy.proxy_protocol] above.
+#
 # [dot.proxy_protocol]
 # from = ["10.0.0.0/8"]
 # header_timeout_ms = 5000
@@ -198,20 +214,12 @@ tld = "numa"
 # broadcast_interval_secs = 30
 # peer_timeout_secs = 90
 
-# Mobile API — persistent HTTP listener serving read-only routes
-# (/health, /ca.pem, /mobileconfig, /ca.mobileconfig) on a LAN-reachable
-# port. Consumed by the iOS/Android companion apps for discovery and
-# profile fetching, and by `numa setup-phone` for QR-based onboarding.
-#
-# Opt-in because the listener binds to the LAN by default. None of the
-# exposed routes are cryptographically sensitive (no private keys, no
-# state mutations, all idempotent GETs), but enabling it does add a new
-# listener to any device on the LAN that scans port 8765.
-#
-# Safe for home LANs. Think twice before enabling on untrusted LANs
-# (office Wi-Fi, coffee shops, etc.) — an attacker on the same network
-# could run a competing Numa instance that shadows yours via mDNS and
-# trick companion apps into installing their profile instead of yours.
+# ── Mobile API ─────────────────────────────────────────────────────
+# Read-only HTTP for the companion apps (discovery, /ca.pem,
+# /mobileconfig, QR onboarding via `numa setup-phone`). Binds to the
+# LAN by default. Don't enable on untrusted LANs (office Wi-Fi,
+# cafés) — an attacker on the same network can shadow you via mDNS
+# and serve their profile instead.
 [mobile]
 enabled = true                # opt-in to the mobile API listener
 # port = 8765                 # default; matches Discovery.swift defaultAPIPort

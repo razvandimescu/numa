@@ -25,6 +25,11 @@ jobs:
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
             name: numa-linux-aarch64
+            cross: true
+          - target: arm-unknown-linux-musleabihf
+            os: ubuntu-latest
+            name: numa-linux-armv6
+            cross: true
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             name: numa-windows-x86_64
@@ -42,16 +47,16 @@ jobs:
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
-      - name: Install cross (aarch64)
-        if: matrix.target == 'aarch64-unknown-linux-musl'
+      - name: Install cross
+        if: matrix.cross
         run: cargo install cross
 
       - name: Build (native)
-        if: matrix.target != 'aarch64-unknown-linux-musl'
+        if: matrix.cross != true
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Build (cross)
-        if: matrix.target == 'aarch64-unknown-linux-musl'
+        if: matrix.cross
         run: cross build --release --target ${{ matrix.target }}
 
       - name: Package (Unix)

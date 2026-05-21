@@ -8,8 +8,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use arc_swap::ArcSwap;
-use log::{error, info};
+use log::{debug, error, info};
 
 use crate::blocklist::{download_blocklists, parse_blocklist, BlocklistStore};
 use crate::bootstrap_resolver::NumaResolver;
@@ -74,9 +73,14 @@ pub async fn run(config_path: String) -> crate::Result<()> {
 
     // Build service store: config services + persisted user services
     let mut service_store = ServiceStore::new();
-    service_store.insert_from_config("numa", config.server.api_port, Vec::new());
+    service_store.insert_from_config("numa", config.server.api_port, None, Vec::new());
     for svc in &config.services {
-        service_store.insert_from_config(&svc.name, svc.target_port, svc.routes.clone());
+        service_store.insert_from_config(
+            &svc.name,
+            svc.target_port,
+            svc.target_host.clone(),
+            svc.routes.clone(),
+        );
     }
     service_store.load_persisted();
 
@@ -100,28 +104,8 @@ pub async fn run(config_path: String) -> crate::Result<()> {
         .clone()
         .unwrap_or_else(crate::data_dir);
 
-    // Build initial TLS config before ServerCtx (so ArcSwap is ready at construction)
-    let initial_tls = if config.proxy.enabled && config.proxy.tls_port > 0 {
-        let service_names = service_store.names();
-        match crate::tls::build_tls_config(
-            &config.proxy.tld,
-            &service_names,
-            Vec::new(),
-            &resolved_data_dir,
-        ) {
-            Ok(tls_config) => Some(ArcSwap::from(tls_config)),
-            Err(e) => {
-                if let Some(advisory) = crate::tls::try_data_dir_advisory(&e, &resolved_data_dir) {
-                    eprint!("{}", advisory);
-                } else {
-                    log::warn!("TLS setup failed, HTTPS proxy disabled: {}", e);
-                }
-                None
-            }
-        }
-    } else {
-        None
-    };
+    let (initial_tls, tls_byo) =
+        crate::tls::build_proxy_tls(&config, &service_store, &resolved_data_dir);
 
     let doh_enabled = initial_tls.is_some();
     let health_meta = crate::health::HealthMeta::build(
@@ -137,6 +121,15 @@ pub async fn run(config_path: String) -> crate::Result<()> {
     );
 
     let ca_pem = std::fs::read_to_string(resolved_data_dir.join("ca.pem")).ok();
+
+    let allow_from = crate::acl::AllowFromAcl::from_entries(&config.server.allow_from)
+        .map_err(|e| format!("invalid [server].allow_from: {e}"))?;
+    if allow_from.is_enabled() {
+        info!(
+            "client-IP allow_from enabled with {} entries (loopback always allowed)",
+            config.server.allow_from.len()
+        );
+    }
 
     let sockets = bind_udp_listeners(&config.server.bind_addr).await?;
 
@@ -173,6 +166,7 @@ pub async fn run(config_path: String) -> crate::Result<()> {
         config_dir: crate::config_dir(),
         data_dir: resolved_data_dir,
         tls_config: initial_tls,
+        tls_byo,
         upstream_mode: resolved_mode,
         root_hints,
         srtt: std::sync::RwLock::new(crate::srtt::SrttCache::new(config.upstream.srtt)),
@@ -184,6 +178,7 @@ pub async fn run(config_path: String) -> crate::Result<()> {
         mobile_enabled: config.mobile.enabled,
         mobile_port: config.mobile.port,
         filter_aaaa: config.server.filter_aaaa,
+        allow_from,
     });
 
     let zone_count: usize = ctx.zone_map.len();
@@ -403,6 +398,11 @@ async fn udp_serve_loop(
         let Some((src_addr, dns_len)) = pp.apply(&mut buffer.buf, len, peer) else {
             continue;
         };
+        if !ctx.allow_from.allows(src_addr.ip()) {
+            // Silent drop: no reply means no amplification, no fingerprint.
+            debug!("UDP: dropping {} — not in allow_from", src_addr);
+            continue;
+        }
         // Response goes to the kernel UDP peer (e.g. dnsdist), not the
         // PROXY-extracted logical source — otherwise the reply skips the
         // front-end and never reaches the original client.

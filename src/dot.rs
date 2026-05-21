@@ -1,5 +1,4 @@
 use std::net::{IpAddr, SocketAddr};
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,29 +19,6 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn dot_alpn() -> Vec<Vec<u8>> {
     vec![b"dot".to_vec()]
-}
-
-/// Build a TLS ServerConfig for DoT from user-provided cert/key PEM files.
-fn load_tls_config(cert_path: &Path, key_path: &Path) -> crate::Result<Arc<ServerConfig>> {
-    // rustls needs a CryptoProvider installed before ServerConfig::builder().
-    // The proxy's build_tls_config also does this; we repeat it here because
-    // running DoT with user-provided certs while the proxy is disabled would
-    // otherwise panic on first handshake (no default provider).
-    let _ = rustls::crypto::ring::default_provider().install_default();
-
-    let cert_pem = std::fs::read(cert_path)?;
-    let key_pem = std::fs::read(key_path)?;
-
-    let certs: Vec<_> = rustls_pemfile::certs(&mut &cert_pem[..]).collect::<Result<_, _>>()?;
-    let key = rustls_pemfile::private_key(&mut &key_pem[..])?
-        .ok_or("no private key found in key file")?;
-
-    let mut config = ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certs, key)?;
-    config.alpn_protocols = dot_alpn();
-
-    Ok(Arc::new(config))
 }
 
 /// Build a self-signed DoT TLS config. Can't reuse `ctx.tls_config` (the
@@ -70,14 +46,18 @@ fn self_signed_tls(ctx: &ServerCtx) -> Option<Arc<ServerConfig>> {
 /// Start the DNS-over-TLS listener (RFC 7858).
 pub async fn start_dot(ctx: Arc<ServerCtx>, config: &DotConfig) {
     let tls_config = match (&config.cert_path, &config.key_path) {
-        (Some(cert), Some(key)) => match load_tls_config(cert, key) {
+        (Some(cert), Some(key)) => match crate::tls::load_pem_tls_config(cert, key, dot_alpn()) {
             Ok(cfg) => cfg,
             Err(e) => {
                 warn!("DoT: failed to load TLS cert/key: {} — DoT disabled", e);
                 return;
             }
         },
-        _ => match self_signed_tls(&ctx) {
+        (Some(_), None) | (None, Some(_)) => {
+            error!("[dot] cert_path and key_path must both be set — DoT disabled");
+            return;
+        }
+        (None, None) => match self_signed_tls(&ctx) {
             Some(cfg) => cfg,
             None => return,
         },
@@ -142,6 +122,12 @@ async fn accept_loop(
             else {
                 return;
             };
+
+            if !ctx.allow_from.allows(remote_addr.ip()) {
+                // Close before TLS handshake — no fingerprint, no cert exposure.
+                debug!("DoT: dropping {} — not in allow_from", remote_addr);
+                return;
+            }
 
             let tls_stream =
                 match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {

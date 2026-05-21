@@ -53,6 +53,7 @@ pub async fn test_ctx() -> ServerCtx {
         config_dir: PathBuf::from("/tmp"),
         data_dir: PathBuf::from("/tmp"),
         tls_config: None,
+        tls_byo: false,
         upstream_mode: UpstreamMode::Forward,
         root_hints: Vec::new(),
         srtt: RwLock::new(SrttCache::new(true)),
@@ -64,6 +65,7 @@ pub async fn test_ctx() -> ServerCtx {
         mobile_enabled: false,
         mobile_port: 8765,
         filter_aaaa: false,
+        allow_from: crate::acl::AllowFromAcl::default(),
     }
 }
 

@@ -21,6 +21,17 @@ pub async fn doh_post(State(state): State<super::proxy::DohState>, req: Request)
         return StatusCode::NOT_FOUND.into_response();
     }
 
+    // Gate DoH only — service-proxy routes on the same TLS listener
+    // aren't subject to the DNS ACL. Fail closed when the peer is unknown.
+    if state.ctx.allow_from.is_enabled() {
+        let allowed = state
+            .remote_addr
+            .is_some_and(|a| state.ctx.allow_from.allows(a.ip()));
+        if !allowed {
+            return StatusCode::FORBIDDEN.into_response();
+        }
+    }
+
     let content_type = req
         .headers()
         .get(hyper::header::CONTENT_TYPE)

@@ -60,6 +60,8 @@ pub struct ServerCtx {
     pub config_dir: PathBuf,
     pub data_dir: PathBuf,
     pub tls_config: Option<ArcSwap<ServerConfig>>,
+    /// Set when `tls_config` is a user-supplied cert; suppresses regeneration.
+    pub tls_byo: bool,
     pub upstream_mode: UpstreamMode,
     pub root_hints: Vec<SocketAddr>,
     pub srtt: RwLock<SrttCache>,
@@ -81,6 +83,7 @@ pub struct ServerCtx {
     /// answer) instead of hitting cache/forwarding/upstream. Local data
     /// (overrides, zones, .numa proxy, blocklist sinkhole) is unaffected.
     pub filter_aaaa: bool,
+    pub allow_from: crate::acl::AllowFromAcl,
 }
 
 /// Transport-agnostic DNS resolution. Runs the full pipeline (overrides, blocklist,
@@ -1394,7 +1397,7 @@ mod tests {
     #[tokio::test]
     async fn pipeline_tld_proxy_resolves_service() {
         let ctx = crate::testutil::test_ctx().await;
-        ctx.services.lock().unwrap().insert("grafana", 3000);
+        ctx.services.lock().unwrap().insert("grafana", 3000, None);
         let ctx = Arc::new(ctx);
 
         let (resp, path) = resolve_in_test(&ctx, "grafana.numa", QueryType::A).await;

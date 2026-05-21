@@ -43,24 +43,8 @@ impl PpConfig {
         if cfg.from.is_empty() {
             return Ok(None);
         }
-        let mut from = Vec::with_capacity(cfg.from.len());
-        for entry in &cfg.from {
-            let net: IpNet = entry
-                .parse()
-                .or_else(|_| entry.parse::<IpAddr>().map(IpNet::from))
-                .map_err(|_| format!("invalid CIDR or IP in proxy_protocol.from: {entry:?}"))?;
-            if matches!(&net, IpNet::V4(n) if n.prefix_len() == 0)
-                || matches!(&net, IpNet::V6(n) if n.prefix_len() == 0)
-            {
-                warn!(
-                    "proxy_protocol.from contains world-routable {} — any sender on the Internet will be permitted to spoof source IPs",
-                    entry
-                );
-            }
-            from.push(net);
-        }
         Ok(Some(PpConfig {
-            from,
+            from: crate::acl::parse_cidr_list(&cfg.from, "proxy_protocol.from")?,
             header_timeout: Duration::from_millis(cfg.header_timeout_ms),
         }))
     }
