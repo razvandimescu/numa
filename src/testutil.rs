@@ -69,6 +69,24 @@ pub async fn test_ctx() -> ServerCtx {
     }
 }
 
+/// Build a `DnsRecord::A` — concise fixture for zone-map and pipeline tests.
+pub fn a_record(domain: &str, addr: Ipv4Addr, ttl: u32) -> DnsRecord {
+    DnsRecord::A {
+        domain: domain.to_string(),
+        addr,
+        ttl,
+    }
+}
+
+/// Build a `DnsRecord::CNAME` — concise fixture for zone-map and pipeline tests.
+pub fn cname_record(domain: &str, host: &str, ttl: u32) -> DnsRecord {
+    DnsRecord::CNAME {
+        domain: domain.to_string(),
+        host: host.to_string(),
+        ttl,
+    }
+}
+
 /// Build a NOERROR response containing a single A record — the shape used
 /// repeatedly by pipeline/forwarding tests to seed `mock_upstream`.
 pub fn a_record_response(domain: &str, addr: Ipv4Addr, ttl: u32) -> DnsPacket {

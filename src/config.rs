@@ -911,6 +911,29 @@ mod tests {
     }
 
     #[test]
+    fn cname_returned_when_qtype_absent() {
+        // RFC 1034 §3.6.2: a query on a CNAME owner for a different qtype must
+        // return the CNAME so the chase layer can follow it. Exact + wildcard.
+        let map = build_zone_map(&[
+            zone("alias.test", "CNAME", "real.test"),
+            zone("*.svc.home", "CNAME", "proxy.home"),
+        ])
+        .unwrap();
+
+        let exact = map.lookup("alias.test", QueryType::A).expect("hit");
+        assert!(matches!(&exact[0], DnsRecord::CNAME { host, .. } if host == "real.test"));
+
+        let wild = map.lookup("git.svc.home", QueryType::A).expect("hit");
+        match &wild[0] {
+            DnsRecord::CNAME { domain, host, .. } => {
+                assert_eq!(domain, "git.svc.home", "wildcard owner must be QNAME");
+                assert_eq!(host, "proxy.home");
+            }
+            other => panic!("expected CNAME, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn wildcard_nodata_when_qtype_absent() {
         let map = build_zone_map(&[zone("*.foo", "A", "10.0.0.1")]).unwrap();
         let result = map.lookup("x.foo", QueryType::AAAA);
@@ -1623,9 +1646,19 @@ impl ZoneMap {
 
     /// `None` = no zone owns this name (fall through to next stage).
     /// `Some(rrs)` = zone owns name; empty vec is NODATA (RFC 4592 §2.2.1).
+    /// RFC 1034 §3.6.2: if the qtype is absent but a CNAME exists at the
+    /// same name, return the CNAME so the chase layer can follow it.
     pub fn lookup(&self, qname: &str, qtype: QueryType) -> Option<Vec<DnsRecord>> {
         if let Some(records) = self.exact.get(qname) {
-            return Some(records.get(&qtype).cloned().unwrap_or_default());
+            if let Some(rrs) = records.get(&qtype) {
+                return Some(rrs.clone());
+            }
+            if qtype != QueryType::CNAME {
+                if let Some(cnames) = records.get(&QueryType::CNAME) {
+                    return Some(cnames.clone());
+                }
+            }
+            return Some(Vec::new());
         }
         let mut rest = qname;
         while let Some(dot) = rest.find('.') {
@@ -1634,20 +1667,24 @@ impl ZoneMap {
                 break;
             }
             if let Some(records) = self.wildcard.get(parent) {
-                return Some(
-                    records
-                        .get(&qtype)
-                        .map(|rrs| {
-                            rrs.iter()
-                                .cloned()
-                                .map(|mut r| {
-                                    r.set_domain(qname.to_string());
-                                    r
-                                })
-                                .collect()
+                let rebind = |rrs: &Vec<DnsRecord>| -> Vec<DnsRecord> {
+                    rrs.iter()
+                        .cloned()
+                        .map(|mut r| {
+                            r.set_domain(qname.to_string());
+                            r
                         })
-                        .unwrap_or_default(),
-                );
+                        .collect()
+                };
+                if let Some(rrs) = records.get(&qtype) {
+                    return Some(rebind(rrs));
+                }
+                if qtype != QueryType::CNAME {
+                    if let Some(cnames) = records.get(&QueryType::CNAME) {
+                        return Some(rebind(cnames));
+                    }
+                }
+                return Some(Vec::new());
             }
             rest = parent;
         }

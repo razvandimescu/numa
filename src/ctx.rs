@@ -108,21 +108,10 @@ pub async fn resolve_query(
     // Pipeline: overrides -> .localhost -> local zones -> special-use (unless forwarded)
     //        -> .tld proxy -> blocklist -> cache -> forwarding -> recursive/upstream
     // Each lock is scoped to avoid holding MutexGuard across await points.
-    let mut upstream_transport: Option<crate::stats::UpstreamTransport> = None;
-    let (response, path, dnssec) = match resolve_local(&query, src_addr, &qname, qtype, ctx) {
-        Some(result) => result,
-        None => {
-            let (resp, path, dnssec, ut) =
-                resolve_remote(&query, raw_wire, src_addr, &qname, qtype, ctx).await;
-            upstream_transport = ut;
-            (resp, path, dnssec)
-        }
-    };
-
-    let mut response = response;
+    let (mut response, path, mut dnssec, upstream_transport) =
+        resolve_with_cname_chase(&query, raw_wire, src_addr, &qname, qtype, ctx).await;
 
     // DNSSEC validation (recursive/forwarded responses only)
-    let mut dnssec = dnssec;
     if ctx.dnssec_enabled && path == QueryPath::Recursive {
         let (status, vstats) =
             crate::dnssec::validate_response(&response, &ctx.cache, &ctx.root_hints, &ctx.srtt)
@@ -233,6 +222,71 @@ fn serialize_with_fallback(
             servfail.write(&mut out)?;
             Ok(out)
         }
+    }
+}
+
+/// RFC 1034 §3.6.2 CNAME chase across the local-or-remote pipeline. Bad
+/// chains (loop, over `MAX_CNAME_DEPTH`) return SERVFAIL, never bare CNAME.
+async fn resolve_with_cname_chase(
+    query: &DnsPacket,
+    raw_wire: &[u8],
+    src_addr: SocketAddr,
+    qname: &str,
+    qtype: QueryType,
+    ctx: &Arc<ServerCtx>,
+) -> (
+    DnsPacket,
+    QueryPath,
+    DnssecStatus,
+    Option<crate::stats::UpstreamTransport>,
+) {
+    let mut visited = HashSet::new();
+    visited.insert(qname.to_ascii_lowercase());
+
+    let (mut resp, path, dnssec, mut ut) = match resolve_local(query, src_addr, qname, qtype, ctx) {
+        Some((r, p, d)) => (r, p, d, None),
+        None => resolve_remote(query, raw_wire, src_addr, qname, qtype, ctx).await,
+    };
+    let mut current_qname = qname.to_string();
+
+    loop {
+        if resp.answers.iter().any(|r| r.query_type() == qtype)
+            || resp.header.rescode != ResultCode::NOERROR
+        {
+            return (resp, path, dnssec, ut);
+        }
+        let Some(target) = crate::recursive::extract_cname_target(&resp, &current_qname) else {
+            return (resp, path, dnssec, ut);
+        };
+        if visited.len() > crate::recursive::MAX_CNAME_DEPTH as usize
+            || !visited.insert(target.to_ascii_lowercase())
+        {
+            return (
+                DnsPacket::response_from(query, ResultCode::SERVFAIL),
+                path,
+                dnssec,
+                ut,
+            );
+        }
+
+        let sub_query = DnsPacket::query(query.header.id, &target, qtype);
+        let mut sub_buf = BytePacketBuffer::new();
+        sub_query
+            .write(&mut sub_buf)
+            .expect("sub-query serialization");
+        let (sub_resp, _, _, sub_ut) =
+            match resolve_local(&sub_query, src_addr, &target, qtype, ctx) {
+                Some((r, p, d)) => (r, p, d, None),
+                None => {
+                    resolve_remote(&sub_query, sub_buf.filled(), src_addr, &target, qtype, ctx)
+                        .await
+                }
+            };
+
+        resp.answers.extend(sub_resp.answers);
+        resp.header.rescode = sub_resp.header.rescode;
+        ut = ut.or(sub_ut);
+        current_qname = target;
     }
 }
 
@@ -2201,5 +2255,110 @@ mod tests {
             .unwrap();
             assert_eq!(src, addr, "reply must come from the receiving socket");
         }
+    }
+
+    // ---- CNAME chase (issue #237) ----
+
+    async fn ctx_with_zone(records: Vec<DnsRecord>) -> ServerCtx {
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.zone_map = crate::config::ZoneMap::from_exact(records);
+        ctx
+    }
+
+    #[tokio::test]
+    async fn cname_chase_local_to_local_returns_combined_answer() {
+        let ctx = Arc::new(
+            ctx_with_zone(vec![
+                crate::testutil::cname_record("app.example.com", "nas.lan", 60),
+                crate::testutil::a_record("nas.lan", Ipv4Addr::new(192, 168, 1, 42), 60),
+            ])
+            .await,
+        );
+
+        let (resp, path) = resolve_in_test(&ctx, "app.example.com", QueryType::A).await;
+        assert_eq!(path, QueryPath::Local);
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+        assert_eq!(resp.answers.len(), 2);
+        assert!(matches!(&resp.answers[0], DnsRecord::CNAME { host, .. } if host == "nas.lan"));
+        assert!(
+            matches!(&resp.answers[1], DnsRecord::A { addr, .. } if *addr == Ipv4Addr::new(192, 168, 1, 42))
+        );
+    }
+
+    #[tokio::test]
+    async fn cname_chase_direct_cname_query_does_not_chase() {
+        let ctx = Arc::new(
+            ctx_with_zone(vec![
+                crate::testutil::cname_record("app.example.com", "nas.lan", 60),
+                crate::testutil::a_record("nas.lan", Ipv4Addr::new(192, 168, 1, 42), 60),
+            ])
+            .await,
+        );
+
+        let (resp, path) = resolve_in_test(&ctx, "app.example.com", QueryType::CNAME).await;
+        assert_eq!(path, QueryPath::Local);
+        assert_eq!(resp.answers.len(), 1);
+        assert!(matches!(&resp.answers[0], DnsRecord::CNAME { .. }));
+    }
+
+    #[tokio::test]
+    async fn cname_chase_loop_returns_servfail() {
+        let ctx = Arc::new(
+            ctx_with_zone(vec![
+                crate::testutil::cname_record("a.test", "b.test", 60),
+                crate::testutil::cname_record("b.test", "a.test", 60),
+            ])
+            .await,
+        );
+        let (resp, _) = resolve_in_test(&ctx, "a.test", QueryType::A).await;
+        assert_eq!(resp.header.rescode, ResultCode::SERVFAIL);
+    }
+
+    #[tokio::test]
+    async fn cname_chase_depth_cap_returns_servfail() {
+        let chain: Vec<DnsRecord> = (0..10)
+            .map(|i| {
+                crate::testutil::cname_record(
+                    &format!("n{}.test", i),
+                    &format!("n{}.test", i + 1),
+                    60,
+                )
+            })
+            .collect();
+        let ctx = Arc::new(ctx_with_zone(chain).await);
+        let (resp, _) = resolve_in_test(&ctx, "n0.test", QueryType::A).await;
+        assert_eq!(resp.header.rescode, ResultCode::SERVFAIL);
+    }
+
+    #[tokio::test]
+    async fn cname_chase_local_to_upstream_returns_combined() {
+        let upstream = crate::testutil::mock_upstream(crate::testutil::a_record_response(
+            "public.example.org",
+            Ipv4Addr::new(93, 184, 216, 34),
+            300,
+        ))
+        .await;
+
+        let mut ctx = ctx_with_zone(vec![crate::testutil::cname_record(
+            "alias.test",
+            "public.example.org",
+            60,
+        )])
+        .await;
+        ctx.upstream_pool = Mutex::new(crate::forward::UpstreamPool::new(
+            vec![crate::forward::Upstream::Udp(upstream)],
+            vec![],
+        ));
+        let ctx = Arc::new(ctx);
+
+        let (resp, _) = resolve_in_test(&ctx, "alias.test", QueryType::A).await;
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+        assert_eq!(resp.answers.len(), 2);
+        assert!(
+            matches!(&resp.answers[0], DnsRecord::CNAME { host, .. } if host == "public.example.org")
+        );
+        assert!(
+            matches!(&resp.answers[1], DnsRecord::A { addr, .. } if *addr == Ipv4Addr::new(93, 184, 216, 34))
+        );
     }
 }
