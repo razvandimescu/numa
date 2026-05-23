@@ -85,6 +85,9 @@ impl ClientPolicySet {
     /// First matching rule wins. Within a rule, allow beats block (via the
     /// underlying `BlocklistStore` semantics).
     pub fn evaluate(&self, peer: IpAddr, qname: &str) -> Decision {
+        // Dual-stack `[::]` binds deliver IPv4 clients as `::ffff:a.b.c.d`;
+        // canonicalize so IPv4 CIDR rules and the loopback check still match.
+        let peer = peer.to_canonical();
         if self.rules.is_empty() || peer.is_loopback() {
             return Decision::Passthrough;
         }
@@ -205,6 +208,28 @@ mod tests {
         );
         assert_eq!(
             set.evaluate(ip("::1"), "example.com"),
+            Decision::Passthrough
+        );
+        // IPv4-mapped loopback on a dual-stack bind must also pass through.
+        assert_eq!(
+            set.evaluate(ip("::ffff:127.0.0.1"), "example.com"),
+            Decision::Passthrough
+        );
+    }
+
+    #[test]
+    fn ipv4_mapped_client_matches_v4_rule() {
+        // Dual-stack `[::]` binds deliver IPv4 peers as `::ffff:a.b.c.d`;
+        // an IPv4 CIDR rule must still match (regression for #239 follow-up).
+        let set =
+            ClientPolicySet::from_configs(&[cfg(&["192.168.1.50/32"], &["youtube.com"], &[])])
+                .unwrap();
+        assert_eq!(
+            set.evaluate(ip("::ffff:192.168.1.50"), "m.youtube.com"),
+            Decision::Block
+        );
+        assert_eq!(
+            set.evaluate(ip("::ffff:192.168.1.99"), "m.youtube.com"),
             Decision::Passthrough
         );
     }
