@@ -235,7 +235,7 @@ pub fn parse_blocklist(text: &str) -> HashSet<String> {
     domains
 }
 
-pub(crate) fn normalize(domain: &str) -> String {
+fn normalize(domain: &str) -> String {
     domain.to_lowercase().trim_end_matches('.').to_string()
 }
 

@@ -6,14 +6,13 @@
 //! Loopback bypass mirrors `allow_from`: stub resolvers on the same host
 //! never hit the per-client path.
 
-use std::collections::HashSet;
 use std::net::IpAddr;
 
 use ipnet::IpNet;
 use serde::Deserialize;
 
 use crate::acl::parse_cidr_list;
-use crate::blocklist::{normalize, BlocklistStore};
+use crate::blocklist::{parse_blocklist, BlocklistStore};
 
 #[derive(Deserialize, Clone, Debug, Default)]
 pub struct ClientPolicyConfig {
@@ -51,20 +50,18 @@ impl ClientPolicySet {
             if cfg.clients.is_empty() {
                 return Err(format!("{ctx}: must list at least one CIDR or IP"));
             }
-            if cfg.block.is_empty() && cfg.allow.is_empty() {
+            // Reuse the global blocklist parser so per-client and global lists can't drift.
+            let blocks = parse_blocklist(&cfg.block.join("\n"));
+            let allows = parse_blocklist(&cfg.allow.join("\n"));
+            if blocks.is_empty() && allows.is_empty() {
                 return Err(format!(
-                    "client_policy[{idx}]: must specify `block` or `allow` (or both)"
+                    "client_policy[{idx}]: must specify at least one valid domain in `block` or `allow`"
                 ));
             }
-            let blocks: HashSet<String> = cfg
-                .block
-                .iter()
-                .map(|s| normalize(strip_wildcard(s)))
-                .collect();
             let mut store = BlocklistStore::new();
             store.swap_domains(blocks, vec![]);
-            for a in &cfg.allow {
-                store.add_to_allowlist(strip_wildcard(a));
+            for a in &allows {
+                store.add_to_allowlist(a);
             }
             rules.push(ClientPolicy {
                 nets: parse_cidr_list(&cfg.clients, &ctx)?,
@@ -105,10 +102,6 @@ impl ClientPolicySet {
         }
         Decision::Passthrough
     }
-}
-
-fn strip_wildcard(s: &str) -> &str {
-    s.strip_prefix("*.").unwrap_or(s)
 }
 
 #[cfg(test)]
@@ -161,6 +154,52 @@ mod tests {
             Decision::Block
         );
         assert_eq!(set.evaluate(ip("10.0.0.5"), "tiktok.com"), Decision::Block);
+    }
+
+    #[test]
+    fn adblock_syntax_is_parsed_like_global_list() {
+        // `||host^` and `$options` must be stripped, matching parse_blocklist.
+        let set = ClientPolicySet::from_configs(&[cfg(
+            &["10.0.0.0/8"],
+            &["||tracker.com^", "ads.net$third-party"],
+            &[],
+        )])
+        .unwrap();
+        assert_eq!(set.evaluate(ip("10.0.0.5"), "tracker.com"), Decision::Block);
+        assert_eq!(
+            set.evaluate(ip("10.0.0.5"), "sub.tracker.com"),
+            Decision::Block
+        );
+        assert_eq!(set.evaluate(ip("10.0.0.5"), "ads.net"), Decision::Block);
+    }
+
+    #[test]
+    fn dotless_entry_does_not_blanket_block_a_tld() {
+        // `*.com` normalizes to bare `com`, which parse_blocklist drops (no dot),
+        // so it must NOT sinkhole the whole TLD; a valid sibling still blocks.
+        let set = ClientPolicySet::from_configs(&[cfg(
+            &["192.168.1.0/24"],
+            &["*.com", "ads.example"],
+            &[],
+        )])
+        .unwrap();
+        assert_eq!(
+            set.evaluate(ip("192.168.1.5"), "youtube.com"),
+            Decision::Passthrough
+        );
+        assert_eq!(
+            set.evaluate(ip("192.168.1.5"), "ads.example"),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn rule_with_only_invalid_domains_is_rejected() {
+        // A rule whose lists parse to nothing (junk / dotless) errors at load
+        // instead of silently becoming a no-op.
+        assert!(
+            ClientPolicySet::from_configs(&[cfg(&["10.0.0.0/8"], &["*", "com"], &[])]).is_err()
+        );
     }
 
     #[test]
