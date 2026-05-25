@@ -834,11 +834,12 @@ async fn list_services(State(ctx): State<Arc<ServerCtx>>) -> Json<Vec<ServiceRes
     });
     let check_results = futures::future::join_all(check_futures).await;
 
+    let scheme = if ctx.tls_byo { "https" } else { "http" };
     let results = entries
         .into_iter()
         .zip(check_results)
         .map(|((e, source), (healthy, lan_accessible))| ServiceResponse {
-            url: format!("http://{}.{}", e.name, tld),
+            url: format!("{}://{}.{}", scheme, e.name, tld),
             name: e.name,
             target_port: e.target_port,
             target_host: e.target_host,
@@ -914,10 +915,11 @@ async fn create_service(
             None => false,
         }
     });
+    let scheme = if ctx.tls_byo { "https" } else { "http" };
     Ok((
         StatusCode::CREATED,
         Json(ServiceResponse {
-            url: format!("http://{}.{}", name, tld),
+            url: format!("{}://{}.{}", scheme, name, tld),
             name,
             target_port: req.target_port,
             target_host,
@@ -1298,6 +1300,16 @@ mod tests {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn service_url_uses_https_when_byo_cert_configured() {
+        let mut bare = crate::testutil::test_ctx().await;
+        bare.tls_byo = true;
+        let a = router(Arc::new(bare));
+
+        let resp = post_json(&a, "/services", r#"{"name":"nas","target_port":80}"#).await;
+        assert_eq!(body_json(resp).await["url"], "https://nas.numa");
     }
 
     #[tokio::test]
