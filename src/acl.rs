@@ -38,6 +38,9 @@ impl AllowFromAcl {
     }
 
     pub fn allows(&self, peer: IpAddr) -> bool {
+        // Dual-stack `[::]` binds deliver IPv4 clients as `::ffff:a.b.c.d`;
+        // canonicalize so IPv4 CIDR rules and the loopback check still match.
+        let peer = peer.to_canonical();
         if self.nets.is_empty() || peer.is_loopback() {
             return true;
         }
@@ -101,6 +104,22 @@ mod tests {
     fn invalid_entry_rejects() {
         assert!(AllowFromAcl::from_entries(&["not-a-cidr".to_string()]).is_err());
         assert!(AllowFromAcl::from_entries(&["192.168.1.0/40".to_string()]).is_err());
+    }
+
+    #[test]
+    fn ipv4_mapped_client_matches_v4_rule() {
+        // Dual-stack `[::]` binds deliver IPv4 peers as `::ffff:a.b.c.d`;
+        // an IPv4 CIDR allowlist must still match (and still reject out-of-range).
+        let a = acl(&["192.168.1.0/24"]);
+        assert!(a.allows("::ffff:192.168.1.50".parse().unwrap()));
+        assert!(!a.allows("::ffff:10.0.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn ipv4_mapped_loopback_always_allowed() {
+        // IPv4-mapped loopback on a dual-stack bind must pass through too.
+        let a = acl(&["192.168.1.0/24"]);
+        assert!(a.allows("::ffff:127.0.0.1".parse().unwrap()));
     }
 
     #[test]
