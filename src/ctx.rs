@@ -1719,6 +1719,7 @@ mod tests {
                 from: from.iter().map(|s| s.to_string()).collect(),
                 block: block.iter().map(|s| s.to_string()).collect(),
                 allow: allow.iter().map(|s| s.to_string()).collect(),
+                ..Default::default()
             },
         ])
         .unwrap()
