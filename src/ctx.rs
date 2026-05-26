@@ -306,15 +306,17 @@ fn resolve_local(
         return Some((resp, QueryPath::Overridden, DnssecStatus::Indeterminate));
     }
     if qname == "localhost" || qname.ends_with(".localhost") {
-        // RFC 6761: .localhost always resolves to loopback
+        // RFC 6761: .localhost resolves to loopback (NODATA for non-address types).
         let mut resp = DnsPacket::response_from(query, ResultCode::NOERROR);
-        resp.answers.push(sinkhole_record(
+        if let Some(rec) = answer_record(
             qname,
             qtype,
-            std::net::Ipv4Addr::LOCALHOST,
-            std::net::Ipv6Addr::LOCALHOST,
+            Some(std::net::Ipv4Addr::LOCALHOST),
+            Some(std::net::Ipv6Addr::LOCALHOST),
             300,
-        ));
+        ) {
+            resp.answers.push(rec);
+        }
         return Some((resp, QueryPath::Local, DnssecStatus::Indeterminate));
     }
     // RFC 4592 §2.2.1: empty answers (NODATA) still answer locally — don't leak upstream.
@@ -337,13 +339,15 @@ fn resolve_local(
     }
     if ctx.blocklist.read().unwrap().is_blocked(qname) {
         let mut resp = DnsPacket::response_from(query, ResultCode::NOERROR);
-        resp.answers.push(sinkhole_record(
+        if let Some(rec) = answer_record(
             qname,
             qtype,
-            std::net::Ipv4Addr::UNSPECIFIED,
-            std::net::Ipv6Addr::UNSPECIFIED,
+            Some(std::net::Ipv4Addr::UNSPECIFIED),
+            Some(std::net::Ipv6Addr::UNSPECIFIED),
             60,
-        ));
+        ) {
+            resp.answers.push(rec);
+        }
         return Some((resp, QueryPath::Blocked, DnssecStatus::Indeterminate));
     }
     if qtype == QueryType::AAAA && ctx.filter_aaaa {
@@ -382,25 +386,22 @@ fn resolve_proxy_tld(
             v4.to_ipv6_mapped()
         };
         let mut resp = DnsPacket::response_from(query, ResultCode::NOERROR);
-        resp.answers
-            .push(sinkhole_record(qname, qtype, v4, v6, 300));
+        if let Some(rec) = answer_record(qname, qtype, Some(v4), Some(v6), 300) {
+            resp.answers.push(rec);
+        }
         return (resp, QueryPath::Local, DnssecStatus::Indeterminate);
     }
 
     if let Some((ip, _)) = ctx.lan_peers.lock().unwrap().lookup(service_name) {
+        // v4 peers answer A directly and AAAA via the v4-mapped form; v6 peers
+        // answer AAAA only. Mismatched family / non-address qtype → NODATA.
+        let (v4, v6) = match ip {
+            std::net::IpAddr::V4(a) => (Some(a), Some(a.to_ipv6_mapped())),
+            std::net::IpAddr::V6(a) => (None, Some(a)),
+        };
         let mut resp = DnsPacket::response_from(query, ResultCode::NOERROR);
-        match (qtype, ip) {
-            (QueryType::AAAA, std::net::IpAddr::V6(v6)) => resp.answers.push(DnsRecord::AAAA {
-                domain: qname.to_string(),
-                addr: v6,
-                ttl: 300,
-            }),
-            (_, std::net::IpAddr::V4(v4)) => {
-                resp.answers
-                    .push(sinkhole_record(qname, qtype, v4, v4.to_ipv6_mapped(), 300))
-            }
-            // Non-AAAA query on a v6-only peer → NODATA (NOERROR, empty) per RFC 2308.
-            (_, std::net::IpAddr::V6(_)) => {}
+        if let Some(rec) = answer_record(qname, qtype, v4, v6, 300) {
+            resp.answers.push(rec);
         }
         return (resp, QueryPath::Local, DnssecStatus::Indeterminate);
     }
@@ -719,24 +720,29 @@ fn is_special_use_domain(qname: &str) -> bool {
     qname == "local" || qname.ends_with(".local")
 }
 
-fn sinkhole_record(
+/// Address record for `qtype` from the optionally-available v4/v6 forms, or
+/// `None` (NODATA) when the requested family is absent or `qtype` isn't an
+/// address type. Backs every synthesized local answer — sinkholes, `.localhost`,
+/// and `.numa` service/peer responses — so they handle qtypes consistently.
+fn answer_record(
     domain: &str,
     qtype: QueryType,
-    v4: std::net::Ipv4Addr,
-    v6: std::net::Ipv6Addr,
+    v4: Option<std::net::Ipv4Addr>,
+    v6: Option<std::net::Ipv6Addr>,
     ttl: u32,
-) -> DnsRecord {
+) -> Option<DnsRecord> {
     match qtype {
-        QueryType::AAAA => DnsRecord::AAAA {
+        QueryType::A => v4.map(|addr| DnsRecord::A {
             domain: domain.to_string(),
-            addr: v6,
+            addr,
             ttl,
-        },
-        _ => DnsRecord::A {
+        }),
+        QueryType::AAAA => v6.map(|addr| DnsRecord::AAAA {
             domain: domain.to_string(),
-            addr: v4,
+            addr,
             ttl,
-        },
+        }),
+        _ => None,
     }
 }
 
@@ -1741,6 +1747,51 @@ mod tests {
             DnsRecord::A { addr, .. } => assert_eq!(*addr, Ipv4Addr::UNSPECIFIED),
             other => panic!("expected sinkhole A record, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn answer_record_picks_family_or_nodata() {
+        use std::net::{Ipv4Addr, Ipv6Addr};
+        let (v4, v6) = (Some(Ipv4Addr::UNSPECIFIED), Some(Ipv6Addr::UNSPECIFIED));
+        assert!(matches!(
+            answer_record("x.test", QueryType::A, v4, v6, 60),
+            Some(DnsRecord::A { .. })
+        ));
+        assert!(matches!(
+            answer_record("x.test", QueryType::AAAA, v4, v6, 60),
+            Some(DnsRecord::AAAA { .. })
+        ));
+        // Absent family (e.g. A query to a v6-only peer) → NODATA.
+        assert!(answer_record("x.test", QueryType::A, None, v6, 60).is_none());
+        assert!(answer_record("x.test", QueryType::AAAA, v4, None, 60).is_none());
+        // Non-address qtype → NODATA regardless of available addresses.
+        assert!(answer_record("x.test", QueryType::HTTPS, v4, v6, 60).is_none());
+    }
+
+    #[tokio::test]
+    async fn pipeline_blocklist_nodata_for_non_address_qtype() {
+        let ctx = crate::testutil::test_ctx().await;
+        let mut domains = std::collections::HashSet::new();
+        domains.insert("ads.tracker.test".to_string());
+        ctx.blocklist.write().unwrap().swap_domains(domains, vec![]);
+        let ctx = Arc::new(ctx);
+
+        // A still sinkholes to 0.0.0.0 …
+        let (a_resp, _) = resolve_in_test(&ctx, "ads.tracker.test", QueryType::A).await;
+        assert!(matches!(
+            a_resp.answers.first(),
+            Some(DnsRecord::A { addr, .. }) if *addr == Ipv4Addr::UNSPECIFIED
+        ));
+
+        // … but HTTPS (type 65) is NODATA, not a qtype-mismatched A record.
+        let (https_resp, path) = resolve_in_test(&ctx, "ads.tracker.test", QueryType::HTTPS).await;
+        assert_eq!(path, QueryPath::Blocked);
+        assert_eq!(https_resp.header.rescode, ResultCode::NOERROR);
+        assert!(
+            https_resp.answers.is_empty(),
+            "blocked non-address qtype must be NODATA, got {:?}",
+            https_resp.answers
+        );
     }
 
     #[tokio::test]
