@@ -380,6 +380,20 @@ domain = "*.foo.test"
 record_type = "A"
 value = "10.0.0.2"
 ttl = 60
+
+# CNAME chase (issue #237) — interop check that dig parses our
+# combined CNAME+A answer. Logic itself is covered by unit tests.
+[[zones]]
+domain = "alias.local"
+record_type = "CNAME"
+value = "target.local"
+ttl = 60
+
+[[zones]]
+domain = "target.local"
+record_type = "A"
+value = "10.0.0.3"
+ttl = 60
 CONF
 
 RUST_LOG=info "$BINARY" "$CONFIG" > "$LOG" 2>&1 &
@@ -407,6 +421,10 @@ check "Local PTR record (192.168.0.1 → router.lan)" \
 check "Non-local domain still resolves" \
     "." \
     "$($DIG example.com A +short)"
+
+check "CNAME chase: alias.local A → target.local A → 10.0.0.3 (#237)" \
+    "10.0.0.3" \
+    "$($DIG alias.local A +short)"
 
 echo ""
 echo "=== Wildcard zones (RFC 4592) ==="

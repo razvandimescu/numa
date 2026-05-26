@@ -74,6 +74,9 @@ impl AllowFromAcl {
     }
 
     pub fn allows(&self, peer: IpAddr) -> bool {
+        // Dual-stack `[::]` binds deliver IPv4 clients as `::ffff:a.b.c.d`;
+        // canonicalize so the loopback check matches (CidrMatcher canonicalizes
+        // again for membership — idempotent).
         let peer = peer.to_canonical();
         if self.matcher.is_empty() || peer.is_loopback() {
             return true;
@@ -141,29 +144,28 @@ mod tests {
     }
 
     #[test]
+    fn ipv4_mapped_client_matches_v4_rule() {
+        // Dual-stack `[::]` binds deliver IPv4 peers as `::ffff:a.b.c.d`;
+        // an IPv4 CIDR allowlist must still match (and still reject out-of-range).
+        let a = acl(&["192.168.1.0/24"]);
+        assert!(a.allows("::ffff:192.168.1.50".parse().unwrap()));
+        assert!(!a.allows("::ffff:10.0.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn ipv4_mapped_loopback_always_allowed() {
+        // IPv4-mapped loopback on a dual-stack bind must pass through too.
+        let a = acl(&["192.168.1.0/24"]);
+        assert!(a.allows("::ffff:127.0.0.1".parse().unwrap()));
+    }
+
+    #[test]
     fn mixed_v4_and_v6_entries() {
         let a = acl(&["10.0.0.0/8", "2001:db8::/32", "172.16.0.5"]);
         assert!(a.allows("10.1.2.3".parse().unwrap()));
         assert!(a.allows("2001:db8::abcd".parse().unwrap()));
         assert!(a.allows("172.16.0.5".parse().unwrap()));
         assert!(!a.allows("8.8.8.8".parse().unwrap()));
-    }
-
-    #[test]
-    fn allow_from_matches_v4_mapped_client() {
-        // Dual-stack `[::]` binds deliver IPv4 peers as `::ffff:a.b.c.d`; the
-        // canonicalization in CidrMatcher must let a v4 CIDR still match.
-        let a = acl(&["192.168.0.0/16"]);
-        assert!(a.allows("::ffff:192.168.1.5".parse().unwrap()));
-        assert!(!a.allows("::ffff:10.0.0.1".parse().unwrap()));
-    }
-
-    #[test]
-    fn allow_from_v4_mapped_loopback_is_allowed() {
-        // `::ffff:127.0.0.1` is not `Ipv6Addr::is_loopback`; canonicalizing
-        // before the loopback check keeps a v4-mapped loopback bypassed.
-        let a = acl(&["192.168.0.0/16"]);
-        assert!(a.allows("::ffff:127.0.0.1".parse().unwrap()));
     }
 
     fn matcher(include: &[&str], exclude: &[&str]) -> CidrMatcher {

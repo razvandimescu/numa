@@ -15,7 +15,7 @@ use crate::srtt::SrttCache;
 use crate::stats::UpstreamTransport;
 
 const MAX_REFERRAL_DEPTH: u8 = 10;
-const MAX_CNAME_DEPTH: u8 = 8;
+pub(crate) const MAX_CNAME_DEPTH: u8 = 8;
 const NS_QUERY_TIMEOUT: Duration = Duration::from_millis(400);
 const TCP_TIMEOUT: Duration = Duration::from_millis(400);
 const UDP_FAIL_THRESHOLD: u8 = 3;
@@ -790,7 +790,7 @@ async fn send_query(
     }
 }
 
-fn extract_cname_target(response: &DnsPacket, qname: &str) -> Option<String> {
+pub(crate) fn extract_cname_target(response: &DnsPacket, qname: &str) -> Option<String> {
     response.answers.iter().find_map(|r| match r {
         DnsRecord::CNAME { domain, host, .. } if domain.eq_ignore_ascii_case(qname) => {
             Some(host.clone())
