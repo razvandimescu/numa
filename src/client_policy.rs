@@ -162,23 +162,13 @@ mod tests {
     }
 
     #[test]
-    fn star_prefix_blocks_subdomains_and_apex() {
-        let set = policy(&[cfg(&["10.0.0.0/8"], &["*.tiktok.com"], &[])]);
-        check(
-            &set,
-            &[
-                ("10.0.0.5", "vm.tiktok.com", Block),
-                ("10.0.0.5", "tiktok.com", Block),
-            ],
-        );
-    }
-
-    #[test]
     fn adblock_syntax_is_parsed_like_global_list() {
-        // `||host^` and `$options` must be stripped, matching parse_blocklist.
+        // `||host^`, `*.host`, and `$options` must all be stripped to the bare
+        // domain, matching parse_blocklist — and the *apex* ends up blocked, not
+        // just subdomains (so `*.tiktok.com` is not subdomain-only).
         let set = policy(&[cfg(
             &["10.0.0.0/8"],
-            &["||tracker.com^", "ads.net$third-party"],
+            &["||tracker.com^", "*.tiktok.com", "ads.net$third-party"],
             &[],
         )]);
         check(
@@ -186,6 +176,7 @@ mod tests {
             &[
                 ("10.0.0.5", "tracker.com", Block),
                 ("10.0.0.5", "sub.tracker.com", Block),
+                ("10.0.0.5", "tiktok.com", Block),
                 ("10.0.0.5", "ads.net", Block),
             ],
         );
