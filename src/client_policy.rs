@@ -109,6 +109,7 @@ impl ClientPolicySet {
 
 #[cfg(test)]
 mod tests {
+    use super::Decision::{Allow, Block, Passthrough};
     use super::*;
 
     fn cfg(from: &[&str], block: &[&str], allow: &[&str]) -> ClientPolicyConfig {
@@ -129,80 +130,78 @@ mod tests {
         }
     }
 
-    fn ip(s: &str) -> IpAddr {
-        s.parse().unwrap()
+    fn policy(rules: &[ClientPolicyConfig]) -> ClientPolicySet {
+        ClientPolicySet::from_configs(rules).unwrap()
+    }
+
+    /// Assert `(peer, qname) -> Decision` for each case against one rule set.
+    fn check(set: &ClientPolicySet, cases: &[(&str, &str, Decision)]) {
+        for (peer, qname, want) in cases {
+            let got = set.evaluate(peer.parse().unwrap(), qname);
+            assert_eq!(got, *want, "{peer} / {qname}");
+        }
     }
 
     #[test]
     fn empty_set_passes_through() {
         let set = ClientPolicySet::default();
         assert!(!set.is_enabled());
-        assert_eq!(
-            set.evaluate(ip("192.168.1.50"), "example.com"),
-            Decision::Passthrough
-        );
+        check(&set, &[("192.168.1.50", "example.com", Passthrough)]);
     }
 
     #[test]
     fn blocks_matching_client() {
-        let set =
-            ClientPolicySet::from_configs(&[cfg(&["192.168.1.50/32"], &["youtube.com"], &[])])
-                .unwrap();
-        assert_eq!(
-            set.evaluate(ip("192.168.1.50"), "m.youtube.com"),
-            Decision::Block
-        );
-        assert_eq!(
-            set.evaluate(ip("192.168.1.99"), "m.youtube.com"),
-            Decision::Passthrough
+        let set = policy(&[cfg(&["192.168.1.50/32"], &["youtube.com"], &[])]);
+        check(
+            &set,
+            &[
+                ("192.168.1.50", "m.youtube.com", Block),
+                ("192.168.1.99", "m.youtube.com", Passthrough),
+            ],
         );
     }
 
     #[test]
     fn star_prefix_blocks_subdomains_and_apex() {
-        let set =
-            ClientPolicySet::from_configs(&[cfg(&["10.0.0.0/8"], &["*.tiktok.com"], &[])]).unwrap();
-        assert_eq!(
-            set.evaluate(ip("10.0.0.5"), "vm.tiktok.com"),
-            Decision::Block
+        let set = policy(&[cfg(&["10.0.0.0/8"], &["*.tiktok.com"], &[])]);
+        check(
+            &set,
+            &[
+                ("10.0.0.5", "vm.tiktok.com", Block),
+                ("10.0.0.5", "tiktok.com", Block),
+            ],
         );
-        assert_eq!(set.evaluate(ip("10.0.0.5"), "tiktok.com"), Decision::Block);
     }
 
     #[test]
     fn adblock_syntax_is_parsed_like_global_list() {
         // `||host^` and `$options` must be stripped, matching parse_blocklist.
-        let set = ClientPolicySet::from_configs(&[cfg(
+        let set = policy(&[cfg(
             &["10.0.0.0/8"],
             &["||tracker.com^", "ads.net$third-party"],
             &[],
-        )])
-        .unwrap();
-        assert_eq!(set.evaluate(ip("10.0.0.5"), "tracker.com"), Decision::Block);
-        assert_eq!(
-            set.evaluate(ip("10.0.0.5"), "sub.tracker.com"),
-            Decision::Block
+        )]);
+        check(
+            &set,
+            &[
+                ("10.0.0.5", "tracker.com", Block),
+                ("10.0.0.5", "sub.tracker.com", Block),
+                ("10.0.0.5", "ads.net", Block),
+            ],
         );
-        assert_eq!(set.evaluate(ip("10.0.0.5"), "ads.net"), Decision::Block);
     }
 
     #[test]
     fn dotless_entry_does_not_blanket_block_a_tld() {
         // `*.com` normalizes to bare `com`, which parse_blocklist drops (no dot),
         // so it must NOT sinkhole the whole TLD; a valid sibling still blocks.
-        let set = ClientPolicySet::from_configs(&[cfg(
-            &["192.168.1.0/24"],
-            &["*.com", "ads.example"],
-            &[],
-        )])
-        .unwrap();
-        assert_eq!(
-            set.evaluate(ip("192.168.1.5"), "youtube.com"),
-            Decision::Passthrough
-        );
-        assert_eq!(
-            set.evaluate(ip("192.168.1.5"), "ads.example"),
-            Decision::Block
+        let set = policy(&[cfg(&["192.168.1.0/24"], &["*.com", "ads.example"], &[])]);
+        check(
+            &set,
+            &[
+                ("192.168.1.5", "youtube.com", Passthrough),
+                ("192.168.1.5", "ads.example", Block),
+            ],
         );
     }
 
@@ -217,19 +216,17 @@ mod tests {
 
     #[test]
     fn allow_overrides_block_within_rule() {
-        let set = ClientPolicySet::from_configs(&[cfg(
+        let set = policy(&[cfg(
             &["192.168.1.50"],
             &["example.com"],
             &["safe.example.com"],
-        )])
-        .unwrap();
-        assert_eq!(
-            set.evaluate(ip("192.168.1.50"), "safe.example.com"),
-            Decision::Allow
-        );
-        assert_eq!(
-            set.evaluate(ip("192.168.1.50"), "ads.example.com"),
-            Decision::Block
+        )]);
+        check(
+            &set,
+            &[
+                ("192.168.1.50", "safe.example.com", Allow),
+                ("192.168.1.50", "ads.example.com", Block),
+            ],
         );
     }
 
@@ -237,23 +234,18 @@ mod tests {
     fn silent_rule_falls_through_to_later_rule() {
         // Rule 0 matches .50 but is silent on reddit → falls through to rule 1
         // (the /24), which blocks it. Rule 0 still owns its own domain.
-        let set = ClientPolicySet::from_configs(&[
+        // .99 only matches rule 1, which is silent on youtube → passthrough.
+        let set = policy(&[
             cfg(&["192.168.1.50"], &["youtube.com"], &[]),
             cfg(&["192.168.1.0/24"], &["reddit.com"], &[]),
-        ])
-        .unwrap();
-        assert_eq!(
-            set.evaluate(ip("192.168.1.50"), "reddit.com"),
-            Decision::Block
-        );
-        assert_eq!(
-            set.evaluate(ip("192.168.1.50"), "youtube.com"),
-            Decision::Block
-        );
-        // .99 only matches rule 1, which is silent on youtube → passthrough.
-        assert_eq!(
-            set.evaluate(ip("192.168.1.99"), "youtube.com"),
-            Decision::Passthrough
+        ]);
+        check(
+            &set,
+            &[
+                ("192.168.1.50", "reddit.com", Block),
+                ("192.168.1.50", "youtube.com", Block),
+                ("192.168.1.99", "youtube.com", Passthrough),
+            ],
         );
     }
 
@@ -261,37 +253,30 @@ mod tests {
     fn earlier_allow_beats_later_block() {
         // For an overlapping client, the earlier rule's explicit decision wins:
         // rule 0 allows the domain, the broader rule 1 blocks it → Allow.
-        let set = ClientPolicySet::from_configs(&[
+        let set = policy(&[
             cfg(&["192.168.1.50"], &[], &["news.ycombinator.com"]),
             cfg(&["192.168.1.0/24"], &["news.ycombinator.com"], &[]),
-        ])
-        .unwrap();
-        assert_eq!(
-            set.evaluate(ip("192.168.1.50"), "news.ycombinator.com"),
-            Decision::Allow
-        );
-        assert_eq!(
-            set.evaluate(ip("192.168.1.99"), "news.ycombinator.com"),
-            Decision::Block
+        ]);
+        check(
+            &set,
+            &[
+                ("192.168.1.50", "news.ycombinator.com", Allow),
+                ("192.168.1.99", "news.ycombinator.com", Block),
+            ],
         );
     }
 
     #[test]
     fn loopback_always_passthrough() {
-        let set =
-            ClientPolicySet::from_configs(&[cfg(&["127.0.0.0/8"], &["example.com"], &[])]).unwrap();
-        assert_eq!(
-            set.evaluate(ip("127.0.0.1"), "example.com"),
-            Decision::Passthrough
-        );
-        assert_eq!(
-            set.evaluate(ip("::1"), "example.com"),
-            Decision::Passthrough
-        );
-        // IPv4-mapped loopback on a dual-stack bind must also pass through.
-        assert_eq!(
-            set.evaluate(ip("::ffff:127.0.0.1"), "example.com"),
-            Decision::Passthrough
+        // Plain, v6, and IPv4-mapped loopback on a dual-stack bind all bypass.
+        let set = policy(&[cfg(&["127.0.0.0/8"], &["example.com"], &[])]);
+        check(
+            &set,
+            &[
+                ("127.0.0.1", "example.com", Passthrough),
+                ("::1", "example.com", Passthrough),
+                ("::ffff:127.0.0.1", "example.com", Passthrough),
+            ],
         );
     }
 
@@ -299,31 +284,25 @@ mod tests {
     fn ipv4_mapped_client_matches_v4_rule() {
         // Dual-stack `[::]` binds deliver IPv4 peers as `::ffff:a.b.c.d`;
         // an IPv4 CIDR rule must still match (regression for #239 follow-up).
-        let set =
-            ClientPolicySet::from_configs(&[cfg(&["192.168.1.50/32"], &["youtube.com"], &[])])
-                .unwrap();
-        assert_eq!(
-            set.evaluate(ip("::ffff:192.168.1.50"), "m.youtube.com"),
-            Decision::Block
-        );
-        assert_eq!(
-            set.evaluate(ip("::ffff:192.168.1.99"), "m.youtube.com"),
-            Decision::Passthrough
+        let set = policy(&[cfg(&["192.168.1.50/32"], &["youtube.com"], &[])]);
+        check(
+            &set,
+            &[
+                ("::ffff:192.168.1.50", "m.youtube.com", Block),
+                ("::ffff:192.168.1.99", "m.youtube.com", Passthrough),
+            ],
         );
     }
 
     #[test]
     fn ipv6_client_cidr() {
-        let set =
-            ClientPolicySet::from_configs(&[cfg(&["2001:db8::/32"], &["tracker.example"], &[])])
-                .unwrap();
-        assert_eq!(
-            set.evaluate(ip("2001:db8::abcd"), "tracker.example"),
-            Decision::Block
-        );
-        assert_eq!(
-            set.evaluate(ip("2001:db9::abcd"), "tracker.example"),
-            Decision::Passthrough
+        let set = policy(&[cfg(&["2001:db8::/32"], &["tracker.example"], &[])]);
+        check(
+            &set,
+            &[
+                ("2001:db8::abcd", "tracker.example", Block),
+                ("2001:db9::abcd", "tracker.example", Passthrough),
+            ],
         );
     }
 
@@ -349,41 +328,19 @@ mod tests {
     #[test]
     fn exclude_carves_a_host_out_of_the_range() {
         // "filter the whole /24 except my own device" — the driving use case.
-        let set = ClientPolicySet::from_configs(&[cfg_ex(
+        // The excluded device matches no rule → passthrough (unfiltered).
+        let set = policy(&[cfg_ex(
             &["192.168.1.0/24"],
             &["192.168.1.254"],
             &["youtube.com"],
             &[],
-        )])
-        .unwrap();
-        assert_eq!(
-            set.evaluate(ip("192.168.1.50"), "youtube.com"),
-            Decision::Block
-        );
-        // The excluded device is unfiltered: it matches no rule → passthrough.
-        assert_eq!(
-            set.evaluate(ip("192.168.1.254"), "youtube.com"),
-            Decision::Passthrough
-        );
-    }
-
-    #[test]
-    fn excluded_v4_mapped_peer_is_unfiltered() {
-        // Exclusion must survive dual-stack canonicalization too.
-        let set = ClientPolicySet::from_configs(&[cfg_ex(
-            &["192.168.1.0/24"],
-            &["192.168.1.254"],
-            &["youtube.com"],
-            &[],
-        )])
-        .unwrap();
-        assert_eq!(
-            set.evaluate(ip("::ffff:192.168.1.254"), "youtube.com"),
-            Decision::Passthrough
-        );
-        assert_eq!(
-            set.evaluate(ip("::ffff:192.168.1.50"), "youtube.com"),
-            Decision::Block
+        )]);
+        check(
+            &set,
+            &[
+                ("192.168.1.50", "youtube.com", Block),
+                ("192.168.1.254", "youtube.com", Passthrough),
+            ],
         );
     }
 }
