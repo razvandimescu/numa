@@ -1710,13 +1710,13 @@ mod tests {
     }
 
     fn ctx_with_policy(
-        clients: &[&str],
+        from: &[&str],
         block: &[&str],
         allow: &[&str],
     ) -> crate::client_policy::ClientPolicySet {
         crate::client_policy::ClientPolicySet::from_configs(&[
             crate::client_policy::ClientPolicyConfig {
-                clients: clients.iter().map(|s| s.to_string()).collect(),
+                from: from.iter().map(|s| s.to_string()).collect(),
                 block: block.iter().map(|s| s.to_string()).collect(),
                 allow: allow.iter().map(|s| s.to_string()).collect(),
             },

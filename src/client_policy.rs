@@ -17,7 +17,7 @@ use crate::blocklist::{parse_blocklist, BlocklistStore};
 #[derive(Deserialize, Clone, Debug, Default)]
 pub struct ClientPolicyConfig {
     #[serde(default)]
-    pub clients: Vec<String>,
+    pub from: Vec<String>,
     #[serde(default)]
     pub block: Vec<String>,
     #[serde(default)]
@@ -46,8 +46,8 @@ impl ClientPolicySet {
     pub fn from_configs(configs: &[ClientPolicyConfig]) -> Result<Self, String> {
         let mut rules = Vec::with_capacity(configs.len());
         for (idx, cfg) in configs.iter().enumerate() {
-            let ctx = format!("client_policy[{idx}].clients");
-            if cfg.clients.is_empty() {
+            let ctx = format!("client_policy[{idx}].from");
+            if cfg.from.is_empty() {
                 return Err(format!("{ctx}: must list at least one CIDR or IP"));
             }
             // Reuse the global blocklist parser so per-client and global lists can't drift.
@@ -64,7 +64,7 @@ impl ClientPolicySet {
                 store.add_to_allowlist(a);
             }
             rules.push(ClientPolicy {
-                nets: parse_cidr_list(&cfg.clients, &ctx)?,
+                nets: parse_cidr_list(&cfg.from, &ctx)?,
                 store,
             });
         }
@@ -108,9 +108,9 @@ impl ClientPolicySet {
 mod tests {
     use super::*;
 
-    fn cfg(clients: &[&str], block: &[&str], allow: &[&str]) -> ClientPolicyConfig {
+    fn cfg(from: &[&str], block: &[&str], allow: &[&str]) -> ClientPolicyConfig {
         ClientPolicyConfig {
-            clients: clients.iter().map(|s| s.to_string()).collect(),
+            from: from.iter().map(|s| s.to_string()).collect(),
             block: block.iter().map(|s| s.to_string()).collect(),
             allow: allow.iter().map(|s| s.to_string()).collect(),
         }
