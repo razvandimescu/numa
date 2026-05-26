@@ -79,8 +79,9 @@ impl ClientPolicySet {
         self.rules.len()
     }
 
-    /// First matching rule wins. Within a rule, allow beats block (via the
-    /// underlying `BlocklistStore` semantics).
+    /// Rules layer in declaration order: the first rule with an explicit
+    /// Block/Allow for `qname` wins; a client-matching rule silent on `qname`
+    /// falls through to the next. Within a rule, allow beats block.
     pub fn evaluate(&self, peer: IpAddr, qname: &str) -> Decision {
         // Dual-stack `[::]` binds deliver IPv4 clients as `::ffff:a.b.c.d`;
         // canonicalize so IPv4 CIDR rules and the loopback check still match.
@@ -221,7 +222,33 @@ mod tests {
     }
 
     #[test]
-    fn first_matching_rule_wins() {
+    fn silent_rule_falls_through_to_later_rule() {
+        // Rule 0 matches .50 but is silent on reddit → falls through to rule 1
+        // (the /24), which blocks it. Rule 0 still owns its own domain.
+        let set = ClientPolicySet::from_configs(&[
+            cfg(&["192.168.1.50"], &["youtube.com"], &[]),
+            cfg(&["192.168.1.0/24"], &["reddit.com"], &[]),
+        ])
+        .unwrap();
+        assert_eq!(
+            set.evaluate(ip("192.168.1.50"), "reddit.com"),
+            Decision::Block
+        );
+        assert_eq!(
+            set.evaluate(ip("192.168.1.50"), "youtube.com"),
+            Decision::Block
+        );
+        // .99 only matches rule 1, which is silent on youtube → passthrough.
+        assert_eq!(
+            set.evaluate(ip("192.168.1.99"), "youtube.com"),
+            Decision::Passthrough
+        );
+    }
+
+    #[test]
+    fn earlier_allow_beats_later_block() {
+        // For an overlapping client, the earlier rule's explicit decision wins:
+        // rule 0 allows the domain, the broader rule 1 blocks it → Allow.
         let set = ClientPolicySet::from_configs(&[
             cfg(&["192.168.1.50"], &[], &["news.ycombinator.com"]),
             cfg(&["192.168.1.0/24"], &["news.ycombinator.com"], &[]),
