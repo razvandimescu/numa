@@ -1,3 +1,4 @@
+use base64::Engine;
 use std::net::SocketAddr;
 
 use axum::body::Bytes;
@@ -7,7 +8,7 @@ use hyper::StatusCode;
 use log::warn;
 
 use crate::buffer::BytePacketBuffer;
-use crate::ctx::{resolve_query, ServerCtx};
+use crate::ctx::{ServerCtx, resolve_query};
 use crate::header::ResultCode;
 use crate::packet::DnsPacket;
 use crate::stats::Transport;
@@ -17,20 +18,10 @@ const DOH_CONTENT_TYPE: &str = "application/dns-message";
 
 pub async fn doh_post(State(state): State<super::proxy::DohState>, req: Request) -> Response {
     let host = super::proxy::extract_host(&req);
-    if !is_doh_host(host.as_deref(), &state.ctx.proxy_tld) {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-
-    // Gate DoH only — service-proxy routes on the same TLS listener
-    // aren't subject to the DNS ACL. Fail closed when the peer is unknown.
-    if state.ctx.allow_from.is_enabled() {
-        let allowed = state
-            .remote_addr
-            .is_some_and(|a| state.ctx.allow_from.allows(a.ip()));
-        if !allowed {
-            return StatusCode::FORBIDDEN.into_response();
-        }
-    }
+    let src = match doh_validate(&state, host.as_deref()) {
+        Ok(src) => src,
+        Err(resp) => return resp,
+    };
 
     let content_type = req
         .headers()
@@ -44,7 +35,7 @@ pub async fn doh_post(State(state): State<super::proxy::DohState>, req: Request)
     let body = match axum::body::to_bytes(req.into_body(), MAX_DNS_MSG).await {
         Ok(b) => b,
         Err(_) => {
-            return (StatusCode::PAYLOAD_TOO_LARGE, "body exceeds 4096 bytes").into_response()
+            return (StatusCode::PAYLOAD_TOO_LARGE, "body exceeds 4096 bytes").into_response();
         }
     };
 
@@ -52,11 +43,66 @@ pub async fn doh_post(State(state): State<super::proxy::DohState>, req: Request)
         return (StatusCode::BAD_REQUEST, "empty body").into_response();
     }
 
-    let src = state
-        .remote_addr
-        .unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], 0)));
+    resolve_doh(&body, src, &state.ctx).await
+}
+
+pub async fn doh_get(State(state): State<super::proxy::DohState>, req: Request) -> Response {
+    let host = super::proxy::extract_host(&req);
+    let src = match doh_validate(&state, host.as_deref()) {
+        Ok(src) => src,
+        Err(resp) => return resp,
+    };
+
+    let dns_param = req
+        .uri()
+        .query()
+        .and_then(|q| q.split('&').find_map(|pair| pair.strip_prefix("dns=")))
+        .unwrap_or("");
+
+    if dns_param.is_empty() {
+        return (StatusCode::BAD_REQUEST, "missing dns query parameter").into_response();
+    }
+
+    let body = match base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(dns_param) {
+        Ok(b) => b,
+        Err(_) => {
+            return (StatusCode::BAD_REQUEST, "invalid base64url encoding").into_response();
+        }
+    };
+
+    if body.len() > MAX_DNS_MSG {
+        return (StatusCode::PAYLOAD_TOO_LARGE, "body exceeds 4096 bytes").into_response();
+    }
+
+    if body.is_empty() {
+        return (StatusCode::BAD_REQUEST, "empty dns query").into_response();
+    }
 
     resolve_doh(&body, src, &state.ctx).await
+}
+
+fn doh_validate(
+    state: &super::proxy::DohState,
+    host: Option<&str>,
+) -> Result<SocketAddr, Response> {
+    if !is_doh_host(host, &state.ctx.proxy_tld) {
+        return Err(StatusCode::NOT_FOUND.into_response());
+    }
+
+    // Gate DoH only — service-proxy routes on the same TLS listener
+    // aren't subject to the DNS ACL. Fail closed when the peer is unknown.
+    if state.ctx.allow_from.is_enabled() {
+        let allowed = state
+            .remote_addr
+            .is_some_and(|a| state.ctx.allow_from.allows(a.ip()));
+        if !allowed {
+            return Err(StatusCode::FORBIDDEN.into_response());
+        }
+    }
+
+    Ok(state
+        .remote_addr
+        .unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], 0))))
 }
 
 fn is_doh_host(host: Option<&str>, tld: &str) -> bool {

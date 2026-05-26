@@ -4,7 +4,7 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::response::IntoResponse;
-use axum::routing::{any, post};
+use axum::routing::{any, get};
 use axum::Router;
 use http_body_util::BodyExt;
 use hyper::StatusCode;
@@ -142,7 +142,9 @@ async fn accept_loop_tls(
             let app = Router::new()
                 .route(
                     "/dns-query",
-                    post(crate::doh::doh_post).with_state(conn_doh_state),
+                    get(crate::doh::doh_get)
+                        .post(crate::doh::doh_post)
+                        .with_state(conn_doh_state),
                 )
                 .fallback(any(proxy_handler))
                 .with_state(proxy_state);

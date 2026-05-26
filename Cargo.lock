@@ -1667,6 +1667,7 @@ version = "0.19.0"
 dependencies = [
  "arc-swap",
  "axum",
+ "base64",
  "criterion",
  "env_logger",
  "futures",
