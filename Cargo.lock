@@ -1700,6 +1700,7 @@ dependencies = [
  "tower",
  "webpki-roots",
  "windows-service",
+ "windows-sys 0.59.0",
  "x509-parser",
 ]
 

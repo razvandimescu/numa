@@ -2,6 +2,7 @@ use std::time::Instant;
 
 /// Returns the process memory footprint in bytes, or 0 if unavailable.
 /// macOS: phys_footprint (matches Activity Monitor). Linux: RSS from /proc/self/statm.
+/// Windows: WorkingSetSize (matches Task Manager).
 pub fn process_memory_bytes() -> usize {
     #[cfg(target_os = "macos")]
     {
@@ -11,7 +12,11 @@ pub fn process_memory_bytes() -> usize {
     {
         linux_rss()
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(windows)]
+    {
+        windows_working_set()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     {
         0
     }
@@ -85,6 +90,23 @@ fn linux_rss() -> usize {
         }
     }
     0
+}
+
+#[cfg(windows)]
+fn windows_working_set() -> usize {
+    use std::mem;
+    use windows_sys::Win32::System::ProcessStatus::{
+        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+    };
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    let mut info: PROCESS_MEMORY_COUNTERS = unsafe { mem::zeroed() };
+    let cb = mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+    let ok = unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &mut info, cb) };
+    if ok != 0 {
+        info.WorkingSetSize
+    } else {
+        0
+    }
 }
 
 pub struct ServerStats {
