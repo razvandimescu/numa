@@ -423,15 +423,17 @@ fn validate_chain<'a>(
                     {
                         let ta_tag = compute_key_tag(*ta_flags, *ta_proto, *ta_algo, ta_key);
                         if tag == ta_tag && algorithm == ta_algo && public_key == ta_key {
-                            // Presence of the (public) anchor key is not enough:
-                            // require the DNSKEY RRset to be self-signed by it,
-                            // else a spoofed set carrying the anchor validates.
-                            if verify_dnskey_self_signed(zone_records) {
-                                debug!("dnssec: trust anchor match (self-signed) for '{}'", zone);
+                            // Signed by the anchor itself, not merely present.
+                            if verify_rrset_signed(
+                                zone_records,
+                                QueryType::DNSKEY,
+                                std::slice::from_ref(ta),
+                            ) {
+                                debug!("dnssec: root DNSKEY signed by trust anchor for '{}'", zone);
                                 return DnssecStatus::Secure;
                             }
                             debug!(
-                                "dnssec: trust anchor present but RRset not self-signed for '{}'",
+                                "dnssec: anchor present but RRset not signed by it: '{}'",
                                 zone
                             );
                             return DnssecStatus::Bogus;
@@ -461,28 +463,23 @@ fn validate_chain<'a>(
             return DnssecStatus::Insecure;
         }
 
-        // Verify DS matches a zone DNSKEY
-        let mut ds_matched = false;
-        for ds in &ds_records {
-            for dk in &zone_dnskeys {
-                if verify_ds(ds, dk, zone) {
-                    ds_matched = true;
-                    break;
-                }
-            }
-            if ds_matched {
-                break;
-            }
-        }
-
-        if !ds_matched {
+        // RFC 4035 §5.2: the RRset must be signed by the *same* KSK the DS
+        // commits to, so verify only against DS-matched keys (not any KSK).
+        let ds_authenticated_ksks: Vec<DnsRecord> = zone_dnskeys
+            .iter()
+            .copied()
+            .filter(|dk| ds_records.iter().any(|ds| verify_ds(ds, dk, zone)))
+            .cloned()
+            .collect();
+        if ds_authenticated_ksks.is_empty() {
             debug!("dnssec: DS digest mismatch for zone '{}'", zone);
             return DnssecStatus::Bogus;
         }
-
-        // Verify the DNSKEY RRset is self-signed by a KSK
-        if !verify_dnskey_self_signed(zone_records) {
-            debug!("dnssec: DNSKEY RRset not self-signed for zone '{}'", zone);
+        if !verify_rrset_signed(zone_records, QueryType::DNSKEY, &ds_authenticated_ksks) {
+            debug!(
+                "dnssec: DNSKEY RRset not signed by a DS-matched KSK: '{}'",
+                zone
+            );
             return DnssecStatus::Bogus;
         }
 
@@ -520,22 +517,11 @@ fn validate_chain<'a>(
     })
 }
 
-/// Verify the apex DNSKEY RRset is self-signed by a KSK (SEP, flags bit 0x0001)
-/// it contains — the key the parent's DS commits to.
-fn verify_dnskey_self_signed(records: &[DnsRecord]) -> bool {
-    let ksks: Vec<DnsRecord> = records
-        .iter()
-        .filter(|r| matches!(r, DnsRecord::DNSKEY { flags, .. } if *flags & 0x0101 == 0x0101))
-        .cloned()
-        .collect();
-    verify_rrset_signed(records, QueryType::DNSKEY, &ksks)
-}
-
 /// The signature-checking primitive: does the `rrset_type` RRset in `records`
 /// carry a time-valid RRSIG made by one of `signing_keys` (which the caller must
-/// already trust)? Signers may be ZSKs (e.g. a parent signing a child's DS),
-/// not only KSKs — `verify_dnskey_self_signed` is this restricted to the set's
-/// own KSKs.
+/// already trust)? Callers pass the specific authenticated key(s) — the trust
+/// anchor for the root DNSKEY, or the DS-matched KSKs for a child — so a signer
+/// the chain never committed to cannot satisfy the check.
 fn verify_rrset_signed(
     records: &[DnsRecord],
     rrset_type: QueryType,
@@ -1862,12 +1848,9 @@ mod tests {
         assert!(base32hex_decode("!!").is_none());
     }
 
-    // --- Chain-of-trust authentication (issue #235 follow-up) ---
-    // An attacker who can tamper with a delegation's DS response must not be
-    // able to forge a Secure verdict. These tests mint throwaway ECDSA P-256
-    // (algo 13) keys so a self-consistent chain can be built end to end, with a
-    // test KSK standing in for the root trust anchor (the real root's private
-    // key is, by design, unforgeable).
+    // Chain-of-trust authentication (issue #235). These tests mint throwaway
+    // ECDSA P-256 (algo 13) keys and use a test KSK as the root trust anchor —
+    // the real root's private key is, by design, unforgeable.
     use ring::rand::SystemRandom;
     use ring::signature::{EcdsaKeyPair, KeyPair, ECDSA_P256_SHA256_FIXED_SIGNING};
 
@@ -1970,8 +1953,7 @@ mod tests {
         )
     }
 
-    /// A fully-signed delegation must validate — guards the fix against being
-    /// too strict and confirms the harness produces verifiable signatures.
+    // Positive control: a fully-signed delegation must stay Secure.
     #[tokio::test]
     async fn properly_signed_delegation_validates() {
         let (cache, srtt, stats) = empty_ctx();
@@ -2023,8 +2005,6 @@ mod tests {
         assert_eq!(status, DnssecStatus::Secure);
     }
 
-    /// A DS whose digest matches the child KSK but carries NO parent signature
-    /// must NOT validate — otherwise an on-path attacker forges any delegation.
     #[tokio::test]
     async fn unsigned_ds_must_not_validate() {
         let (cache, srtt, stats) = empty_ctx();
@@ -2074,8 +2054,6 @@ mod tests {
         );
     }
 
-    /// Mere presence of the trust-anchor KSK in the root DNSKEY set must not
-    /// yield Secure without a valid self-signature proving the KSK signed it.
     #[tokio::test]
     async fn root_anchor_without_self_signature_must_not_validate() {
         let (cache, srtt, stats) = empty_ctx();
@@ -2098,6 +2076,99 @@ mod tests {
             status,
             DnssecStatus::Secure,
             "trust-anchor presence alone must not yield Secure"
+        );
+    }
+
+    #[tokio::test]
+    async fn root_with_forged_ksk_must_not_validate() {
+        let (cache, srtt, stats) = empty_ctx();
+        let anchor = mk_signer(257);
+        let anchor_dk = mk_dnskey(".", &anchor);
+        let trust_anchors = [anchor_dk.clone()];
+
+        // Set carries the (public) anchor key + an attacker KSK; signed by the
+        // attacker KSK, which the attacker controls — never by the anchor.
+        let attacker = mk_signer(257);
+        let attacker_dk = mk_dnskey(".", &attacker);
+        let root_set = vec![anchor_dk.clone(), attacker_dk.clone()];
+        let root_refs: Vec<&DnsRecord> = root_set.iter().collect();
+        let forged = mk_rrsig(&attacker, ".", QueryType::DNSKEY, &root_refs);
+        let mut root_records = root_set.clone();
+        root_records.push(forged);
+
+        let status = validate_chain(
+            ".",
+            &root_records,
+            &cache,
+            &[],
+            &srtt,
+            &trust_anchors,
+            0,
+            &stats,
+        )
+        .await;
+        assert_ne!(
+            status,
+            DnssecStatus::Secure,
+            "root set signed by a non-anchor KSK must not validate"
+        );
+    }
+
+    #[tokio::test]
+    async fn child_with_forged_ksk_must_not_validate() {
+        let (cache, srtt, stats) = empty_ctx();
+
+        let root_ksk = mk_signer(257);
+        let root_dk = mk_dnskey(".", &root_ksk);
+        let trust_anchors = [root_dk.clone()];
+        let root_set = [root_dk.clone()];
+        let root_refs: Vec<&DnsRecord> = root_set.iter().collect();
+        let root_selfsig = mk_rrsig(&root_ksk, ".", QueryType::DNSKEY, &root_refs);
+        cache.write().unwrap().insert(
+            ".",
+            QueryType::DNSKEY,
+            &mk_pkt(vec![root_dk.clone(), root_selfsig]),
+        );
+
+        // Real child KSK — the genuine DS commits to it.
+        let real_ksk = mk_signer(257);
+        let real_dk = mk_dnskey("test", &real_ksk);
+
+        // Attacker's child set: real (public) KSK to satisfy the DS digest, plus
+        // an attacker KSK that actually signs the set.
+        let attacker = mk_signer(257);
+        let attacker_dk = mk_dnskey("test", &attacker);
+        let child_set = vec![real_dk.clone(), attacker_dk.clone()];
+        let child_refs: Vec<&DnsRecord> = child_set.iter().collect();
+        let forged = mk_rrsig(&attacker, "test", QueryType::DNSKEY, &child_refs);
+        let mut child_records = child_set.clone();
+        child_records.push(forged);
+
+        // Genuine DS (digest of the REAL KSK), signed by the root.
+        let ds = mk_ds("test", &real_dk);
+        let ds_set = [ds.clone()];
+        let ds_refs: Vec<&DnsRecord> = ds_set.iter().collect();
+        let ds_sig = mk_rrsig(&root_ksk, ".", QueryType::DS, &ds_refs);
+        cache
+            .write()
+            .unwrap()
+            .insert("test", QueryType::DS, &mk_pkt(vec![ds, ds_sig]));
+
+        let status = validate_chain(
+            "test",
+            &child_records,
+            &cache,
+            &[],
+            &srtt,
+            &trust_anchors,
+            0,
+            &stats,
+        )
+        .await;
+        assert_ne!(
+            status,
+            DnssecStatus::Secure,
+            "child set signed by a KSK the DS does not commit to must not validate"
         );
     }
 }
