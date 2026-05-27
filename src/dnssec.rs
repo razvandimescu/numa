@@ -1825,4 +1825,243 @@ mod tests {
         // invalid char
         assert!(base32hex_decode("!!").is_none());
     }
+
+    // --- Chain-of-trust authentication (issue #235 follow-up) ---
+    // An attacker who can tamper with a delegation's DS response must not be
+    // able to forge a Secure verdict. These tests mint throwaway ECDSA P-256
+    // (algo 13) keys so a self-consistent chain can be built end to end, with a
+    // test KSK standing in for the root trust anchor (the real root's private
+    // key is, by design, unforgeable).
+    use ring::rand::SystemRandom;
+    use ring::signature::{EcdsaKeyPair, KeyPair, ECDSA_P256_SHA256_FIXED_SIGNING};
+
+    struct TestSigner {
+        key: EcdsaKeyPair,
+        pubkey: Vec<u8>, // DNSSEC form: raw x||y, no 0x04 prefix
+        flags: u16,
+    }
+
+    fn mk_signer(flags: u16) -> TestSigner {
+        let rng = SystemRandom::new();
+        let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng).unwrap();
+        let key = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref(), &rng)
+            .unwrap();
+        let pubkey = key.public_key().as_ref()[1..].to_vec();
+        TestSigner { key, pubkey, flags }
+    }
+
+    fn mk_dnskey(owner: &str, s: &TestSigner) -> DnsRecord {
+        DnsRecord::DNSKEY {
+            domain: owner.into(),
+            flags: s.flags,
+            protocol: 3,
+            algorithm: 13,
+            public_key: s.pubkey.clone(),
+            ttl: 3600,
+        }
+    }
+
+    /// RRSIG made by `signer` over `rrset`, signing the exact bytes the
+    /// validator reconstructs via `build_signed_data`.
+    fn mk_rrsig(
+        signer: &TestSigner,
+        signer_name: &str,
+        type_covered: QueryType,
+        rrset: &[&DnsRecord],
+    ) -> DnsRecord {
+        let mut rrsig = DnsRecord::RRSIG {
+            domain: rrset[0].domain().to_string(),
+            type_covered: type_covered.to_num(),
+            algorithm: 13,
+            labels: rrset[0]
+                .domain()
+                .split('.')
+                .filter(|l| !l.is_empty())
+                .count() as u8,
+            original_ttl: 3600,
+            expiration: 2_147_483_647,
+            inception: 1,
+            key_tag: compute_key_tag(signer.flags, 3, 13, &signer.pubkey),
+            signer_name: signer_name.to_string(),
+            signature: Vec::new(),
+            ttl: 3600,
+        };
+        let signed_data = build_signed_data(&rrsig, rrset);
+        let sig = signer.key.sign(&SystemRandom::new(), &signed_data).unwrap();
+        if let DnsRecord::RRSIG { signature, .. } = &mut rrsig {
+            *signature = sig.as_ref().to_vec();
+        }
+        rrsig
+    }
+
+    fn mk_ds(child_owner: &str, child_ksk: &DnsRecord) -> DnsRecord {
+        let DnsRecord::DNSKEY {
+            flags,
+            protocol,
+            algorithm,
+            public_key,
+            ..
+        } = child_ksk
+        else {
+            unreachable!()
+        };
+        let mut input = name_to_wire(child_owner);
+        input.extend(&flags.to_be_bytes());
+        input.push(*protocol);
+        input.push(*algorithm);
+        input.extend(public_key);
+        DnsRecord::DS {
+            domain: child_owner.into(),
+            key_tag: compute_key_tag(*flags, *protocol, *algorithm, public_key),
+            algorithm: *algorithm,
+            digest_type: 2,
+            digest: digest::digest(&digest::SHA256, &input).as_ref().to_vec(),
+            ttl: 3600,
+        }
+    }
+
+    fn mk_pkt(answers: Vec<DnsRecord>) -> DnsPacket {
+        let mut p = DnsPacket::new();
+        p.answers = answers;
+        p
+    }
+
+    fn empty_ctx() -> (RwLock<DnsCache>, RwLock<SrttCache>, Mutex<ValidationStats>) {
+        (
+            RwLock::new(DnsCache::new(1000, 0, 100_000)),
+            RwLock::new(SrttCache::new(false)),
+            Mutex::new(ValidationStats::default()),
+        )
+    }
+
+    /// A fully-signed delegation must validate — guards the fix against being
+    /// too strict and confirms the harness produces verifiable signatures.
+    #[tokio::test]
+    async fn properly_signed_delegation_validates() {
+        let (cache, srtt, stats) = empty_ctx();
+
+        let root_ksk = mk_signer(257);
+        let root_zsk = mk_signer(256);
+        let root_ksk_dk = mk_dnskey(".", &root_ksk);
+        let root_zsk_dk = mk_dnskey(".", &root_zsk);
+        let trust_anchors = vec![root_ksk_dk.clone()];
+
+        let root_set = vec![root_ksk_dk.clone(), root_zsk_dk.clone()];
+        let root_refs: Vec<&DnsRecord> = root_set.iter().collect();
+        let root_selfsig = mk_rrsig(&root_ksk, ".", QueryType::DNSKEY, &root_refs);
+        let mut root_answers = root_set.clone();
+        root_answers.push(root_selfsig);
+        cache
+            .write()
+            .unwrap()
+            .insert(".", QueryType::DNSKEY, &mk_pkt(root_answers));
+
+        let test_ksk = mk_signer(257);
+        let test_dk = mk_dnskey("test", &test_ksk);
+        let test_set = vec![test_dk.clone()];
+        let test_refs: Vec<&DnsRecord> = test_set.iter().collect();
+        let test_selfsig = mk_rrsig(&test_ksk, "test", QueryType::DNSKEY, &test_refs);
+        let test_records = vec![test_dk.clone(), test_selfsig];
+
+        // DS for "test", signed by the root ZSK — a legitimate delegation.
+        let ds = mk_ds("test", &test_dk);
+        let ds_set = vec![ds.clone()];
+        let ds_refs: Vec<&DnsRecord> = ds_set.iter().collect();
+        let ds_sig = mk_rrsig(&root_zsk, ".", QueryType::DS, &ds_refs);
+        cache
+            .write()
+            .unwrap()
+            .insert("test", QueryType::DS, &mk_pkt(vec![ds, ds_sig]));
+
+        let status = validate_chain(
+            "test",
+            &test_records,
+            &cache,
+            &[],
+            &srtt,
+            &trust_anchors,
+            0,
+            &stats,
+        )
+        .await;
+        assert_eq!(status, DnssecStatus::Secure);
+    }
+
+    /// A DS whose digest matches the child KSK but carries NO parent signature
+    /// must NOT validate — otherwise an on-path attacker forges any delegation.
+    #[tokio::test]
+    async fn unsigned_ds_must_not_validate() {
+        let (cache, srtt, stats) = empty_ctx();
+
+        let root_ksk = mk_signer(257);
+        let root_ksk_dk = mk_dnskey(".", &root_ksk);
+        let trust_anchors = vec![root_ksk_dk.clone()];
+        let root_set = vec![root_ksk_dk.clone()];
+        let root_refs: Vec<&DnsRecord> = root_set.iter().collect();
+        let root_selfsig = mk_rrsig(&root_ksk, ".", QueryType::DNSKEY, &root_refs);
+        cache.write().unwrap().insert(
+            ".",
+            QueryType::DNSKEY,
+            &mk_pkt(vec![root_ksk_dk.clone(), root_selfsig]),
+        );
+
+        // Attacker zone "test": own KSK, self-signed DNSKEY set.
+        let test_ksk = mk_signer(257);
+        let test_dk = mk_dnskey("test", &test_ksk);
+        let test_set = vec![test_dk.clone()];
+        let test_refs: Vec<&DnsRecord> = test_set.iter().collect();
+        let test_selfsig = mk_rrsig(&test_ksk, "test", QueryType::DNSKEY, &test_refs);
+        let test_records = vec![test_dk.clone(), test_selfsig];
+
+        // Forged DS — digest matches the attacker KSK, but UNSIGNED by root.
+        let forged_ds = mk_ds("test", &test_dk);
+        cache
+            .write()
+            .unwrap()
+            .insert("test", QueryType::DS, &mk_pkt(vec![forged_ds]));
+
+        let status = validate_chain(
+            "test",
+            &test_records,
+            &cache,
+            &[],
+            &srtt,
+            &trust_anchors,
+            0,
+            &stats,
+        )
+        .await;
+        assert_ne!(
+            status,
+            DnssecStatus::Secure,
+            "unsigned DS must not yield Secure — the parent must sign the DS RRset"
+        );
+    }
+
+    /// Mere presence of the trust-anchor KSK in the root DNSKEY set must not
+    /// yield Secure without a valid self-signature proving the KSK signed it.
+    #[tokio::test]
+    async fn root_anchor_without_self_signature_must_not_validate() {
+        let (cache, srtt, stats) = empty_ctx();
+        let root_ksk = mk_signer(257);
+        let root_ksk_dk = mk_dnskey(".", &root_ksk);
+        let trust_anchors = vec![root_ksk_dk.clone()];
+        let root_records = vec![root_ksk_dk.clone()]; // no RRSIG
+        let status = validate_chain(
+            ".",
+            &root_records,
+            &cache,
+            &[],
+            &srtt,
+            &trust_anchors,
+            0,
+            &stats,
+        )
+        .await;
+        assert_ne!(
+            status,
+            DnssecStatus::Secure,
+            "trust-anchor presence alone must not yield Secure"
+        );
+    }
 }
