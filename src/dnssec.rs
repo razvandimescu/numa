@@ -423,8 +423,18 @@ fn validate_chain<'a>(
                     {
                         let ta_tag = compute_key_tag(*ta_flags, *ta_proto, *ta_algo, ta_key);
                         if tag == ta_tag && algorithm == ta_algo && public_key == ta_key {
-                            debug!("dnssec: trust anchor match for zone '{}'", zone);
-                            return DnssecStatus::Secure;
+                            // Presence of the (public) anchor key is not enough:
+                            // require the DNSKEY RRset to be self-signed by it,
+                            // else a spoofed set carrying the anchor validates.
+                            if verify_dnskey_self_signed(zone_records) {
+                                debug!("dnssec: trust anchor match (self-signed) for '{}'", zone);
+                                return DnssecStatus::Secure;
+                            }
+                            debug!(
+                                "dnssec: trust anchor present but RRset not self-signed for '{}'",
+                                zone
+                            );
+                            return DnssecStatus::Bogus;
                         }
                     }
                 }
@@ -440,7 +450,11 @@ fn validate_chain<'a>(
             return DnssecStatus::Indeterminate;
         }
         let parent = parent_zone(zone);
-        let ds_records = fetch_ds(zone, cache, root_hints, srtt, stats).await;
+        let ds_response = fetch_ds(zone, cache, root_hints, srtt, stats).await;
+        let ds_records: Vec<&DnsRecord> = ds_response
+            .iter()
+            .filter(|r| matches!(r, DnsRecord::DS { .. }))
+            .collect();
 
         if ds_records.is_empty() {
             debug!("dnssec: no DS for zone '{}' at parent '{}'", zone, parent);
@@ -480,7 +494,7 @@ fn validate_chain<'a>(
             return DnssecStatus::Indeterminate;
         }
 
-        validate_chain(
+        let parent_status = validate_chain(
             &parent,
             &parent_records,
             cache,
@@ -490,33 +504,69 @@ fn validate_chain<'a>(
             depth + 1,
             stats,
         )
-        .await
+        .await;
+        if parent_status != DnssecStatus::Secure {
+            return parent_status;
+        }
+
+        // The DS RRset must itself be signed by the (now-validated) parent.
+        // A digest match alone lets a forged DS endorse an attacker's KSK.
+        if !verify_rrset_signed(&ds_response, QueryType::DS, &parent_records) {
+            debug!("dnssec: DS RRset for '{}' not signed by parent", zone);
+            return DnssecStatus::Bogus;
+        }
+
+        DnssecStatus::Secure
     })
 }
 
-/// Verify that the DNSKEY RRset is signed by a KSK within the set.
+/// Verify the apex DNSKEY RRset is self-signed by a KSK (SEP, flags bit 0x0001)
+/// it contains — the key the parent's DS commits to.
 fn verify_dnskey_self_signed(records: &[DnsRecord]) -> bool {
-    let dnskeys: Vec<&DnsRecord> = records
+    let ksks: Vec<DnsRecord> = records
         .iter()
-        .filter(|r| matches!(r, DnsRecord::DNSKEY { .. }))
+        .filter(|r| matches!(r, DnsRecord::DNSKEY { flags, .. } if *flags & 0x0101 == 0x0101))
+        .cloned()
         .collect();
+    verify_rrset_signed(records, QueryType::DNSKEY, &ksks)
+}
 
-    // Find RRSIG covering DNSKEY type
+/// The signature-checking primitive: does the `rrset_type` RRset in `records`
+/// carry a time-valid RRSIG made by one of `signing_keys` (which the caller must
+/// already trust)? Signers may be ZSKs (e.g. a parent signing a child's DS),
+/// not only KSKs — `verify_dnskey_self_signed` is this restricted to the set's
+/// own KSKs.
+fn verify_rrset_signed(
+    records: &[DnsRecord],
+    rrset_type: QueryType,
+    signing_keys: &[DnsRecord],
+) -> bool {
+    let rrset: Vec<&DnsRecord> = records
+        .iter()
+        .filter(|r| r.query_type() == rrset_type)
+        .collect();
+    if rrset.is_empty() {
+        return false;
+    }
+
     for r in records {
         if let DnsRecord::RRSIG {
             type_covered,
             algorithm,
             key_tag,
+            expiration,
+            inception,
             signature,
             ..
         } = r
         {
-            if QueryType::from_num(*type_covered) != QueryType::DNSKEY {
+            if QueryType::from_num(*type_covered) != rrset_type {
                 continue;
             }
-
-            // Find the KSK that made this signature
-            for dk in &dnskeys {
+            if !is_rrsig_time_valid(*expiration, *inception) {
+                continue;
+            }
+            for dk in signing_keys {
                 if let DnsRecord::DNSKEY {
                     flags,
                     protocol,
@@ -525,28 +575,20 @@ fn verify_dnskey_self_signed(records: &[DnsRecord]) -> bool {
                     ..
                 } = dk
                 {
-                    if *flags & 0x0101 != 0x0101 {
-                        continue; // Not a KSK
-                    }
                     if dk_algo != algorithm {
                         continue;
                     }
-                    let tag = compute_key_tag(*flags, *protocol, *dk_algo, public_key);
-                    if tag != *key_tag {
+                    if compute_key_tag(*flags, *protocol, *dk_algo, public_key) != *key_tag {
                         continue;
                     }
-
-                    // Verify: RRSIG(DNSKEY) signed by this KSK
-                    let signed_data = build_signed_data(r, &dnskeys);
+                    let signed_data = build_signed_data(r, &rrset);
                     if verify_signature(*algorithm, public_key, &signed_data, signature) {
-                        trace!("dnssec: DNSKEY RRset self-signed by KSK tag={}", tag);
                         return true;
                     }
                 }
             }
         }
     }
-
     false
 }
 
@@ -591,13 +633,11 @@ async fn fetch_ds(
     srtt: &RwLock<SrttCache>,
     stats: &Mutex<ValidationStats>,
 ) -> Vec<DnsRecord> {
+    // Returns the full answer set (DS records *and* their RRSIGs); the caller
+    // both digest-matches the DS and verifies the parent's signature over it.
     if let Some(pkt) = cache.read().unwrap().lookup(child, QueryType::DS) {
         stats.lock().unwrap().ds_cache_hits += 1;
-        return pkt
-            .answers
-            .into_iter()
-            .filter(|r| matches!(r, DnsRecord::DS { .. }))
-            .collect();
+        return pkt.answers;
     }
 
     stats.lock().unwrap().ds_fetches += 1;
@@ -606,11 +646,7 @@ async fn fetch_ds(
             .await
     {
         cache.write().unwrap().insert(child, QueryType::DS, &pkt);
-        return pkt
-            .answers
-            .into_iter()
-            .filter(|r| matches!(r, DnsRecord::DS { .. }))
-            .collect();
+        return pkt.answers;
     }
 
     Vec::new()
@@ -1958,14 +1994,14 @@ mod tests {
 
         let test_ksk = mk_signer(257);
         let test_dk = mk_dnskey("test", &test_ksk);
-        let test_set = vec![test_dk.clone()];
+        let test_set = [test_dk.clone()];
         let test_refs: Vec<&DnsRecord> = test_set.iter().collect();
         let test_selfsig = mk_rrsig(&test_ksk, "test", QueryType::DNSKEY, &test_refs);
         let test_records = vec![test_dk.clone(), test_selfsig];
 
         // DS for "test", signed by the root ZSK — a legitimate delegation.
         let ds = mk_ds("test", &test_dk);
-        let ds_set = vec![ds.clone()];
+        let ds_set = [ds.clone()];
         let ds_refs: Vec<&DnsRecord> = ds_set.iter().collect();
         let ds_sig = mk_rrsig(&root_zsk, ".", QueryType::DS, &ds_refs);
         cache
@@ -1996,7 +2032,7 @@ mod tests {
         let root_ksk = mk_signer(257);
         let root_ksk_dk = mk_dnskey(".", &root_ksk);
         let trust_anchors = vec![root_ksk_dk.clone()];
-        let root_set = vec![root_ksk_dk.clone()];
+        let root_set = [root_ksk_dk.clone()];
         let root_refs: Vec<&DnsRecord> = root_set.iter().collect();
         let root_selfsig = mk_rrsig(&root_ksk, ".", QueryType::DNSKEY, &root_refs);
         cache.write().unwrap().insert(
@@ -2008,7 +2044,7 @@ mod tests {
         // Attacker zone "test": own KSK, self-signed DNSKEY set.
         let test_ksk = mk_signer(257);
         let test_dk = mk_dnskey("test", &test_ksk);
-        let test_set = vec![test_dk.clone()];
+        let test_set = [test_dk.clone()];
         let test_refs: Vec<&DnsRecord> = test_set.iter().collect();
         let test_selfsig = mk_rrsig(&test_ksk, "test", QueryType::DNSKEY, &test_refs);
         let test_records = vec![test_dk.clone(), test_selfsig];
