@@ -8,7 +8,7 @@ use hyper::StatusCode;
 use log::warn;
 
 use crate::buffer::BytePacketBuffer;
-use crate::ctx::{ServerCtx, resolve_query};
+use crate::ctx::{resolve_query, ServerCtx};
 use crate::header::ResultCode;
 use crate::packet::DnsPacket;
 use crate::stats::Transport;
@@ -20,7 +20,7 @@ pub async fn doh_post(State(state): State<super::proxy::DohState>, req: Request)
     let host = super::proxy::extract_host(&req);
     let src = match doh_validate(&state, host.as_deref()) {
         Ok(src) => src,
-        Err(resp) => return resp,
+        Err(code) => return code.into_response(),
     };
 
     let content_type = req
@@ -50,7 +50,7 @@ pub async fn doh_get(State(state): State<super::proxy::DohState>, req: Request) 
     let host = super::proxy::extract_host(&req);
     let src = match doh_validate(&state, host.as_deref()) {
         Ok(src) => src,
-        Err(resp) => return resp,
+        Err(code) => return code.into_response(),
     };
 
     let dns_param = req
@@ -84,9 +84,9 @@ pub async fn doh_get(State(state): State<super::proxy::DohState>, req: Request) 
 fn doh_validate(
     state: &super::proxy::DohState,
     host: Option<&str>,
-) -> Result<SocketAddr, Response> {
+) -> Result<SocketAddr, StatusCode> {
     if !is_doh_host(host, &state.ctx.proxy_tld) {
-        return Err(StatusCode::NOT_FOUND.into_response());
+        return Err(StatusCode::NOT_FOUND);
     }
 
     // Gate DoH only — service-proxy routes on the same TLS listener
@@ -96,7 +96,7 @@ fn doh_validate(
             .remote_addr
             .is_some_and(|a| state.ctx.allow_from.allows(a.ip()));
         if !allowed {
-            return Err(StatusCode::FORBIDDEN.into_response());
+            return Err(StatusCode::FORBIDDEN);
         }
     }
 
