@@ -218,6 +218,8 @@ mod tests {
     use crate::header::ResultCode;
     use crate::packet::DnsPacket;
     use crate::record::DnsRecord;
+    use axum::extract::State;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
     #[test]
     fn is_doh_host_matches_tld() {
@@ -294,5 +296,61 @@ mod tests {
 
         assert_eq!(resp.header.rescode, ResultCode::SERVFAIL);
         assert!(resp.edns.is_some(), "DoH SERVFAIL must mirror client's OPT");
+    }
+
+    async fn doh_get_response(query: &str) -> Response {
+        let ctx = std::sync::Arc::new(crate::testutil::test_ctx().await);
+        let state = crate::proxy::DohState {
+            ctx,
+            remote_addr: Some("127.0.0.1:1234".parse().unwrap()),
+        };
+        let req = Request::builder()
+            .uri(format!("/dns-query?{query}"))
+            .header(hyper::header::HOST, "localhost")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        doh_get(State(state), req).await
+    }
+
+    #[tokio::test]
+    async fn doh_get_rejects_missing_param() {
+        let resp = doh_get_response("name=example.com").await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn doh_get_rejects_invalid_base64url() {
+        // valid URI char, invalid base64url (one symbol can't form a byte)
+        let resp = doh_get_response("dns=A").await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn doh_get_rejects_oversized() {
+        let param = URL_SAFE_NO_PAD.encode(vec![0u8; MAX_DNS_MSG + 1]);
+        let resp = doh_get_response(&format!("dns={param}")).await;
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn doh_get_decodes_param_and_resolves() {
+        // base64url(dns) → decode → resolve; empty-questions drives SERVFAIL.
+        let mut query = DnsPacket::new();
+        query.header.id = 0x1234;
+        query.header.recursion_desired = true;
+        query.edns = Some(crate::packet::EdnsOpt::default());
+        let mut buf = BytePacketBuffer::new();
+        query.write(&mut buf).unwrap();
+        let param = URL_SAFE_NO_PAD.encode(buf.filled());
+
+        let resp = doh_get_response(&format!("dns={param}")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), MAX_DNS_MSG)
+            .await
+            .unwrap();
+        let mut parse = BytePacketBuffer::from_bytes(&body);
+        let parsed = DnsPacket::from_buffer(&mut parse).unwrap();
+        assert_eq!(parsed.header.rescode, ResultCode::SERVFAIL);
     }
 }
