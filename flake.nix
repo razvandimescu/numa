@@ -1,6 +1,7 @@
 {
   description = "Portable DNS resolver in Rust";
 
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
   inputs.flake-utils.url = "github:numtide/flake-utils";
 
   outputs = {
