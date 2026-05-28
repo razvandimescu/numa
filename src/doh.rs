@@ -74,10 +74,6 @@ pub async fn doh_get(State(state): State<super::proxy::DohState>, req: Request) 
         return (StatusCode::PAYLOAD_TOO_LARGE, "body exceeds 4096 bytes").into_response();
     }
 
-    if body.is_empty() {
-        return (StatusCode::BAD_REQUEST, "empty dns query").into_response();
-    }
-
     resolve_doh(&body, src, &state.ctx).await
 }
 
@@ -335,10 +331,7 @@ mod tests {
     #[tokio::test]
     async fn doh_get_decodes_param_and_resolves() {
         // base64url(dns) → decode → resolve; empty-questions drives SERVFAIL.
-        let mut query = DnsPacket::new();
-        query.header.id = 0x1234;
-        query.header.recursion_desired = true;
-        query.edns = Some(crate::packet::EdnsOpt::default());
+        let query = DnsPacket::new();
         let mut buf = BytePacketBuffer::new();
         query.write(&mut buf).unwrap();
         let param = URL_SAFE_NO_PAD.encode(buf.filled());
