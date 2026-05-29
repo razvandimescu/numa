@@ -6,6 +6,24 @@ use log::info;
 use crate::forward::Upstream;
 use crate::forward::UpstreamPool;
 
+// Unix only: the reference config binds `0.0.0.0:53`, wrong for Windows
+// where numa lives on the `127.0.0.2:53` loopback behind an NRPT rule.
+#[cfg(not(windows))]
+const DEFAULT_CONFIG_TEMPLATE: &str = include_str!("../numa.toml");
+
+/// `Ok(true)` if written, `Ok(false)` if a config was already there.
+#[cfg(not(windows))]
+fn write_default_config(path: &std::path::Path) -> std::io::Result<bool> {
+    if path.exists() {
+        return Ok(false);
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, DEFAULT_CONFIG_TEMPLATE)?;
+    Ok(true)
+}
+
 fn print_recursive_hint() {
     let is_recursive = crate::config::load_config("numa.toml")
         .map(|c| c.config.upstream.mode == crate::config::UpstreamMode::Recursive)
@@ -1140,6 +1158,21 @@ pub fn install_service(skip_system_dns: bool) -> Result<(), String> {
     };
 
     if result.is_ok() {
+        #[cfg(not(windows))]
+        {
+            // data_dir(), not config_dir(): under sudo the latter resolves to
+            // the calling user's home, but the daemon reads the system path.
+            let config_path = crate::data_dir().join("numa.toml");
+            match write_default_config(&config_path) {
+                Ok(true) => eprintln!("  Wrote default config: {}", config_path.display()),
+                Ok(false) => {}
+                Err(e) => eprintln!(
+                    "  warning: could not write {}: {}",
+                    config_path.display(),
+                    e
+                ),
+            }
+        }
         if let Err(e) = trust_ca() {
             eprintln!("  warning: could not trust CA: {}", e);
             eprintln!("  HTTPS proxy will work but browsers will show certificate warnings.\n");
@@ -2110,6 +2143,43 @@ mod tests {
     fn try_port53_advisory_skips_malformed_bind_addr() {
         let err = std::io::Error::from(std::io::ErrorKind::AddrInUse);
         assert!(try_port53_advisory("not-an-address", &err).is_none());
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn config_template_parses_as_config() {
+        let _: crate::config::Config = toml::from_str(DEFAULT_CONFIG_TEMPLATE)
+            .expect("embedded numa.toml template must parse as a valid Config");
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn write_default_config_creates_when_absent() {
+        let dir = std::env::temp_dir().join(format!("numa-tmpl-new-{}", std::process::id()));
+        let path = dir.join("numa.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(write_default_config(&path).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            DEFAULT_CONFIG_TEMPLATE
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn write_default_config_never_clobbers() {
+        let dir = std::env::temp_dir().join(format!("numa-tmpl-keep-{}", std::process::id()));
+        let path = dir.join("numa.toml");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, "# user config\n").unwrap();
+
+        assert!(!write_default_config(&path).unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# user config\n");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
