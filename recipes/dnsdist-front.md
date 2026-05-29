@@ -41,6 +41,25 @@ addTLSLocal(
 addAction(AllRule(), PoolAction("", false))
 ```
 
+## ACL: who may recurse
+
+dnsdist — not Numa — gates who reaches the resolver. Its default ACL is loopback plus the
+RFC 1918 / ULA private ranges, so a fresh config is already closed to the internet even
+though the listeners bind `0.0.0.0`. [`setACL()`](https://www.dnsdist.org/advanced/acl.html)
+replaces that default, `addACL()` appends — widen it on purpose, never by accident.
+
+```lua
+-- Personal / LAN / Tailscale: restrict to your own ranges.
+setACL({"127.0.0.0/8", "::1/128", "100.64.0.0/10", "192.168.0.0/16"})
+```
+
+Widening to `0.0.0.0/0` makes you a public open resolver — you inherit the load, abuse, and
+query-log liability of every stranger who finds it. To give back to public DNS, run `numa
+relay` instead: the ODoH relay carries no resolution and sees no queries. Numa as a
+hardened *public recursive* resolver isn't turnkey yet (still needs response-rate limiting
+with TC-slip, RFC 8482 ANY-refusal, DNS Cookies, and `allow_recursion` split from
+`allow_query`), so keep the ACL scoped until then.
+
 ## Numa config
 
 ```toml
