@@ -49,7 +49,7 @@ Set as system DNS:
 | Linux | `sudo numa install` | `sudo numa uninstall` |
 | Windows | `numa install` (admin) + reboot | `numa uninstall` (admin) + reboot |
 
-On macOS and Linux, numa runs as a system service (launchd/systemd). On Windows, numa auto-starts on login via registry.
+On macOS and Linux, numa runs as a system service (launchd/systemd). On Windows, numa auto-starts on login via registry. Windows also binds `127.0.0.2:53` (the built-in Dnscache owns `127.0.0.1:53`) and installs an NRPT rule to route queries to it — so edit `bind_addr`/`api_bind_addr` against `127.0.0.2`, not `127.0.0.1`.
 
 ## Local Services
 
