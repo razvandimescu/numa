@@ -2,7 +2,8 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::extract::{Request, State};
+use axum::extract::{ConnectInfo, Request, State};
+use axum::middleware::Next;
 use axum::response::IntoResponse;
 use axum::routing::{any, get};
 use axum::Router;
@@ -34,6 +35,23 @@ struct ProxyState {
     client: HttpClient,
 }
 
+/// Reject proxy clients outside `[server].allow_from`, mirroring the DNS
+/// listeners. Loopback and an empty allowlist are always permitted (see
+/// `AllowFromAcl::allows`), so the default open behaviour is unchanged.
+async fn allow_from_guard(
+    State(ctx): State<Arc<ServerCtx>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    req: Request,
+    next: Next,
+) -> axum::response::Response {
+    if ctx.allow_from.allows(peer.ip()) {
+        next.run(req).await
+    } else {
+        debug!("proxy: dropping {} — not in allow_from", peer.ip());
+        StatusCode::FORBIDDEN.into_response()
+    }
+}
+
 pub async fn start_proxy(ctx: Arc<ServerCtx>, port: u16, bind_addr: Ipv4Addr) {
     let addr: SocketAddr = (bind_addr, port).into();
     let listener = match tokio::net::TcpListener::bind(addr).await {
@@ -52,11 +70,22 @@ pub async fn start_proxy(ctx: Arc<ServerCtx>, port: u16, bind_addr: Ipv4Addr) {
         .http1_preserve_header_case(true)
         .build_http();
 
-    let state = ProxyState { ctx, client };
+    let state = ProxyState {
+        ctx: Arc::clone(&ctx),
+        client,
+    };
 
-    let app = Router::new().fallback(any(proxy_handler)).with_state(state);
+    let app = Router::new()
+        .fallback(any(proxy_handler))
+        .with_state(state)
+        .layer(axum::middleware::from_fn_with_state(ctx, allow_from_guard));
 
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .unwrap();
 }
 
 pub async fn start_proxy_tls(
@@ -135,6 +164,14 @@ async fn accept_loop_tls(
             else {
                 return;
             };
+
+            if !ctx_for_pp2.allow_from.allows(remote_addr.ip()) {
+                debug!(
+                    "proxy(tls): dropping {} — not in allow_from",
+                    remote_addr.ip()
+                );
+                return;
+            }
 
             let mut conn_doh_state = doh_state;
             conn_doh_state.remote_addr = Some(remote_addr);
@@ -632,5 +669,36 @@ mod tests {
         let resp = DnsPacket::from_buffer(&mut r_buf).unwrap();
         assert_eq!(resp.header.rescode, ResultCode::NOERROR);
         assert_eq!(resp.answers.len(), 1);
+    }
+
+    /// The proxy honours `allow_from` like the DNS listeners: peers outside the
+    /// set get 403, peers inside pass, loopback is always exempt.
+    #[tokio::test]
+    async fn proxy_allow_from_guard_gates_by_peer_ip() {
+        use tower::ServiceExt;
+
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.allow_from =
+            crate::acl::AllowFromAcl::from_entries(&["10.0.0.0/8".to_string()]).unwrap();
+        let ctx = Arc::new(ctx);
+
+        let app = Router::new()
+            .route("/", get(|| async { StatusCode::OK }))
+            .layer(axum::middleware::from_fn_with_state(
+                Arc::clone(&ctx),
+                allow_from_guard,
+            ));
+
+        for (peer, want) in [
+            ("10.1.2.3:5000", StatusCode::OK),
+            ("192.0.2.1:5000", StatusCode::FORBIDDEN),
+            ("127.0.0.1:5000", StatusCode::OK),
+        ] {
+            let peer: SocketAddr = peer.parse().unwrap();
+            let mut req = Request::builder().uri("/").body(Body::empty()).unwrap();
+            req.extensions_mut().insert(ConnectInfo(peer));
+            let status = app.clone().oneshot(req).await.unwrap().status();
+            assert_eq!(status, want, "peer {peer}");
+        }
     }
 }
