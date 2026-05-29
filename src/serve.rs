@@ -405,10 +405,10 @@ async fn udp_serve_loop(
             Err(e) => return Err(e.into()),
         };
         let pp = crate::pp2_udp::parse_if_trusted(&buffer.buf[..len], peer, udp_pp, ctx);
-        let Some((src_addr, dns_len)) = pp.apply(&mut buffer.buf, len, peer) else {
+        let Some((src_addr, dns_len, local_command)) = pp.apply(&mut buffer.buf, len, peer) else {
             continue;
         };
-        if !ctx.allow_from.allows(src_addr.ip()) {
+        if !ctx.allow_from.admits(src_addr.ip(), local_command) {
             // Silent drop: no reply means no amplification, no fingerprint.
             debug!("UDP: dropping {} — not in allow_from", src_addr);
             continue;

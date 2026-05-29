@@ -81,13 +81,13 @@ async fn accept_loop(listener: TcpListener, pp: Option<Arc<PpConfig>>, ctx: Arc<
         tokio::spawn(async move {
             let _permit = permit;
 
-            let Some((stream, remote_addr)) =
+            let Some((stream, remote_addr, local_command)) =
                 pp2::handshake(tcp_stream, tcp_peer, pp.as_deref(), &ctx).await
             else {
                 return;
             };
 
-            if !ctx.allow_from.allows(remote_addr.ip()) {
+            if !ctx.allow_from.admits(remote_addr.ip(), local_command) {
                 debug!("TCP: dropping {} — not in allow_from", remote_addr);
                 return;
             }

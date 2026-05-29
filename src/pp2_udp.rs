@@ -14,7 +14,13 @@ use crate::pp2::{PpConfig, PARSE_CFG};
 #[derive(Debug, PartialEq, Eq)]
 pub enum UdpPp {
     Bare,
-    Proxied { src: SocketAddr, hdr_len: usize },
+    Proxied {
+        src: SocketAddr,
+        hdr_len: usize,
+        /// LOCAL command (sender health probe): `src` is the front-end itself,
+        /// not a client, so it bypasses the client `allow_from`.
+        local_command: bool,
+    },
     Drop,
 }
 
@@ -27,12 +33,16 @@ impl UdpPp {
         buf: &mut [u8],
         len: usize,
         peer: SocketAddr,
-    ) -> Option<(SocketAddr, usize)> {
+    ) -> Option<(SocketAddr, usize, bool)> {
         match self {
-            UdpPp::Bare => Some((peer, len)),
-            UdpPp::Proxied { src, hdr_len } => {
+            UdpPp::Bare => Some((peer, len, false)),
+            UdpPp::Proxied {
+                src,
+                hdr_len,
+                local_command,
+            } => {
                 buf.copy_within(hdr_len..len, 0);
-                Some((src, len - hdr_len))
+                Some((src, len - hdr_len, local_command))
             }
             UdpPp::Drop => None,
         }
@@ -71,13 +81,18 @@ pub fn parse_if_trusted(
             UdpPp::Proxied {
                 src: addr.source,
                 hdr_len,
+                local_command: false,
             }
         }
         None => {
             // LOCAL command (sender health probe): use peer as the real
             // client and treat the rest of the datagram as DNS.
             ctx.stats.lock().unwrap().proxy_v2_local_command += 1;
-            UdpPp::Proxied { src: peer, hdr_len }
+            UdpPp::Proxied {
+                src: peer,
+                hdr_len,
+                local_command: true,
+            }
         }
     }
 }
@@ -141,8 +156,13 @@ mod tests {
         let peer: SocketAddr = "172.29.0.20:44444".parse().unwrap();
 
         match parse_if_trusted(&datagram, peer, Some(&pp), &ctx) {
-            UdpPp::Proxied { src, hdr_len } => {
+            UdpPp::Proxied {
+                src,
+                hdr_len,
+                local_command,
+            } => {
                 assert_eq!(src.to_string(), "203.0.113.5:55000");
+                assert!(!local_command, "PROXY command is not a LOCAL probe");
                 assert_eq!(&datagram[hdr_len..], dns);
             }
             other => panic!("expected Proxied, got {other:?}"),
@@ -185,7 +205,10 @@ mod tests {
     async fn apply_bare_passes_through() {
         let mut buf = *b"hello-world";
         let peer: SocketAddr = "1.2.3.4:53".parse().unwrap();
-        assert_eq!(UdpPp::Bare.apply(&mut buf, 11, peer), Some((peer, 11)));
+        assert_eq!(
+            UdpPp::Bare.apply(&mut buf, 11, peer),
+            Some((peer, 11, false))
+        );
         assert_eq!(&buf, b"hello-world");
     }
 
@@ -197,9 +220,10 @@ mod tests {
         let r = UdpPp::Proxied {
             src: real,
             hdr_len: 9,
+            local_command: false,
         }
         .apply(&mut buf, 20, peer);
-        assert_eq!(r, Some((real, 11)));
+        assert_eq!(r, Some((real, 11, false)));
         assert_eq!(&buf[..11], b"dns-payload");
     }
 

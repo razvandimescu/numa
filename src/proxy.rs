@@ -35,9 +35,10 @@ struct ProxyState {
     client: HttpClient,
 }
 
-/// Reject proxy clients outside `[server].allow_from`, mirroring the DNS
-/// listeners. Loopback and an empty allowlist are always permitted (see
-/// `AllowFromAcl::allows`), so the default open behaviour is unchanged.
+/// Gate the plain HTTP proxy on `[server].allow_from`, checking the direct TCP
+/// peer — this listener has no PROXY-protocol support, so behind a load balancer
+/// the peer is the balancer, not the client. Loopback and an empty allowlist are
+/// always permitted, so the default open behaviour is unchanged.
 async fn allow_from_guard(
     State(ctx): State<Arc<ServerCtx>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -159,13 +160,16 @@ async fn accept_loop_tls(
         let pp = pp.clone();
 
         tokio::spawn(async move {
-            let Some((stream, remote_addr)) =
+            let Some((stream, remote_addr, local_command)) =
                 pp2::handshake(tcp_stream, tcp_peer, pp.as_deref(), &ctx_for_pp2).await
             else {
                 return;
             };
 
-            if !ctx_for_pp2.allow_from.allows(remote_addr.ip()) {
+            if !ctx_for_pp2
+                .allow_from
+                .admits(remote_addr.ip(), local_command)
+            {
                 debug!(
                     "proxy(tls): dropping {} — not in allow_from",
                     remote_addr.ip()
@@ -563,12 +567,20 @@ mod tests {
         h
     }
 
-    /// Spin up a DoH-capable TLS listener with a PROXY v2 allowlist.
-    async fn spawn_doh_server_with_pp(pp_from: &[&str]) -> (SocketAddr, CertificateDer<'static>) {
+    /// Spin up a DoH-capable TLS listener with a PROXY v2 allowlist and an
+    /// optional `[server].allow_from` (empty = allow-all).
+    async fn spawn_doh_server_with_pp(
+        pp_from: &[&str],
+        allow_from: &[&str],
+    ) -> (SocketAddr, CertificateDer<'static>) {
         let (server_tls, cert_der) = test_tls_configs();
         let upstream_addr = crate::testutil::blackhole_upstream();
 
         let mut ctx = crate::testutil::test_ctx().await;
+        ctx.allow_from = crate::acl::AllowFromAcl::from_entries(
+            &allow_from.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        )
+        .unwrap();
         ctx.zone_map = crate::config::ZoneMap::from_exact(vec![DnsRecord::A {
             domain: "doh-test.example".to_string(),
             addr: std::net::Ipv4Addr::new(10, 0, 0, 2),
@@ -635,7 +647,7 @@ mod tests {
         // Trusted client (127.0.0.1) sends a v4 PROXY header before the TLS
         // ClientHello; server completes TLS, parses the wire DNS message,
         // and returns NOERROR with the local-zone A record.
-        let (addr, cert_der) = spawn_doh_server_with_pp(&["127.0.0.1"]).await;
+        let (addr, cert_der) = spawn_doh_server_with_pp(&["127.0.0.1"], &[]).await;
 
         let mut root_store = rustls::RootCertStore::empty();
         root_store.add(cert_der).unwrap();
@@ -700,5 +712,50 @@ mod tests {
             let status = app.clone().oneshot(req).await.unwrap().status();
             assert_eq!(status, want, "peer {peer}");
         }
+    }
+
+    /// On 443 the proxy gates the PROXY-v2-resolved client against allow_from:
+    /// an in-range proxied source completes TLS, an out-of-range one is dropped
+    /// before the handshake. (The test client is loopback, but the gated address
+    /// is the proxied source in the PROXY header, so the check is exercised.)
+    #[tokio::test]
+    async fn proxy_tls_allow_from_gates_proxied_client() {
+        let (addr, cert_der) = spawn_doh_server_with_pp(&["127.0.0.1"], &["203.0.113.0/24"]).await;
+
+        let mut root_store = rustls::RootCertStore::empty();
+        root_store.add(cert_der).unwrap();
+        let client_config = Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(root_store)
+                .with_no_client_auth(),
+        );
+
+        async fn tls_connects(
+            addr: SocketAddr,
+            client_config: Arc<rustls::ClientConfig>,
+            src: &str,
+        ) -> bool {
+            let mut tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let pp = pp2_v4_proxy(
+                src.parse().unwrap(),
+                "10.0.0.5".parse().unwrap(),
+                54321,
+                443,
+            );
+            tcp.write_all(&pp).await.unwrap();
+            tokio_rustls::TlsConnector::from(client_config)
+                .connect(ServerName::try_from("numa.numa").unwrap(), tcp)
+                .await
+                .is_ok()
+        }
+
+        assert!(
+            tls_connects(addr, client_config.clone(), "203.0.113.42").await,
+            "in-range proxied client should be served"
+        );
+        assert!(
+            !tls_connects(addr, client_config, "198.51.100.7").await,
+            "out-of-range proxied client should be dropped before TLS"
+        );
     }
 }

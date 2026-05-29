@@ -84,16 +84,20 @@ pub fn init(listener: &str, cfg: &ProxyProtocolConfig) -> Result<Option<Arc<PpCo
 /// Returns `None` when the connection should be dropped — either because
 /// the peer is not on the allowlist, or because the header failed to parse
 /// or arrive before the timeout. Stats are recorded as a side effect.
+/// Returns `(stream, remote_addr, local_command)`. `local_command` is true for
+/// a PROXY-v2 LOCAL header (the front-end probing for itself, no client) so the
+/// caller can exempt it from the client `allow_from`; false for a real proxied
+/// client or a direct (no-PROXY) connection.
 pub async fn handshake(
     tcp_stream: TcpStream,
     tcp_peer: SocketAddr,
     pp: Option<&PpConfig>,
     ctx: &Arc<ServerCtx>,
-) -> Option<(Stream, SocketAddr)> {
+) -> Option<(Stream, SocketAddr, bool)> {
     let pp = match pp {
         Some(p) => p,
-        // Feature disabled on this listener; passthrough.
-        None => return Some((Stream::Bare(tcp_stream), tcp_peer)),
+        // Feature disabled on this listener; passthrough (direct client).
+        None => return Some((Stream::Bare(tcp_stream), tcp_peer, false)),
     };
 
     if !pp.allows(tcp_peer.ip()) {
@@ -126,20 +130,20 @@ pub async fn handshake(
     };
 
     let header = proxied.proxy_header();
-    let real_addr = match header.proxied_address() {
+    let (real_addr, local_command) = match header.proxied_address() {
         Some(addr) => {
             ctx.stats.lock().unwrap().proxy_v2_accepted += 1;
-            addr.source
+            (addr.source, false)
         }
         None => {
             // LOCAL command (proxy health check) or an address-less header.
             // Use the TCP peer as the connection's remote_addr.
             ctx.stats.lock().unwrap().proxy_v2_local_command += 1;
-            tcp_peer
+            (tcp_peer, true)
         }
     };
 
-    Some((Stream::Proxied(Box::new(proxied)), real_addr))
+    Some((Stream::Proxied(Box::new(proxied)), real_addr, local_command))
 }
 
 /// `Either`-style enum covering the two states the listener may produce:

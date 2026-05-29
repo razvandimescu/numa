@@ -117,13 +117,13 @@ async fn accept_loop(
         tokio::spawn(async move {
             let _permit = permit; // held until task exits
 
-            let Some((stream, remote_addr)) =
+            let Some((stream, remote_addr, local_command)) =
                 pp2::handshake(tcp_stream, tcp_peer, pp.as_deref(), &ctx).await
             else {
                 return;
             };
 
-            if !ctx.allow_from.allows(remote_addr.ip()) {
+            if !ctx.allow_from.admits(remote_addr.ip(), local_command) {
                 // Close before TLS handshake — no fingerprint, no cert exposure.
                 debug!("DoT: dropping {} — not in allow_from", remote_addr);
                 return;

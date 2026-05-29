@@ -84,6 +84,14 @@ impl AllowFromAcl {
         self.matcher.matches(peer)
     }
 
+    /// Whether to admit a connection given its PROXY-v2 command kind. A LOCAL
+    /// command is the front-end/LB probing for itself (already vetted by
+    /// `proxy_protocol.from`) — it carries no client, so it bypasses this
+    /// client allowlist. Everything else is gated on `allows`.
+    pub fn admits(&self, peer: IpAddr, local_command: bool) -> bool {
+        local_command || self.allows(peer)
+    }
+
     pub fn is_enabled(&self) -> bool {
         !self.matcher.is_empty()
     }
@@ -124,6 +132,25 @@ mod tests {
         let a = AllowFromAcl::default();
         assert!(!a.is_enabled());
         check_allows(&a, &[("1.2.3.4", true), ("2001:db8::1", true)]);
+    }
+
+    /// A PROXY-v2 LOCAL command (health probe, no client) bypasses the ACL even
+    /// when the resolved address is outside the allowlist; a real client at the
+    /// same address is still gated. (Untestable through a listener: the test
+    /// peer is always loopback, which `allows` exempts regardless.)
+    #[test]
+    fn local_command_bypasses_allow_from() {
+        let a = AllowFromAcl {
+            matcher: matcher(&["10.0.0.0/8"], &[]),
+        };
+        let outside: IpAddr = "192.0.2.1".parse().unwrap();
+        let inside: IpAddr = "10.1.2.3".parse().unwrap();
+        assert!(
+            a.admits(outside, true),
+            "LOCAL command bypasses the allowlist"
+        );
+        assert!(!a.admits(outside, false), "real client outside is gated");
+        assert!(a.admits(inside, false), "real client inside is admitted");
     }
 
     #[test]
