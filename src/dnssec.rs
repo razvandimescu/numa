@@ -278,71 +278,7 @@ async fn try_verify_with_key(
     dnskey_response: &[DnsRecord],
     ctx: &ValidationCtx<'_>,
 ) -> KeyOutcome {
-    let DnsRecord::DNSKEY {
-        flags,
-        protocol,
-        algorithm: dk_algo,
-        public_key,
-        ..
-    } = dk
-    else {
-        return KeyOutcome::Skip;
-    };
-    let DnsRecord::RRSIG {
-        algorithm,
-        key_tag,
-        expiration,
-        inception,
-        signature,
-        ..
-    } = rrsig
-    else {
-        return KeyOutcome::Skip;
-    };
-
-    let tag = compute_key_tag(*flags, *protocol, *dk_algo, public_key);
-    if *dk_algo != *algorithm {
-        trace!(
-            "dnssec:   DNSKEY tag={} algo={} — algo mismatch (want {})",
-            tag,
-            dk_algo,
-            algorithm
-        );
-        return KeyOutcome::Skip;
-    }
-    if tag != *key_tag {
-        trace!(
-            "dnssec:   DNSKEY tag={} — tag mismatch (want {})",
-            tag,
-            key_tag
-        );
-        return KeyOutcome::Skip;
-    }
-    if !is_rrsig_time_valid(*expiration, *inception) {
-        trace!(
-            "dnssec:   RRSIG expired or not yet valid (inception={} expiration={})",
-            inception,
-            expiration
-        );
-        return KeyOutcome::Skip;
-    }
-
-    trace!(
-        "dnssec:   DNSKEY tag={} algo={} flags={} — matched, verifying signature ({} bytes)",
-        tag,
-        dk_algo,
-        flags,
-        public_key.len()
-    );
-    let signed_data = build_signed_data(rrsig, rrset);
-    let ok = verify_signature(*algorithm, public_key, &signed_data, signature);
-    trace!(
-        "dnssec:   verify result: {} (signed_data={} bytes, sig={} bytes)",
-        ok,
-        signed_data.len(),
-        signature.len()
-    );
-    if !ok {
+    if !rrsig_verified_by(rrsig, dk, rrset) {
         return KeyOutcome::Skip;
     }
 
@@ -398,49 +334,23 @@ fn validate_chain<'a>(
             return DnssecStatus::Indeterminate;
         }
 
-        // Check if any zone DNSKEY matches a trust anchor
-        for dk in &zone_dnskeys {
-            if let DnsRecord::DNSKEY {
-                flags,
-                protocol,
-                algorithm,
-                public_key,
-                ..
-            } = dk
-            {
-                if *flags & 0x0101 != 0x0101 {
-                    continue;
-                }
-                let tag = compute_key_tag(*flags, *protocol, *algorithm, public_key);
-                for ta in trust_anchors {
-                    if let DnsRecord::DNSKEY {
-                        algorithm: ta_algo,
-                        public_key: ta_key,
-                        flags: ta_flags,
-                        protocol: ta_proto,
-                        ..
-                    } = ta
-                    {
-                        let ta_tag = compute_key_tag(*ta_flags, *ta_proto, *ta_algo, ta_key);
-                        if tag == ta_tag && algorithm == ta_algo && public_key == ta_key {
-                            // Signed by the anchor itself, not merely present.
-                            if verify_rrset_signed(
-                                zone_records,
-                                QueryType::DNSKEY,
-                                std::slice::from_ref(ta),
-                            ) {
-                                debug!("dnssec: root DNSKEY signed by trust anchor for '{}'", zone);
-                                return DnssecStatus::Secure;
-                            }
-                            debug!(
-                                "dnssec: anchor present but RRset not signed by it: '{}'",
-                                zone
-                            );
-                            return DnssecStatus::Bogus;
-                        }
-                    }
-                }
-            }
+        // Root base case: a trust anchor must be present *and* have signed the
+        // DNSKEY RRset. Present-but-unsigned is an attack signal → Bogus (fail
+        // closed), not a fall-through to the Indeterminate KSK-rollover path.
+        let anchor_present = zone_dnskeys
+            .iter()
+            .any(|dk| trust_anchors.iter().any(|ta| same_dnskey(dk, ta)));
+        if anchor_present {
+            return if verify_rrset_signed(zone_records, QueryType::DNSKEY, trust_anchors) {
+                debug!("dnssec: root DNSKEY signed by trust anchor for '{}'", zone);
+                DnssecStatus::Secure
+            } else {
+                debug!(
+                    "dnssec: anchor present but RRset not signed by it: '{}'",
+                    zone
+                );
+                DnssecStatus::Bogus
+            };
         }
 
         // Not a trust anchor — need to verify via parent DS
@@ -517,11 +427,58 @@ fn validate_chain<'a>(
     })
 }
 
-/// The signature-checking primitive: does the `rrset_type` RRset in `records`
-/// carry a time-valid RRSIG made by one of `signing_keys` (which the caller must
-/// already trust)? Callers pass the specific authenticated key(s) — the trust
-/// anchor for the root DNSKEY, or the DS-matched KSKs for a child — so a signer
-/// the chain never committed to cannot satisfy the check.
+/// Same DNSKEY identity (algorithm + public key); flags/protocol are not part
+/// of key identity, so a tag comparison would be redundant.
+fn same_dnskey(a: &DnsRecord, b: &DnsRecord) -> bool {
+    matches!(
+        (a, b),
+        (
+            DnsRecord::DNSKEY { algorithm: aa, public_key: ak, .. },
+            DnsRecord::DNSKEY { algorithm: ba, public_key: bk, .. },
+        ) if aa == ba && ak == bk
+    )
+}
+
+/// The chain's single signature gate: does `dk` make a time-valid RRSIG `rrsig`
+/// over `rrset`? Matches algorithm + key tag, checks validity window, then
+/// verifies the signature over the canonical RRset bytes.
+fn rrsig_verified_by(rrsig: &DnsRecord, dk: &DnsRecord, rrset: &[&DnsRecord]) -> bool {
+    let (
+        DnsRecord::RRSIG {
+            algorithm,
+            key_tag,
+            expiration,
+            inception,
+            signature,
+            ..
+        },
+        DnsRecord::DNSKEY {
+            flags,
+            protocol,
+            algorithm: dk_algo,
+            public_key,
+            ..
+        },
+    ) = (rrsig, dk)
+    else {
+        return false;
+    };
+    dk_algo == algorithm
+        && compute_key_tag(*flags, *protocol, *dk_algo, public_key) == *key_tag
+        && is_rrsig_time_valid(*expiration, *inception)
+        && verify_signature(
+            *algorithm,
+            public_key,
+            &build_signed_data(rrsig, rrset),
+            signature,
+        )
+}
+
+/// Does the `rrset_type` RRset in `records` carry an RRSIG made by one of
+/// `signing_keys` (which the caller must already trust)? Callers pass the
+/// specific authenticated key(s) — the trust anchor for the root DNSKEY, or the
+/// DS-matched KSKs for a child — so a signer the chain never committed to cannot
+/// satisfy the check.
 fn verify_rrset_signed(
     records: &[DnsRecord],
     rrset_type: QueryType,
@@ -534,48 +491,13 @@ fn verify_rrset_signed(
     if rrset.is_empty() {
         return false;
     }
-
-    for r in records {
-        if let DnsRecord::RRSIG {
-            type_covered,
-            algorithm,
-            key_tag,
-            expiration,
-            inception,
-            signature,
-            ..
-        } = r
-        {
-            if QueryType::from_num(*type_covered) != rrset_type {
-                continue;
-            }
-            if !is_rrsig_time_valid(*expiration, *inception) {
-                continue;
-            }
-            for dk in signing_keys {
-                if let DnsRecord::DNSKEY {
-                    flags,
-                    protocol,
-                    algorithm: dk_algo,
-                    public_key,
-                    ..
-                } = dk
-                {
-                    if dk_algo != algorithm {
-                        continue;
-                    }
-                    if compute_key_tag(*flags, *protocol, *dk_algo, public_key) != *key_tag {
-                        continue;
-                    }
-                    let signed_data = build_signed_data(r, &rrset);
-                    if verify_signature(*algorithm, public_key, &signed_data, signature) {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    false
+    records.iter().any(|r| {
+        matches!(r, DnsRecord::RRSIG { type_covered, .. }
+            if QueryType::from_num(*type_covered) == rrset_type)
+            && signing_keys
+                .iter()
+                .any(|dk| rrsig_verified_by(r, dk, &rrset))
+    })
 }
 
 // -- Fetching helpers --
