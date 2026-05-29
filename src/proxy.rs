@@ -683,8 +683,7 @@ mod tests {
         assert_eq!(resp.answers.len(), 1);
     }
 
-    /// The proxy honours `allow_from` like the DNS listeners: peers outside the
-    /// set get 403, peers inside pass, loopback is always exempt.
+    /// Port-80 guard: outside `allow_from` → 403, inside → pass, loopback exempt.
     #[tokio::test]
     async fn proxy_allow_from_guard_gates_by_peer_ip() {
         use tower::ServiceExt;
@@ -714,10 +713,8 @@ mod tests {
         }
     }
 
-    /// On 443 the proxy gates the PROXY-v2-resolved client against allow_from:
-    /// an in-range proxied source completes TLS, an out-of-range one is dropped
-    /// before the handshake. (The test client is loopback, but the gated address
-    /// is the proxied source in the PROXY header, so the check is exercised.)
+    /// The gated address is the proxied source in the PROXY header (not the
+    /// loopback test peer), so the 443 ACL is genuinely exercised.
     #[tokio::test]
     async fn proxy_tls_allow_from_gates_proxied_client() {
         let (addr, cert_der) = spawn_doh_server_with_pp(&["127.0.0.1"], &["203.0.113.0/24"]).await;
