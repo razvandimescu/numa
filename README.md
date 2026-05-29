@@ -22,7 +22,7 @@ brew install razvandimescu/tap/numa
 curl -fsSL https://raw.githubusercontent.com/razvandimescu/numa/main/install.sh | sh
 
 # Arch Linux
-pacman -S numa
+yay -S numa-git
 
 # Windows — download from GitHub Releases
 # All platforms
