@@ -376,7 +376,8 @@ fn resolve_local(
 }
 
 /// Resolve `.numa` queries:
-///   - locally-registered service → loopback (local client) or LAN IP (remote)
+///   - locally-registered service → loopback locally, else the egress IP toward
+///     the client (so LAN and tailnet peers each get a reachable proxy address)
 ///   - LAN peer learned via discovery → that peer's actual IP (v4 or v6 native)
 ///   - unknown name → NXDOMAIN (never silently sinkhole to loopback)
 fn resolve_proxy_tld(
@@ -391,7 +392,8 @@ fn resolve_proxy_tld(
 
     if ctx.services.lock().unwrap().lookup(service_name).is_some() {
         let v4 = if is_remote {
-            *ctx.lan_ip.lock().unwrap()
+            crate::lan::local_ip_toward(src_addr.ip())
+                .unwrap_or_else(|| *ctx.lan_ip.lock().unwrap())
         } else {
             std::net::Ipv4Addr::LOCALHOST
         };

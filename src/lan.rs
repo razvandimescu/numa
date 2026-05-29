@@ -101,13 +101,19 @@ impl PeerStore {
 
 // --- mDNS Discovery ---
 
-pub fn detect_lan_ip() -> Option<Ipv4Addr> {
+/// Source IPv4 the kernel would route from to reach `dest`. The UDP `connect`
+/// sends no packet — it only consults the routing table.
+pub fn local_ip_toward(dest: IpAddr) -> Option<Ipv4Addr> {
     let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-    socket.connect("8.8.8.8:80").ok()?;
+    socket.connect((dest, 53)).ok()?;
     match socket.local_addr().ok()? {
         SocketAddr::V4(addr) => Some(*addr.ip()),
         _ => None,
     }
+}
+
+pub fn detect_lan_ip() -> Option<Ipv4Addr> {
+    local_ip_toward(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)))
 }
 
 /// Short hostname for mDNS instance names (`<short>._numa._tcp.local`).
@@ -511,4 +517,17 @@ fn create_mdns_socket() -> std::io::Result<std::net::UdpSocket> {
     socket.bind(&socket2::SockAddr::from(addr))?;
     socket.join_multicast_v4(&MDNS_ADDR, &Ipv4Addr::UNSPECIFIED)?;
     Ok(socket.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_ip_toward_loopback_dest_is_loopback() {
+        assert_eq!(
+            local_ip_toward(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            Some(Ipv4Addr::LOCALHOST)
+        );
+    }
 }
