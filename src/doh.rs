@@ -5,7 +5,7 @@ use axum::body::Bytes;
 use axum::extract::{Request, State};
 use axum::response::{IntoResponse, Response};
 use hyper::StatusCode;
-use log::warn;
+use log::{debug, warn};
 
 use crate::buffer::BytePacketBuffer;
 use crate::ctx::{resolve_query, ServerCtx};
@@ -92,6 +92,10 @@ fn doh_validate(
             .remote_addr
             .is_some_and(|a| state.ctx.allow_from.allows(a.ip()));
         if !allowed {
+            match state.remote_addr {
+                Some(a) => debug!("DoH: dropping {a} — not in allow_from"),
+                None => debug!("DoH: dropping unknown peer — not in allow_from"),
+            }
             return Err(StatusCode::FORBIDDEN);
         }
     }
