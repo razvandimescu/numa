@@ -73,5 +73,10 @@ harness = false
 name = "recursive_compare"
 harness = false
 
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
+
 [lints.clippy]
 cognitive_complexity = "warn"
