@@ -23,7 +23,7 @@
                 pname = "numa";
                 version = (lib.importTOML ./Cargo.toml).package.version;
                 src = ./.;
-                cargoHash = "sha256-svTcUocOSHNmXcPQaBusOSh3oVb2kRbPS9Hy4XdVpv4=";
+                cargoHash = "sha256-DU+pAgIy76FcKFs1p25o8S1MxcT5hdGphVqpi60pIus=";
                 meta = {
                   description = "Portable DNS resolver in Rust";
                   homepage = "https://numa.rs";
