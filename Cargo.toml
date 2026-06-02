@@ -40,7 +40,7 @@ qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 webpki-roots = "1"
 proxy-header = { version = "0.1", features = ["tokio"] }
 ipnet = { version = "2", features = ["serde"] }
-quinn-udp = "0.5"
+quinn-udp = "0.6"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
