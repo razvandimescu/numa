@@ -1,9 +1,7 @@
-//! DNS rebinding protection (#240). Strips private/special-use addresses from
-//! answers that came from an untrusted upstream path, so a public hostname
-//! can't be rebound to an address inside the client's perimeter. Off by
-//! default; opt-in via `[server] rebind_protect`. Local data (zones,
-//! overrides, `.numa`, blocklist sinkhole) resolves on a different
-//! `QueryPath` and never reaches this filter — see `resolve_query`.
+//! DNS rebinding protection (#240): strip private/special-use addresses from
+//! upstream answers so a public name can't resolve to an address inside the
+//! client's perimeter. Off by default. Runs only on remote/cache paths; local
+//! data (zones, overrides, `.numa`, sinkhole) is exempt by gating in `ctx.rs`.
 
 use std::net::IpAddr;
 
@@ -13,19 +11,22 @@ use crate::question::QueryType;
 use crate::record::DnsRecord;
 
 /// Built-in private/special-use ranges, used when `rebind_private_ranges` is
-/// empty. Loopback (`127.0.0.0/8`, `::1`) is deliberately omitted: it collides
-/// with the blocklist's `0.0.0.0` sinkhole and with DNSBLs that return
-/// `127.0.0.x` as a positive signal. IPv4-mapped IPv6 (`::ffff:a.b.c.d`) needs
-/// no entry — `CidrMatcher` canonicalizes before matching, so a mapped private
-/// address already matches the v4 ranges.
+/// empty. Loopback is included — it's the canonical rebind target (localhost
+/// dev servers, Docker/Electron dashboards). DNSBL/RBL users (mail servers
+/// resolving `127.0.0.x` from zones like `zen.spamhaus.org`) and upstreams
+/// that sinkhole ads to `127.0.0.1` should allowlist those names. IPv4-mapped
+/// IPv6 (`::ffff:a.b.c.d`) needs no entry — `CidrMatcher` canonicalizes before
+/// matching, so a mapped private address already matches the v4 ranges.
 const DEFAULT_RANGES: &[&str] = &[
+    "127.0.0.0/8",    // RFC 1122 loopback — the canonical rebind target
     "10.0.0.0/8",     // RFC 1918
     "172.16.0.0/12",  // RFC 1918
     "192.168.0.0/16", // RFC 1918
     "169.254.0.0/16", // RFC 3927 link-local
-    "0.0.0.0/8",      // RFC 1122 "this host" — localhost-mapped on Linux/macOS
+    "0.0.0.0/8",      // RFC 1122 "this host" — 0.0.0.0 routes to localhost on connect
     "fc00::/7",       // RFC 4193 ULA
     "fe80::/10",      // RFC 4291 link-local
+    "::1/128",        // loopback
     "::/128",         // unspecified
 ];
 
@@ -187,10 +188,20 @@ mod tests {
     }
 
     #[test]
-    fn loopback_not_stripped_by_default() {
+    fn loopback_stripped_by_default() {
         let f = filter(&[]);
-        let mut p = packet(vec![a("127.0.0.1")]);
-        assert_eq!(f.apply("evil.com", &mut p), 0);
+        let mut p = packet(vec![a("127.0.0.1"), aaaa("::1")]);
+        assert_eq!(f.apply("evil.com", &mut p), 2);
+        assert!(p.answers.is_empty());
+    }
+
+    #[test]
+    fn allowlisted_dnsbl_zone_keeps_127_response() {
+        // RBL lookups legitimately resolve to 127.0.0.x; allowlisting the zone
+        // exempts them from the loopback strip.
+        let f = filter(&["spamhaus.org"]);
+        let mut p = packet(vec![a("127.0.0.2")]);
+        assert_eq!(f.apply("2.0.0.127.zen.spamhaus.org", &mut p), 0);
     }
 
     #[test]

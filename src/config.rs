@@ -111,10 +111,11 @@ pub struct ServerConfig {
     #[serde(default)]
     pub allow_from: Vec<String>,
     /// DNS rebinding protection (#240). When true, strip private/special-use
-    /// addresses (RFC 1918, link-local, ULA, `0.0.0.0/8`; not loopback) from
+    /// addresses (loopback, RFC 1918, link-local, ULA, `0.0.0.0/8`) from
     /// answers resolved via the upstream/recursive/cache paths, so a public
     /// hostname can't be rebound to an address inside the perimeter. Local
     /// data (zones, overrides, `.numa`, blocklist sinkhole) is never affected.
+    /// DNSBL/RBL users should add their lookup zones to `rebind_allowlist`.
     /// Default false.
     #[serde(default)]
     pub rebind_protect: bool,
