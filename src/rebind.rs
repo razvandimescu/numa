@@ -3,9 +3,11 @@
 //! client's perimeter. Off by default. Runs only on remote/cache paths; local
 //! data (zones, overrides, `.numa`, sinkhole) is exempt by gating in `ctx.rs`.
 
+use std::collections::HashSet;
 use std::net::IpAddr;
 
 use crate::acl::CidrMatcher;
+use crate::blocklist::{find_in_set, normalize};
 use crate::packet::DnsPacket;
 use crate::question::QueryType;
 use crate::record::DnsRecord;
@@ -34,7 +36,7 @@ const DEFAULT_RANGES: &[&str] = &[
 pub struct RebindFilter {
     enabled: bool,
     ranges: CidrMatcher,
-    allowlist: Vec<String>, // normalized: lowercase, no trailing dot
+    allowlist: HashSet<String>, // normalized: lowercase, no trailing dot
 }
 
 impl RebindFilter {
@@ -93,28 +95,11 @@ impl RebindFilter {
         acted
     }
 
-    /// Exact-or-parent suffix match, mirroring `BlocklistStore` semantics:
+    /// Exact-or-parent suffix match (shared with `BlocklistStore`):
     /// `example.com` covers `nas.example.com` but never `evilexample.com`.
     fn is_allowed(&self, qname: &str) -> bool {
-        if self.allowlist.is_empty() {
-            return false;
-        }
-        let q = normalize(qname);
-        let mut d = q.as_str();
-        loop {
-            if self.allowlist.iter().any(|e| e == d) {
-                return true;
-            }
-            match d.find('.') {
-                Some(dot) => d = &d[dot + 1..],
-                None => return false,
-            }
-        }
+        !self.allowlist.is_empty() && find_in_set(&normalize(qname), &self.allowlist).is_some()
     }
-}
-
-fn normalize(domain: &str) -> String {
-    domain.to_lowercase().trim_end_matches('.').to_string()
 }
 
 #[cfg(test)]

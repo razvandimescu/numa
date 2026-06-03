@@ -148,13 +148,8 @@ pub async fn run(config_path: String) -> crate::Result<()> {
     .map_err(|e| format!("invalid [server] rebind config: {e}"))?;
     if rebind.is_enabled() {
         info!(
-            "DNS rebinding protection enabled ({} allowlist entr{})",
-            config.server.rebind_allowlist.len(),
-            if config.server.rebind_allowlist.len() == 1 {
-                "y"
-            } else {
-                "ies"
-            }
+            "DNS rebinding protection enabled ({} allowlist entries)",
+            config.server.rebind_allowlist.len()
         );
     }
 

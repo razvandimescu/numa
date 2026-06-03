@@ -147,16 +147,12 @@ pub async fn resolve_query(
     }
 
     // Rebind protection, after DNSSEC validation + the unfiltered cache insert
-    // above, before shaping. Gated by *exclusion*, not inclusion: only the
-    // trusted-local paths (zones/special-use, ephemeral overrides, blocklist
-    // sinkhole) legitimately return private IPs and are exempt. Everything else
-    // — recursive/forward/upstream/cache, and any future untrusted source such
-    // as pkarr (#225) — is filtered by default, so a new path can't silently
-    // ship unprotected. UpstreamError carries no answers, so it's a no-op.
-    if !matches!(
-        path,
-        QueryPath::Local | QueryPath::Overridden | QueryPath::Blocked
-    ) {
+    // above, before shaping. Gated by *exclusion* (see
+    // `QueryPath::returns_trusted_local_data`): only trusted-local paths are
+    // exempt, so any future untrusted source — recursive/forward/upstream/cache
+    // or pkarr (#225) — is filtered by default and can't silently ship
+    // unprotected. UpstreamError carries no answers, so it's a no-op.
+    if !path.returns_trusted_local_data() {
         let stripped = ctx.rebind.apply(&qname, &mut response);
         if stripped > 0 {
             // A stripped Secure answer is no longer the validated one; don't

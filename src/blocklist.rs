@@ -88,10 +88,10 @@ impl BlocklistStore {
             }
         }
         let domain = normalize(domain);
-        if Self::find_in_set(&domain, &self.allowlist).is_some() {
+        if find_in_set(&domain, &self.allowlist).is_some() {
             return false;
         }
-        Self::find_in_set(&domain, &self.domains).is_some()
+        find_in_set(&domain, &self.domains).is_some()
     }
 
     pub fn check(&self, domain: &str) -> BlockCheckResult {
@@ -107,7 +107,7 @@ impl BlocklistStore {
 
         let domain = normalize(domain);
 
-        if let Some(matched) = Self::find_in_set(&domain, &self.allowlist) {
+        if let Some(matched) = find_in_set(&domain, &self.allowlist) {
             let reason = if matched == domain {
                 "exact match in allowlist"
             } else {
@@ -116,7 +116,7 @@ impl BlocklistStore {
             return BlockCheckResult::allowed(matched, reason);
         }
 
-        if let Some(matched) = Self::find_in_set(&domain, &self.domains) {
+        if let Some(matched) = find_in_set(&domain, &self.domains) {
             let reason = if matched == domain {
                 "exact match in blocklist"
             } else {
@@ -128,19 +128,6 @@ impl BlocklistStore {
         BlockCheckResult::not_blocked()
     }
 
-    fn find_in_set<'a>(domain: &'a str, set: &HashSet<String>) -> Option<&'a str> {
-        if set.contains(domain) {
-            return Some(domain);
-        }
-        let mut d = domain;
-        while let Some(dot) = d.find('.') {
-            d = &d[dot + 1..];
-            if set.contains(d) {
-                return Some(d);
-            }
-        }
-        None
-    }
 
     /// Atomically swap in a new domain set. Build the set outside the lock,
     /// then call this to swap — keeps lock hold time sub-microsecond.
@@ -235,8 +222,25 @@ pub fn parse_blocklist(text: &str) -> HashSet<String> {
     domains
 }
 
-fn normalize(domain: &str) -> String {
+pub(crate) fn normalize(domain: &str) -> String {
     domain.to_lowercase().trim_end_matches('.').to_string()
+}
+
+/// Exact-or-parent suffix match: `example.com` matches `nas.example.com` but
+/// never `evilexample.com`. `domain` must already be normalized. Shared by the
+/// blocklist and rebind allowlist.
+pub(crate) fn find_in_set<'a>(domain: &'a str, set: &HashSet<String>) -> Option<&'a str> {
+    if set.contains(domain) {
+        return Some(domain);
+    }
+    let mut d = domain;
+    while let Some(dot) = d.find('.') {
+        d = &d[dot + 1..];
+        if set.contains(d) {
+            return Some(d);
+        }
+    }
+    None
 }
 
 fn insert_if_valid(set: &mut HashSet<String>, raw: &str) {
