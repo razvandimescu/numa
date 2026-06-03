@@ -13,12 +13,9 @@ use crate::question::QueryType;
 use crate::record::DnsRecord;
 
 /// Built-in private/special-use ranges, used when `rebind_private_ranges` is
-/// empty. Loopback is included — it's the canonical rebind target (localhost
-/// dev servers, Docker/Electron dashboards). DNSBL/RBL users (mail servers
-/// resolving `127.0.0.x` from zones like `zen.spamhaus.org`) and upstreams
-/// that sinkhole ads to `127.0.0.1` should allowlist those names. IPv4-mapped
-/// IPv6 (`::ffff:a.b.c.d`) needs no entry — `CidrMatcher` canonicalizes before
-/// matching, so a mapped private address already matches the v4 ranges.
+/// empty. Loopback is included — it's a prime rebind target (localhost dev
+/// servers, Docker/Electron dashboards); DNSBL/RBL users that resolve
+/// `127.0.0.x` should allowlist those zones.
 const DEFAULT_RANGES: &[&str] = &[
     "127.0.0.0/8",    // RFC 1122 loopback — the canonical rebind target
     "10.0.0.0/8",     // RFC 1918
@@ -95,8 +92,6 @@ impl RebindFilter {
         acted
     }
 
-    /// Exact-or-parent suffix match (shared with `BlocklistStore`):
-    /// `example.com` covers `nas.example.com` but never `evilexample.com`.
     fn is_allowed(&self, qname: &str) -> bool {
         !self.allowlist.is_empty() && find_in_set(&normalize(qname), &self.allowlist).is_some()
     }

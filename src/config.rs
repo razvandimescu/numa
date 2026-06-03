@@ -116,7 +116,6 @@ pub struct ServerConfig {
     /// hostname can't be rebound to an address inside the perimeter. Local
     /// data (zones, overrides, `.numa`, blocklist sinkhole) is never affected.
     /// DNSBL/RBL users should add their lookup zones to `rebind_allowlist`.
-    /// Default false.
     #[serde(default)]
     pub rebind_protect: bool,
     /// Domains exempt from rebind protection (split-horizon home services).

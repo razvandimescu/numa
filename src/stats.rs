@@ -213,10 +213,9 @@ impl QueryPath {
         }
     }
 
-    /// True for paths that return trusted local data (zones/special-use,
-    /// ephemeral overrides, blocklist sinkhole) and are therefore exempt from
-    /// rebind protection. Exhaustive on purpose: adding a `QueryPath` variant
-    /// forces a trust decision here, so a new (untrusted) source fails closed.
+    /// Paths returning trusted local data (zones, overrides, sinkhole) — exempt
+    /// from rebind protection. Exhaustive on purpose: a new `QueryPath` variant
+    /// must choose a side here, so an untrusted source fails closed.
     pub fn returns_trusted_local_data(&self) -> bool {
         match self {
             QueryPath::Local | QueryPath::Overridden | QueryPath::Blocked => true,

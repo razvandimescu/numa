@@ -30,7 +30,6 @@ fn skip_target_name(rdata: &[u8], mut pos: usize) -> Option<usize> {
     }
 }
 
-/// Address stride for a hint key: 4 bytes per `ipv4hint`, 16 per `ipv6hint`.
 fn hint_stride(key: u16) -> Option<usize> {
     match key {
         IPV4_HINT_KEY => Some(4),

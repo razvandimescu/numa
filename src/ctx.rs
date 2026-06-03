@@ -146,12 +146,9 @@ pub async fn resolve_query(
             .insert_with_status(&qname, qtype, &response, status);
     }
 
-    // Rebind protection, after DNSSEC validation + the unfiltered cache insert
-    // above, before shaping. Gated by *exclusion* (see
-    // `QueryPath::returns_trusted_local_data`): only trusted-local paths are
-    // exempt, so any future untrusted source — recursive/forward/upstream/cache
-    // or pkarr (#225) — is filtered by default and can't silently ship
-    // unprotected. UpstreamError carries no answers, so it's a no-op.
+    // Runs after DNSSEC validation + the unfiltered cache insert above (so the
+    // cache keeps the true record), before shaping. UpstreamError carries no
+    // answers, so it's a no-op.
     if !path.returns_trusted_local_data() {
         let stripped = ctx.rebind.apply(&qname, &mut response);
         if stripped > 0 {
