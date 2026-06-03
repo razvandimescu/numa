@@ -146,17 +146,16 @@ pub async fn resolve_query(
             .insert_with_status(&qname, qtype, &response, status);
     }
 
-    // Rebind protection: runs only on untrusted (remote/cache) paths, after
-    // DNSSEC validation + the unfiltered cache insert above, before shaping.
-    // Local paths (overrides, zones, `.numa`, blocklist sinkhole) legitimately
-    // return private IPs and are exempt by construction.
-    if matches!(
+    // Rebind protection, after DNSSEC validation + the unfiltered cache insert
+    // above, before shaping. Gated by *exclusion*, not inclusion: only the
+    // trusted-local paths (zones/special-use, ephemeral overrides, blocklist
+    // sinkhole) legitimately return private IPs and are exempt. Everything else
+    // — recursive/forward/upstream/cache, and any future untrusted source such
+    // as pkarr (#225) — is filtered by default, so a new path can't silently
+    // ship unprotected. UpstreamError carries no answers, so it's a no-op.
+    if !matches!(
         path,
-        QueryPath::Recursive
-            | QueryPath::Forwarded
-            | QueryPath::Upstream
-            | QueryPath::Cached
-            | QueryPath::Coalesced
+        QueryPath::Local | QueryPath::Overridden | QueryPath::Blocked
     ) {
         let stripped = ctx.rebind.apply(&qname, &mut response);
         if stripped > 0 {
@@ -1438,6 +1437,27 @@ mod tests {
             1,
             "override's private IP must not be stripped"
         );
+    }
+
+    #[tokio::test]
+    async fn pipeline_rebind_leaves_blocklist_sinkhole_untouched() {
+        // The Blocked path returns 0.0.0.0, which IS in the default rebind
+        // ranges — so the exclusion gate must exempt it, or rebind protection
+        // would silently eat ad-blocking.
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.rebind = crate::rebind::RebindFilter::new(true, &[], &[]).unwrap();
+        let mut domains = std::collections::HashSet::new();
+        domains.insert("ads.tracker.test".to_string());
+        ctx.blocklist.write().unwrap().swap_domains(domains, vec![]);
+        let ctx = Arc::new(ctx);
+
+        let (resp, path) = resolve_in_test(&ctx, "ads.tracker.test", QueryType::A).await;
+        assert_eq!(path, QueryPath::Blocked);
+        assert_eq!(resp.answers.len(), 1, "sinkhole answer must survive rebind");
+        match &resp.answers[0] {
+            DnsRecord::A { addr, .. } => assert_eq!(*addr, Ipv4Addr::UNSPECIFIED),
+            other => panic!("expected sinkhole A record, got {:?}", other),
+        }
     }
 
     #[tokio::test]
