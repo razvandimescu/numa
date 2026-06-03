@@ -85,6 +85,7 @@ pub struct ServerCtx {
     pub filter_aaaa: bool,
     pub allow_from: crate::acl::AllowFromAcl,
     pub client_policy: crate::client_policy::ClientPolicySet,
+    pub rebind: crate::rebind::RebindFilter,
 }
 
 /// Transport-agnostic DNS resolution. Runs the full pipeline (overrides, blocklist,
@@ -143,6 +144,32 @@ pub async fn resolve_query(
             .write()
             .unwrap()
             .insert_with_status(&qname, qtype, &response, status);
+    }
+
+    // Rebind protection: runs only on untrusted (remote/cache) paths, after
+    // DNSSEC validation + the unfiltered cache insert above, before shaping.
+    // Local paths (overrides, zones, `.numa`, blocklist sinkhole) legitimately
+    // return private IPs and are exempt by construction.
+    if matches!(
+        path,
+        QueryPath::Recursive
+            | QueryPath::Forwarded
+            | QueryPath::Upstream
+            | QueryPath::Cached
+            | QueryPath::Coalesced
+    ) {
+        let stripped = ctx.rebind.apply(&qname, &mut response);
+        if stripped > 0 {
+            // A stripped Secure answer is no longer the validated one; don't
+            // claim AD over a NODATA the validator never proved.
+            response.header.authed_data = false;
+            info!(
+                "REBIND | {} | stripped {} private RR(s) | {}",
+                qname,
+                stripped,
+                path.as_str()
+            );
+        }
     }
 
     shape_response_for_client(&mut response, &query, ctx.filter_aaaa);
@@ -1357,6 +1384,60 @@ mod tests {
             "forwarding rule must take precedence over special-use NXDOMAIN"
         );
         assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+    }
+
+    #[tokio::test]
+    async fn pipeline_rebind_strips_private_from_forwarded() {
+        let mut resp = DnsPacket::new();
+        resp.header.response = true;
+        resp.header.rescode = ResultCode::NOERROR;
+        resp.answers.push(DnsRecord::A {
+            domain: "intranet.evil.test".to_string(),
+            addr: "192.168.1.1".parse().unwrap(),
+            ttl: 60,
+        });
+        let upstream_addr = crate::testutil::mock_upstream(resp).await;
+
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.rebind = crate::rebind::RebindFilter::new(true, &[], &[]).unwrap();
+        ctx.forwarding_rules = vec![ForwardingRule::new(
+            "evil.test".to_string(),
+            UpstreamPool::new(vec![Upstream::Udp(upstream_addr)], vec![]),
+        )];
+        let ctx = Arc::new(ctx);
+
+        let (resp, path) = resolve_in_test(&ctx, "intranet.evil.test", QueryType::A).await;
+        assert_eq!(path, QueryPath::Forwarded);
+        assert_eq!(
+            resp.header.rescode,
+            ResultCode::NOERROR,
+            "all-stripped is NODATA, not NXDOMAIN"
+        );
+        assert!(resp.answers.is_empty(), "private answer must be stripped");
+    }
+
+    #[tokio::test]
+    async fn pipeline_rebind_leaves_local_override_untouched() {
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.rebind = crate::rebind::RebindFilter::new(true, &[], &[]).unwrap();
+        ctx.overrides
+            .write()
+            .unwrap()
+            .insert("nas.local", "192.168.1.50", 60, None)
+            .unwrap();
+        let ctx = Arc::new(ctx);
+
+        let (resp, path) = resolve_in_test(&ctx, "nas.local", QueryType::A).await;
+        assert_eq!(
+            path,
+            QueryPath::Overridden,
+            "local path is exempt by gating"
+        );
+        assert_eq!(
+            resp.answers.len(),
+            1,
+            "override's private IP must not be stripped"
+        );
     }
 
     #[tokio::test]

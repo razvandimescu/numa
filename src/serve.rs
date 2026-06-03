@@ -140,6 +140,24 @@ pub async fn run(config_path: String) -> crate::Result<()> {
         );
     }
 
+    let rebind = crate::rebind::RebindFilter::new(
+        config.server.rebind_protect,
+        &config.server.rebind_allowlist,
+        &config.server.rebind_private_ranges,
+    )
+    .map_err(|e| format!("invalid [server] rebind config: {e}"))?;
+    if rebind.is_enabled() {
+        info!(
+            "DNS rebinding protection enabled ({} allowlist entr{})",
+            config.server.rebind_allowlist.len(),
+            if config.server.rebind_allowlist.len() == 1 {
+                "y"
+            } else {
+                "ies"
+            }
+        );
+    }
+
     let sockets = bind_udp_listeners(&config.server.bind_addr).await?;
 
     let ctx = Arc::new(ServerCtx {
@@ -189,6 +207,7 @@ pub async fn run(config_path: String) -> crate::Result<()> {
         filter_aaaa: config.server.filter_aaaa,
         allow_from,
         client_policy,
+        rebind,
     });
 
     let zone_count: usize = ctx.zone_map.len();

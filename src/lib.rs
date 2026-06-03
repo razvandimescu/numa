@@ -24,6 +24,7 @@ pub mod pp2_udp;
 pub mod proxy;
 pub mod query_log;
 pub mod question;
+pub mod rebind;
 pub mod record;
 pub mod recursive;
 pub mod relay;
