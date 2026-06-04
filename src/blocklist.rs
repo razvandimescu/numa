@@ -128,7 +128,6 @@ impl BlocklistStore {
         BlockCheckResult::not_blocked()
     }
 
-
     /// Atomically swap in a new domain set. Build the set outside the lock,
     /// then call this to swap — keeps lock hold time sub-microsecond.
     pub fn swap_domains(&mut self, domains: HashSet<String>, sources: Vec<String>) {
