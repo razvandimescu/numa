@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::SystemTime;
 
 /// Returns the process memory footprint in bytes, or 0 if unavailable.
 /// macOS: phys_footprint (matches Activity Monitor). Linux: RSS from /proc/self/statm.
@@ -134,7 +134,7 @@ pub struct ServerStats {
     pub(crate) proxy_v2_rejected_signature: u64,
     pub(crate) proxy_v2_local_command: u64,
     pub(crate) proxy_v2_timeout: u64,
-    started_at: Instant,
+    started_at: SystemTime,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -271,7 +271,7 @@ impl ServerStats {
             proxy_v2_rejected_signature: 0,
             proxy_v2_local_command: 0,
             proxy_v2_timeout: 0,
-            started_at: Instant::now(),
+            started_at: SystemTime::now(),
         }
     }
 
@@ -316,7 +316,7 @@ impl ServerStats {
     }
 
     pub fn uptime_secs(&self) -> u64 {
-        self.started_at.elapsed().as_secs()
+        self.started_at.elapsed().unwrap_or_default().as_secs()
     }
 
     pub fn snapshot(&self) -> StatsSnapshot {
@@ -350,7 +350,7 @@ impl ServerStats {
     }
 
     pub fn log_summary(&self) {
-        let uptime = self.started_at.elapsed();
+        let uptime = self.started_at.elapsed().unwrap_or_default();
         let hours = uptime.as_secs() / 3600;
         let mins = (uptime.as_secs() % 3600) / 60;
         let secs = uptime.as_secs() % 60;
