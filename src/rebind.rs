@@ -100,21 +100,16 @@ impl RebindFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{Ipv4Addr, Ipv6Addr};
 
     fn filter(allowlist: &[&str]) -> RebindFilter {
-        RebindFilter::new(
-            true,
-            &allowlist.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
-            &[],
-        )
-        .unwrap()
+        let allow: Vec<String> = allowlist.iter().map(|s| s.to_string()).collect();
+        RebindFilter::new(true, &allow, &[]).unwrap()
     }
 
     fn a(addr: &str) -> DnsRecord {
         DnsRecord::A {
             domain: "host.example.".into(),
-            addr: addr.parse::<Ipv4Addr>().unwrap(),
+            addr: addr.parse().unwrap(),
             ttl: 60,
         }
     }
@@ -122,57 +117,53 @@ mod tests {
     fn aaaa(addr: &str) -> DnsRecord {
         DnsRecord::AAAA {
             domain: "host.example.".into(),
-            addr: addr.parse::<Ipv6Addr>().unwrap(),
+            addr: addr.parse().unwrap(),
             ttl: 60,
         }
     }
 
-    fn packet(answers: Vec<DnsRecord>) -> DnsPacket {
+    /// Apply `f` to `answers` for `qname`; return (count stripped, survivors).
+    fn run(f: &RebindFilter, qname: &str, answers: Vec<DnsRecord>) -> (usize, Vec<DnsRecord>) {
         let mut p = DnsPacket::new();
         p.answers = answers;
-        p
+        let n = f.apply(qname, &mut p);
+        (n, p.answers)
+    }
+
+    /// The common case: default ranges, no allowlist, throwaway public qname.
+    fn strip(answers: Vec<DnsRecord>) -> (usize, Vec<DnsRecord>) {
+        run(&filter(&[]), "evil.com", answers)
     }
 
     #[test]
     fn strips_rfc1918_v4() {
-        let f = filter(&[]);
-        let mut p = packet(vec![a("8.8.8.8"), a("192.168.1.1"), a("10.0.0.5")]);
-        assert_eq!(f.apply("evil.com", &mut p), 2);
-        assert_eq!(p.answers, vec![a("8.8.8.8")]);
+        let r = strip(vec![a("8.8.8.8"), a("192.168.1.1"), a("10.0.0.5")]);
+        assert_eq!(r, (2, vec![a("8.8.8.8")]));
     }
 
     #[test]
     fn strips_link_local_and_this_host() {
-        let f = filter(&[]);
-        let mut p = packet(vec![a("169.254.1.1"), a("0.0.0.0"), a("1.1.1.1")]);
-        assert_eq!(f.apply("evil.com", &mut p), 2);
-        assert_eq!(p.answers, vec![a("1.1.1.1")]);
+        let r = strip(vec![a("169.254.1.1"), a("0.0.0.0"), a("1.1.1.1")]);
+        assert_eq!(r, (2, vec![a("1.1.1.1")]));
     }
 
     #[test]
     fn strips_ula_and_link_local_v6() {
-        let f = filter(&[]);
-        let mut p = packet(vec![aaaa("2606:4700::1"), aaaa("fd00::1"), aaaa("fe80::1")]);
-        assert_eq!(f.apply("evil.com", &mut p), 2);
-        assert_eq!(p.answers, vec![aaaa("2606:4700::1")]);
+        let r = strip(vec![aaaa("2606:4700::1"), aaaa("fd00::1"), aaaa("fe80::1")]);
+        assert_eq!(r, (2, vec![aaaa("2606:4700::1")]));
     }
 
     #[test]
     fn strips_v4_mapped_private_v6() {
         // ::ffff:192.168.1.1 canonicalizes to the v4 range — no explicit
         // ::ffff:0:0/96 entry needed.
-        let f = filter(&[]);
-        let mut p = packet(vec![aaaa("::ffff:192.168.1.1"), aaaa("::ffff:8.8.8.8")]);
-        assert_eq!(f.apply("evil.com", &mut p), 1);
-        assert_eq!(p.answers, vec![aaaa("::ffff:8.8.8.8")]);
+        let r = strip(vec![aaaa("::ffff:192.168.1.1"), aaaa("::ffff:8.8.8.8")]);
+        assert_eq!(r, (1, vec![aaaa("::ffff:8.8.8.8")]));
     }
 
     #[test]
     fn loopback_stripped_by_default() {
-        let f = filter(&[]);
-        let mut p = packet(vec![a("127.0.0.1"), aaaa("::1")]);
-        assert_eq!(f.apply("evil.com", &mut p), 2);
-        assert!(p.answers.is_empty());
+        assert_eq!(strip(vec![a("127.0.0.1"), aaaa("::1")]), (2, vec![]));
     }
 
     #[test]
@@ -180,19 +171,23 @@ mod tests {
         // RBL lookups legitimately resolve to 127.0.0.x; allowlisting the zone
         // exempts them from the loopback strip.
         let f = filter(&["spamhaus.org"]);
-        let mut p = packet(vec![a("127.0.0.2")]);
-        assert_eq!(f.apply("2.0.0.127.zen.spamhaus.org", &mut p), 0);
+        assert_eq!(
+            run(&f, "2.0.0.127.zen.spamhaus.org", vec![a("127.0.0.2")]).0,
+            0
+        );
     }
 
     #[test]
     fn allowlist_suffix_exempts_subdomain_not_lookalike() {
         let f = filter(&["example.com"]);
-        let mut nas = packet(vec![a("192.168.1.50")]);
-        assert_eq!(f.apply("nas.example.com", &mut nas), 0, "subdomain exempt");
-
-        let mut evil = packet(vec![a("192.168.1.50")]);
+        let priv_a = vec![a("192.168.1.50")];
         assert_eq!(
-            f.apply("evilexample.com", &mut evil),
+            run(&f, "nas.example.com", priv_a.clone()).0,
+            0,
+            "subdomain exempt"
+        );
+        assert_eq!(
+            run(&f, "evilexample.com", priv_a).0,
             1,
             "lookalike not exempt"
         );
@@ -201,18 +196,18 @@ mod tests {
     #[test]
     fn disabled_passes_through() {
         let f = RebindFilter::new(false, &[], &[]).unwrap();
-        let mut p = packet(vec![a("192.168.1.1")]);
-        assert_eq!(f.apply("evil.com", &mut p), 0);
-        assert_eq!(p.answers.len(), 1);
+        assert_eq!(
+            run(&f, "evil.com", vec![a("192.168.1.1")]),
+            (0, vec![a("192.168.1.1")])
+        );
     }
 
     #[test]
     fn custom_ranges_override_defaults() {
         // Only block ULA; RFC1918 v4 now passes.
         let f = RebindFilter::new(true, &[], &["fc00::/7".to_string()]).unwrap();
-        let mut p = packet(vec![a("192.168.1.1"), aaaa("fd00::1")]);
-        assert_eq!(f.apply("evil.com", &mut p), 1);
-        assert_eq!(p.answers, vec![a("192.168.1.1")]);
+        let r = run(&f, "evil.com", vec![a("192.168.1.1"), aaaa("fd00::1")]);
+        assert_eq!(r, (1, vec![a("192.168.1.1")]));
     }
 
     #[test]
