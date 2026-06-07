@@ -61,6 +61,70 @@ fn filter_hint(value: &[u8], stride: usize, is_private: &impl Fn(IpAddr) -> bool
     out
 }
 
+/// One SvcParam at `pos`: `(key, value, end)`, or `None` if its
+/// {u16 key, u16 len, opaque[len]} framing runs past the RDATA.
+fn read_param(rdata: &[u8], pos: usize) -> Option<(u16, &[u8], usize)> {
+    if pos + 4 > rdata.len() {
+        return None;
+    }
+    let key = u16::from_be_bytes([rdata[pos], rdata[pos + 1]]);
+    let vlen = u16::from_be_bytes([rdata[pos + 2], rdata[pos + 3]]) as usize;
+    let end = pos.checked_add(4)?.checked_add(vlen)?;
+    if end > rdata.len() {
+        return None;
+    }
+    Some((key, &rdata[pos + 4..end], end))
+}
+
+enum Edit {
+    Keep,
+    /// Replace the value; an empty `Vec` drops the param entirely.
+    Rewrite(Vec<u8>),
+}
+
+/// Apply `edit` to each SvcParam of an HTTPS/SVCB RDATA blob (RFC 9460 §2.2:
+/// priority, uncompressed target name, then key-sorted params). `None` when
+/// nothing changed, the RDATA is unparseable, or `edit` rejects a malformed
+/// param — so the caller keeps the original bytes. The first pass validates
+/// framing and skips the allocation entirely when no param is rewritten.
+fn edit_svcparams(rdata: &[u8], edit: impl Fn(u16, &[u8]) -> Option<Edit>) -> Option<Vec<u8>> {
+    if rdata.len() < 2 {
+        return None;
+    }
+    let params_start = skip_target_name(rdata, 2)?;
+
+    let mut pos = params_start;
+    let mut changed = false;
+    while pos < rdata.len() {
+        let (key, value, end) = read_param(rdata, pos)?;
+        if !matches!(edit(key, value)?, Edit::Keep) {
+            changed = true;
+        }
+        pos = end;
+    }
+    if !changed {
+        return None;
+    }
+
+    let mut out = Vec::with_capacity(rdata.len());
+    out.extend_from_slice(&rdata[..params_start]);
+    let mut pos = params_start;
+    while pos < rdata.len() {
+        let (key, value, end) = read_param(rdata, pos)?;
+        match edit(key, value)? {
+            Edit::Keep => out.extend_from_slice(&rdata[pos..end]),
+            Edit::Rewrite(v) if !v.is_empty() => {
+                out.extend_from_slice(&key.to_be_bytes());
+                out.extend_from_slice(&(v.len() as u16).to_be_bytes());
+                out.extend_from_slice(&v);
+            }
+            Edit::Rewrite(_) => {}
+        }
+        pos = end;
+    }
+    Some(out)
+}
+
 /// Strip private address values from `ipv4hint`/`ipv6hint` SvcParams, keeping
 /// public ones. A hint left empty is dropped entirely; all other SvcParams
 /// (alpn, port, ech, …) are preserved untouched. `is_private` receives the
@@ -71,115 +135,35 @@ fn filter_hint(value: &[u8], stride: usize, is_private: &impl Fn(IpAddr) -> bool
 /// nothing changed or the RDATA couldn't be parsed (caller keeps the
 /// original bytes).
 pub fn strip_private_hints(rdata: &[u8], is_private: impl Fn(IpAddr) -> bool) -> Option<Vec<u8>> {
-    if rdata.len() < 2 {
-        return None;
-    }
-    let params_start = skip_target_name(rdata, 2)?;
-
-    // Validate framing and decide whether a rebuild is needed.
-    let mut scan = params_start;
-    let mut changed = false;
-    while scan < rdata.len() {
-        if scan + 4 > rdata.len() {
-            return None;
-        }
-        let key = u16::from_be_bytes([rdata[scan], rdata[scan + 1]]);
-        let vlen = u16::from_be_bytes([rdata[scan + 2], rdata[scan + 3]]) as usize;
-        let end = scan.checked_add(4)?.checked_add(vlen)?;
-        if end > rdata.len() {
-            return None;
-        }
-        if let Some(stride) = hint_stride(key) {
-            if !vlen.is_multiple_of(stride) {
+    edit_svcparams(rdata, |key, value| match hint_stride(key) {
+        Some(stride) => {
+            if !value.len().is_multiple_of(stride) {
                 return None;
             }
-            if filter_hint(&rdata[scan + 4..end], stride, &is_private).len() != vlen {
-                changed = true;
-            }
+            let kept = filter_hint(value, stride, &is_private);
+            Some(if kept.len() == value.len() {
+                Edit::Keep
+            } else {
+                Edit::Rewrite(kept)
+            })
         }
-        scan = end;
-    }
-    if scan != rdata.len() || !changed {
-        return None;
-    }
-
-    let mut out = Vec::with_capacity(rdata.len());
-    out.extend_from_slice(&rdata[..params_start]);
-    let mut pos = params_start;
-    while pos < rdata.len() {
-        let key = u16::from_be_bytes([rdata[pos], rdata[pos + 1]]);
-        let vlen = u16::from_be_bytes([rdata[pos + 2], rdata[pos + 3]]) as usize;
-        let end = pos + 4 + vlen;
-        match hint_stride(key) {
-            Some(stride) => {
-                let kept = filter_hint(&rdata[pos + 4..end], stride, &is_private);
-                if !kept.is_empty() {
-                    out.extend_from_slice(&key.to_be_bytes());
-                    out.extend_from_slice(&(kept.len() as u16).to_be_bytes());
-                    out.extend_from_slice(&kept);
-                }
-            }
-            None => out.extend_from_slice(&rdata[pos..end]),
-        }
-        pos = end;
-    }
-    Some(out)
+        None => Some(Edit::Keep),
+    })
 }
 
 /// Strip the `ipv6hint` SvcParam from an HTTPS/SVCB RDATA blob.
 ///
-/// Returns `Some(new_rdata)` if `ipv6hint` was present and removed.
-/// Returns `None` if the record had no `ipv6hint`, or if the RDATA
-/// couldn't be parsed — in both cases the caller should keep the
-/// original bytes untouched.
-///
-/// SVCB RDATA (RFC 9460 §2.2):
-///   SvcPriority (u16)
-///   TargetName  (uncompressed DNS name — labels terminated by 0 octet)
-///   SvcParams   (series of {u16 key, u16 len, opaque[len] value}, sorted by key)
+/// Returns `Some(new_rdata)` if `ipv6hint` was present and removed, `None` if
+/// the record had no `ipv6hint` or the RDATA couldn't be parsed — in both
+/// cases the caller keeps the original bytes untouched.
 pub fn strip_ipv6hint(rdata: &[u8]) -> Option<Vec<u8>> {
-    if rdata.len() < 2 {
-        return None;
-    }
-    let params_start = skip_target_name(rdata, 2)?;
-
-    // Scan params once to decide whether we need to rebuild.
-    let mut scan = params_start;
-    let mut has_ipv6hint = false;
-    while scan < rdata.len() {
-        if scan + 4 > rdata.len() {
-            return None;
-        }
-        let key = u16::from_be_bytes([rdata[scan], rdata[scan + 1]]);
-        let vlen = u16::from_be_bytes([rdata[scan + 2], rdata[scan + 3]]) as usize;
-        let end = scan.checked_add(4)?.checked_add(vlen)?;
-        if end > rdata.len() {
-            return None;
-        }
-        if key == IPV6_HINT_KEY {
-            has_ipv6hint = true;
-        }
-        scan = end;
-    }
-    if scan != rdata.len() || !has_ipv6hint {
-        return None;
-    }
-
-    // Rebuild without ipv6hint, preserving param order (RFC 9460 requires
-    // ascending key order, which we preserve by filtering in place).
-    let mut out = Vec::with_capacity(rdata.len());
-    out.extend_from_slice(&rdata[..params_start]);
-    let mut pos = params_start;
-    while pos < rdata.len() {
-        let key = u16::from_be_bytes([rdata[pos], rdata[pos + 1]]);
-        let vlen = u16::from_be_bytes([rdata[pos + 2], rdata[pos + 3]]) as usize;
-        let end = pos + 4 + vlen;
-        if key != IPV6_HINT_KEY {
-            out.extend_from_slice(&rdata[pos..end]);
-        }
-        pos = end;
-    }
-    Some(out)
+    edit_svcparams(rdata, |key, _| {
+        Some(if key == IPV6_HINT_KEY {
+            Edit::Rewrite(Vec::new())
+        } else {
+            Edit::Keep
+        })
+    })
 }
 
 /// Build an SVCB RDATA blob from a priority, target labels, and
