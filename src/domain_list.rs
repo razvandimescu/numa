@@ -19,14 +19,20 @@ pub struct PersistedDomainList {
 }
 
 impl PersistedDomainList {
-    /// `filename` is resolved under the platform config dir, e.g.
-    /// `rebind-allow.json`.
-    pub fn new(filename: &str) -> Self {
-        PersistedDomainList {
+    /// The production list: seeds `config_seeds`, then loads persisted
+    /// runtime entries from `filename` (resolved under the platform config
+    /// dir) — in that order, so config takes precedence on overlap.
+    pub fn new(filename: &str, config_seeds: &[String]) -> Self {
+        let mut list = PersistedDomainList {
             config: HashSet::new(),
             user: HashSet::new(),
             persist_path: Some(crate::config_dir().join(filename)),
+        };
+        for domain in config_seeds {
+            list.insert_from_config(domain);
         }
+        list.load_persisted();
+        list
     }
 
     /// In-memory only: save and load are no-ops. For lists that are pure
@@ -112,9 +118,7 @@ impl PersistedDomainList {
         table + strings
     }
 
-    /// Load persisted runtime entries. Call once at startup, after seeding
-    /// config entries (so config takes precedence on overlap).
-    pub fn load_persisted(&mut self) {
+    fn load_persisted(&mut self) {
         let Some(path) = &self.persist_path else {
             return;
         };
