@@ -1128,7 +1128,7 @@ function applyLogFilter() {
 
   tbody.innerHTML = filtered.map(e => {
     const allowBtn = e.path === 'BLOCKED'
-      ? ` <button class="btn-delete" data-domain="${h(e.domain)}" onclick="postDomain('/blocking/allowlist', this.dataset.domain)" title="Allow this domain" style="color:var(--emerald);font-size:0.65rem;">allow</button>`
+      ? ` <button class="btn-delete" data-domain="${h(e.domain)}" onclick="unblockDomain(this.dataset.domain)" title="Allow this domain" style="color:var(--emerald);font-size:0.65rem;">allow</button>`
       : e.rebind_stripped
       ? ` <button class="btn-delete" data-domain="${h(e.domain)}" onclick="postDomain('/rebind/allowlist', this.dataset.domain)" title="Stop stripping private IPs for this domain" style="color:var(--emerald);font-size:0.65rem;">allow</button>`
       : e.path !== 'LOCAL'
@@ -1420,7 +1420,7 @@ async function checkDomain(event) {
       el.className = 'check-result-blocked';
       el.innerHTML = `<strong>Blocked</strong> — ${h(result.reason)}` +
         (result.matched_rule ? `<br>Rule: <code>${h(result.matched_rule)}</code>` : '') +
-        ` <button class="btn-delete" data-domain="${h(domain)}" onclick="postDomain('/blocking/allowlist', this.dataset.domain)" style="color:var(--emerald);font-size:0.7rem;margin-left:0.4rem;">allow</button>`;
+        ` <button class="btn-delete" data-domain="${h(domain)}" onclick="unblockDomain(this.dataset.domain)" style="color:var(--emerald);font-size:0.7rem;margin-left:0.4rem;">allow</button>`;
     } else {
       el.className = 'check-result-allowed';
       el.innerHTML = `<strong>Allowed</strong> — ${h(result.reason)}` +
@@ -1505,6 +1505,16 @@ async function addAllowlistDomain(event) {
   const domain = input.value.trim();
   if (domain && (await postDomain('/blocking/allowlist', domain))) input.value = '';
   return false;
+}
+
+// Undo a manual block if one exists; otherwise add an allowlist exception
+// (for domains blocked by a list, which the user can't edit).
+async function unblockDomain(domain) {
+  try {
+    const res = await fetch(API + '/blocking/blocklist/' + encodeURIComponent(domain), { method: 'DELETE' });
+    if (res.ok) refresh();
+    else postDomain('/blocking/allowlist', domain);
+  } catch (err) {}
 }
 
 async function deleteDomain(path, domain) {
