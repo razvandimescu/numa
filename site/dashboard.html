@@ -1484,6 +1484,10 @@ function renderAllowlist(entries, manualBlocks) {
         <button class="btn-delete" data-domain="${h(d)}" onclick="deleteDomain('/blocking/allowlist', this.dataset.domain)">&times;</button>
       </div>
     `).join('') : '<div class="empty-state">No exceptions</div>'}
+    <form onsubmit="return addAllowlistDomain(event)" style="display:flex;gap:0.4rem;margin-top:0.4rem;">
+      <input type="text" id="allowDomainInput" placeholder="domain to allow" required style="flex:1;font-family:var(--font-mono);font-size:0.75rem;padding:0.35rem 0.5rem;border:1px solid var(--border);border-radius:4px;background:var(--bg-surface);color:var(--text-primary);outline:none;">
+      <button type="submit" class="btn" style="background:var(--emerald);color:var(--text-on-btn);flex-shrink:0;">Allow</button>
+    </form>
     ${blocked.length ? `
     <div style="font-size:0.65rem;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-dim);margin:0.8rem 0 0.4rem;">Manually blocked (${blocked.length})</div>
     ${blocked.map(d => `
@@ -1492,10 +1496,6 @@ function renderAllowlist(entries, manualBlocks) {
         <button class="btn-delete" data-domain="${h(d)}" onclick="deleteDomain('/blocking/blocklist', this.dataset.domain)">&times;</button>
       </div>
     `).join('')}` : ''}
-    <form onsubmit="return addAllowlistDomain(event)" style="display:flex;gap:0.4rem;margin-top:0.4rem;">
-      <input type="text" id="allowDomainInput" placeholder="domain to allow" required style="flex:1;font-family:var(--font-mono);font-size:0.75rem;padding:0.35rem 0.5rem;border:1px solid var(--border);border-radius:4px;background:var(--bg-surface);color:var(--text-primary);outline:none;">
-      <button type="submit" class="btn" style="background:var(--emerald);color:var(--text-on-btn);flex-shrink:0;">Allow</button>
-    </form>
   `;
 }
 
