@@ -9,6 +9,7 @@ use crate::domain_list::PersistedDomainList;
 pub struct BlocklistStore {
     domains: HashSet<String>,
     allowlist: PersistedDomainList,
+    manual: PersistedDomainList, // UI/API-blocked domains; survives list refresh
     enabled: bool,
     paused_until: Option<Instant>,
     list_sources: Vec<String>,
@@ -63,12 +64,13 @@ pub struct BlocklistStats {
 }
 
 impl BlocklistStore {
-    /// `allowlist` arrives pre-seeded (config entries + persisted runtime
-    /// entries) — the orchestrator owns that wiring.
-    pub fn new(allowlist: PersistedDomainList) -> Self {
+    /// Lists arrive pre-seeded (config entries + persisted runtime entries) —
+    /// the orchestrator owns that wiring.
+    pub fn new(allowlist: PersistedDomainList, manual: PersistedDomainList) -> Self {
         BlocklistStore {
             domains: HashSet::new(),
             allowlist,
+            manual,
             enabled: true,
             paused_until: None,
             list_sources: Vec::new(),
@@ -89,7 +91,8 @@ impl BlocklistStore {
         if self.allowlist.find_normalized(&domain).is_some() {
             return false;
         }
-        find_in_set(&domain, &self.domains).is_some()
+        self.manual.find_normalized(&domain).is_some()
+            || find_in_set(&domain, &self.domains).is_some()
     }
 
     pub fn check(&self, domain: &str) -> BlockCheckResult {
@@ -112,6 +115,10 @@ impl BlocklistStore {
                 "parent domain in allowlist"
             };
             return BlockCheckResult::allowed(matched, reason);
+        }
+
+        if let Some(matched) = self.manual.find_normalized(&domain) {
+            return BlockCheckResult::blocked(matched, "manually blocked");
         }
 
         if let Some(matched) = find_in_set(&domain, &self.domains) {
@@ -170,11 +177,25 @@ impl BlocklistStore {
         self.allowlist.entries()
     }
 
+    /// Persists across restarts; survives blocklist refresh (separate from
+    /// `domains`, which `swap_domains` replaces wholesale).
+    pub fn add_to_blocklist(&mut self, domain: &str) {
+        self.manual.insert(domain);
+    }
+
+    pub fn remove_from_blocklist(&mut self, domain: &str) -> bool {
+        self.manual.remove(domain)
+    }
+
+    pub fn manual_blocklist(&self) -> Vec<String> {
+        self.manual.entries()
+    }
+
     pub fn heap_bytes(&self) -> usize {
         let per_slot_overhead = std::mem::size_of::<u64>() + std::mem::size_of::<String>() + 1;
         let domains_table = self.domains.capacity() * per_slot_overhead;
         let domains_heap: usize = self.domains.iter().map(|d| d.capacity()).sum();
-        domains_table + domains_heap + self.allowlist.heap_bytes()
+        domains_table + domains_heap + self.allowlist.heap_bytes() + self.manual.heap_bytes()
     }
 
     pub fn stats(&self) -> BlocklistStats {
@@ -252,7 +273,10 @@ mod tests {
     use super::*;
 
     fn store_with(domains: &[&str], allowlist: &[&str]) -> BlocklistStore {
-        let mut store = BlocklistStore::new(PersistedDomainList::unpersisted());
+        let mut store = BlocklistStore::new(
+            PersistedDomainList::unpersisted(),
+            PersistedDomainList::unpersisted(),
+        );
         store.swap_domains(domains.iter().map(|s| s.to_string()).collect(), vec![]);
         for d in allowlist {
             store.add_to_allowlist(d);
@@ -314,7 +338,7 @@ mod tests {
     fn config_allowlist_entry_not_runtime_removable() {
         let mut allow = PersistedDomainList::unpersisted();
         allow.insert_from_config("safe.example.com");
-        let mut store = BlocklistStore::new(allow);
+        let mut store = BlocklistStore::new(allow, PersistedDomainList::unpersisted());
         store.swap_domains(
             [
                 "safe.example.com".to_string(),
@@ -331,6 +355,23 @@ mod tests {
         assert!(!store.is_blocked("ads.example.com"));
         assert!(store.remove_from_allowlist("ads.example.com"));
         assert!(store.is_blocked("ads.example.com"));
+    }
+
+    #[test]
+    fn manual_block_survives_refresh_and_respects_allowlist() {
+        let mut store = store_with(&[], &["safe.example.com"]);
+        store.add_to_blocklist("bad.example.com");
+        store.add_to_blocklist("safe.example.com");
+        assert!(store.is_blocked("bad.example.com"));
+        assert!(store.is_blocked("sub.bad.example.com"), "suffix match");
+        // Allowlist wins over a manual block, same as over list blocks.
+        assert!(!store.is_blocked("safe.example.com"));
+        // List refresh replaces `domains` wholesale; manual entries survive.
+        store.swap_domains(HashSet::new(), vec![]);
+        assert!(store.is_blocked("bad.example.com"));
+        assert_eq!(store.check("bad.example.com").reason, "manually blocked");
+        assert!(store.remove_from_blocklist("bad.example.com"));
+        assert!(!store.is_blocked("bad.example.com"));
     }
 
     #[test]
@@ -414,7 +455,10 @@ mod tests {
 
     #[test]
     fn heap_bytes_grows_with_domains() {
-        let mut store = BlocklistStore::new(PersistedDomainList::unpersisted());
+        let mut store = BlocklistStore::new(
+            PersistedDomainList::unpersisted(),
+            PersistedDomainList::unpersisted(),
+        );
         let empty = store.heap_bytes();
         let domains: HashSet<String> = ["example.com", "example.org", "test.net"]
             .iter()

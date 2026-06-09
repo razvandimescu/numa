@@ -1516,6 +1516,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pipeline_manual_block_routes_through_blocked_path() {
+        // #257: domains blocked from the UI must hit the same sinkhole as
+        // list-blocked domains — NOT overrides (TTL auto-revert, wrong HTML).
+        let ctx = crate::testutil::test_ctx().await;
+        ctx.blocklist
+            .write()
+            .unwrap()
+            .add_to_blocklist("manually.blocked.test");
+        let ctx = Arc::new(ctx);
+
+        let (resp, path) = resolve_in_test(&ctx, "manually.blocked.test", QueryType::A).await;
+        assert_eq!(path, QueryPath::Blocked);
+        match &resp.answers[0] {
+            DnsRecord::A { addr, .. } => assert_eq!(*addr, Ipv4Addr::UNSPECIFIED),
+            other => panic!("expected sinkhole A record, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
     async fn pipeline_override_takes_precedence() {
         let ctx = crate::testutil::test_ctx().await;
         ctx.overrides

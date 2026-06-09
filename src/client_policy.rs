@@ -63,7 +63,10 @@ impl ClientPolicySet {
             for a in &allows {
                 allow.insert_from_config(a);
             }
-            let mut store = BlocklistStore::new(allow);
+            let mut store = BlocklistStore::new(
+                allow,
+                crate::domain_list::PersistedDomainList::unpersisted(),
+            );
             store.swap_domains(blocks, vec![]);
             rules.push(ClientPolicy {
                 nets: CidrMatcher::from_entries(&cfg.from, &cfg.exclude, &format!("{ctx}.from"))?,

@@ -33,6 +33,7 @@ pub async fn test_ctx() -> ServerCtx {
         overrides: RwLock::new(OverrideStore::new()),
         blocklist: RwLock::new(BlocklistStore::new(
             crate::domain_list::PersistedDomainList::unpersisted(),
+            crate::domain_list::PersistedDomainList::unpersisted(),
         )),
         query_log: Mutex::new(QueryLog::new(100)),
         services: Mutex::new(ServiceStore::new()),

@@ -50,6 +50,12 @@ pub fn router(ctx: Arc<ServerCtx>) -> Router {
             "/blocking/allowlist/{domain}",
             delete(blocking_allowlist_remove),
         )
+        .route("/blocking/blocklist", get(blocking_blocklist))
+        .route("/blocking/blocklist", post(blocking_blocklist_add))
+        .route(
+            "/blocking/blocklist/{domain}",
+            delete(blocking_blocklist_remove),
+        )
         .route("/rebind", get(rebind_status))
         .route("/rebind/toggle", put(rebind_toggle))
         .route("/rebind/allowlist", post(rebind_allowlist_add))
@@ -779,6 +785,38 @@ async fn blocking_allowlist_remove(
         .write()
         .unwrap()
         .remove_from_allowlist(&domain)
+    {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::NOT_FOUND
+    }
+}
+
+async fn blocking_blocklist(State(ctx): State<Arc<ServerCtx>>) -> Json<Vec<String>> {
+    let list = ctx.blocklist.read().unwrap().manual_blocklist();
+    Json(list)
+}
+
+async fn blocking_blocklist_add(
+    State(ctx): State<Arc<ServerCtx>>,
+    Json(req): Json<AllowlistRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    ctx.blocklist.write().unwrap().add_to_blocklist(&req.domain);
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "blocked": req.domain })),
+    )
+}
+
+async fn blocking_blocklist_remove(
+    State(ctx): State<Arc<ServerCtx>>,
+    Path(domain): Path<String>,
+) -> StatusCode {
+    if ctx
+        .blocklist
+        .write()
+        .unwrap()
+        .remove_from_blocklist(&domain)
     {
         StatusCode::NO_CONTENT
     } else {

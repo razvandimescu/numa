@@ -63,10 +63,13 @@ pub async fn run(config_path: String) -> crate::Result<()> {
         resolve_upstream_pool(&config, &system_dns, &root_hints, &bootstrap_resolver).await?;
     let api_port = config.server.api_port;
 
-    let mut blocklist = BlocklistStore::new(crate::domain_list::PersistedDomainList::new(
-        "blocking-allow.json",
-        &config.blocking.allowlist,
-    ));
+    let mut blocklist = BlocklistStore::new(
+        crate::domain_list::PersistedDomainList::new(
+            "blocking-allow.json",
+            &config.blocking.allowlist,
+        ),
+        crate::domain_list::PersistedDomainList::new("blocking-block.json", &[]),
+    );
     if !config.blocking.enabled {
         blocklist.set_enabled(false);
     }
