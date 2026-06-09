@@ -63,10 +63,12 @@ pub async fn run(config_path: String) -> crate::Result<()> {
         resolve_upstream_pool(&config, &system_dns, &root_hints, &bootstrap_resolver).await?;
     let api_port = config.server.api_port;
 
-    let mut blocklist = BlocklistStore::new();
+    let mut blocking_allow = crate::domain_list::PersistedDomainList::new("blocking-allow.json");
     for domain in &config.blocking.allowlist {
-        blocklist.add_to_allowlist(domain);
+        blocking_allow.insert_from_config(domain);
     }
+    blocking_allow.load_persisted();
+    let mut blocklist = BlocklistStore::new(blocking_allow);
     if !config.blocking.enabled {
         blocklist.set_enabled(false);
     }
@@ -140,17 +142,20 @@ pub async fn run(config_path: String) -> crate::Result<()> {
         );
     }
 
+    let mut rebind_allow = crate::domain_list::PersistedDomainList::new("rebind-allow.json");
+    for domain in &config.server.rebind_allowlist {
+        rebind_allow.insert_from_config(domain);
+    }
+    rebind_allow.load_persisted();
+    let rebind_allow_count = rebind_allow.len();
     let rebind = crate::rebind::RebindFilter::new(
         config.server.rebind_protect,
-        &config.server.rebind_allowlist,
+        rebind_allow,
         &config.server.rebind_private_ranges,
     )
     .map_err(|e| format!("invalid [server] rebind config: {e}"))?;
     if rebind.is_enabled() {
-        info!(
-            "DNS rebinding protection enabled ({} allowlist entries)",
-            config.server.rebind_allowlist.len()
-        );
+        info!("DNS rebinding protection enabled ({rebind_allow_count} allowlist entries)");
     }
 
     let sockets = bind_udp_listeners(&config.server.bind_addr).await?;

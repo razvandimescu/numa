@@ -59,11 +59,12 @@ impl ClientPolicySet {
                     "{ctx}: must specify at least one valid domain in `block` or `allow`"
                 ));
             }
-            let mut store = BlocklistStore::new();
-            store.swap_domains(blocks, vec![]);
+            let mut allow = crate::domain_list::PersistedDomainList::unpersisted();
             for a in &allows {
-                store.add_to_allowlist(a);
+                allow.insert_from_config(a);
             }
+            let mut store = BlocklistStore::new(allow);
+            store.swap_domains(blocks, vec![]);
             rules.push(ClientPolicy {
                 nets: CidrMatcher::from_entries(&cfg.from, &cfg.exclude, &format!("{ctx}.from"))?,
                 store,

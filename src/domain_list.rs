@@ -11,10 +11,11 @@ use std::path::PathBuf;
 use crate::blocklist::{find_in_set, normalize};
 use crate::persist::{load_json_vec, save_json};
 
+#[derive(Debug)]
 pub struct PersistedDomainList {
     config: HashSet<String>, // from numa.toml; reloaded each boot, never saved
     user: HashSet<String>,   // runtime-added; persisted to `persist_path`
-    persist_path: PathBuf,
+    persist_path: Option<PathBuf>,
 }
 
 impl PersistedDomainList {
@@ -24,7 +25,17 @@ impl PersistedDomainList {
         PersistedDomainList {
             config: HashSet::new(),
             user: HashSet::new(),
-            persist_path: crate::config_dir().join(filename),
+            persist_path: Some(crate::config_dir().join(filename)),
+        }
+    }
+
+    /// In-memory only: save and load are no-ops. For lists that are pure
+    /// config (per-client policies) and for tests.
+    pub fn unpersisted() -> Self {
+        PersistedDomainList {
+            config: HashSet::new(),
+            user: HashSet::new(),
+            persist_path: None,
         }
     }
 
@@ -56,8 +67,13 @@ impl PersistedDomainList {
     /// Exact-or-parent suffix match against either layer: `example.com`
     /// matches `nas.example.com` but never `evilexample.com`.
     pub fn matches(&self, qname: &str) -> bool {
-        let n = normalize(qname);
-        find_in_set(&n, &self.config).is_some() || find_in_set(&n, &self.user).is_some()
+        self.find_normalized(&normalize(qname)).is_some()
+    }
+
+    /// The matched suffix for an already-normalized domain (config layer
+    /// first), or None. Lets callers report *which* entry matched.
+    pub fn find_normalized<'a>(&self, domain: &'a str) -> Option<&'a str> {
+        find_in_set(domain, &self.config).or_else(|| find_in_set(domain, &self.user))
     }
 
     /// Whether the exact (normalized) domain came from config — lets the UI
@@ -73,10 +89,36 @@ impl PersistedDomainList {
         v
     }
 
+    /// Entry count. The layers are disjoint: runtime inserts and persisted
+    /// loads both skip domains the config layer already holds.
+    pub fn len(&self) -> usize {
+        self.config.len() + self.user.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.config.is_empty() && self.user.is_empty()
+    }
+
+    /// Estimated heap usage, mirroring `BlocklistStore::heap_bytes`.
+    pub fn heap_bytes(&self) -> usize {
+        let per_slot_overhead = std::mem::size_of::<u64>() + std::mem::size_of::<String>() + 1;
+        let table = (self.config.capacity() + self.user.capacity()) * per_slot_overhead;
+        let strings: usize = self
+            .config
+            .iter()
+            .chain(self.user.iter())
+            .map(|d| d.capacity())
+            .sum();
+        table + strings
+    }
+
     /// Load persisted runtime entries. Call once at startup, after seeding
     /// config entries (so config takes precedence on overlap).
     pub fn load_persisted(&mut self) {
-        for domain in load_json_vec::<String>(&self.persist_path) {
+        let Some(path) = &self.persist_path else {
+            return;
+        };
+        for domain in load_json_vec::<String>(path) {
             let d = normalize(&domain);
             if !self.config.contains(&d) {
                 self.user.insert(d);
@@ -85,9 +127,12 @@ impl PersistedDomainList {
     }
 
     fn save(&self) {
+        let Some(path) = &self.persist_path else {
+            return;
+        };
         let mut entries: Vec<&String> = self.user.iter().collect();
         entries.sort();
-        save_json(&self.persist_path, &entries);
+        save_json(path, &entries);
     }
 }
 
@@ -95,14 +140,30 @@ impl PersistedDomainList {
 mod tests {
     use super::*;
 
-    /// Store whose persisted writes go to /dev/null (mirrors `service_store`
-    /// tests) — exercises the save path without touching the real config dir.
     fn test_list() -> PersistedDomainList {
-        PersistedDomainList {
-            config: HashSet::new(),
-            user: HashSet::new(),
-            persist_path: PathBuf::from("/dev/null"),
-        }
+        PersistedDomainList::unpersisted()
+    }
+
+    #[test]
+    fn save_load_roundtrip_preserves_user_entries() {
+        let path =
+            std::env::temp_dir().join(format!("numa-domain-list-{}.json", std::process::id()));
+        let mut l = test_list();
+        l.persist_path = Some(path.clone());
+        l.insert("user.example");
+        l.insert("config-overlap.example");
+
+        let mut reloaded = test_list();
+        reloaded.persist_path = Some(path.clone());
+        reloaded.insert_from_config("config-overlap.example");
+        reloaded.load_persisted();
+        let _ = std::fs::remove_file(&path);
+
+        assert!(reloaded.matches("user.example"));
+        assert!(!reloaded.is_config("user.example"));
+        // Config wins on overlap: the persisted copy must not shadow it.
+        assert!(reloaded.is_config("config-overlap.example"));
+        assert_eq!(reloaded.len(), 2);
     }
 
     #[test]

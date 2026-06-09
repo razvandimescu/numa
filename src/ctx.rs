@@ -1394,7 +1394,14 @@ mod tests {
         let upstream_addr = crate::testutil::mock_upstream(resp).await;
 
         let mut ctx = crate::testutil::test_ctx().await;
-        ctx.rebind = RwLock::new(crate::rebind::RebindFilter::new(true, &[], &[]).unwrap());
+        ctx.rebind = RwLock::new(
+            crate::rebind::RebindFilter::new(
+                true,
+                crate::domain_list::PersistedDomainList::unpersisted(),
+                &[],
+            )
+            .unwrap(),
+        );
         ctx.forwarding_rules = vec![ForwardingRule::new(
             "evil.test".to_string(),
             UpstreamPool::new(vec![Upstream::Udp(upstream_addr)], vec![]),
@@ -1426,7 +1433,14 @@ mod tests {
         let upstream_addr = crate::testutil::mock_upstream(resp).await;
 
         let mut ctx = crate::testutil::test_ctx().await;
-        ctx.rebind = RwLock::new(crate::rebind::RebindFilter::new(true, &[], &[]).unwrap());
+        ctx.rebind = RwLock::new(
+            crate::rebind::RebindFilter::new(
+                true,
+                crate::domain_list::PersistedDomainList::unpersisted(),
+                &[],
+            )
+            .unwrap(),
+        );
         ctx.forwarding_rules = vec![ForwardingRule::new(
             "evil.test".to_string(),
             UpstreamPool::new(vec![Upstream::Udp(upstream_addr)], vec![]),
@@ -1445,7 +1459,14 @@ mod tests {
     #[tokio::test]
     async fn pipeline_rebind_leaves_local_override_untouched() {
         let mut ctx = crate::testutil::test_ctx().await;
-        ctx.rebind = RwLock::new(crate::rebind::RebindFilter::new(true, &[], &[]).unwrap());
+        ctx.rebind = RwLock::new(
+            crate::rebind::RebindFilter::new(
+                true,
+                crate::domain_list::PersistedDomainList::unpersisted(),
+                &[],
+            )
+            .unwrap(),
+        );
         ctx.overrides
             .write()
             .unwrap()
@@ -1472,7 +1493,14 @@ mod tests {
         // ranges — so the exclusion gate must exempt it, or rebind protection
         // would silently eat ad-blocking.
         let mut ctx = crate::testutil::test_ctx().await;
-        ctx.rebind = RwLock::new(crate::rebind::RebindFilter::new(true, &[], &[]).unwrap());
+        ctx.rebind = RwLock::new(
+            crate::rebind::RebindFilter::new(
+                true,
+                crate::domain_list::PersistedDomainList::unpersisted(),
+                &[],
+            )
+            .unwrap(),
+        );
         let mut domains = std::collections::HashSet::new();
         domains.insert("ads.tracker.test".to_string());
         ctx.blocklist.write().unwrap().swap_domains(domains, vec![]);

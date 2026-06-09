@@ -31,7 +31,9 @@ pub async fn test_ctx() -> ServerCtx {
         refreshing: Mutex::new(HashSet::new()),
         stats: Mutex::new(ServerStats::new()),
         overrides: RwLock::new(OverrideStore::new()),
-        blocklist: RwLock::new(BlocklistStore::new()),
+        blocklist: RwLock::new(BlocklistStore::new(
+            crate::domain_list::PersistedDomainList::unpersisted(),
+        )),
         query_log: Mutex::new(QueryLog::new(100)),
         services: Mutex::new(ServiceStore::new()),
         lan_peers: Mutex::new(PeerStore::new(90)),
@@ -67,7 +69,14 @@ pub async fn test_ctx() -> ServerCtx {
         filter_aaaa: false,
         allow_from: crate::acl::AllowFromAcl::default(),
         client_policy: crate::client_policy::ClientPolicySet::default(),
-        rebind: std::sync::RwLock::new(crate::rebind::RebindFilter::default()),
+        rebind: std::sync::RwLock::new(
+            crate::rebind::RebindFilter::new(
+                false,
+                crate::domain_list::PersistedDomainList::unpersisted(),
+                &[],
+            )
+            .unwrap(),
+        ),
     }
 }
 

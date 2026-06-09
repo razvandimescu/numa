@@ -3,11 +3,10 @@
 //! client's perimeter. Off by default. Runs only on remote/cache paths; local
 //! data (zones, overrides, `.numa`, sinkhole) is exempt by gating in `ctx.rs`.
 
-use std::collections::HashSet;
 use std::net::IpAddr;
 
 use crate::acl::CidrMatcher;
-use crate::blocklist::{find_in_set, normalize};
+use crate::domain_list::PersistedDomainList;
 use crate::packet::DnsPacket;
 use crate::question::QueryType;
 use crate::record::DnsRecord;
@@ -29,18 +28,19 @@ const DEFAULT_RANGES: &[&str] = &[
     "::/128",         // unspecified
 ];
 
-#[derive(Clone, Debug, Default)]
 pub struct RebindFilter {
     enabled: bool,
     ranges: CidrMatcher,
     range_strings: Vec<String>, // effective ranges, kept verbatim for the API
-    allowlist: HashSet<String>, // normalized: lowercase, no trailing dot
+    allowlist: PersistedDomainList,
 }
 
 impl RebindFilter {
+    /// `allowlist` arrives pre-seeded (config entries + persisted runtime
+    /// entries) — the orchestrator owns that wiring.
     pub fn new(
         enabled: bool,
-        allowlist: &[String],
+        allowlist: PersistedDomainList,
         custom_ranges: &[String],
     ) -> Result<Self, String> {
         let range_strings: Vec<String> = if custom_ranges.is_empty() {
@@ -53,7 +53,7 @@ impl RebindFilter {
             enabled,
             ranges,
             range_strings,
-            allowlist: allowlist.iter().map(|d| normalize(d)).collect(),
+            allowlist,
         })
     }
 
@@ -72,17 +72,17 @@ impl RebindFilter {
 
     /// Allowlisted domains, sorted for stable output.
     pub fn allowlist(&self) -> Vec<String> {
-        let mut v: Vec<String> = self.allowlist.iter().cloned().collect();
-        v.sort();
-        v
+        self.allowlist.entries()
     }
 
+    /// Persists across restarts (no-op for domains the config already covers).
     pub fn add_to_allowlist(&mut self, domain: &str) {
-        self.allowlist.insert(normalize(domain));
+        self.allowlist.insert(domain);
     }
 
+    /// False for config-declared entries — those are file-owned.
     pub fn remove_from_allowlist(&mut self, domain: &str) -> bool {
-        self.allowlist.remove(&normalize(domain))
+        self.allowlist.remove(domain)
     }
 
     /// Strip private A/AAAA answers (and private SVCB/HTTPS address hints) from
@@ -119,7 +119,7 @@ impl RebindFilter {
     }
 
     fn is_allowed(&self, qname: &str) -> bool {
-        !self.allowlist.is_empty() && find_in_set(&normalize(qname), &self.allowlist).is_some()
+        !self.allowlist.is_empty() && self.allowlist.matches(qname)
     }
 }
 
@@ -128,8 +128,11 @@ mod tests {
     use super::*;
 
     fn filter(allowlist: &[&str]) -> RebindFilter {
-        let allow: Vec<String> = allowlist.iter().map(|s| s.to_string()).collect();
-        RebindFilter::new(true, &allow, &[]).unwrap()
+        let mut allow = PersistedDomainList::unpersisted();
+        for d in allowlist {
+            allow.insert_from_config(d);
+        }
+        RebindFilter::new(true, allow, &[]).unwrap()
     }
 
     fn a(addr: &str) -> DnsRecord {
@@ -221,7 +224,7 @@ mod tests {
 
     #[test]
     fn disabled_passes_through() {
-        let f = RebindFilter::new(false, &[], &[]).unwrap();
+        let f = RebindFilter::new(false, PersistedDomainList::unpersisted(), &[]).unwrap();
         assert_eq!(
             run(&f, "evil.com", vec![a("192.168.1.1")]),
             (0, vec![a("192.168.1.1")])
@@ -231,13 +234,35 @@ mod tests {
     #[test]
     fn custom_ranges_override_defaults() {
         // Only block ULA; RFC1918 v4 now passes.
-        let f = RebindFilter::new(true, &[], &["fc00::/7".to_string()]).unwrap();
+        let f = RebindFilter::new(
+            true,
+            PersistedDomainList::unpersisted(),
+            &["fc00::/7".to_string()],
+        )
+        .unwrap();
         let r = run(&f, "evil.com", vec![a("192.168.1.1"), aaaa("fd00::1")]);
         assert_eq!(r, (1, vec![a("192.168.1.1")]));
     }
 
     #[test]
     fn invalid_custom_range_errors() {
-        assert!(RebindFilter::new(true, &[], &["not-a-cidr".to_string()]).is_err());
+        assert!(RebindFilter::new(
+            true,
+            PersistedDomainList::unpersisted(),
+            &["not-a-cidr".to_string()]
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn runtime_allowlist_add_exempts_remove_restores() {
+        let mut f = filter(&["config.example"]);
+        f.add_to_allowlist("nas.example.com");
+        assert_eq!(run(&f, "nas.example.com", vec![a("192.168.1.50")]).0, 0);
+        assert!(f.remove_from_allowlist("nas.example.com"));
+        assert_eq!(run(&f, "nas.example.com", vec![a("192.168.1.50")]).0, 1);
+        // Config entries are file-owned: not removable at runtime.
+        assert!(!f.remove_from_allowlist("config.example"));
+        assert_eq!(run(&f, "config.example", vec![a("10.0.0.1")]).0, 0);
     }
 }
