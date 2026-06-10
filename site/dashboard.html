@@ -732,6 +732,7 @@ body {
             <option value="OVERRIDE">override</option>
             <option value="LOCAL">local</option>
             <option value="SERVFAIL">error</option>
+            <option value="STRIPPED">stripped</option>
           </select>
           <select id="logFilterTransport" onchange="applyLogFilter()"
             style="font-family:var(--font-mono);font-size:0.7rem;padding:0.25rem 0.4rem;border:1px solid var(--border);border-radius:4px;background:var(--bg-surface);color:var(--text-secondary);outline:none;">
@@ -866,6 +867,7 @@ const API = '';
 const h = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 let prevTotal = null;
 let lastLogEntries = [];
+const rebindAllowed = new Set(); // domains allowlisted this session, so old log rows show "allowed" instead of the button
 let prevTime = null;
 
 async function fetchJSON(path) {
@@ -1113,7 +1115,9 @@ function applyLogFilter() {
   if (domainFilter) {
     filtered = filtered.filter(e => e.domain.toLowerCase().includes(domainFilter));
   }
-  if (pathFilter) {
+  if (pathFilter === 'STRIPPED') {
+    filtered = filtered.filter(e => e.rebind_stripped);
+  } else if (pathFilter) {
     filtered = filtered.filter(e => e.path === pathFilter);
   }
   if (transportFilter) {
@@ -1129,10 +1133,12 @@ function applyLogFilter() {
   tbody.innerHTML = filtered.map(e => {
     const allowBtn = e.path === 'BLOCKED'
       ? ` <button class="btn-delete" data-domain="${h(e.domain)}" onclick="unblockDomain(this.dataset.domain)" title="Allow this domain" style="color:var(--emerald);font-size:0.65rem;">allow</button>`
+      : e.rebind_stripped && rebindAllowed.has(e.domain)
+      ? ` <span style="color:var(--emerald);font-size:0.65rem;" title="Allowlisted — new queries keep their private IPs">✓ allowed</span>`
       : e.rebind_stripped
-      ? ` <button class="btn-delete" data-domain="${h(e.domain)}" onclick="postDomain('/rebind/allowlist', this.dataset.domain)" title="Stop stripping private IPs for this domain" style="color:var(--emerald);font-size:0.65rem;">allow</button>`
+      ? ` <button class="btn-delete" data-domain="${h(e.domain)}" onclick="postDomain('/rebind/allowlist', this.dataset.domain, this)" title="Stop stripping private IPs for this domain" style="color:var(--emerald);font-size:0.65rem;">allow</button>`
       : e.path !== 'LOCAL'
-      ? ` <button class="btn-delete" data-domain="${h(e.domain)}" onclick="postDomain('/blocking/blocklist', this.dataset.domain)" title="Blocks this domain and its subdomains" style="font-size:0.65rem;">block</button>`
+      ? ` <button class="btn-delete" data-domain="${h(e.domain)}" onclick="postDomain('/blocking/blocklist', this.dataset.domain, this)" title="Blocks this domain and its subdomains" style="font-size:0.65rem;">block</button>`
       : '';
     const rebindTag = e.rebind_stripped
       ? ` <span class="path-tag" style="background:rgba(192,98,58,0.12);color:var(--amber-dim);" title="Private IPs stripped by rebind protection">stripped</span>`
@@ -1262,6 +1268,15 @@ async function refresh() {
     document.getElementById('footerDnssec').style.color = stats.dnssec ? 'var(--emerald)' : 'var(--text-dim)';
     document.getElementById('footerSrtt').textContent = stats.srtt ? 'on' : 'off';
     document.getElementById('footerSrtt').style.color = stats.srtt ? 'var(--emerald)' : 'var(--text-dim)';
+    const strippedCount = q.rebind_stripped || 0;
+    const footerRebind = document.getElementById('footerRebind');
+    footerRebind.textContent = !stats.rebind ? 'off'
+      : strippedCount > 0 ? `on · ${formatNumber(strippedCount)} stripped` : 'on';
+    footerRebind.style.color = !stats.rebind ? 'var(--text-dim)'
+      : strippedCount > 0 ? 'var(--amber-dim)' : 'var(--emerald)';
+    footerRebind.title = strippedCount > 0
+      ? 'Rebind protection removed private IPs from answers — filter the query log by "stripped" to see which domains'
+      : 'DNS rebinding protection';
     if (!document.getElementById('footerLogs').textContent) {
       const isWin = stats.data_dir && stats.data_dir.includes(':\\');
       const isMac = stats.data_dir && stats.data_dir.includes('/usr/local/');
@@ -1394,16 +1409,23 @@ async function unpauseBlocking() {
   } catch (err) {}
 }
 
-async function postDomain(path, domain) {
+async function postDomain(path, domain, btn) {
   try {
-    await fetch(API + path, {
+    const res = await fetch(API + path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ domain }),
     });
+    if (!res.ok) throw new Error(await res.text());
+    if (path === '/rebind/allowlist') rebindAllowed.add(domain);
     refresh();
     return true;
   } catch (err) {
+    if (btn) {
+      btn.textContent = 'failed';
+      btn.style.color = 'var(--rose)';
+      btn.title = err.message;
+    }
     return false;
   }
 }
@@ -1657,6 +1679,7 @@ setInterval(refresh, 2000);
   Upstream: <span id="footerUpstream" style="user-select:all;color:var(--emerald);"></span>
   · DNSSEC: <span id="footerDnssec" style="color:var(--text-dim);">—</span>
   · SRTT: <span id="footerSrtt" style="color:var(--text-dim);">—</span>
+  · Rebind: <span id="footerRebind" style="color:var(--text-dim);">—</span>
   · <a href="https://github.com/razvandimescu/numa" target="_blank" rel="noopener" style="color:var(--amber);text-decoration:none;">GitHub</a>
 </div>
 

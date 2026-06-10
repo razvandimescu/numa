@@ -188,6 +188,7 @@ struct StatsResponse {
     proxy_tld: String,
     dnssec: bool,
     srtt: bool,
+    rebind: bool,
     queries: QueriesStats,
     transport: TransportStats,
     upstream_transport: UpstreamTransportStats,
@@ -587,6 +588,7 @@ async fn stats(State(ctx): State<Arc<ServerCtx>>) -> Json<StatsResponse> {
         proxy_tld: ctx.proxy_tld.clone(),
         dnssec: ctx.dnssec_enabled,
         srtt: srtt_enabled,
+        rebind: ctx.rebind.read().unwrap().is_enabled(),
         queries: QueriesStats {
             total: snap.total,
             forwarded: snap.forwarded,
