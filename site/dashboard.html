@@ -1472,7 +1472,8 @@ function renderBlockingInfo(info) {
 }
 
 function renderAllowlist(entries, manualBlocks) {
-  if (document.activeElement && document.activeElement.id === 'allowDomainInput') return;
+  const focused = document.activeElement && document.activeElement.id;
+  if (focused === 'allowDomainInput' || focused === 'blockDomainInput') return;
   const el = document.getElementById('blockingAllowlist');
   const count = entries.length;
   const blocked = manualBlocks || [];
@@ -1484,26 +1485,29 @@ function renderAllowlist(entries, manualBlocks) {
         <button class="btn-delete" data-domain="${h(d)}" onclick="deleteDomain('/blocking/allowlist', this.dataset.domain)">&times;</button>
       </div>
     `).join('') : '<div class="empty-state">No exceptions</div>'}
-    <form onsubmit="return addAllowlistDomain(event)" style="display:flex;gap:0.4rem;margin-top:0.4rem;">
+    <form onsubmit="return addDomain(event, '/blocking/allowlist')" style="display:flex;gap:0.4rem;margin-top:0.4rem;">
       <input type="text" id="allowDomainInput" placeholder="domain to allow" required style="flex:1;font-family:var(--font-mono);font-size:0.75rem;padding:0.35rem 0.5rem;border:1px solid var(--border);border-radius:4px;background:var(--bg-surface);color:var(--text-primary);outline:none;">
       <button type="submit" class="btn" style="background:var(--emerald);color:var(--text-on-btn);flex-shrink:0;">Allow</button>
     </form>
-    ${blocked.length ? `
-    <div style="font-size:0.65rem;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-dim);margin:0.8rem 0 0.4rem;">Manually blocked (${blocked.length})</div>
+    <div style="font-size:0.65rem;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-dim);margin:0.8rem 0 0.4rem;">Manually blocked${blocked.length ? ` (${blocked.length})` : ''}</div>
     ${blocked.map(d => `
       <div style="display:flex;justify-content:space-between;align-items:center;padding:0.25rem 0;border-bottom:1px solid var(--border);">
         <span style="font-family:var(--font-mono);font-size:0.75rem;color:var(--rose);">${h(d)}</span>
         <button class="btn-delete" data-domain="${h(d)}" onclick="deleteDomain('/blocking/blocklist', this.dataset.domain)">&times;</button>
       </div>
-    `).join('')}` : ''}
+    `).join('')}
+    <form onsubmit="return addDomain(event, '/blocking/blocklist')" style="display:flex;gap:0.4rem;margin-top:0.4rem;">
+      <input type="text" id="blockDomainInput" placeholder="domain to block" required style="flex:1;font-family:var(--font-mono);font-size:0.75rem;padding:0.35rem 0.5rem;border:1px solid var(--border);border-radius:4px;background:var(--bg-surface);color:var(--text-primary);outline:none;">
+      <button type="submit" class="btn" style="background:var(--rose);color:var(--text-on-btn);flex-shrink:0;">Block</button>
+    </form>
   `;
 }
 
-async function addAllowlistDomain(event) {
+async function addDomain(event, path) {
   event.preventDefault();
-  const input = document.getElementById('allowDomainInput');
+  const input = event.target.querySelector('input');
   const domain = input.value.trim();
-  if (domain && (await postDomain('/blocking/allowlist', domain))) input.value = '';
+  if (domain && (await postDomain(path, domain))) input.value = '';
   return false;
 }
 
