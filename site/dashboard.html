@@ -1132,7 +1132,7 @@ function applyLogFilter() {
       : e.rebind_stripped
       ? ` <button class="btn-delete" data-domain="${h(e.domain)}" onclick="postDomain('/rebind/allowlist', this.dataset.domain)" title="Stop stripping private IPs for this domain" style="color:var(--emerald);font-size:0.65rem;">allow</button>`
       : e.path !== 'LOCAL'
-      ? ` <button class="btn-delete" data-domain="${h(e.domain.replace(/^www\./, ''))}" onclick="postDomain('/blocking/blocklist', this.dataset.domain)" title="Block this domain (and subdomains)" style="font-size:0.65rem;">block</button>`
+      ? ` <button class="btn-delete" data-domain="${h(e.domain)}" onclick="postDomain('/blocking/blocklist', this.dataset.domain)" title="Blocks this domain and its subdomains" style="font-size:0.65rem;">block</button>`
       : '';
     const rebindTag = e.rebind_stripped
       ? ` <span class="path-tag" style="background:rgba(192,98,58,0.12);color:var(--amber-dim);" title="Private IPs stripped by rebind protection">stripped</span>`
