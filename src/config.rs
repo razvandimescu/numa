@@ -136,6 +136,21 @@ pub struct ServerConfig {
     /// CIDR allowlist applied at every DNS surface. Empty = disabled.
     #[serde(default)]
     pub allow_from: Vec<String>,
+    /// DNS rebinding protection (#240). When true, strip private/special-use
+    /// addresses (loopback, RFC 1918, link-local, ULA, `0.0.0.0/8`) from
+    /// answers resolved via the upstream/recursive/cache paths, so a public
+    /// hostname can't be rebound to an address inside the perimeter. Local
+    /// data (zones, overrides, `.numa`, blocklist sinkhole) is never affected.
+    /// DNSBL/RBL users should add their lookup zones to `rebind_allowlist`.
+    #[serde(default)]
+    pub rebind_protect: bool,
+    /// Domains exempt from rebind protection (split-horizon home services).
+    /// Suffix match: `example.com` covers `nas.example.com`, not `evilexample.com`.
+    #[serde(default)]
+    pub rebind_allowlist: Vec<String>,
+    /// Override the built-in private-range set. Empty = built-in defaults.
+    #[serde(default)]
+    pub rebind_private_ranges: Vec<String>,
 }
 
 impl Default for ServerConfig {
@@ -148,6 +163,9 @@ impl Default for ServerConfig {
             filter_aaaa: false,
             proxy_protocol: ProxyProtocolConfig::default(),
             allow_from: Vec::new(),
+            rebind_protect: false,
+            rebind_allowlist: Vec::new(),
+            rebind_private_ranges: Vec::new(),
         }
     }
 }

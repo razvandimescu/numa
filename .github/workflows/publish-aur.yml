@@ -35,6 +35,12 @@ on:
 permissions:
   contents: read
 
+# Releases push main twice within minutes (PR merge + version bump); parallel
+# runs race on the AUR git remote and the loser's push is rejected.
+concurrency:
+  group: publish-aur
+  cancel-in-progress: false
+
 jobs:
   # The 'validate' job ensures that the PKGBUILD is correct and the software builds/tests
   # successfully on Arch Linux before we attempt to publish it.

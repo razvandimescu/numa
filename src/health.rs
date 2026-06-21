@@ -14,7 +14,7 @@
 
 use std::net::Ipv4Addr;
 use std::path::Path;
-use std::time::Instant;
+use std::time::SystemTime;
 
 use ring::digest::{digest, SHA256};
 use serde::Serialize;
@@ -31,7 +31,9 @@ pub struct HealthMeta {
     pub api_port: u16,
     pub ca_fingerprint_sha256: Option<String>,
     pub features: Vec<String>,
-    pub started_at: Instant,
+    // SystemTime, not Instant: monotonic time freezes during host suspend
+    // (Linux/macOS), so uptime would drift below systemd's "active since" (#281).
+    pub started_at: SystemTime,
 }
 
 impl HealthMeta {
@@ -50,7 +52,7 @@ impl HealthMeta {
             api_port: 8765,
             ca_fingerprint_sha256: None,
             features: vec![],
-            started_at: Instant::now(),
+            started_at: SystemTime::now(),
         }
     }
 
@@ -106,7 +108,7 @@ impl HealthMeta {
             api_port,
             ca_fingerprint_sha256,
             features,
-            started_at: Instant::now(),
+            started_at: SystemTime::now(),
         }
     }
 }
@@ -155,7 +157,7 @@ impl HealthResponse {
         HealthResponse {
             status: "ok",
             version: meta.version,
-            uptime_secs: meta.started_at.elapsed().as_secs(),
+            uptime_secs: meta.started_at.elapsed().unwrap_or_default().as_secs(),
             hostname: meta.hostname.clone(),
             lan_ip: lan_ip.map(|ip| ip.to_string()),
             sni: meta.sni.clone(),
@@ -209,7 +211,7 @@ mod tests {
             api_port: 8765,
             ca_fingerprint_sha256: Some("abcd1234".to_string()),
             features: vec!["dot".to_string(), "dnssec".to_string()],
-            started_at: Instant::now(),
+            started_at: SystemTime::now(),
         };
 
         let response = HealthResponse::build(&meta, Some(Ipv4Addr::new(192, 168, 1, 50)));
@@ -237,7 +239,7 @@ mod tests {
             api_port: 8765,
             ca_fingerprint_sha256: None,
             features: vec![],
-            started_at: Instant::now(),
+            started_at: SystemTime::now(),
         };
 
         let response = HealthResponse::build(&meta, None);

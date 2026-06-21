@@ -23,7 +23,11 @@
                 pname = "numa";
                 version = (lib.importTOML ./Cargo.toml).package.version;
                 src = ./.;
-                cargoHash = "sha256-svTcUocOSHNmXcPQaBusOSh3oVb2kRbPS9Hy4XdVpv4=";
+                # Per-crate hashes come from Cargo.lock, so there is no aggregate
+                # cargoHash to recompute on every dep change. Needs nixpkgs >= the
+                # 2026-05-27 importCargoLock->static.crates.io migration (PR #524985)
+                # to avoid crates.io/api/v1 403s in the build sandbox.
+                cargoLock.lockFile = ./Cargo.lock;
                 meta = {
                   description = "Portable DNS resolver in Rust";
                   homepage = "https://numa.rs";

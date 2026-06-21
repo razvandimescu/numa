@@ -70,10 +70,11 @@ impl BytePacketBuffer {
     }
 
     pub fn get_range(&self, start: usize, len: usize) -> Result<&[u8]> {
-        if start + len > BUF_SIZE {
+        let end = start.checked_add(len).ok_or("End of buffer")?;
+        if end > BUF_SIZE {
             return Err("End of buffer".into());
         }
-        Ok(&self.buf[start..start + len])
+        Ok(&self.buf[start..end])
     }
 
     pub fn read_u16(&mut self) -> Result<u16> {
@@ -460,5 +461,15 @@ mod tests {
         let mut buf = BytePacketBuffer::from_bytes(b"\x03foo\x00\xc0\x02");
         buf.seek(5).unwrap();
         assert!(buf.read_qname(&mut String::new()).is_err());
+    }
+
+    #[test]
+    fn get_range_length_overflow_errors_not_panics() {
+        // A length near usize::MAX must not overflow the bounds check into a
+        // false pass (then a reversed-slice panic). Guards the rdlength-underflow
+        // class at the buffer layer.
+        let buf = BytePacketBuffer::from_bytes(b"abcd");
+        assert!(buf.get_range(2, usize::MAX).is_err());
+        assert!(buf.get_range(usize::MAX, 8).is_err());
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "numa"
-version = "0.20.0"
+version = "0.21.0"
 authors = ["razvandimescu <razvan@dimescu.com>"]
 edition = "2021"
 description = "Portable DNS resolver in Rust — .numa local domains, ad blocking, developer overrides, DNS-over-HTTPS"
@@ -25,8 +25,8 @@ futures = "0.3"
 socket2 = { version = "0.6", features = ["all"] }
 rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
 time = "0.3"
-rustls = "0.23"
-tokio-rustls = "0.26"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 arc-swap = "1"
 ring = "0.17"
 odoh-rs = "1"
@@ -40,14 +40,14 @@ qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 webpki-roots = "1"
 proxy-header = { version = "0.1", features = ["tokio"] }
 ipnet = { version = "2", features = ["serde"] }
-quinn-udp = "0.5"
+quinn-udp = "0.6"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.8"
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
@@ -72,6 +72,11 @@ harness = false
 [[bench]]
 name = "recursive_compare"
 harness = false
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
 
 [lints.clippy]
 cognitive_complexity = "warn"

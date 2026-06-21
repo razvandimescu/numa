@@ -62,6 +62,11 @@ with TC-slip, RFC 8482 ANY-refusal, DNS Cookies, and `allow_recursion` split fro
 
 ## Numa config
 
+Unlike Unbound's dedicated `proxy-protocol-port`, Numa has **no separate proxy port**.
+PROXY v2 is a *mode* on the existing `:53` listener, switched on by a non-empty `from`
+allowlist — the listener keeps serving plain DNS, but now requires a PROXY header from
+the trusted front-end.
+
 ```toml
 [server.proxy_protocol]
 from = ["127.0.0.1/32"]  # trust the local dnsdist front-end to prepend PROXY v2

@@ -63,10 +63,13 @@ pub async fn run(config_path: String) -> crate::Result<()> {
         resolve_upstream_pool(&config, &system_dns, &root_hints, &bootstrap_resolver).await?;
     let api_port = config.server.api_port;
 
-    let mut blocklist = BlocklistStore::new();
-    for domain in &config.blocking.allowlist {
-        blocklist.add_to_allowlist(domain);
-    }
+    let mut blocklist = BlocklistStore::new(
+        crate::domain_list::PersistedDomainList::new(
+            "blocking-allow.json",
+            &config.blocking.allowlist,
+        ),
+        crate::domain_list::PersistedDomainList::new("blocking-block.json", &[]),
+    );
     if !config.blocking.enabled {
         blocklist.set_enabled(false);
     }
@@ -154,6 +157,23 @@ pub async fn run(config_path: String) -> crate::Result<()> {
         None
     };
 
+    let rebind_allow = crate::domain_list::PersistedDomainList::new(
+        "rebind-allow.json",
+        &config.server.rebind_allowlist,
+    );
+    if config.server.rebind_protect {
+        info!(
+            "DNS rebinding protection enabled ({} allowlist entries)",
+            rebind_allow.len()
+        );
+    }
+    let rebind = crate::rebind::RebindFilter::new(
+        config.server.rebind_protect,
+        rebind_allow,
+        &config.server.rebind_private_ranges,
+    )
+    .map_err(|e| format!("invalid [server] rebind config: {e}"))?;
+
     let sockets = bind_udp_listeners(&config.server.bind_addr).await?;
 
     let ctx = Arc::new(ServerCtx {
@@ -204,6 +224,7 @@ pub async fn run(config_path: String) -> crate::Result<()> {
         allow_from,
         client_policy,
         pkarr,
+        rebind: RwLock::new(rebind),
     });
 
     let zone_count: usize = ctx.zone_map.len();
@@ -420,10 +441,10 @@ async fn udp_serve_loop(
             Err(e) => return Err(e.into()),
         };
         let pp = crate::pp2_udp::parse_if_trusted(&buffer.buf[..len], peer, udp_pp, ctx);
-        let Some((src_addr, dns_len)) = pp.apply(&mut buffer.buf, len, peer) else {
+        let Some((src_addr, dns_len, local_command)) = pp.apply(&mut buffer.buf, len, peer) else {
             continue;
         };
-        if !ctx.allow_from.allows(src_addr.ip()) {
+        if !ctx.allow_from.admits(src_addr.ip(), local_command) {
             // Silent drop: no reply means no amplification, no fingerprint.
             debug!("UDP: dropping {} — not in allow_from", src_addr);
             continue;

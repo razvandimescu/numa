@@ -24,17 +24,6 @@ fn write_default_config(path: &std::path::Path) -> std::io::Result<bool> {
     Ok(true)
 }
 
-fn print_recursive_hint() {
-    let is_recursive = crate::config::load_config("numa.toml")
-        .map(|c| c.config.upstream.mode == crate::config::UpstreamMode::Recursive)
-        .unwrap_or(false);
-    if !is_recursive {
-        eprintln!("  Want full DNS sovereignty? Add to numa.toml:");
-        eprintln!("    [upstream]");
-        eprintln!("    mode = \"recursive\"\n");
-    }
-}
-
 fn is_loopback_or_stub(addr: &str) -> bool {
     // fec0:0:0:ffff::1/2/3 are the deprecated IPv6 site-local stubs that
     // Get-DnsClientServerAddress returns for any IPv6-enabled adapter
@@ -641,13 +630,6 @@ fn install_windows(skip_system_dns: bool) -> Result<(), String> {
         ),
     }
 
-    eprintln!();
-    if skip_system_dns {
-        eprintln!("{}", SKIP_DNS_NOTICE);
-    }
-    eprintln!("  Run 'numa uninstall' to remove.\n");
-    eprintln!("  Numa is running.\n");
-    print_recursive_hint();
     Ok(())
 }
 
@@ -999,11 +981,9 @@ fn install_macos() -> Result<(), String> {
     // as the unscoped resolver and would otherwise NXDOMAIN our TLD.
     write_resolver_dropin();
 
-    eprintln!();
     if !has_useful_existing {
         eprintln!("  Original DNS saved to {}", backup_path().display());
     }
-    eprintln!("  Run 'sudo numa uninstall' to restore.\n");
 
     Ok(())
 }
@@ -1128,9 +1108,6 @@ const PLIST_DEST: &str = "/Library/LaunchDaemons/com.numa.dns.plist";
 #[cfg(target_os = "linux")]
 const SYSTEMD_UNIT: &str = "/etc/systemd/system/numa.service";
 
-const SKIP_DNS_NOTICE: &str =
-    "  --no-system-dns: system DNS unchanged. Point clients at 127.0.0.1 yourself.";
-
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn unsupported_os_err(op: &str) -> String {
     format!(
@@ -1177,8 +1154,36 @@ pub fn install_service(skip_system_dns: bool) -> Result<(), String> {
             eprintln!("  warning: could not trust CA: {}", e);
             eprintln!("  HTTPS proxy will work but browsers will show certificate warnings.\n");
         }
+        print_install_summary(skip_system_dns);
     }
     result
+}
+
+/// `numa.numa` is the CA-trusted entry point (the `.numa` proxy serves the
+/// dashboard over HTTPS); loopback is the fallback if it can't bind 80/443.
+fn print_install_summary(skip_system_dns: bool) {
+    // data_dir(), not a relative path: under sudo the daemon reads the
+    // system config, not numa.toml in the caller's cwd.
+    let config_path = crate::data_dir().join("numa.toml");
+    let api_port = crate::config::load_config(&config_path.to_string_lossy())
+        .map(|c| c.config.server.api_port)
+        .unwrap_or(crate::config::DEFAULT_API_PORT);
+
+    if skip_system_dns {
+        eprintln!(
+            "\nNuma is running — system DNS unchanged; point clients at 127.0.0.1 yourself.\n"
+        );
+    } else {
+        eprintln!("\nNuma is live — all DNS on this machine now resolves through it.\n");
+    }
+
+    #[cfg(windows)]
+    let uninstall = "numa uninstall";
+    #[cfg(not(windows))]
+    let uninstall = "sudo numa uninstall";
+
+    eprintln!("  Dashboard  https://numa.numa  (or http://127.0.0.1:{api_port})");
+    eprintln!("  Remove     {uninstall}  # restores original DNS");
 }
 
 /// Start the service. If already installed, just starts it via the platform
@@ -1418,17 +1423,14 @@ fn install_service_macos(skip_system_dns: bool) -> Result<(), String> {
         );
     }
 
-    if skip_system_dns {
-        eprintln!("{}", SKIP_DNS_NOTICE);
-    } else if let Err(e) = install_macos() {
-        eprintln!("  warning: failed to configure system DNS: {}", e);
+    if !skip_system_dns {
+        if let Err(e) = install_macos() {
+            eprintln!("  warning: failed to configure system DNS: {}", e);
+        }
     }
 
-    eprintln!("  Service installed and started.");
-    eprintln!("  Numa will auto-start on boot and restart if killed.");
+    eprintln!("  Service installed and started (auto-starts on boot, restarts if killed)");
     eprintln!("  Logs: /usr/local/var/log/numa.log");
-    eprintln!("  Run 'sudo numa uninstall' to restore original DNS.\n");
-    print_recursive_hint();
     Ok(())
 }
 
@@ -1522,9 +1524,10 @@ fn install_linux() -> Result<(), String> {
         .map_err(|e| format!("failed to write {}: {}", drop_in.display(), e))?;
 
         let _ = run_systemctl(&["restart", "systemd-resolved"]);
-        eprintln!("  systemd-resolved detected.");
-        eprintln!("  Installed drop-in: {}", drop_in.display());
-        eprintln!("  Run 'sudo numa uninstall' to remove.\n");
+        eprintln!(
+            "  systemd-resolved detected, drop-in installed: {}",
+            drop_in.display()
+        );
         return Ok(());
     }
 
@@ -1580,7 +1583,6 @@ fn install_linux() -> Result<(), String> {
         .map_err(|e| format!("failed to write /etc/resolv.conf: {}", e))?;
 
     eprintln!("  Set /etc/resolv.conf -> nameserver 127.0.0.1");
-    eprintln!("  Run 'sudo numa uninstall' to restore.\n");
     Ok(())
 }
 
@@ -1693,21 +1695,18 @@ fn install_service_linux(skip_system_dns: bool) -> Result<(), String> {
     run_systemctl(&["enable", "numa"])?;
 
     // Configure system DNS before starting numa so resolved releases port 53 first
-    if skip_system_dns {
-        eprintln!("{}", SKIP_DNS_NOTICE);
-    } else if let Err(e) = install_linux() {
-        eprintln!("  warning: failed to configure system DNS: {}", e);
+    if !skip_system_dns {
+        if let Err(e) = install_linux() {
+            eprintln!("  warning: failed to configure system DNS: {}", e);
+        }
     }
 
     // restart, not start: on re-install the service is already running
     // the previous binary; restart picks up the new one.
     run_systemctl(&["restart", "numa"])?;
 
-    eprintln!("  Service installed and started.");
-    eprintln!("  Numa will auto-start on boot and restart if killed.");
+    eprintln!("  Service installed and started (auto-starts on boot, restarts if killed)");
     eprintln!("  Logs: journalctl -u numa -f");
-    eprintln!("  Run 'sudo numa uninstall' to restore original DNS.\n");
-    print_recursive_hint();
     Ok(())
 }
 
@@ -1947,12 +1946,20 @@ fn run_refresh(store_name: &str, argv: &[&str]) -> Result<(), String> {
     let (cmd, args) = argv
         .split_first()
         .expect("refresh command must be non-empty");
-    let status = std::process::Command::new(cmd)
+    // .output() (not .status()) captures update-ca-certificates' chatty stdout,
+    // which would otherwise land last in the install transcript.
+    let output = std::process::Command::new(cmd)
         .args(args)
-        .status()
+        .output()
         .map_err(|e| format!("{} ({}): {}", cmd, store_name, e))?;
-    if !status.success() {
-        return Err(format!("{} ({}) failed", cmd, store_name));
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "{} ({}) failed: {}",
+            cmd,
+            store_name,
+            stderr.trim()
+        ));
     }
     Ok(())
 }

@@ -115,10 +115,29 @@ api_port = 5380
 # refresh_hours = 24
 # lists = [
 #     "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/hosts/pro.txt",
+#     "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/wildcard/nsfw-onlydomains.txt",  # adult-content (opt-in; hagezi ships nsfw only as wildcard/adblock, not hosts/)
 #     "file:///etc/numa/local-blocklist.txt",  # local hosts-style file
 #     "/etc/numa/extra-blocks.txt",            # bare absolute path also works
 # ]
 # allowlist = ["example.com"]  # domains to never block
+
+# ── Per-client domain policies ─────────────────────────────────────
+# Block or allow specific domains for specific clients, on top of the
+# global blocklist above. `block`/`allow` use the same adblock syntax
+# as global lists. Loopback always bypasses. Rules layer in order: the
+# first rule matching the client that has an explicit block/allow for
+# the name wins; within a rule, allow beats block.
+#
+# [[client_policy]]
+# from    = ["192.168.1.0/24"]   # clients this rule applies to (CIDRs/IPs)
+# exclude = ["192.168.1.254"]    # carve hosts out of the range (e.g. your own device)
+# block   = ["youtube.com", "*.tiktok.com"]
+# allow   = ["safe.example.com"] # exempt a name the global list would block
+#
+# [[client_policy]]
+# from  = ["10.0.0.50"]          # a single host: stricter rules just for it
+# block = ["reddit.com"]
+# filter_aaaa = true             # override global [server].filter_aaaa for these clients (alone makes a rule valid)
 
 [cache]
 max_entries = 100000

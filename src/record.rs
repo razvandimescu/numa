@@ -321,7 +321,10 @@ impl DnsRecord {
                 let flags = buffer.read_u16()?;
                 let protocol = buffer.read()?;
                 let algorithm = buffer.read()?;
-                let key_len = data_len as usize - 4; // flags(2) + protocol(1) + algorithm(1)
+                let rdata_end = rdata_start + data_len as usize;
+                let key_len = rdata_end
+                    .checked_sub(buffer.pos())
+                    .ok_or("DNSKEY data_len too short for fixed fields")?;
                 let public_key = buffer.get_range(buffer.pos(), key_len)?.to_vec();
                 buffer.step(key_len)?;
                 Ok(DnsRecord::DNSKEY {
@@ -337,7 +340,10 @@ impl DnsRecord {
                 let key_tag = buffer.read_u16()?;
                 let algorithm = buffer.read()?;
                 let digest_type = buffer.read()?;
-                let digest_len = data_len as usize - 4; // key_tag(2) + algorithm(1) + digest_type(1)
+                let rdata_end = rdata_start + data_len as usize;
+                let digest_len = rdata_end
+                    .checked_sub(buffer.pos())
+                    .ok_or("DS data_len too short for fixed fields")?;
                 let digest = buffer.get_range(buffer.pos(), digest_len)?.to_vec();
                 buffer.step(digest_len)?;
                 Ok(DnsRecord::DS {
@@ -817,6 +823,28 @@ mod tests {
         };
         let parsed = round_trip(&rec);
         assert_eq!(rec, parsed);
+    }
+
+    #[test]
+    fn dnskey_ds_short_rdlength_errors_not_panics() {
+        // rdlength < fixed-field size must be a clean Err, not an arithmetic
+        // underflow panic (a crafted upstream answer / relayed query is fully
+        // attacker-controlled). Found by fuzzing the packet parser.
+        for qtype in [QueryType::DNSKEY.to_num(), QueryType::DS.to_num()] {
+            for rdlength in [0u16, 1, 2, 3] {
+                let mut buf = BytePacketBuffer::new();
+                write_header(&mut buf, "example.com", qtype, 3600).unwrap();
+                buf.write_u16(rdlength).unwrap();
+                for _ in 0..rdlength {
+                    buf.write_u8(0).unwrap();
+                }
+                buf.seek(0).unwrap();
+                assert!(
+                    DnsRecord::read(&mut buf).is_err(),
+                    "qtype {qtype} rdlength {rdlength} should error"
+                );
+            }
+        }
     }
 
     #[test]

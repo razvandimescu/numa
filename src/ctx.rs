@@ -89,6 +89,7 @@ pub struct ServerCtx {
     /// `Arc<RwLock<...>>` so background refresh tasks can clone it across
     /// `.await` points without borrowing `ServerCtx`.
     pub pkarr: Option<Arc<RwLock<crate::pkarr::PkarrStore>>>,
+    pub rebind: RwLock<crate::rebind::RebindFilter>,
 }
 
 /// Transport-agnostic DNS resolution. Runs the full pipeline (overrides, blocklist,
@@ -149,7 +150,30 @@ pub async fn resolve_query(
             .insert_with_status(&qname, qtype, &response, status);
     }
 
-    shape_response_for_client(&mut response, &query, ctx.filter_aaaa);
+    // Runs after DNSSEC validation + the unfiltered cache insert above (so the
+    // cache keeps the true record), before shaping. UpstreamError carries no
+    // answers, so it's a no-op.
+    let rebind_stripped = !path.returns_trusted_local_data() && {
+        let stripped = ctx.rebind.read().unwrap().apply(&qname, &mut response);
+        if stripped > 0 {
+            // A stripped Secure answer is no longer the validated one; don't
+            // claim AD over a NODATA the validator never proved.
+            response.header.authed_data = false;
+            ctx.stats.lock().unwrap().record_rebind_stripped();
+            info!(
+                "REBIND | {} | stripped {} private RR(s) | {}",
+                qname,
+                stripped,
+                path.as_str()
+            );
+        }
+        stripped > 0
+    };
+
+    let filter_aaaa = ctx
+        .client_policy
+        .effective_filter_aaaa(src_addr.ip(), ctx.filter_aaaa);
+    shape_response_for_client(&mut response, &query, filter_aaaa);
 
     let elapsed = start.elapsed();
 
@@ -170,7 +194,7 @@ pub async fn resolve_query(
         response.resources.len(),
     );
 
-    let resp_buffer = serialize_with_fallback(&mut response, &query, &qname, ctx.filter_aaaa)?;
+    let resp_buffer = serialize_with_fallback(&mut response, &query, &qname, filter_aaaa)?;
 
     // Record stats and query log
     {
@@ -191,6 +215,7 @@ pub async fn resolve_query(
         rescode: response.header.rescode,
         latency_us: elapsed.as_micros() as u64,
         dnssec,
+        rebind_stripped,
     });
 
     Ok((resp_buffer, path))
@@ -373,7 +398,11 @@ async fn resolve_local(
         ));
         return Some((resp, QueryPath::Blocked, DnssecStatus::Indeterminate));
     }
-    if qtype == QueryType::AAAA && ctx.filter_aaaa {
+    if qtype == QueryType::AAAA
+        && ctx
+            .client_policy
+            .effective_filter_aaaa(src_addr.ip(), ctx.filter_aaaa)
+    {
         // RFC 2308 NODATA: NOERROR with empty answer section. Prevents
         // Happy Eyeballs clients from waiting on an AAAA they'll never use
         // on IPv4-only networks.
@@ -945,7 +974,7 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::net::{Ipv4Addr, Ipv6Addr};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, RwLock};
     use tokio::sync::broadcast;
 
     // ---- InflightGuard unit tests ----
@@ -1395,6 +1424,159 @@ mod tests {
             "forwarding rule must take precedence over special-use NXDOMAIN"
         );
         assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+    }
+
+    #[tokio::test]
+    async fn pipeline_rebind_strips_private_from_forwarded() {
+        let mut resp = DnsPacket::new();
+        resp.header.response = true;
+        resp.header.rescode = ResultCode::NOERROR;
+        resp.answers.push(DnsRecord::A {
+            domain: "intranet.evil.test".to_string(),
+            addr: "192.168.1.1".parse().unwrap(),
+            ttl: 60,
+        });
+        let upstream_addr = crate::testutil::mock_upstream(resp).await;
+
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.rebind = RwLock::new(
+            crate::rebind::RebindFilter::new(
+                true,
+                crate::domain_list::PersistedDomainList::unpersisted(),
+                &[],
+            )
+            .unwrap(),
+        );
+        ctx.forwarding_rules = vec![ForwardingRule::new(
+            "evil.test".to_string(),
+            UpstreamPool::new(vec![Upstream::Udp(upstream_addr)], vec![]),
+        )];
+        let ctx = Arc::new(ctx);
+
+        let (resp, path) = resolve_in_test(&ctx, "intranet.evil.test", QueryType::A).await;
+        assert_eq!(path, QueryPath::Forwarded);
+        assert_eq!(
+            resp.header.rescode,
+            ResultCode::NOERROR,
+            "all-stripped is NODATA, not NXDOMAIN"
+        );
+        assert!(resp.answers.is_empty(), "private answer must be stripped");
+    }
+
+    #[tokio::test]
+    async fn pipeline_rebind_stats_count_queries_not_records() {
+        let mut resp = DnsPacket::new();
+        resp.header.response = true;
+        resp.header.rescode = ResultCode::NOERROR;
+        for last_octet in [1, 2] {
+            resp.answers.push(DnsRecord::A {
+                domain: "intranet.evil.test".to_string(),
+                addr: format!("192.168.1.{last_octet}").parse().unwrap(),
+                ttl: 60,
+            });
+        }
+        let upstream_addr = crate::testutil::mock_upstream(resp).await;
+
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.rebind = RwLock::new(
+            crate::rebind::RebindFilter::new(
+                true,
+                crate::domain_list::PersistedDomainList::unpersisted(),
+                &[],
+            )
+            .unwrap(),
+        );
+        ctx.forwarding_rules = vec![ForwardingRule::new(
+            "evil.test".to_string(),
+            UpstreamPool::new(vec![Upstream::Udp(upstream_addr)], vec![]),
+        )];
+        let ctx = Arc::new(ctx);
+
+        let (resp, _) = resolve_in_test(&ctx, "intranet.evil.test", QueryType::A).await;
+        assert!(resp.answers.is_empty(), "both private answers stripped");
+        assert_eq!(
+            ctx.stats.lock().unwrap().snapshot().rebind_stripped,
+            1,
+            "queries.rebind_stripped counts affected queries, not stripped RRs"
+        );
+    }
+
+    #[tokio::test]
+    async fn pipeline_rebind_leaves_local_override_untouched() {
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.rebind = RwLock::new(
+            crate::rebind::RebindFilter::new(
+                true,
+                crate::domain_list::PersistedDomainList::unpersisted(),
+                &[],
+            )
+            .unwrap(),
+        );
+        ctx.overrides
+            .write()
+            .unwrap()
+            .insert("nas.local", "192.168.1.50", 60, None)
+            .unwrap();
+        let ctx = Arc::new(ctx);
+
+        let (resp, path) = resolve_in_test(&ctx, "nas.local", QueryType::A).await;
+        assert_eq!(
+            path,
+            QueryPath::Overridden,
+            "local path is exempt by gating"
+        );
+        assert_eq!(
+            resp.answers.len(),
+            1,
+            "override's private IP must not be stripped"
+        );
+    }
+
+    #[tokio::test]
+    async fn pipeline_rebind_leaves_blocklist_sinkhole_untouched() {
+        // The Blocked path returns 0.0.0.0, which IS in the default rebind
+        // ranges — so the exclusion gate must exempt it, or rebind protection
+        // would silently eat ad-blocking.
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.rebind = RwLock::new(
+            crate::rebind::RebindFilter::new(
+                true,
+                crate::domain_list::PersistedDomainList::unpersisted(),
+                &[],
+            )
+            .unwrap(),
+        );
+        let mut domains = std::collections::HashSet::new();
+        domains.insert("ads.tracker.test".to_string());
+        ctx.blocklist.write().unwrap().swap_domains(domains, vec![]);
+        let ctx = Arc::new(ctx);
+
+        let (resp, path) = resolve_in_test(&ctx, "ads.tracker.test", QueryType::A).await;
+        assert_eq!(path, QueryPath::Blocked);
+        assert_eq!(resp.answers.len(), 1, "sinkhole answer must survive rebind");
+        match &resp.answers[0] {
+            DnsRecord::A { addr, .. } => assert_eq!(*addr, Ipv4Addr::UNSPECIFIED),
+            other => panic!("expected sinkhole A record, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn pipeline_manual_block_routes_through_blocked_path() {
+        // #257: domains blocked from the UI must hit the same sinkhole as
+        // list-blocked domains — NOT overrides (TTL auto-revert, wrong HTML).
+        let ctx = crate::testutil::test_ctx().await;
+        ctx.blocklist
+            .write()
+            .unwrap()
+            .add_to_blocklist("manually.blocked.test");
+        let ctx = Arc::new(ctx);
+
+        let (resp, path) = resolve_in_test(&ctx, "manually.blocked.test", QueryType::A).await;
+        assert_eq!(path, QueryPath::Blocked);
+        match &resp.answers[0] {
+            DnsRecord::A { addr, .. } => assert_eq!(*addr, Ipv4Addr::UNSPECIFIED),
+            other => panic!("expected sinkhole A record, got {:?}", other),
+        }
     }
 
     #[tokio::test]
@@ -1923,6 +2105,81 @@ mod tests {
 
         let (_, path) = resolve_in_test(&ctx, "ads.tracker.test", QueryType::A).await;
         assert_eq!(path, QueryPath::Blocked, "global blocklist still applies");
+    }
+
+    fn ctx_with_aaaa_policy(
+        from: &[&str],
+        filter_aaaa: Option<bool>,
+    ) -> crate::client_policy::ClientPolicySet {
+        crate::client_policy::ClientPolicySet::from_configs(&[
+            crate::client_policy::ClientPolicyConfig {
+                from: from.iter().map(|s| s.to_string()).collect(),
+                filter_aaaa,
+                ..Default::default()
+            },
+        ])
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn pipeline_per_client_filter_aaaa_strips_for_matched_peer() {
+        // Global filter off, but the rule forces it on for this CIDR (#286).
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.filter_aaaa = false;
+        ctx.client_policy = ctx_with_aaaa_policy(&["10.210.0.0/16"], Some(true));
+        let ctx = Arc::new(ctx);
+
+        let src: SocketAddr = "10.210.0.5:5000".parse().unwrap();
+        let (resp, path) = resolve_from_src(&ctx, src, "example.com", QueryType::AAAA).await;
+        assert_eq!(path, QueryPath::Local);
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+        assert!(resp.answers.is_empty(), "matched peer AAAA must be NODATA");
+    }
+
+    /// AAAA answers a peer receives when an upstream returns one record, under
+    /// the given global flag and single `filter_aaaa` rule. 0 = stripped.
+    async fn aaaa_answers(global: bool, rule: &[&str], ovr: Option<bool>, peer: &str) -> usize {
+        let upstream_resp = crate::testutil::aaaa_record_response(
+            "example.com",
+            "2001:db8::1".parse().unwrap(),
+            300,
+        );
+        let upstream_addr = crate::testutil::mock_upstream(upstream_resp).await;
+
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.filter_aaaa = global;
+        ctx.client_policy = ctx_with_aaaa_policy(rule, ovr);
+        ctx.upstream_pool
+            .lock()
+            .unwrap()
+            .set_primary(vec![Upstream::Udp(upstream_addr)]);
+        let ctx = Arc::new(ctx);
+
+        let src: SocketAddr = peer.parse().unwrap();
+        resolve_from_src(&ctx, src, "example.com", QueryType::AAAA)
+            .await
+            .0
+            .answers
+            .len()
+    }
+
+    #[tokio::test]
+    async fn pipeline_per_client_filter_aaaa_spares_unmatched_peer() {
+        let n = aaaa_answers(false, &["10.210.0.0/16"], Some(true), "192.168.1.5:5000").await;
+        assert_eq!(n, 1, "unmatched peer keeps its AAAA");
+    }
+
+    #[tokio::test]
+    async fn pipeline_per_client_filter_aaaa_exempts_matched_peer_from_global() {
+        // Global filter on, rule carves out a v6-capable subnet (the inverse).
+        let n = aaaa_answers(
+            true,
+            &["2001:db8:cafe::/48"],
+            Some(false),
+            "[2001:db8:cafe::5]:5000",
+        )
+        .await;
+        assert_eq!(n, 1, "exempt peer keeps its AAAA");
     }
 
     #[tokio::test]

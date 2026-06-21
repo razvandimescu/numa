@@ -211,6 +211,10 @@ body {
   grid-template-columns: 1fr 340px;
   gap: 1.2rem;
 }
+.main-grid > .panel {
+  display: flex;
+  flex-direction: column;
+}
 
 /* Panels */
 .panel {
@@ -291,7 +295,13 @@ body {
 
 /* Query log table */
 .query-log {
-  max-height: 600px;
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+.query-log-scroll {
+  position: absolute;
+  inset: 0;
   overflow-y: auto;
   scrollbar-width: thin;
   scrollbar-color: var(--bg-elevated) transparent;
@@ -733,6 +743,7 @@ body {
             <option value="OVERRIDE">override</option>
             <option value="LOCAL">local</option>
             <option value="SERVFAIL">error</option>
+            <option value="STRIPPED">stripped</option>
           </select>
           <select id="logFilterTransport" onchange="applyLogFilter()"
             style="font-family:var(--font-mono);font-size:0.7rem;padding:0.25rem 0.4rem;border:1px solid var(--border);border-radius:4px;background:var(--bg-surface);color:var(--text-secondary);outline:none;">
@@ -746,21 +757,23 @@ body {
         </div>
       </div>
       <div class="query-log" id="queryLog">
-        <table>
-          <thead>
-            <tr>
-              <th>Time</th>
-              <th>Type</th>
-              <th>Domain</th>
-              <th>Path</th>
-              <th>Transport</th>
-              <th>Result</th>
-              <th>Latency</th>
-            </tr>
-          </thead>
-          <tbody id="queryLogBody">
-          </tbody>
-        </table>
+        <div class="query-log-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Type</th>
+                <th>Domain</th>
+                <th>Path</th>
+                <th>Transport</th>
+                <th>Result</th>
+                <th>Latency</th>
+              </tr>
+            </thead>
+            <tbody id="queryLogBody">
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
 
@@ -867,6 +880,7 @@ const API = '';
 const h = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 let prevTotal = null;
 let lastLogEntries = [];
+const rebindAllowed = new Set(); // domains allowlisted this session, so old log rows show "allowed" instead of the button
 let prevTime = null;
 
 async function fetchJSON(path) {
@@ -1115,7 +1129,9 @@ function applyLogFilter() {
   if (domainFilter) {
     filtered = filtered.filter(e => e.domain.toLowerCase().includes(domainFilter));
   }
-  if (pathFilter) {
+  if (pathFilter === 'STRIPPED') {
+    filtered = filtered.filter(e => e.rebind_stripped);
+  } else if (pathFilter) {
     filtered = filtered.filter(e => e.path === pathFilter);
   }
   if (transportFilter) {
@@ -1130,14 +1146,23 @@ function applyLogFilter() {
 
   tbody.innerHTML = filtered.map(e => {
     const allowBtn = e.path === 'BLOCKED'
-      ? ` <button class="btn-delete" onclick="allowDomain('${e.domain}')" title="Allow this domain" style="color:var(--emerald);font-size:0.65rem;">allow</button>`
+      ? ` <button class="btn-delete" data-domain="${h(e.domain)}" onclick="unblockDomain(this.dataset.domain)" title="Allow this domain" style="color:var(--emerald);font-size:0.65rem;">allow</button>`
+      : e.rebind_stripped && rebindAllowed.has(e.domain)
+      ? ` <span style="color:var(--emerald);font-size:0.65rem;" title="Allowlisted — new queries keep their private IPs">✓ allowed</span>`
+      : e.rebind_stripped
+      ? ` <button class="btn-delete" data-domain="${h(e.domain)}" onclick="postDomain('/rebind/allowlist', this.dataset.domain, this)" title="Stop stripping private IPs for this domain" style="color:var(--emerald);font-size:0.65rem;">allow</button>`
+      : e.path !== 'LOCAL'
+      ? ` <button class="btn-delete" data-domain="${h(e.domain)}" onclick="postDomain('/blocking/blocklist', this.dataset.domain, this)" title="Blocks this domain and its subdomains" style="font-size:0.65rem;">block</button>`
+      : '';
+    const rebindTag = e.rebind_stripped
+      ? ` <span class="path-tag" style="background:rgba(192,98,58,0.12);color:var(--amber-dim);" title="Private IPs stripped by rebind protection">stripped</span>`
       : '';
     return `
     <tr title="Source: ${e.src || 'unknown'}">
       <td>${formatTime(e.timestamp_epoch)}<br><span class="src-tag">${shortSrc(e.src)}</span></td>
       <td>${e.query_type}</td>
-      <td class="domain-cell" title="${e.domain}">${e.domain}${allowBtn}</td>
-      <td><span class="path-tag ${e.path}">${e.path}</span></td>
+      <td class="domain-cell" title="${h(e.domain)}">${h(e.domain)}${allowBtn}</td>
+      <td><span class="path-tag ${e.path}">${e.path}</span>${rebindTag}</td>
       <td><span class="path-tag ${e.transport}">${e.transport}</span></td>
       <td style="white-space:nowrap;"><span style="display:inline-block;width:15px;text-align:center;">${e.dnssec === 'secure' ? '<svg title="DNSSEC verified" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--emerald)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>' : ''}</span>${e.rescode}</td>
       <td>${e.latency_ms.toFixed(1)}ms</td>
@@ -1219,7 +1244,7 @@ function renderCache(entries) {
   const sorted = entries.sort((a, b) => b.ttl_remaining - a.ttl_remaining).slice(0, 50);
   el.innerHTML = sorted.map(e => `
     <div class="cache-item">
-      <span class="cache-domain" title="${e.domain}">${e.domain}</span>
+      <span class="cache-domain" title="${h(e.domain)}">${h(e.domain)}</span>
       <span class="cache-ttl">${e.query_type} ${e.ttl_remaining}s</span>
     </div>
   `).join('');
@@ -1227,7 +1252,7 @@ function renderCache(entries) {
 
 async function refresh() {
   try {
-    const [stats, logs, overrides, cache, services, blockingInfo, allowlist] = await Promise.all([
+    const [stats, logs, overrides, cache, services, blockingInfo, allowlist, manualBlocks] = await Promise.all([
       fetchJSON('/stats'),
       fetchJSON('/query-log?limit=200'),
       fetchJSON('/overrides'),
@@ -1235,6 +1260,7 @@ async function refresh() {
       fetchJSON('/services'),
       fetchJSON('/blocking/stats'),
       fetchJSON('/blocking/allowlist'),
+      fetchJSON('/blocking/blocklist'),
     ]);
 
     // Connection status
@@ -1256,6 +1282,15 @@ async function refresh() {
     document.getElementById('footerDnssec').style.color = stats.dnssec ? 'var(--emerald)' : 'var(--text-dim)';
     document.getElementById('footerSrtt').textContent = stats.srtt ? 'on' : 'off';
     document.getElementById('footerSrtt').style.color = stats.srtt ? 'var(--emerald)' : 'var(--text-dim)';
+    const strippedCount = q.rebind_stripped || 0;
+    const footerRebind = document.getElementById('footerRebind');
+    footerRebind.textContent = !stats.rebind ? 'off'
+      : strippedCount > 0 ? `on · ${formatNumber(strippedCount)} stripped` : 'on';
+    footerRebind.style.color = !stats.rebind ? 'var(--text-dim)'
+      : strippedCount > 0 ? 'var(--amber-dim)' : 'var(--emerald)';
+    footerRebind.title = strippedCount > 0
+      ? 'Rebind protection removed private IPs from answers — filter the query log by "stripped" to see which domains'
+      : 'DNS rebinding protection';
     if (!document.getElementById('footerLogs').textContent) {
       const isWin = stats.data_dir && stats.data_dir.includes(':\\');
       const isMac = stats.data_dir && stats.data_dir.includes('/usr/local/');
@@ -1347,7 +1382,7 @@ async function refresh() {
     renderCache(cache);
     renderServices(services);
     renderBlockingInfo(blockingInfo);
-    renderAllowlist(allowlist);
+    renderAllowlist(allowlist, manualBlocks);
     renderMemory(stats.memory, stats);
 
   } catch (err) {
@@ -1388,15 +1423,25 @@ async function unpauseBlocking() {
   } catch (err) {}
 }
 
-async function allowDomain(domain) {
+async function postDomain(path, domain, btn) {
   try {
-    await fetch(API + '/blocking/allowlist', {
+    const res = await fetch(API + path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ domain: domain }),
+      body: JSON.stringify({ domain }),
     });
+    if (!res.ok) throw new Error(await res.text());
+    if (path === '/rebind/allowlist') rebindAllowed.add(domain);
     refresh();
-  } catch (err) {}
+    return true;
+  } catch (err) {
+    if (btn) {
+      btn.textContent = 'failed';
+      btn.style.color = 'var(--rose)';
+      btn.title = err.message;
+    }
+    return false;
+  }
 }
 
 async function checkDomain(event) {
@@ -1411,7 +1456,7 @@ async function checkDomain(event) {
       el.className = 'check-result-blocked';
       el.innerHTML = `<strong>Blocked</strong> — ${h(result.reason)}` +
         (result.matched_rule ? `<br>Rule: <code>${h(result.matched_rule)}</code>` : '') +
-        ` <button class="btn-delete" onclick="allowDomain('${h(domain)}')" style="color:var(--emerald);font-size:0.7rem;margin-left:0.4rem;">allow</button>`;
+        ` <button class="btn-delete" data-domain="${h(domain)}" onclick="unblockDomain(this.dataset.domain)" style="color:var(--emerald);font-size:0.7rem;margin-left:0.4rem;">allow</button>`;
     } else {
       el.className = 'check-result-allowed';
       el.innerHTML = `<strong>Allowed</strong> — ${h(result.reason)}` +
@@ -1462,45 +1507,59 @@ function renderBlockingInfo(info) {
   `;
 }
 
-function renderAllowlist(entries) {
-  if (document.activeElement && document.activeElement.id === 'allowDomainInput') return;
+function renderAllowlist(entries, manualBlocks) {
+  const focused = document.activeElement && document.activeElement.id;
+  if (focused === 'allowDomainInput' || focused === 'blockDomainInput') return;
   const el = document.getElementById('blockingAllowlist');
   const count = entries.length;
+  const blocked = manualBlocks || [];
   el.innerHTML = `
     <div style="font-size:0.65rem;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-dim);margin-bottom:0.4rem;">Allowlist${count ? ` (${count})` : ''}</div>
     ${count ? entries.map(d => `
       <div style="display:flex;justify-content:space-between;align-items:center;padding:0.25rem 0;border-bottom:1px solid var(--border);">
-        <span style="font-family:var(--font-mono);font-size:0.75rem;color:var(--emerald);">${d}</span>
-        <button class="btn-delete" onclick="removeAllowlistDomain('${d}')">&times;</button>
+        <span style="font-family:var(--font-mono);font-size:0.75rem;color:var(--emerald);">${h(d)}</span>
+        <button class="btn-delete" data-domain="${h(d)}" onclick="deleteDomain('/blocking/allowlist', this.dataset.domain)">&times;</button>
       </div>
     `).join('') : '<div class="empty-state">No exceptions</div>'}
-    <form onsubmit="return addAllowlistDomain(event)" style="display:flex;gap:0.4rem;margin-top:0.4rem;">
+    <form onsubmit="return addDomain(event, '/blocking/allowlist')" style="display:flex;gap:0.4rem;margin-top:0.4rem;">
       <input type="text" id="allowDomainInput" placeholder="domain to allow" required style="flex:1;font-family:var(--font-mono);font-size:0.75rem;padding:0.35rem 0.5rem;border:1px solid var(--border);border-radius:4px;background:var(--bg-surface);color:var(--text-primary);outline:none;">
       <button type="submit" class="btn" style="background:var(--emerald);color:var(--text-on-btn);flex-shrink:0;">Allow</button>
+    </form>
+    <div style="font-size:0.65rem;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-dim);margin:0.8rem 0 0.4rem;">Manually blocked${blocked.length ? ` (${blocked.length})` : ''}</div>
+    ${blocked.map(d => `
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:0.25rem 0;border-bottom:1px solid var(--border);">
+        <span style="font-family:var(--font-mono);font-size:0.75rem;color:var(--rose);">${h(d)}</span>
+        <button class="btn-delete" data-domain="${h(d)}" onclick="deleteDomain('/blocking/blocklist', this.dataset.domain)">&times;</button>
+      </div>
+    `).join('')}
+    <form onsubmit="return addDomain(event, '/blocking/blocklist')" style="display:flex;gap:0.4rem;margin-top:0.4rem;">
+      <input type="text" id="blockDomainInput" placeholder="domain to block" required style="flex:1;font-family:var(--font-mono);font-size:0.75rem;padding:0.35rem 0.5rem;border:1px solid var(--border);border-radius:4px;background:var(--bg-surface);color:var(--text-primary);outline:none;">
+      <button type="submit" class="btn" style="background:var(--rose);color:var(--text-on-btn);flex-shrink:0;">Block</button>
     </form>
   `;
 }
 
-async function addAllowlistDomain(event) {
+async function addDomain(event, path) {
   event.preventDefault();
-  const input = document.getElementById('allowDomainInput');
+  const input = event.target.querySelector('input');
   const domain = input.value.trim();
-  if (!domain) return false;
-  try {
-    await fetch(API + '/blocking/allowlist', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ domain }),
-    });
-    input.value = '';
-    refresh();
-  } catch (err) {}
+  if (domain && (await postDomain(path, domain))) input.value = '';
   return false;
 }
 
-async function removeAllowlistDomain(domain) {
+// Undo a manual block if one exists; otherwise add an allowlist exception
+// (for domains blocked by a list, which the user can't edit).
+async function unblockDomain(domain) {
   try {
-    await fetch(API + '/blocking/allowlist/' + encodeURIComponent(domain), { method: 'DELETE' });
+    const res = await fetch(API + '/blocking/blocklist/' + encodeURIComponent(domain), { method: 'DELETE' });
+    if (res.ok) refresh();
+    else postDomain('/blocking/allowlist', domain);
+  } catch (err) {}
+}
+
+async function deleteDomain(path, domain) {
+  try {
+    await fetch(API + path + '/' + encodeURIComponent(domain), { method: 'DELETE' });
     refresh();
   } catch (err) {}
 }
@@ -1634,6 +1693,7 @@ setInterval(refresh, 2000);
   Upstream: <span id="footerUpstream" style="user-select:all;color:var(--emerald);"></span>
   · DNSSEC: <span id="footerDnssec" style="color:var(--text-dim);">—</span>
   · SRTT: <span id="footerSrtt" style="color:var(--text-dim);">—</span>
+  · Rebind: <span id="footerRebind" style="color:var(--text-dim);">—</span>
   · <a href="https://github.com/razvandimescu/numa" target="_blank" rel="noopener" style="color:var(--amber);text-decoration:none;">GitHub</a>
 </div>
 

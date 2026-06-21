@@ -31,7 +31,10 @@ pub async fn test_ctx() -> ServerCtx {
         refreshing: Mutex::new(HashSet::new()),
         stats: Mutex::new(ServerStats::new()),
         overrides: RwLock::new(OverrideStore::new()),
-        blocklist: RwLock::new(BlocklistStore::new()),
+        blocklist: RwLock::new(BlocklistStore::new(
+            crate::domain_list::PersistedDomainList::unpersisted(),
+            crate::domain_list::PersistedDomainList::unpersisted(),
+        )),
         query_log: Mutex::new(QueryLog::new(100)),
         services: Mutex::new(ServiceStore::new()),
         lan_peers: Mutex::new(PeerStore::new(90)),
@@ -68,6 +71,14 @@ pub async fn test_ctx() -> ServerCtx {
         allow_from: crate::acl::AllowFromAcl::default(),
         client_policy: crate::client_policy::ClientPolicySet::default(),
         pkarr: None,
+        rebind: std::sync::RwLock::new(
+            crate::rebind::RebindFilter::new(
+                false,
+                crate::domain_list::PersistedDomainList::unpersisted(),
+                &[],
+            )
+            .unwrap(),
+        ),
     }
 }
 
@@ -96,6 +107,19 @@ pub fn a_record_response(domain: &str, addr: Ipv4Addr, ttl: u32) -> DnsPacket {
     pkt.header.response = true;
     pkt.header.rescode = ResultCode::NOERROR;
     pkt.answers.push(DnsRecord::A {
+        domain: domain.to_string(),
+        addr,
+        ttl,
+    });
+    pkt
+}
+
+/// AAAA counterpart of `a_record_response`, for filter_aaaa pipeline tests.
+pub fn aaaa_record_response(domain: &str, addr: std::net::Ipv6Addr, ttl: u32) -> DnsPacket {
+    let mut pkt = DnsPacket::new();
+    pkt.header.response = true;
+    pkt.header.rescode = ResultCode::NOERROR;
+    pkt.answers.push(DnsRecord::AAAA {
         domain: domain.to_string(),
         addr,
         ttl,

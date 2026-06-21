@@ -23,12 +23,15 @@ pub struct ClientPolicyConfig {
     pub block: Vec<String>,
     #[serde(default)]
     pub allow: Vec<String>,
+    #[serde(default)]
+    pub filter_aaaa: Option<bool>,
 }
 
 #[derive(Debug)]
 struct ClientPolicy {
     nets: CidrMatcher,
     store: BlocklistStore,
+    filter_aaaa: Option<bool>,
 }
 
 #[derive(Debug, Default)]
@@ -54,19 +57,24 @@ impl ClientPolicySet {
             // Reuse the global blocklist parser so per-client and global lists can't drift.
             let blocks = parse_blocklist(&cfg.block.join("\n"));
             let allows = parse_blocklist(&cfg.allow.join("\n"));
-            if blocks.is_empty() && allows.is_empty() {
+            if blocks.is_empty() && allows.is_empty() && cfg.filter_aaaa.is_none() {
                 return Err(format!(
-                    "{ctx}: must specify at least one valid domain in `block` or `allow`"
+                    "{ctx}: must specify at least one valid domain in `block`/`allow`, or set `filter_aaaa`"
                 ));
             }
-            let mut store = BlocklistStore::new();
-            store.swap_domains(blocks, vec![]);
+            let mut allow = crate::domain_list::PersistedDomainList::unpersisted();
             for a in &allows {
-                store.add_to_allowlist(a);
+                allow.insert_from_config(a);
             }
+            let mut store = BlocklistStore::new(
+                allow,
+                crate::domain_list::PersistedDomainList::unpersisted(),
+            );
+            store.swap_domains(blocks, vec![]);
             rules.push(ClientPolicy {
                 nets: CidrMatcher::from_entries(&cfg.from, &cfg.exclude, &format!("{ctx}.from"))?,
                 store,
+                filter_aaaa: cfg.filter_aaaa,
             });
         }
         Ok(ClientPolicySet { rules })
@@ -80,21 +88,24 @@ impl ClientPolicySet {
         self.rules.len()
     }
 
+    /// Rules matching `peer`, in declaration order. Canonicalizes so the
+    /// loopback bypass also covers `::ffff:127.0.0.1` from a dual-stack bind;
+    /// loopback yields nothing, so a stub resolver on the same host never
+    /// reaches the matcher and cannot be filtered. An empty rule set yields
+    /// nothing on its own.
+    fn matching_rules(&self, peer: IpAddr) -> impl Iterator<Item = &ClientPolicy> {
+        let peer = peer.to_canonical();
+        let bypass = peer.is_loopback();
+        self.rules
+            .iter()
+            .filter(move |rule| !bypass && rule.nets.matches(peer))
+    }
+
     /// Rules layer in declaration order: the first rule with an explicit
     /// Block/Allow for `qname` wins; a client-matching rule silent on `qname`
     /// falls through to the next. Within a rule, allow beats block.
     pub fn evaluate(&self, peer: IpAddr, qname: &str) -> Decision {
-        // Canonicalize so the loopback bypass also covers `::ffff:127.0.0.1`
-        // from a dual-stack bind. Loopback wins over any `exclude` — a loopback
-        // peer never reaches the matcher, so it cannot be filtered.
-        let peer = peer.to_canonical();
-        if self.rules.is_empty() || peer.is_loopback() {
-            return Decision::Passthrough;
-        }
-        for rule in &self.rules {
-            if !rule.nets.matches(peer) {
-                continue;
-            }
+        for rule in self.matching_rules(peer) {
             let r = rule.store.check(qname);
             if r.blocked {
                 return Decision::Block;
@@ -104,6 +115,13 @@ impl ClientPolicySet {
             }
         }
         Decision::Passthrough
+    }
+
+    /// First matching rule with an explicit override wins; else `global`.
+    pub fn effective_filter_aaaa(&self, peer: IpAddr, global: bool) -> bool {
+        self.matching_rules(peer)
+            .find_map(|rule| rule.filter_aaaa)
+            .unwrap_or(global)
     }
 }
 
@@ -127,6 +145,15 @@ mod tests {
             exclude: exclude.iter().map(|s| s.to_string()).collect(),
             block: block.iter().map(|s| s.to_string()).collect(),
             allow: allow.iter().map(|s| s.to_string()).collect(),
+            filter_aaaa: None,
+        }
+    }
+
+    fn cfg_aaaa(from: &[&str], filter_aaaa: Option<bool>) -> ClientPolicyConfig {
+        ClientPolicyConfig {
+            from: from.iter().map(|s| s.to_string()).collect(),
+            filter_aaaa,
+            ..Default::default()
         }
     }
 
@@ -306,7 +333,7 @@ mod tests {
     #[test]
     fn rejects_empty_block_and_allow() {
         let err = ClientPolicySet::from_configs(&[cfg(&["192.168.1.0/24"], &[], &[])]).unwrap_err();
-        assert!(err.contains("`block` or `allow`"));
+        assert!(err.contains("`block`/`allow`"));
     }
 
     #[test]
@@ -333,5 +360,74 @@ mod tests {
                 ("192.168.1.254", "youtube.com", Passthrough),
             ],
         );
+    }
+
+    // ── per-client filter_aaaa override (issue #286) ────────────────────────
+
+    fn eff(set: &ClientPolicySet, peer: &str, global: bool) -> bool {
+        set.effective_filter_aaaa(peer.parse().unwrap(), global)
+    }
+
+    #[test]
+    fn effective_filter_aaaa_matrix() {
+        // (rule cidr, override, peer, global) -> expected effective filter.
+        let cases: &[(&str, Option<bool>, &str, bool, bool)] = &[
+            ("10.210.0.0/16", Some(true), "192.168.1.5", false, false), // unmatched inherits global
+            ("10.210.0.0/16", Some(true), "192.168.1.5", true, true),   // unmatched inherits global
+            ("10.210.0.0/16", Some(true), "10.210.0.5", false, true), // match forces on over global off
+            ("2001:db8::/32", Some(false), "2001:db8::abcd", true, false), // match forces off over global on
+            (
+                "10.210.0.0/16",
+                Some(true),
+                "::ffff:10.210.0.5",
+                false,
+                true,
+            ), // v4-mapped matches v4 rule
+            ("127.0.0.0/8", Some(true), "127.0.0.1", false, false), // loopback bypasses to global
+            ("127.0.0.0/8", Some(true), "::1", false, false),       // loopback bypasses to global
+            ("127.0.0.0/8", Some(true), "::ffff:127.0.0.1", false, false), // loopback bypasses to global
+        ];
+        for (cidr, ovr, peer, global, want) in cases {
+            let set = policy(&[cfg_aaaa(&[cidr], *ovr)]);
+            assert_eq!(eff(&set, peer, *global), *want, "{peer} global={global}");
+        }
+    }
+
+    #[test]
+    fn filter_aaaa_unset_rule_inherits_global() {
+        // A block/allow rule with no filter_aaaa key must not force-disable.
+        let set = policy(&[cfg(&["10.0.0.0/8"], &["ads.example"], &[])]);
+        assert!(eff(&set, "10.0.0.5", true), "unset inherits global true");
+        assert!(!eff(&set, "10.0.0.5", false), "unset inherits global false");
+    }
+
+    #[test]
+    fn filter_aaaa_first_explicit_override_wins() {
+        let set = policy(&[
+            cfg(&["10.0.0.0/8"], &["ads.example"], &[]), // matches, silent on aaaa
+            cfg_aaaa(&["10.0.0.0/8"], Some(true)),       // first explicit override
+        ]);
+        assert!(eff(&set, "10.0.0.5", false), "first explicit override wins");
+    }
+
+    #[test]
+    fn filter_aaaa_only_rule_is_accepted() {
+        // No block/allow domains, just a filter_aaaa override → valid.
+        assert!(ClientPolicySet::from_configs(&[cfg_aaaa(&["10.0.0.0/8"], Some(true))]).is_ok());
+    }
+
+    #[test]
+    fn rule_with_nothing_is_rejected() {
+        // No block, no allow, no filter_aaaa → still an error.
+        let err = ClientPolicySet::from_configs(&[cfg_aaaa(&["10.0.0.0/8"], None)]).unwrap_err();
+        assert!(err.contains("filter_aaaa"), "got: {err}");
+    }
+
+    #[test]
+    fn filter_aaaa_only_rule_still_requires_from() {
+        let mut c = cfg_aaaa(&[], Some(true));
+        c.from.clear();
+        let err = ClientPolicySet::from_configs(&[c]).unwrap_err();
+        assert!(err.contains("at least one CIDR"), "got: {err}");
     }
 }

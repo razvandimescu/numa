@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::SystemTime;
 
 /// Returns the process memory footprint in bytes, or 0 if unavailable.
 /// macOS: phys_footprint (matches Activity Monitor). Linux: RSS from /proc/self/statm.
@@ -135,7 +135,8 @@ pub struct ServerStats {
     pub(crate) proxy_v2_rejected_signature: u64,
     pub(crate) proxy_v2_local_command: u64,
     pub(crate) proxy_v2_timeout: u64,
-    started_at: Instant,
+    rebind_stripped: u64,
+    started_at: SystemTime,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -217,6 +218,22 @@ impl QueryPath {
         }
     }
 
+    /// Paths returning trusted local data (zones, overrides, sinkhole) — exempt
+    /// from rebind protection. Exhaustive on purpose: a new `QueryPath` variant
+    /// must choose a side here, so an untrusted source fails closed.
+    pub fn returns_trusted_local_data(&self) -> bool {
+        match self {
+            QueryPath::Local | QueryPath::Overridden | QueryPath::Blocked => true,
+            QueryPath::Cached
+            | QueryPath::Forwarded
+            | QueryPath::Upstream
+            | QueryPath::Recursive
+            | QueryPath::Coalesced
+            | QueryPath::Pkarr
+            | QueryPath::UpstreamError => false,
+        }
+    }
+
     pub fn parse_str(s: &str) -> Option<QueryPath> {
         if s.eq_ignore_ascii_case("LOCAL") {
             Some(QueryPath::Local)
@@ -278,8 +295,15 @@ impl ServerStats {
             proxy_v2_rejected_signature: 0,
             proxy_v2_local_command: 0,
             proxy_v2_timeout: 0,
-            started_at: Instant::now(),
+            rebind_stripped: 0,
+            started_at: SystemTime::now(),
         }
+    }
+
+    /// One per affected query (not per stripped RR), matching the other
+    /// per-query counters in `queries.*`.
+    pub fn record_rebind_stripped(&mut self) {
+        self.rebind_stripped += 1;
     }
 
     pub fn record(
@@ -324,7 +348,7 @@ impl ServerStats {
     }
 
     pub fn uptime_secs(&self) -> u64 {
-        self.started_at.elapsed().as_secs()
+        self.started_at.elapsed().unwrap_or_default().as_secs()
     }
 
     pub fn snapshot(&self) -> StatsSnapshot {
@@ -355,17 +379,18 @@ impl ServerStats {
             proxy_v2_rejected_signature: self.proxy_v2_rejected_signature,
             proxy_v2_local_command: self.proxy_v2_local_command,
             proxy_v2_timeout: self.proxy_v2_timeout,
+            rebind_stripped: self.rebind_stripped,
         }
     }
 
     pub fn log_summary(&self) {
-        let uptime = self.started_at.elapsed();
+        let uptime = self.started_at.elapsed().unwrap_or_default();
         let hours = uptime.as_secs() / 3600;
         let mins = (uptime.as_secs() % 3600) / 60;
         let secs = uptime.as_secs() % 60;
 
         log::info!(
-            "STATS | uptime {}h{}m{}s | total {} | fwd {} | upstream {} | recursive {} | coalesced {} | cached {} | local {} | override {} | pkarr {} | blocked {} | errors {} | up-udp {} | up-tcp {} | up-doh {} | up-dot {} | up-odoh {}",
+            "STATS | uptime {}h{}m{}s | total {} | fwd {} | upstream {} | recursive {} | coalesced {} | cached {} | local {} | override {} | pkarr {} | blocked {} | errors {} | up-udp {} | up-tcp {} | up-doh {} | up-dot {} | up-odoh {} | rebind {}",
             hours, mins, secs,
             self.queries_total,
             self.queries_forwarded,
@@ -383,6 +408,7 @@ impl ServerStats {
             self.upstream_transport_doh,
             self.upstream_transport_dot,
             self.upstream_transport_odoh,
+            self.rebind_stripped,
         );
     }
 }
@@ -414,4 +440,5 @@ pub struct StatsSnapshot {
     pub proxy_v2_rejected_signature: u64,
     pub proxy_v2_local_command: u64,
     pub proxy_v2_timeout: u64,
+    pub rebind_stripped: u64,
 }

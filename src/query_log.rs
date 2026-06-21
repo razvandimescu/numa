@@ -17,6 +17,7 @@ pub struct QueryLogEntry {
     pub rescode: ResultCode,
     pub latency_us: u64,
     pub dnssec: DnssecStatus,
+    pub rebind_stripped: bool,
 }
 
 pub struct QueryLog {
@@ -112,6 +113,7 @@ mod tests {
             rescode: ResultCode::NOERROR,
             latency_us: 500,
             dnssec: DnssecStatus::Indeterminate,
+            rebind_stripped: false,
         });
         assert!(log.heap_bytes() > empty);
     }

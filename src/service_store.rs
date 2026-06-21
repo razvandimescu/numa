@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use log::{info, warn};
+use log::info;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -175,30 +175,20 @@ impl ServiceStore {
 
     /// Load user-defined services from ~/.config/numa/services.json
     pub fn load_persisted(&mut self) {
-        if !self.persist_path.exists() {
-            return;
+        let entries = crate::persist::load_json_vec::<ServiceEntry>(&self.persist_path);
+        let count = entries.len();
+        for entry in entries {
+            let key = entry.name.to_lowercase();
+            // Don't overwrite config-defined services
+            if !self.config_services.contains(&key) {
+                self.entries.insert(key, entry);
+            }
         }
-        match std::fs::read_to_string(&self.persist_path) {
-            Ok(contents) => match serde_json::from_str::<Vec<ServiceEntry>>(&contents) {
-                Ok(entries) => {
-                    let count = entries.len();
-                    for entry in entries {
-                        let key = entry.name.to_lowercase();
-                        // Don't overwrite config-defined services
-                        if !self.config_services.contains(&key) {
-                            self.entries.insert(key, entry);
-                        }
-                    }
-                    if count > 0 {
-                        info!(
-                            "loaded {} persisted services from {:?}",
-                            count, self.persist_path
-                        );
-                    }
-                }
-                Err(e) => warn!("failed to parse {:?}: {}", self.persist_path, e),
-            },
-            Err(e) => warn!("failed to read {:?}: {}", self.persist_path, e),
+        if count > 0 {
+            info!(
+                "loaded {} persisted services from {:?}",
+                count, self.persist_path
+            );
         }
     }
 
@@ -209,19 +199,7 @@ impl ServiceStore {
             .values()
             .filter(|e| !self.config_services.contains(&e.name))
             .collect();
-
-        if let Some(parent) = self.persist_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-
-        match serde_json::to_string_pretty(&user_services) {
-            Ok(json) => {
-                if let Err(e) = std::fs::write(&self.persist_path, json) {
-                    warn!("failed to save services to {:?}: {}", self.persist_path, e);
-                }
-            }
-            Err(e) => warn!("failed to serialize services: {}", e),
-        }
+        crate::persist::save_json(&self.persist_path, &user_services);
     }
 }
 
