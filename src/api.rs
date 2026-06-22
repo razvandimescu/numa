@@ -69,7 +69,6 @@ pub fn router(ctx: Arc<ServerCtx>) -> Router {
         .route("/services/{name}/routes", get(list_routes))
         .route("/services/{name}/routes", post(add_route))
         .route("/services/{name}/routes", delete(remove_route))
-        .route("/petnames", get(list_petnames))
         .route("/ca.pem", get(serve_ca))
         .route("/qr", get(serve_qr))
         .route("/fonts/fonts.css", get(serve_fonts_css))
@@ -1116,42 +1115,6 @@ async fn remove_route(
     } else {
         StatusCode::NOT_FOUND
     }
-}
-
-// ─── Pkarr petnames ─────────────────────────────────────────────────────────
-//
-// Read-only in phase 1: petnames are declarative config (`[pkarr.petnames]` in
-// numa.toml). Runtime add/remove + persistence land in phase 2 alongside the
-// dashboard management UX.
-
-#[derive(Serialize)]
-struct PetnameEntry {
-    name: String,
-    key: String,
-}
-
-#[derive(Serialize)]
-struct PetnameError {
-    error: &'static str,
-}
-
-async fn list_petnames(
-    State(ctx): State<Arc<ServerCtx>>,
-) -> Result<Json<Vec<PetnameEntry>>, (StatusCode, Json<PetnameError>)> {
-    let store = ctx.pkarr.as_ref().ok_or((
-        StatusCode::NOT_FOUND,
-        Json(PetnameError {
-            error: "pkarr not enabled",
-        }),
-    ))?;
-    let entries = store
-        .read()
-        .unwrap()
-        .list_petnames()
-        .into_iter()
-        .map(|(name, key)| PetnameEntry { name, key })
-        .collect();
-    Ok(Json(entries))
 }
 
 pub async fn serve_ca(State(ctx): State<Arc<ServerCtx>>) -> Result<impl IntoResponse, StatusCode> {

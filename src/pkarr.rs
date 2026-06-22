@@ -67,16 +67,6 @@ impl PkarrStore {
     pub fn resolve_petname(&self, name: &str) -> Option<[u8; 32]> {
         self.petnames.get(name).copied()
     }
-
-    pub fn list_petnames(&self) -> Vec<(String, String)> {
-        let mut entries: Vec<_> = self
-            .petnames
-            .iter()
-            .map(|(n, k)| (n.clone(), z32_encode(k)))
-            .collect();
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
-        entries
-    }
 }
 
 fn z32_encode(bytes: &[u8]) -> String {
