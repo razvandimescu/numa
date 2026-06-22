@@ -436,9 +436,17 @@ async fn resolve_pkarr(
         }
     };
 
-    let resp = crate::pkarr::resolve(query, qname, qtype, &pubkey, subdomain.as_deref(), store)
+    let mut resp = crate::pkarr::resolve(query, qname, qtype, &pubkey, subdomain.as_deref(), store)
         .await
         .unwrap_or_else(|| DnsPacket::response_from(query, ResultCode::SERVFAIL));
+
+    // Fail closed: a signed pkarr record proves authenticity, not benevolence —
+    // a publisher can point their own key at 169.254.169.254 / 127.0.0.1 / RFC1918.
+    // Strip private answers unconditionally, independent of `rebind_protect`.
+    let stripped = ctx.rebind.read().unwrap().strip_private(qname, &mut resp);
+    if stripped > 0 {
+        log::info!("REBIND | {qname} | stripped {stripped} private RR(s) from pkarr answer");
+    }
     pkarr(resp)
 }
 

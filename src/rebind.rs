@@ -92,7 +92,18 @@ impl RebindFilter {
     /// disabled, allowlisted, or nothing private. The caller logs and clears
     /// `authed_data` when the count is > 0.
     pub fn apply(&self, qname: &str, response: &mut DnsPacket) -> usize {
-        if !self.enabled || self.is_allowed(qname) {
+        if !self.enabled {
+            return 0;
+        }
+        self.strip_private(qname, response)
+    }
+
+    /// Strip private answers regardless of the `enabled` toggle — for
+    /// intrinsically untrusted sources (e.g. pkarr, where anyone can publish a
+    /// signed record for their own key) that must fail closed even when global
+    /// rebind protection is off. Still honors the allowlist.
+    pub fn strip_private(&self, qname: &str, response: &mut DnsPacket) -> usize {
+        if self.is_allowed(qname) {
             return 0;
         }
         let is_private = |ip: IpAddr| self.ranges.matches(ip);
@@ -171,6 +182,28 @@ mod tests {
     /// The common case: default ranges, no allowlist, throwaway public qname.
     fn strip(answers: Vec<DnsRecord>) -> (usize, Vec<DnsRecord>) {
         run(&filter(&[]), "evil.com", answers)
+    }
+
+    #[test]
+    fn strip_private_ignores_disabled_toggle() {
+        // pkarr fails closed: strip_private must scrub even when the global
+        // rebind toggle is off, while apply() respects it.
+        let mut f = filter(&[]);
+        f.set_enabled(false);
+        let mut p = DnsPacket::new();
+        p.answers = vec![a("192.168.1.1"), a("8.8.8.8")];
+        assert_eq!(f.apply("evil.key", &mut p.clone()), 0);
+        assert_eq!(f.strip_private("evil.key", &mut p), 1);
+        assert_eq!(p.answers, vec![a("8.8.8.8")]);
+    }
+
+    #[test]
+    fn strip_private_honors_allowlist() {
+        let f = filter(&["home.key"]);
+        let mut p = DnsPacket::new();
+        p.answers = vec![a("192.168.1.1")];
+        assert_eq!(f.strip_private("home.key", &mut p), 0);
+        assert_eq!(p.answers, vec![a("192.168.1.1")]);
     }
 
     #[test]

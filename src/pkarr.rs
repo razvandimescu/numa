@@ -23,7 +23,7 @@ use crate::record::DnsRecord;
 const Z32_ALPHABET: &[u8] = b"ybndrfg8ejkmcpqxot1uwisza345h769";
 const Z32_KEY_LEN: usize = 52;
 const MAX_SIGNED_PACKET_BYTES: usize = 1072;
-const RELAY_TIMEOUT: Duration = Duration::from_secs(10);
+const RELAY_TIMEOUT: Duration = Duration::from_secs(3);
 /// Pkarr signed packets carry no DNS TTL of their own; this is the resolver-side
 /// cache freshness window. 5 min matches typical short-TTL DNS without spamming
 /// the relay.
@@ -77,14 +77,6 @@ impl PkarrStore {
         entries.sort_by(|a, b| a.0.cmp(&b.0));
         entries
     }
-
-    pub fn add_petname(&mut self, name: String, key: [u8; 32]) {
-        self.petnames.insert(name, key);
-    }
-
-    pub fn remove_petname(&mut self, name: &str) -> bool {
-        self.petnames.remove(name).is_some()
-    }
 }
 
 fn z32_encode(bytes: &[u8]) -> String {
@@ -123,13 +115,9 @@ fn z32_decode(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-pub fn is_z32_key_label(label: &str) -> bool {
-    decode_key(label).is_some()
-}
-
 /// Returns the 32-byte key iff `s` is a valid z-base32 string decoding to 32 bytes.
-/// Length-agnostic (handles raw key strings from config); use `is_z32_key_label`
-/// at the boundary where label-length matters.
+/// Length-agnostic (handles raw key strings from config); `classify` adds the
+/// `Z32_KEY_LEN` label-length gate where it matters.
 pub fn decode_key(s: &str) -> Option<[u8; 32]> {
     let bytes = z32_decode(s)?;
     (bytes.len() == 32).then(|| {
@@ -166,39 +154,46 @@ pub enum PkarrTarget {
     },
 }
 
-/// Classify a qname for pkarr routing. Returns:
-///   - `Key` when any label is a 52-char z-base32 pubkey
-///   - `Petname` when qname ends in `.key` and the label before it isn't a z32 key
+/// Classify a qname for pkarr routing. The key is the effective root: it must be
+/// the rightmost label (an optional trailing `.key` aside), so a real domain can
+/// never be shadowed by an embedded key (`<z32>.example.com` → `None`, not Key).
+/// Returns:
+///   - `Key` when the root label is a 52-char z-base32 pubkey
+///   - `Petname` when qname ends in `.key` and the root label isn't a z32 key
 ///   - `None` otherwise (not a pkarr query)
 ///
 /// Examples:
 ///   `<z32>`                  → Key, subdomain None
+///   `git.<z32>`              → Key, subdomain "git"
 ///   `<z32>.key`              → Key, subdomain None
 ///   `git.<z32>.key`          → Key, subdomain "git"
 ///   `alice.key`              → Petname "alice", subdomain None
 ///   `git.alice.key`          → Petname "alice", subdomain "git"
+///   `<z32>.example.com`      → None (key not the root — real DNS wins)
 ///   `example.com`            → None
 pub fn classify(qname: &str) -> Option<PkarrTarget> {
-    let labels: Vec<&str> = qname.split('.').collect();
-    for (i, label) in labels.iter().enumerate().rev() {
-        if label.len() != Z32_KEY_LEN {
-            continue;
-        }
-        if let Some(pubkey) = decode_key(label) {
-            let subdomain = (i > 0).then(|| labels[..i].join("."));
+    let q = qname.strip_suffix('.').unwrap_or(qname);
+    let (core, has_key_tld) = match q.strip_suffix(".key") {
+        Some(rest) => (rest, true),
+        None => (q, false),
+    };
+    if core.is_empty() {
+        return None;
+    }
+    let (subdomain, root) = match core.rsplit_once('.') {
+        Some((sub, root)) => (Some(sub.to_string()), root),
+        None => (None, core),
+    };
+    if root.len() == Z32_KEY_LEN {
+        if let Some(pubkey) = decode_key(root) {
             return Some(PkarrTarget::Key { pubkey, subdomain });
         }
     }
-    // Petname requires the exact `.key` suffix.
-    let stripped = qname.strip_suffix(".key")?;
-    if stripped.is_empty() {
-        return None;
-    }
-    let (name, subdomain) = match stripped.rsplit_once('.') {
-        Some((sub, name)) => (name.to_string(), Some(sub.to_string())),
-        None => (stripped.to_string(), None),
-    };
-    Some(PkarrTarget::Petname { name, subdomain })
+    // A non-key root label is a petname only under the `.key` TLD.
+    has_key_tld.then(|| PkarrTarget::Petname {
+        name: root.to_string(),
+        subdomain,
+    })
 }
 
 /// Resolve a pkarr domain. Returns `Some` on success, `None` on fetch/verify
@@ -463,6 +458,35 @@ mod tests {
     }
 
     #[test]
+    fn classify_key_not_rightmost_does_not_shadow_real_domain() {
+        // The key is the root, not "any label" — a real domain with an embedded
+        // key must fall through to normal DNS, never resolve via pkarr.
+        let key = key_for(0);
+        assert!(classify(&format!("{}.example.com", key)).is_none());
+        assert!(classify(&format!("login.{}.paypal.com", key)).is_none());
+        assert!(classify(&format!("{}.com", key)).is_none());
+    }
+
+    #[test]
+    fn classify_trailing_dot_normalized() {
+        let key = key_for(0);
+        assert_eq!(
+            classify(&format!("{}.", key)).unwrap(),
+            PkarrTarget::Key {
+                pubkey: [0u8; 32],
+                subdomain: None,
+            }
+        );
+        assert_eq!(
+            classify("alice.key.").unwrap(),
+            PkarrTarget::Petname {
+                name: "alice".to_string(),
+                subdomain: None,
+            }
+        );
+    }
+
+    #[test]
     fn classify_non_pkarr_returns_none() {
         assert!(classify("example.com").is_none());
         assert!(classify("").is_none());
@@ -476,13 +500,13 @@ mod tests {
     }
 
     #[test]
-    fn is_z32_key_label_strictness() {
-        assert!(is_z32_key_label(&key_for(0)));
-        assert!(!is_z32_key_label("alice"));
-        assert!(!is_z32_key_label(""));
+    fn decode_key_strictness() {
+        assert!(decode_key(&key_for(0)).is_some());
+        assert!(decode_key("alice").is_none());
+        assert!(decode_key("").is_none());
         // Right length but invalid char:
         let mut bad = key_for(0);
         bad.replace_range(0..1, "A");
-        assert!(!is_z32_key_label(&bad));
+        assert!(decode_key(&bad).is_none());
     }
 }
