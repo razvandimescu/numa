@@ -33,6 +33,8 @@ const CACHE_TTL: Duration = Duration::from_secs(300);
 struct CachedPacket {
     dns_bytes: Vec<u8>,
     fetched_at: Instant,
+    /// Signed BEP44 `seq`; `store_packet` uses it to reject rollback replays.
+    timestamp: u64,
 }
 
 pub struct PkarrStore {
@@ -66,6 +68,18 @@ impl PkarrStore {
 
     pub fn resolve_petname(&self, name: &str) -> Option<[u8; 32]> {
         self.petnames.get(name).copied()
+    }
+
+    /// Reject rollback replays — the relay is untrusted, so a valid signature
+    /// alone can't stop an old packet pinning an abandoned IP. `seq` is monotonic.
+    fn store_packet(&mut self, pubkey: [u8; 32], packet: CachedPacket) {
+        let is_rollback = self
+            .packets
+            .get(&pubkey)
+            .is_some_and(|cached| packet.timestamp <= cached.timestamp);
+        if !is_rollback {
+            self.packets.insert(pubkey, packet);
+        }
     }
 }
 
@@ -213,7 +227,7 @@ pub async fn resolve(
         None => match fetch_from_relay(&client, &relay_url, pubkey).await {
             Ok(fresh) => {
                 if let Ok(mut w) = store.write() {
-                    w.packets.insert(*pubkey, fresh.clone());
+                    w.store_packet(*pubkey, fresh.clone());
                 }
                 fresh
             }
@@ -243,6 +257,17 @@ pub async fn resolve(
     Some(resp)
 }
 
+/// pkarr surfaces only what `strip_private` can vet: address literals and TXT.
+/// Name-target records (CNAME/NS/SRV/MX, SVCB/HTTPS `TargetName`) are dropped —
+/// fail-closed, since the IP-only scrub can't catch a target into private space.
+fn is_vettable(r: &DnsRecord) -> bool {
+    match r {
+        DnsRecord::A { .. } | DnsRecord::AAAA { .. } => true,
+        DnsRecord::UNKNOWN { qtype, .. } => *qtype == QueryType::TXT.to_num(),
+        _ => false,
+    }
+}
+
 /// Filter pkarr records matching the requested subdomain + qtype, rewriting
 /// the domain to `qname` so clients see their own query name.
 ///
@@ -263,6 +288,7 @@ fn filter_matching_records(
     let want_num = qtype.to_num();
     records
         .iter()
+        .filter(|r| is_vettable(r))
         .filter(|r| r.query_type().to_num() == want_num)
         .filter(|r| {
             let dom = r.domain().trim_end_matches('.').to_lowercase();
@@ -313,6 +339,7 @@ async fn fetch_from_relay(
     Ok(CachedPacket {
         dns_bytes,
         fetched_at: Instant::now(),
+        timestamp,
     })
 }
 
@@ -487,6 +514,47 @@ mod tests {
     fn classify_bare_key_tld_is_none() {
         // Just "key" or ".key" on its own isn't a routable petname.
         assert!(classify("key").is_none());
+    }
+
+    #[test]
+    fn filter_drops_name_target_records() {
+        // A surfaced name-target into private space would bypass the IP scrub.
+        let pubkey = [0u8; 32];
+        let z32 = z32_encode(&pubkey);
+        let records = vec![DnsRecord::CNAME {
+            domain: z32,
+            host: "metadata.google.internal.".into(),
+            ttl: 60,
+        }];
+        let out = filter_matching_records(&records, &pubkey, None, QueryType::CNAME, "alice.key");
+        assert!(
+            out.is_empty(),
+            "pkarr must not surface CNAME/name-target records (rebind bypass)"
+        );
+    }
+
+    #[test]
+    fn store_rejects_rollback_to_older_packet() {
+        // An older replayed packet must not roll the cache back (untrusted relay).
+        let mut store = PkarrStore::new(&PkarrConfig::default(), None);
+        let pubkey = [7u8; 32];
+        let newer = CachedPacket {
+            dns_bytes: vec![1],
+            fetched_at: Instant::now(),
+            timestamp: 200,
+        };
+        let older = CachedPacket {
+            dns_bytes: vec![2],
+            fetched_at: Instant::now(),
+            timestamp: 100,
+        };
+        store.store_packet(pubkey, newer);
+        store.store_packet(pubkey, older); // replayed older — must be ignored
+        assert_eq!(
+            store.packets.get(&pubkey).unwrap().timestamp,
+            200,
+            "older replayed packet must not replace newer cached one"
+        );
     }
 
     #[test]
