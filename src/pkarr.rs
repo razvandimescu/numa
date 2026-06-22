@@ -28,6 +28,10 @@ const RELAY_TIMEOUT: Duration = Duration::from_secs(3);
 /// cache freshness window. 5 min matches typical short-TTL DNS without spamming
 /// the relay.
 const CACHE_TTL: Duration = Duration::from_secs(300);
+/// Cap on distinct cached keys. The relay is open, so an attacker can publish
+/// arbitrarily many keys and induce a lookup for each; bound the cache and evict
+/// the oldest-fetched entry past this point.
+const MAX_CACHED_PACKETS: usize = 4096;
 
 #[derive(Clone, Debug)]
 struct CachedPacket {
@@ -87,8 +91,23 @@ impl PkarrStore {
             .packets
             .get(&pubkey)
             .is_some_and(|cached| packet.timestamp <= cached.timestamp);
-        if !is_rollback {
-            self.packets.insert(pubkey, packet);
+        if is_rollback {
+            return;
+        }
+        if !self.packets.contains_key(&pubkey) && self.packets.len() >= MAX_CACHED_PACKETS {
+            self.evict_oldest();
+        }
+        self.packets.insert(pubkey, packet);
+    }
+
+    fn evict_oldest(&mut self) {
+        if let Some(oldest) = self
+            .packets
+            .iter()
+            .min_by_key(|(_, p)| p.fetched_at)
+            .map(|(k, _)| *k)
+        {
+            self.packets.remove(&oldest);
         }
     }
 
@@ -193,7 +212,10 @@ pub enum PkarrTarget {
 ///   `<z32>.example.com`      → None (key not the root — real DNS wins)
 ///   `example.com`            → None
 pub fn classify(qname: &str) -> Option<PkarrTarget> {
-    let q = qname.strip_suffix('.').unwrap_or(qname);
+    // DNS is case-insensitive and z-base32 keys are canonically lower-case, so a
+    // mixed-case (or 0x20-randomized) query must still route and decode.
+    let qname = qname.to_ascii_lowercase();
+    let q = qname.strip_suffix('.').unwrap_or(&qname);
     let (core, has_key_tld) = match q.strip_suffix(".key") {
         Some(rest) => (rest, true),
         None => (q, false),
@@ -325,7 +347,6 @@ fn filter_matching_records(
         .collect()
 }
 
-/// Wire layout: `<64B sig><8B ts-BE><dns bytes>` (max 1072 bytes).
 async fn fetch_from_relay(
     client: &reqwest::Client,
     relay_url: &str,
@@ -336,12 +357,18 @@ async fn fetch_from_relay(
     if !resp.status().is_success() {
         return Err(format!("relay returned HTTP {}", resp.status()).into());
     }
-    let body = resp.bytes().await?;
+    parse_signed_packet(&resp.bytes().await?, pubkey)
+}
+
+/// Parse and Ed25519-verify a signed packet: `<64B sig><8B ts-BE><=1000B dns>`.
+/// The transport is untrusted; this is the only trust gate, so it runs on every
+/// relay/DHT response before the bytes reach the cache.
+fn parse_signed_packet(body: &[u8], pubkey: &[u8; 32]) -> crate::Result<CachedPacket> {
     if body.len() < 72 {
-        return Err(format!("relay response too short: {} bytes", body.len()).into());
+        return Err(format!("signed packet too short: {} bytes", body.len()).into());
     }
     if body.len() > MAX_SIGNED_PACKET_BYTES {
-        return Err(format!("relay response too large: {} bytes", body.len()).into());
+        return Err(format!("signed packet too large: {} bytes", body.len()).into());
     }
     let mut ts_bytes = [0u8; 8];
     ts_bytes.copy_from_slice(&body[64..72]);
@@ -362,6 +389,27 @@ mod tests {
 
     fn key_for(b: u8) -> String {
         z32_encode(&[b; 32])
+    }
+
+    /// A fresh Ed25519 keypair + its 32-byte public key, for signing test packets.
+    fn test_keypair() -> (ring::signature::Ed25519KeyPair, [u8; 32]) {
+        use ring::signature::KeyPair;
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let kp = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+        let mut pubkey = [0u8; 32];
+        pubkey.copy_from_slice(kp.public_key().as_ref());
+        (kp, pubkey)
+    }
+
+    /// `<64B sig><8B ts-BE><dns>` signed by `kp` — a well-formed relay body.
+    fn signed_body(kp: &ring::signature::Ed25519KeyPair, ts: u64, dns: &[u8]) -> Vec<u8> {
+        let sig = kp.sign(&build_signable(ts, dns));
+        let mut body = Vec::with_capacity(72 + dns.len());
+        body.extend_from_slice(sig.as_ref());
+        body.extend_from_slice(&ts.to_be_bytes());
+        body.extend_from_slice(dns);
+        body
     }
 
     #[test]
@@ -399,6 +447,56 @@ mod tests {
             &[1u8; 32],
             &signable,
             &[0x42u8; 64]
+        ));
+    }
+
+    #[test]
+    fn parse_signed_packet_accepts_valid_rejects_tampering() {
+        let (kp, pubkey) = test_keypair();
+        let ts = 0x0102_0304_0506_0708u64;
+        let dns = b"\x12\x34 inner dns bytes, not parsed here";
+        let body = signed_body(&kp, ts, dns);
+
+        let ok = parse_signed_packet(&body, &pubkey).unwrap();
+        assert_eq!(ok.timestamp, ts);
+        assert_eq!(ok.dns_bytes, dns);
+
+        // Size bounds (no valid sig needed — checked before verify).
+        assert!(parse_signed_packet(&body[..71], &pubkey).is_err());
+        assert!(parse_signed_packet(&vec![0u8; MAX_SIGNED_PACKET_BYTES + 1], &pubkey).is_err());
+
+        // Tampered DNS body, tampered timestamp, and cross-key all fail verify.
+        let mut tampered_dns = body.clone();
+        *tampered_dns.last_mut().unwrap() ^= 0xff;
+        assert!(parse_signed_packet(&tampered_dns, &pubkey).is_err());
+
+        let mut tampered_ts = body.clone();
+        tampered_ts[64] ^= 0xff;
+        assert!(parse_signed_packet(&tampered_ts, &pubkey).is_err());
+
+        let (_, other_pubkey) = test_keypair();
+        assert!(parse_signed_packet(&body, &other_pubkey).is_err());
+    }
+
+    #[test]
+    fn cache_is_bounded() {
+        let mut store = PkarrStore::new(&PkarrConfig::default(), None);
+        for i in 0..(MAX_CACHED_PACKETS as u32 + 10) {
+            let mut pubkey = [0u8; 32];
+            pubkey[..4].copy_from_slice(&i.to_be_bytes());
+            store.store_packet(pubkey, CachedPacket::new(vec![0], i as u64));
+        }
+        assert!(store.packets.len() <= MAX_CACHED_PACKETS);
+    }
+
+    #[test]
+    fn classify_is_case_insensitive_for_keys() {
+        // A mixed/upper-case (e.g. 0x20-randomized) key query must still resolve.
+        let key = key_for(0);
+        assert_eq!(classify(&key.to_uppercase()), classify(&key));
+        assert!(matches!(
+            classify(&key.to_uppercase()),
+            Some(PkarrTarget::Key { .. })
         ));
     }
 
