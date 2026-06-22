@@ -1401,6 +1401,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pkarr_answer_strips_private_ip_fail_closed() {
+        // End-to-end through resolve_query: a pkarr packet pointing at both a
+        // public and a private IP must surface the public answer and drop the
+        // private one — even with global rebind protection OFF (test_ctx
+        // default). Guards the unconditional scrub wiring in resolve_pkarr, not
+        // just strip_private in isolation.
+        let pubkey = [0u8; 32];
+        let z32 = crate::pkarr::z32_encode(&pubkey);
+
+        let mut inner = DnsPacket::new();
+        inner.header.response = true;
+        inner.answers = vec![
+            DnsRecord::A {
+                domain: z32.clone(),
+                addr: Ipv4Addr::new(8, 8, 8, 8),
+                ttl: 300,
+            },
+            DnsRecord::A {
+                domain: z32.clone(),
+                addr: Ipv4Addr::new(192, 168, 1, 1),
+                ttl: 300,
+            },
+        ];
+        let mut buf = BytePacketBuffer::new();
+        inner.write(&mut buf).unwrap();
+        let dns_bytes = buf.filled().to_vec();
+
+        let mut store = crate::pkarr::PkarrStore::new(&crate::config::PkarrConfig::default(), None);
+        store.seed_packet(pubkey, dns_bytes);
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.pkarr = Some(Arc::new(std::sync::RwLock::new(store)));
+        let ctx = Arc::new(ctx);
+
+        let (resp, path) = resolve_in_test(&ctx, &z32, QueryType::A).await;
+
+        assert_eq!(path, QueryPath::Pkarr);
+        let addrs: Vec<Ipv4Addr> = resp
+            .answers
+            .iter()
+            .filter_map(|r| match r {
+                DnsRecord::A { addr, .. } => Some(*addr),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            addrs.contains(&Ipv4Addr::new(8, 8, 8, 8)),
+            "public A must survive"
+        );
+        assert!(
+            !addrs.contains(&Ipv4Addr::new(192, 168, 1, 1)),
+            "private A must be stripped fail-closed even with rebind off"
+        );
+    }
+
+    #[tokio::test]
     async fn special_use_private_ptr_returns_nxdomain() {
         let ctx = Arc::new(crate::testutil::test_ctx().await);
         let (resp, path) =

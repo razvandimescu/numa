@@ -37,6 +37,16 @@ struct CachedPacket {
     timestamp: u64,
 }
 
+impl CachedPacket {
+    fn new(dns_bytes: Vec<u8>, timestamp: u64) -> Self {
+        CachedPacket {
+            dns_bytes,
+            fetched_at: Instant::now(),
+            timestamp,
+        }
+    }
+}
+
 pub struct PkarrStore {
     packets: HashMap<[u8; 32], CachedPacket>,
     petnames: HashMap<String, [u8; 32]>,
@@ -81,9 +91,16 @@ impl PkarrStore {
             self.packets.insert(pubkey, packet);
         }
     }
+
+    /// Seed the cache with an already-verified inner packet so integration tests
+    /// can drive `resolve` down the cache-hit path without a live relay.
+    #[cfg(test)]
+    pub(crate) fn seed_packet(&mut self, pubkey: [u8; 32], dns_bytes: Vec<u8>) {
+        self.packets.insert(pubkey, CachedPacket::new(dns_bytes, 1));
+    }
 }
 
-fn z32_encode(bytes: &[u8]) -> String {
+pub(crate) fn z32_encode(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len().div_ceil(5) * 8);
     let mut buf: u64 = 0;
     let mut bits = 0u32;
@@ -336,11 +353,7 @@ async fn fetch_from_relay(
         return Err("signature verification failed".into());
     }
 
-    Ok(CachedPacket {
-        dns_bytes,
-        fetched_at: Instant::now(),
-        timestamp,
-    })
+    Ok(CachedPacket::new(dns_bytes, timestamp))
 }
 
 #[cfg(test)]
@@ -538,16 +551,8 @@ mod tests {
         // An older replayed packet must not roll the cache back (untrusted relay).
         let mut store = PkarrStore::new(&PkarrConfig::default(), None);
         let pubkey = [7u8; 32];
-        let newer = CachedPacket {
-            dns_bytes: vec![1],
-            fetched_at: Instant::now(),
-            timestamp: 200,
-        };
-        let older = CachedPacket {
-            dns_bytes: vec![2],
-            fetched_at: Instant::now(),
-            timestamp: 100,
-        };
+        let newer = CachedPacket::new(vec![1], 200);
+        let older = CachedPacket::new(vec![2], 100);
         store.store_packet(pubkey, newer);
         store.store_packet(pubkey, older); // replayed older — must be ignored
         assert_eq!(
