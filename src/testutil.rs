@@ -35,8 +35,9 @@ pub async fn test_ctx() -> ServerCtx {
             crate::domain_list::PersistedDomainList::unpersisted(),
             crate::domain_list::PersistedDomainList::unpersisted(),
         )),
-        query_log: Mutex::new(QueryLog::new(100)),
+        query_log: Mutex::new(QueryLog::new_memory(100)),
         services: Mutex::new(ServiceStore::new()),
+
         lan_peers: Mutex::new(PeerStore::new(90)),
         forwarding_rules: Vec::new(),
         upstream_pool: Mutex::new(UpstreamPool::new(

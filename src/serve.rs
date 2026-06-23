@@ -173,8 +173,9 @@ pub async fn run(config_path: String) -> crate::Result<()> {
         stats: Mutex::new(ServerStats::new()),
         overrides: RwLock::new(OverrideStore::new()),
         blocklist: RwLock::new(blocklist),
-        query_log: Mutex::new(QueryLog::new(1000)),
+        query_log: Mutex::new(QueryLog::new(&config.query_log, &resolved_data_dir)),
         services: Mutex::new(service_store),
+
         lan_peers: Mutex::new(crate::lan::PeerStore::new(config.lan.peer_timeout_secs)),
         forwarding_rules,
         upstream_pool: Mutex::new(pool),

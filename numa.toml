@@ -243,3 +243,14 @@ tld = "numa"
 enabled = true                # opt-in to the mobile API listener
 # port = 8765                 # default; matches Discovery.swift defaultAPIPort
 # bind_addr = "0.0.0.0"       # default; set to "127.0.0.1" for localhost-only
+
+# ── Query Logging ──────────────────────────────────────────────────
+# Persist DNS queries to a database with RAM buffering and batch writing
+# to minimize disk wear.
+[query_log]
+enabled = true                # Set to false to disable query logging entirely
+db_type = "sqlite"            # Database type: "sqlite" or "memory"
+sqlite_path = "query_log.db"  # Path to SQLite DB file (relative to data_dir or absolute)
+buffer_size = 500             # Write logs in batches of this size to reduce disk wear
+flush_interval_ms = 5000      # Force write to disk if no new logs for this long (ms)
+

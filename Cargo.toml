@@ -41,6 +41,8 @@ webpki-roots = "1"
 proxy-header = { version = "0.1", features = ["tokio"] }
 ipnet = { version = "2", features = ["serde"] }
 quinn-udp = "0.6"
+rusqlite = { version = "0.31", features = ["bundled"] }
+
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

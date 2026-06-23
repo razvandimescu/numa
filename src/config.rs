@@ -37,7 +37,10 @@ pub struct Config {
     pub forwarding: Vec<ForwardingRuleConfig>,
     #[serde(default)]
     pub client_policy: Vec<crate::client_policy::ClientPolicyConfig>,
+    #[serde(rename = "query_log", default)]
+    pub query_log: QueryLogConfig,
 }
+
 
 #[derive(Deserialize, Clone, Debug)]
 pub struct ForwardingRuleConfig {
@@ -801,6 +804,53 @@ fn default_mobile_port() -> u16 {
 fn default_mobile_bind_addr() -> String {
     "0.0.0.0".to_string()
 }
+
+#[derive(Deserialize, Clone, Debug)]
+pub struct QueryLogConfig {
+    #[serde(default = "default_query_log_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_db_type")]
+    pub db_type: String,
+    #[serde(default = "default_sqlite_path")]
+    pub sqlite_path: String,
+    #[serde(default = "default_buffer_size")]
+    pub buffer_size: usize,
+    #[serde(default = "default_flush_interval_ms")]
+    pub flush_interval_ms: u64,
+}
+
+impl Default for QueryLogConfig {
+    fn default() -> Self {
+        QueryLogConfig {
+            enabled: true,
+            db_type: "sqlite".to_string(),
+            sqlite_path: "query_log.db".to_string(),
+            buffer_size: 500,
+            flush_interval_ms: 5000,
+        }
+    }
+}
+
+fn default_query_log_enabled() -> bool {
+    true
+}
+
+fn default_db_type() -> String {
+    "sqlite".to_string()
+}
+
+fn default_sqlite_path() -> String {
+    "query_log.db".to_string()
+}
+
+fn default_buffer_size() -> usize {
+    500
+}
+
+fn default_flush_interval_ms() -> u64 {
+    5000
+}
+
 
 #[cfg(test)]
 mod tests {
