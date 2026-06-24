@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH, Duration};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
-use log::{error, info, warn};
+use log::error;
 
 use crate::cache::DnssecStatus;
 use crate::header::ResultCode;
