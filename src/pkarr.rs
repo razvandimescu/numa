@@ -199,15 +199,7 @@ pub enum PkarrTarget {
 ///   - `Petname` when qname ends in `.key` and the root label isn't a z32 key
 ///   - `None` otherwise (not a pkarr query)
 ///
-/// Examples:
-///   `<z32>`                  → Key, subdomain None
-///   `git.<z32>`              → Key, subdomain "git"
-///   `<z32>.key`              → Key, subdomain None
-///   `git.<z32>.key`          → Key, subdomain "git"
-///   `alice.key`              → Petname "alice", subdomain None
-///   `git.alice.key`          → Petname "alice", subdomain "git"
-///   `<z32>.example.com`      → None (key not the root — real DNS wins)
-///   `example.com`            → None
+/// `classify_routes_by_root_label` enumerates the accepted forms.
 pub fn classify(qname: &str) -> Option<PkarrTarget> {
     // qname arrives lower-cased from the wire parser (read_qname), like every
     // other local stage relies on — no re-normalization here.
