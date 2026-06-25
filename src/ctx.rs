@@ -111,11 +111,17 @@ pub async fn resolve_query(
         None => return Err("empty question section".into()),
     };
 
+    // The effective AAAA-filter decision for this peer — resolved once for the
+    // whole request (local NODATA short-circuit + remote-answer shaping).
+    let filter_aaaa = ctx
+        .client_policy
+        .effective_filter_aaaa(src_addr.ip(), ctx.filter_aaaa);
+
     // Pipeline: overrides -> .localhost -> local zones -> special-use (unless forwarded)
     //        -> .tld proxy -> blocklist -> cache -> forwarding -> recursive/upstream
     // Each lock is scoped to avoid holding MutexGuard across await points.
     let (mut response, path, mut dnssec, upstream_transport) =
-        resolve_with_cname_chase(&query, raw_wire, src_addr, &qname, qtype, ctx).await;
+        resolve_with_cname_chase(&query, raw_wire, src_addr, &qname, qtype, filter_aaaa, ctx).await;
 
     // DNSSEC validation (recursive/forwarded responses only)
     if ctx.dnssec_enabled && path == QueryPath::Recursive {
@@ -170,9 +176,6 @@ pub async fn resolve_query(
         stripped > 0
     };
 
-    let filter_aaaa = ctx
-        .client_policy
-        .effective_filter_aaaa(src_addr.ip(), ctx.filter_aaaa);
     shape_response_for_client(&mut response, &query, filter_aaaa);
 
     let elapsed = start.elapsed();
@@ -263,6 +266,7 @@ async fn resolve_with_cname_chase(
     src_addr: SocketAddr,
     qname: &str,
     qtype: QueryType,
+    filter_aaaa: bool,
     ctx: &Arc<ServerCtx>,
 ) -> (
     DnsPacket,
@@ -274,7 +278,7 @@ async fn resolve_with_cname_chase(
     visited.insert(qname.to_ascii_lowercase());
 
     let (mut resp, path, dnssec, mut ut) =
-        match resolve_local(query, src_addr, qname, qtype, ctx).await {
+        match resolve_local(query, src_addr, qname, qtype, filter_aaaa, ctx).await {
             Some((r, p, d)) => (r, p, d, None),
             None => resolve_remote(query, raw_wire, src_addr, qname, qtype, ctx).await,
         };
@@ -306,7 +310,7 @@ async fn resolve_with_cname_chase(
             .write(&mut sub_buf)
             .expect("sub-query serialization");
         let (sub_resp, _, _, sub_ut) =
-            match resolve_local(&sub_query, src_addr, &target, qtype, ctx).await {
+            match resolve_local(&sub_query, src_addr, &target, qtype, filter_aaaa, ctx).await {
                 Some((r, p, d)) => (r, p, d, None),
                 None => {
                     resolve_remote(&sub_query, sub_buf.filled(), src_addr, &target, qtype, ctx)
@@ -329,6 +333,7 @@ async fn resolve_local(
     src_addr: SocketAddr,
     qname: &str,
     qtype: QueryType,
+    filter_aaaa: bool,
     ctx: &ServerCtx,
 ) -> Option<(DnsPacket, QueryPath, DnssecStatus)> {
     if let Some(record) = ctx.overrides.read().unwrap().lookup(qname) {
@@ -398,11 +403,7 @@ async fn resolve_local(
         ));
         return Some((resp, QueryPath::Blocked, DnssecStatus::Indeterminate));
     }
-    if qtype == QueryType::AAAA
-        && ctx
-            .client_policy
-            .effective_filter_aaaa(src_addr.ip(), ctx.filter_aaaa)
-    {
+    if qtype == QueryType::AAAA && filter_aaaa {
         // RFC 2308 NODATA: NOERROR with empty answer section. Prevents
         // Happy Eyeballs clients from waiting on an AAAA they'll never use
         // on IPv4-only networks.

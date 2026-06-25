@@ -151,9 +151,10 @@ fn z32_decode(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Returns the 32-byte key iff `s` is a valid z-base32 string decoding to 32 bytes.
-/// Length-agnostic (handles raw key strings from config); `classify` adds the
-/// `Z32_KEY_LEN` label-length gate where it matters.
+/// Returns the 32-byte key iff `s` is a valid z-base32 string decoding to 32
+/// bytes — the 32-byte check is the real gate (only a 52-char z32 string can
+/// reach it). `classify` pre-checks `Z32_KEY_LEN` purely to skip the decode on
+/// ordinary labels, not for correctness.
 pub fn decode_key(s: &str) -> Option<[u8; 32]> {
     let bytes = z32_decode(s)?;
     (bytes.len() == 32).then(|| {
@@ -246,34 +247,37 @@ pub async fn resolve(
     subdomain: Option<&str>,
     store: &Arc<RwLock<PkarrStore>>,
 ) -> Option<DnsPacket> {
-    let (cached, relay_url, client) = {
+    let z32 = z32_encode(pubkey);
+
+    let cached = {
         let s = store.read().ok()?;
-        let cached = s
-            .packets
+        s.packets
             .get(pubkey)
             .filter(|p| p.fetched_at.elapsed() < CACHE_TTL)
-            .cloned();
-        (cached, s.relay_url.clone(), s.client.clone())
+            .cloned()
     };
 
     let packet = match cached {
         Some(p) => p,
-        None => match fetch_from_relay(&client, &relay_url, pubkey).await {
-            Ok(fresh) => {
-                if let Ok(mut w) = store.write() {
-                    w.store_packet(*pubkey, fresh.clone());
+        None => {
+            // Cache hits never reach here, so the clones stay off that path.
+            let (relay_url, client) = {
+                let s = store.read().ok()?;
+                (s.relay_url.clone(), s.client.clone())
+            };
+            match fetch_from_relay(&client, &relay_url, &z32, pubkey).await {
+                Ok(fresh) => {
+                    if let Ok(mut w) = store.write() {
+                        w.store_packet(*pubkey, fresh.clone());
+                    }
+                    fresh
                 }
-                fresh
+                Err(e) => {
+                    debug!("pkarr: relay fetch failed for {}: {}", z32, e);
+                    return None;
+                }
             }
-            Err(e) => {
-                debug!(
-                    "pkarr: relay fetch failed for {}: {}",
-                    z32_encode(pubkey),
-                    e
-                );
-                return None;
-            }
-        },
+        }
     };
 
     let mut buf = BytePacketBuffer::from_bytes(&packet.dns_bytes);
@@ -285,7 +289,7 @@ pub async fn resolve(
         }
     };
 
-    let answers = filter_matching_records(&inner.answers, pubkey, subdomain, qtype, qname);
+    let answers = filter_matching_records(&inner.answers, &z32, subdomain, qtype, qname);
     let mut resp = DnsPacket::response_from(query, ResultCode::NOERROR);
     resp.answers = answers;
     Some(resp)
@@ -312,26 +316,26 @@ fn is_vettable(r: &DnsRecord) -> bool {
 ///   - `<sub>`                          → subdomain (relative to origin)
 fn filter_matching_records(
     records: &[DnsRecord],
-    pubkey: &[u8; 32],
+    z32: &str,
     subdomain: Option<&str>,
     qtype: QueryType,
     qname: &str,
 ) -> Vec<DnsRecord> {
-    let z32 = z32_encode(pubkey);
-    let want_apex = subdomain.is_none();
     let want_num = qtype.to_num();
+    let abs = subdomain.map(|sub| format!("{}.{}", sub, z32));
     records
         .iter()
         .filter(|r| is_vettable(r))
         .filter(|r| r.query_type().to_num() == want_num)
         .filter(|r| {
-            let dom = r.domain().trim_end_matches('.').to_lowercase();
-            if want_apex {
-                dom.is_empty() || dom == "@" || dom == z32
-            } else {
-                let sub = subdomain.unwrap();
-                let abs = format!("{}.{}", sub, z32);
-                dom == sub || dom == abs
+            let dom = r.domain();
+            let dom = dom.trim_end_matches('.');
+            match subdomain {
+                None => dom.is_empty() || dom == "@" || dom.eq_ignore_ascii_case(z32),
+                Some(sub) => {
+                    dom.eq_ignore_ascii_case(sub)
+                        || dom.eq_ignore_ascii_case(abs.as_deref().unwrap())
+                }
             }
         })
         .map(|r| {
@@ -345,9 +349,10 @@ fn filter_matching_records(
 async fn fetch_from_relay(
     client: &reqwest::Client,
     relay_url: &str,
+    z32: &str,
     pubkey: &[u8; 32],
 ) -> crate::Result<CachedPacket> {
-    let url = format!("{}/{}", relay_url, z32_encode(pubkey));
+    let url = format!("{}/{}", relay_url, z32);
     let resp = client.get(&url).timeout(RELAY_TIMEOUT).send().await?;
     if !resp.status().is_success() {
         return Err(format!("relay returned HTTP {}", resp.status()).into());
@@ -614,14 +619,13 @@ mod tests {
     #[test]
     fn filter_drops_name_target_records() {
         // A surfaced name-target into private space would bypass the IP scrub.
-        let pubkey = [0u8; 32];
-        let z32 = z32_encode(&pubkey);
+        let z32 = z32_encode(&[0u8; 32]);
         let records = vec![DnsRecord::CNAME {
-            domain: z32,
+            domain: z32.clone(),
             host: "metadata.google.internal.".into(),
             ttl: 60,
         }];
-        let out = filter_matching_records(&records, &pubkey, None, QueryType::CNAME, "alice.key");
+        let out = filter_matching_records(&records, &z32, None, QueryType::CNAME, "alice.key");
         assert!(
             out.is_empty(),
             "pkarr must not surface CNAME/name-target records (rebind bypass)"
