@@ -475,10 +475,7 @@ pub async fn download_blocklists(
     lists: &[String],
     resolver: Option<std::sync::Arc<crate::bootstrap_resolver::NumaResolver>>,
 ) -> Vec<(String, String)> {
-    crate::forward::ensure_crypto_provider();
-    let mut builder = reqwest::Client::builder()
-        .use_rustls_tls()
-        .tls_certs_only(crate::forward::bundled_roots())
+    let mut builder = crate::forward::numa_tls_builder()
         .timeout(Duration::from_secs(30))
         .gzip(true);
     if let Some(r) = resolver {

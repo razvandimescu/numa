@@ -32,9 +32,6 @@ const DOH_FALLBACK: &str = "https://9.9.9.9/dns-query";
 
 /// Boot the DNS server and run until the UDP listener errors out.
 pub async fn run(config_path: String) -> crate::Result<()> {
-    // Install the ring CryptoProvider before any HTTPS client is built.
-    crate::forward::ensure_crypto_provider();
-
     let ConfigLoad {
         config,
         path: resolved_config_path,

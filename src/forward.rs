@@ -213,40 +213,31 @@ pub fn build_https_client_with_resolver(
     builder.build().unwrap_or_default()
 }
 
-/// Install the process-default rustls `CryptoProvider` (ring), idempotently.
-/// reqwest 0.13's `rustls-no-provider` ships none, so a `Client` built without
-/// this panics; ring (not 0.13's aws-lc-rs default) keeps the armv6 cross-build.
-pub(crate) fn ensure_crypto_provider() {
+/// The single place Numa configures reqwest TLS. Installs the ring
+/// `CryptoProvider` (reqwest 0.13's `rustls-no-provider` ships none, so a
+/// `Client` built without it panics; ring not aws-lc-rs keeps the armv6
+/// cross-build) and pins validation to the bundled Mozilla roots, skipping
+/// reqwest's default system-cert verifier (absent in the nix sandbox, a
+/// liability for the static Pi binary; also restores Numa's 0.12 behaviour).
+pub(crate) fn numa_tls_builder() -> reqwest::ClientBuilder {
     let _ = rustls::crypto::ring::default_provider().install_default();
-}
-
-/// The bundled Mozilla roots (DER) as reqwest certificates, for `tls_certs_only`
-/// — so HTTPS validation skips reqwest 0.13's default system-cert
-/// `rustls-platform-verifier` (absent in the nix sandbox; a liability for the
-/// static Pi binary). Restores the bundled-roots behaviour Numa had on 0.12.
-pub(crate) fn bundled_roots() -> impl Iterator<Item = reqwest::Certificate> {
-    webpki_root_certs::TLS_SERVER_ROOT_CERTS
+    let roots = webpki_root_certs::TLS_SERVER_ROOT_CERTS
         .iter()
-        .filter_map(|der| reqwest::Certificate::from_der(der).ok())
-}
-
-/// `Client::new()` for tests, with the provider + bundled roots ensured so it
-/// builds regardless of test order or a missing system cert store.
-#[cfg(test)]
-pub(crate) fn default_client() -> reqwest::Client {
-    ensure_crypto_provider();
+        .filter_map(|der| reqwest::Certificate::from_der(der).ok());
     reqwest::Client::builder()
         .use_rustls_tls()
-        .tls_certs_only(bundled_roots())
-        .build()
-        .unwrap_or_default()
+        .tls_certs_only(roots)
+}
+
+/// `Client::new()` for tests, but with Numa's TLS setup so it builds regardless
+/// of test order or a missing system cert store.
+#[cfg(test)]
+pub(crate) fn default_client() -> reqwest::Client {
+    numa_tls_builder().build().unwrap_or_default()
 }
 
 fn https_client_builder(pool_max_idle_per_host: usize) -> reqwest::ClientBuilder {
-    ensure_crypto_provider();
-    reqwest::Client::builder()
-        .use_rustls_tls()
-        .tls_certs_only(bundled_roots())
+    numa_tls_builder()
         .http2_initial_stream_window_size(65_535)
         .http2_initial_connection_window_size(65_535)
         .http2_keep_alive_interval(Duration::from_secs(15))
