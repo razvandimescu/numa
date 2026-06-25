@@ -2184,23 +2184,9 @@ mod tests {
         .unwrap()
     }
 
-    #[tokio::test]
-    async fn pipeline_per_client_filter_aaaa_strips_for_matched_peer() {
-        // Global filter off, but the rule forces it on for this CIDR (#286).
-        let mut ctx = crate::testutil::test_ctx().await;
-        ctx.filter_aaaa = false;
-        ctx.client_policy = ctx_with_aaaa_policy(&["10.210.0.0/16"], Some(true));
-        let ctx = Arc::new(ctx);
-
-        let src: SocketAddr = "10.210.0.5:5000".parse().unwrap();
-        let (resp, path) = resolve_from_src(&ctx, src, "example.com", QueryType::AAAA).await;
-        assert_eq!(path, QueryPath::Local);
-        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
-        assert!(resp.answers.is_empty(), "matched peer AAAA must be NODATA");
-    }
-
     /// AAAA answers a peer receives when an upstream returns one record, under
-    /// the given global flag and single `filter_aaaa` rule. 0 = stripped.
+    /// the given global flag and single `filter_aaaa` rule. 0 = stripped (the
+    /// matched-on case short-circuits to local NODATA before the upstream).
     async fn aaaa_answers(global: bool, rule: &[&str], ovr: Option<bool>, peer: &str) -> usize {
         let upstream_resp = crate::testutil::aaaa_record_response(
             "example.com",
@@ -2227,22 +2213,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pipeline_per_client_filter_aaaa_spares_unmatched_peer() {
-        let n = aaaa_answers(false, &["10.210.0.0/16"], Some(true), "192.168.1.5:5000").await;
-        assert_eq!(n, 1, "unmatched peer keeps its AAAA");
-    }
-
-    #[tokio::test]
-    async fn pipeline_per_client_filter_aaaa_exempts_matched_peer_from_global() {
-        // Global filter on, rule carves out a v6-capable subnet (the inverse).
-        let n = aaaa_answers(
-            true,
-            &["2001:db8:cafe::/48"],
-            Some(false),
-            "[2001:db8:cafe::5]:5000",
-        )
-        .await;
-        assert_eq!(n, 1, "exempt peer keeps its AAAA");
+    async fn pipeline_per_client_filter_aaaa_matrix() {
+        // Per-client override vs global flag (#286). (global, rule, override,
+        // peer) -> AAAA answers surfaced: 0 = stripped to NODATA, 1 = survives.
+        let cases: &[(bool, &str, Option<bool>, &str, usize)] = &[
+            (false, "10.210.0.0/16", Some(true), "10.210.0.5:5000", 0), // rule forces filter on over global off
+            (false, "10.210.0.0/16", Some(true), "192.168.1.5:5000", 1), // unmatched peer inherits global off
+            (
+                true,
+                "2001:db8:cafe::/48",
+                Some(false),
+                "[2001:db8:cafe::5]:5000",
+                1,
+            ), // rule exempts a v6-capable subnet
+        ];
+        for &(global, rule, ovr, peer, want) in cases {
+            let n = aaaa_answers(global, &[rule], ovr, peer).await;
+            assert_eq!(
+                n, want,
+                "global={global} rule={rule} ovr={ovr:?} peer={peer}"
+            );
+        }
     }
 
     #[tokio::test]
