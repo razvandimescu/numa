@@ -186,8 +186,6 @@ mod tests {
 
     #[test]
     fn strip_private_ignores_disabled_toggle() {
-        // pkarr fails closed: strip_private must scrub even when the global
-        // rebind toggle is off, while apply() respects it.
         let mut f = filter(&[]);
         f.set_enabled(false);
         let mut p = DnsPacket::new();
