@@ -87,15 +87,11 @@ impl PkarrStore {
     /// Reject rollback replays — the relay is untrusted, so a valid signature
     /// alone can't stop an old packet pinning an abandoned IP. `seq` is monotonic.
     fn store_packet(&mut self, pubkey: [u8; 32], packet: CachedPacket) {
-        let is_rollback = self
-            .packets
-            .get(&pubkey)
-            .is_some_and(|cached| packet.timestamp <= cached.timestamp);
-        if is_rollback {
-            return;
-        }
-        if !self.packets.contains_key(&pubkey) && self.packets.len() >= MAX_CACHED_PACKETS {
-            self.evict_oldest();
+        match self.packets.get(&pubkey).map(|c| c.timestamp) {
+            Some(cached_ts) if packet.timestamp <= cached_ts => return, // rollback replay
+            Some(_) => {}                                               // overwrite, no growth
+            None if self.packets.len() >= MAX_CACHED_PACKETS => self.evict_oldest(),
+            None => {}
         }
         self.packets.insert(pubkey, packet);
     }
@@ -212,10 +208,9 @@ pub enum PkarrTarget {
 ///   `<z32>.example.com`      → None (key not the root — real DNS wins)
 ///   `example.com`            → None
 pub fn classify(qname: &str) -> Option<PkarrTarget> {
-    // DNS is case-insensitive and z-base32 keys are canonically lower-case, so a
-    // mixed-case (or 0x20-randomized) query must still route and decode.
-    let qname = qname.to_ascii_lowercase();
-    let q = qname.strip_suffix('.').unwrap_or(&qname);
+    // qname arrives lower-cased from the wire parser (read_qname), like every
+    // other local stage relies on — no re-normalization here.
+    let q = qname.strip_suffix('.').unwrap_or(qname);
     let (core, has_key_tld) = match q.strip_suffix(".key") {
         Some(rest) => (rest, true),
         None => (q, false),
@@ -487,17 +482,6 @@ mod tests {
             store.store_packet(pubkey, CachedPacket::new(vec![0], i as u64));
         }
         assert!(store.packets.len() <= MAX_CACHED_PACKETS);
-    }
-
-    #[test]
-    fn classify_is_case_insensitive_for_keys() {
-        // A mixed/upper-case (e.g. 0x20-randomized) key query must still resolve.
-        let key = key_for(0);
-        assert_eq!(classify(&key.to_uppercase()), classify(&key));
-        assert!(matches!(
-            classify(&key.to_uppercase()),
-            Some(PkarrTarget::Key { .. })
-        ));
     }
 
     #[test]

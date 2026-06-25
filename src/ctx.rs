@@ -1409,18 +1409,20 @@ mod tests {
         // just strip_private in isolation.
         let pubkey = [0u8; 32];
         let z32 = crate::pkarr::z32_encode(&pubkey);
+        let public = Ipv4Addr::new(8, 8, 8, 8);
+        let private = Ipv4Addr::new(192, 168, 1, 1);
 
         let mut inner = DnsPacket::new();
         inner.header.response = true;
         inner.answers = vec![
             DnsRecord::A {
                 domain: z32.clone(),
-                addr: Ipv4Addr::new(8, 8, 8, 8),
+                addr: public,
                 ttl: 300,
             },
             DnsRecord::A {
                 domain: z32.clone(),
-                addr: Ipv4Addr::new(192, 168, 1, 1),
+                addr: private,
                 ttl: 300,
             },
         ];
@@ -1445,12 +1447,9 @@ mod tests {
                 _ => None,
             })
             .collect();
+        assert!(addrs.contains(&public), "public A must survive");
         assert!(
-            addrs.contains(&Ipv4Addr::new(8, 8, 8, 8)),
-            "public A must survive"
-        );
-        assert!(
-            !addrs.contains(&Ipv4Addr::new(192, 168, 1, 1)),
+            !addrs.contains(&private),
             "private A must be stripped fail-closed even with rebind off"
         );
     }
