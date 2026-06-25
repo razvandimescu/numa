@@ -421,6 +421,8 @@ mod tests {
         let cache = OdohConfigCache::new(
             "odoh-target.invalid".to_string(),
             reqwest::Client::builder()
+                .use_rustls_tls()
+                .tls_certs_only(crate::forward::bundled_roots())
                 .timeout(Duration::from_millis(200))
                 .build()
                 .unwrap(),

@@ -38,6 +38,10 @@ rand_core = { version = "0.9", features = ["os_rng"] }
 rustls-pemfile = "2.2.0"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 webpki-roots = "1"
+# DER form of the Mozilla roots, fed to reqwest's `tls_certs_only` so HTTPS uses
+# bundled roots (portable static binary) instead of reqwest 0.13's default
+# system-cert platform verifier.
+webpki-root-certs = "1"
 proxy-header = { version = "0.1", features = ["tokio"] }
 ipnet = { version = "2", features = ["serde"] }
 quinn-udp = "0.6"

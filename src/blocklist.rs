@@ -477,6 +477,8 @@ pub async fn download_blocklists(
 ) -> Vec<(String, String)> {
     crate::forward::ensure_crypto_provider();
     let mut builder = reqwest::Client::builder()
+        .use_rustls_tls()
+        .tls_certs_only(crate::forward::bundled_roots())
         .timeout(Duration::from_secs(30))
         .gzip(true);
     if let Some(r) = resolver {

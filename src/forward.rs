@@ -222,19 +222,37 @@ pub(crate) fn ensure_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
-/// A bare reqwest client with the ring provider ensured — used by tests that
-/// want `Client::new()` semantics, so the provider is installed regardless of
-/// test execution order.
+/// The bundled Mozilla roots in DER form, as reqwest certificates. Fed to
+/// `tls_certs_only` so HTTPS validation uses these instead of reqwest 0.13's
+/// default `rustls-platform-verifier` (which reads the host's system cert
+/// store — absent in sandboxes like the nix build, and a portability liability
+/// for the static musl Pi binary). Matches the bundled-roots behaviour Numa had
+/// on reqwest 0.12.
+pub(crate) fn bundled_roots() -> impl Iterator<Item = reqwest::Certificate> {
+    webpki_root_certs::TLS_SERVER_ROOT_CERTS
+        .iter()
+        .filter_map(|der| reqwest::Certificate::from_der(der).ok())
+}
+
+/// A bare reqwest client with the ring provider ensured and bundled roots —
+/// used by tests that want `Client::new()` semantics, so the provider is
+/// installed and the client builds without a system cert store regardless of
+/// test execution order or sandbox.
 #[cfg(test)]
 pub(crate) fn default_client() -> reqwest::Client {
     ensure_crypto_provider();
-    reqwest::Client::builder().build().unwrap_or_default()
+    reqwest::Client::builder()
+        .use_rustls_tls()
+        .tls_certs_only(bundled_roots())
+        .build()
+        .unwrap_or_default()
 }
 
 fn https_client_builder(pool_max_idle_per_host: usize) -> reqwest::ClientBuilder {
     ensure_crypto_provider();
     reqwest::Client::builder()
         .use_rustls_tls()
+        .tls_certs_only(bundled_roots())
         .http2_initial_stream_window_size(65_535)
         .http2_initial_connection_window_size(65_535)
         .http2_keep_alive_interval(Duration::from_secs(15))
