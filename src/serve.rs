@@ -32,8 +32,7 @@ const DOH_FALLBACK: &str = "https://9.9.9.9/dns-query";
 
 /// Boot the DNS server and run until the UDP listener errors out.
 pub async fn run(config_path: String) -> crate::Result<()> {
-    // reqwest 0.13 (`rustls-no-provider`) needs the ring CryptoProvider in place
-    // before any HTTPS client is built; install it once at startup.
+    // Install the ring CryptoProvider before any HTTPS client is built.
     crate::forward::ensure_crypto_provider();
 
     let ConfigLoad {

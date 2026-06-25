@@ -214,30 +214,24 @@ pub fn build_https_client_with_resolver(
 }
 
 /// Install the process-default rustls `CryptoProvider` (ring), idempotently.
-/// reqwest 0.13's `rustls-no-provider` ships no provider, so one must be
-/// installed before the first TLS handshake or `Client::build()` panics. We pin
-/// ring (not 0.13's aws-lc-rs default) to keep the armv6 cross-build, which has
-/// no C toolchain for aws-lc-sys. The `Err` (already installed) is ignored.
+/// reqwest 0.13's `rustls-no-provider` ships none, so a `Client` built without
+/// this panics; ring (not 0.13's aws-lc-rs default) keeps the armv6 cross-build.
 pub(crate) fn ensure_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
-/// The bundled Mozilla roots in DER form, as reqwest certificates. Fed to
-/// `tls_certs_only` so HTTPS validation uses these instead of reqwest 0.13's
-/// default `rustls-platform-verifier` (which reads the host's system cert
-/// store — absent in sandboxes like the nix build, and a portability liability
-/// for the static musl Pi binary). Matches the bundled-roots behaviour Numa had
-/// on reqwest 0.12.
+/// The bundled Mozilla roots (DER) as reqwest certificates, for `tls_certs_only`
+/// — so HTTPS validation skips reqwest 0.13's default system-cert
+/// `rustls-platform-verifier` (absent in the nix sandbox; a liability for the
+/// static Pi binary). Restores the bundled-roots behaviour Numa had on 0.12.
 pub(crate) fn bundled_roots() -> impl Iterator<Item = reqwest::Certificate> {
     webpki_root_certs::TLS_SERVER_ROOT_CERTS
         .iter()
         .filter_map(|der| reqwest::Certificate::from_der(der).ok())
 }
 
-/// A bare reqwest client with the ring provider ensured and bundled roots —
-/// used by tests that want `Client::new()` semantics, so the provider is
-/// installed and the client builds without a system cert store regardless of
-/// test execution order or sandbox.
+/// `Client::new()` for tests, with the provider + bundled roots ensured so it
+/// builds regardless of test order or a missing system cert store.
 #[cfg(test)]
 pub(crate) fn default_client() -> reqwest::Client {
     ensure_crypto_provider();
