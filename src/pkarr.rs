@@ -489,131 +489,51 @@ mod tests {
         assert!(store.packets.len() <= MAX_CACHED_PACKETS);
     }
 
-    #[test]
-    fn classify_raw_key_no_tld() {
-        let key = key_for(0);
-        let target = classify(&key).unwrap();
-        assert_eq!(
-            target,
-            PkarrTarget::Key {
-                pubkey: [0u8; 32],
-                subdomain: None,
-            }
-        );
+    fn key_target(subdomain: Option<&str>) -> Option<PkarrTarget> {
+        Some(PkarrTarget::Key {
+            pubkey: [0u8; 32],
+            subdomain: subdomain.map(String::from),
+        })
+    }
+
+    fn petname(name: &str, subdomain: Option<&str>) -> Option<PkarrTarget> {
+        Some(PkarrTarget::Petname {
+            name: name.into(),
+            subdomain: subdomain.map(String::from),
+        })
     }
 
     #[test]
-    fn classify_raw_key_with_subdomain() {
-        let key = key_for(0);
-        let target = classify(&format!("git.{}", key)).unwrap();
-        assert_eq!(
-            target,
-            PkarrTarget::Key {
-                pubkey: [0u8; 32],
-                subdomain: Some("git".to_string()),
-            }
-        );
-    }
-
-    #[test]
-    fn classify_raw_key_with_key_tld() {
-        let key = key_for(0);
-        let target = classify(&format!("{}.key", key)).unwrap();
-        assert_eq!(
-            target,
-            PkarrTarget::Key {
-                pubkey: [0u8; 32],
-                subdomain: None,
-            }
-        );
-    }
-
-    #[test]
-    fn classify_raw_key_with_subdomain_and_key_tld() {
-        let key = key_for(0);
-        let target = classify(&format!("git.{}.key", key)).unwrap();
-        assert_eq!(
-            target,
-            PkarrTarget::Key {
-                pubkey: [0u8; 32],
-                subdomain: Some("git".to_string()),
-            }
-        );
-    }
-
-    #[test]
-    fn classify_petname_single_label() {
-        assert_eq!(
-            classify("alice.key").unwrap(),
-            PkarrTarget::Petname {
-                name: "alice".to_string(),
-                subdomain: None,
-            }
-        );
-    }
-
-    #[test]
-    fn classify_petname_with_subdomain() {
-        assert_eq!(
-            classify("git.alice.key").unwrap(),
-            PkarrTarget::Petname {
-                name: "alice".to_string(),
-                subdomain: Some("git".to_string()),
-            }
-        );
-    }
-
-    #[test]
-    fn classify_petname_deep_subdomain() {
-        assert_eq!(
-            classify("deep.nested.alice.key").unwrap(),
-            PkarrTarget::Petname {
-                name: "alice".to_string(),
-                subdomain: Some("deep.nested".to_string()),
-            }
-        );
-    }
-
-    #[test]
-    fn classify_key_not_rightmost_does_not_shadow_real_domain() {
-        // The key is the root, not "any label" — a real domain with an embedded
-        // key must fall through to normal DNS, never resolve via pkarr.
-        let key = key_for(0);
-        assert!(classify(&format!("{}.example.com", key)).is_none());
-        assert!(classify(&format!("login.{}.paypal.com", key)).is_none());
-        assert!(classify(&format!("{}.com", key)).is_none());
-    }
-
-    #[test]
-    fn classify_trailing_dot_normalized() {
-        let key = key_for(0);
-        assert_eq!(
-            classify(&format!("{}.", key)).unwrap(),
-            PkarrTarget::Key {
-                pubkey: [0u8; 32],
-                subdomain: None,
-            }
-        );
-        assert_eq!(
-            classify("alice.key.").unwrap(),
-            PkarrTarget::Petname {
-                name: "alice".to_string(),
-                subdomain: None,
-            }
-        );
-    }
-
-    #[test]
-    fn classify_non_pkarr_returns_none() {
-        assert!(classify("example.com").is_none());
-        assert!(classify("").is_none());
-        assert!(classify("alice.numa").is_none());
-    }
-
-    #[test]
-    fn classify_bare_key_tld_is_none() {
-        // Just "key" or ".key" on its own isn't a routable petname.
-        assert!(classify("key").is_none());
+    fn classify_routes_by_root_label() {
+        let k = key_for(0);
+        let cases: &[(String, Option<PkarrTarget>)] = &[
+            // Key as root, with/without subdomain and `.key` aside.
+            (k.clone(), key_target(None)),
+            (format!("git.{k}"), key_target(Some("git"))),
+            (format!("{k}.key"), key_target(None)),
+            (format!("git.{k}.key"), key_target(Some("git"))),
+            (format!("{k}."), key_target(None)), // trailing dot normalized
+            // Petname: non-key root under `.key` only.
+            ("alice.key".into(), petname("alice", None)),
+            ("git.alice.key".into(), petname("alice", Some("git"))),
+            (
+                "deep.nested.alice.key".into(),
+                petname("alice", Some("deep.nested")),
+            ),
+            ("alice.key.".into(), petname("alice", None)), // trailing dot normalized
+            // Key not the rightmost label → real DNS wins, never shadowed.
+            (format!("{k}.example.com"), None),
+            (format!("login.{k}.paypal.com"), None),
+            (format!("{k}.com"), None),
+            // Not pkarr-shaped at all.
+            ("example.com".into(), None),
+            ("".into(), None),
+            ("alice.numa".into(), None),
+            ("key".into(), None), // bare `.key` TLD isn't a routable petname
+        ];
+        for (qname, expected) in cases {
+            assert_eq!(classify(qname), *expected, "classify({qname:?})");
+        }
     }
 
     #[test]
