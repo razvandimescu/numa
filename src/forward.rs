@@ -213,7 +213,26 @@ pub fn build_https_client_with_resolver(
     builder.build().unwrap_or_default()
 }
 
+/// Install the process-default rustls `CryptoProvider` (ring), idempotently.
+/// reqwest 0.13's `rustls-no-provider` ships no provider, so one must be
+/// installed before the first TLS handshake or `Client::build()` panics. We pin
+/// ring (not 0.13's aws-lc-rs default) to keep the armv6 cross-build, which has
+/// no C toolchain for aws-lc-sys. The `Err` (already installed) is ignored.
+pub(crate) fn ensure_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
+/// A bare reqwest client with the ring provider ensured — used by tests that
+/// want `Client::new()` semantics, so the provider is installed regardless of
+/// test execution order.
+#[cfg(test)]
+pub(crate) fn default_client() -> reqwest::Client {
+    ensure_crypto_provider();
+    reqwest::Client::builder().build().unwrap_or_default()
+}
+
 fn https_client_builder(pool_max_idle_per_host: usize) -> reqwest::ClientBuilder {
+    ensure_crypto_provider();
     reqwest::Client::builder()
         .use_rustls_tls()
         .http2_initial_stream_window_size(65_535)
@@ -625,7 +644,7 @@ mod tests {
     fn upstream_display_doh() {
         let u = Upstream::Doh {
             url: "https://dns.quad9.net/dns-query".to_string(),
-            client: reqwest::Client::new(),
+            client: crate::forward::default_client(),
         };
         assert_eq!(u.to_string(), "https://dns.quad9.net/dns-query");
     }
@@ -680,7 +699,7 @@ mod tests {
 
         let upstream = Upstream::Doh {
             url: format!("http://{}/dns-query", addr),
-            client: reqwest::Client::new(),
+            client: crate::forward::default_client(),
         };
 
         let result = forward_query(&query, &upstream, Duration::from_secs(2))
@@ -719,7 +738,7 @@ mod tests {
 
         let upstream = Upstream::Doh {
             url: format!("http://{}/dns-query", addr),
-            client: reqwest::Client::new(),
+            client: crate::forward::default_client(),
         };
 
         let result = forward_query(&make_query(), &upstream, Duration::from_secs(2)).await;
@@ -742,7 +761,7 @@ mod tests {
 
         let upstream = Upstream::Doh {
             url: format!("http://{}/dns-query", addr),
-            client: reqwest::Client::new(),
+            client: crate::forward::default_client(),
         };
 
         let result = forward_query(&make_query(), &upstream, Duration::from_millis(100)).await;
@@ -829,7 +848,7 @@ mod tests {
             vec![Upstream::Udp(bad_udp_addr)],
             vec![Upstream::Doh {
                 url: format!("http://{}/dns-query", doh_addr),
-                client: reqwest::Client::new(),
+                client: crate::forward::default_client(),
             }],
         );
 
@@ -914,7 +933,7 @@ mod tests {
                 Upstream::Udp("127.0.0.1:1".parse().unwrap()), // will fail
                 Upstream::Doh {
                     url: format!("http://{}/dns-query", good_addr),
-                    client: reqwest::Client::new(),
+                    client: crate::forward::default_client(),
                 },
             ],
             vec![],

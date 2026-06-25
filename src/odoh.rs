@@ -417,6 +417,7 @@ mod tests {
         // Point the cache at a host that does not exist so the fetch fails
         // deterministically; this exercises the backoff wiring without a
         // network round-trip succeeding.
+        crate::forward::ensure_crypto_provider();
         let cache = OdohConfigCache::new(
             "odoh-target.invalid".to_string(),
             reqwest::Client::builder()
