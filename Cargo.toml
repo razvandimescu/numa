@@ -37,8 +37,7 @@ base64 = "0.22"
 rand_core = { version = "0.9", features = ["os_rng"] }
 rustls-pemfile = "2.2.0"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
-webpki-roots = "1"
-# Bundled Mozilla roots (DER) for reqwest — see forward::bundled_roots.
+# Bundled Mozilla roots (DER) for both the reqwest and DoT TLS paths — see forward.rs.
 webpki-root-certs = "1"
 proxy-header = { version = "0.1", features = ["tokio"] }
 ipnet = { version = "2", features = ["serde"] }

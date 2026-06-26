@@ -250,7 +250,7 @@ fn https_client_builder(pool_max_idle_per_host: usize) -> reqwest::ClientBuilder
 fn build_dot_connector() -> Result<tokio_rustls::TlsConnector> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let mut root_store = rustls::RootCertStore::empty();
-    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    root_store.add_parsable_certificates(webpki_root_certs::TLS_SERVER_ROOT_CERTS.iter().cloned());
     let config = rustls::ClientConfig::builder()
         .with_root_certificates(root_store)
         .with_no_client_auth();
