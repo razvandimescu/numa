@@ -110,6 +110,11 @@ pub struct ServerConfig {
     /// CIDR allowlist applied at every DNS surface. Empty = disabled.
     #[serde(default)]
     pub allow_from: Vec<String>,
+    /// Shared secret guarding the HTTP control plane (dashboard + REST API)
+    /// for non-loopback peers. Overridden by `NUMA_API_TOKEN`. Loopback is
+    /// always allowed. Empty = none (only valid for a loopback `api_bind_addr`).
+    #[serde(default)]
+    pub api_token: Option<String>,
     /// DNS rebinding protection (#240). When true, strip private/special-use
     /// addresses (loopback, RFC 1918, link-local, ULA, `0.0.0.0/8`) from
     /// answers resolved via the upstream/recursive/cache paths, so a public
@@ -137,6 +142,7 @@ impl Default for ServerConfig {
             filter_aaaa: false,
             proxy_protocol: ProxyProtocolConfig::default(),
             allow_from: Vec::new(),
+            api_token: None,
             rebind_protect: false,
             rebind_allowlist: Vec::new(),
             rebind_private_ranges: Vec::new(),

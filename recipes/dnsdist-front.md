@@ -60,6 +60,27 @@ hardened *public recursive* resolver isn't turnkey yet (still needs response-rat
 with TC-slip, RFC 8482 ANY-refusal, DNS Cookies, and `allow_recursion` split from
 `allow_query`), so keep the ACL scoped until then.
 
+## Protecting the control plane (dashboard + REST API)
+
+dnsdist fronts the *resolver* (`:53`/DoH/DoT), not Numa's HTTP control plane — the dashboard
+and REST API on `api_port` (default 5380), which can rewrite blocklists and overrides. Treat
+it as an admin panel; locking it down and exposing the resolver are independent decisions.
+
+`api_bind_addr` defaults to `127.0.0.1`, and loopback is always allowed without a credential.
+For a remote node, keep it there and reach it over a private network (Tailscale/WireGuard) or
+an SSH tunnel. If you must bind a non-loopback address, a token is **mandatory** — Numa
+refuses to start otherwise:
+
+```toml
+[server]
+api_bind_addr = "0.0.0.0"
+api_token = "…"               # `openssl rand -hex 32`; or pass NUMA_API_TOKEN at runtime
+```
+
+Browsers get an HTTP Basic prompt (any username, token as the password); scripts send
+`Authorization: Bearer <token>`. The token is drive-by protection, not encryption — the API
+is plain HTTP, so terminate TLS in front for internet exposure. `/health` stays open for probes.
+
 ## Numa config
 
 Unlike Unbound's dedicated `proxy-protocol-port`, Numa has **no separate proxy port**.

@@ -329,11 +329,34 @@ fn spawn_background_services(
 
     let api_ctx = Arc::clone(ctx);
     let api_addr: SocketAddr = format!("{}:{}", config.server.api_bind_addr, api_port).parse()?;
+    let api_token = crate::api_auth::ApiAuth::resolve_token(&config.server.api_token);
+    let api_auth = crate::api_auth::ApiAuth::new(api_token);
+    if !api_addr.ip().is_loopback() && !api_auth.is_configured() {
+        return Err(format!(
+            "[server] api_bind_addr {api_addr} exposes the dashboard/REST control plane to \
+             non-loopback peers with no credential. Set [server] api_token (generate one with \
+             `openssl rand -hex 32`, or pass it via the NUMA_API_TOKEN env var), or bind \
+             api_bind_addr to 127.0.0.1 and reach it over Tailscale/WireGuard/SSH. See \
+             recipes/dnsdist-front.md."
+        )
+        .into());
+    }
+    if api_auth.is_configured() {
+        info!("HTTP API authentication enabled for non-loopback peers");
+    }
     tokio::spawn(async move {
-        let app = crate::api::router(api_ctx);
+        let app = crate::api::router(api_ctx).layer(axum::middleware::from_fn_with_state(
+            api_auth,
+            crate::api_auth::require_auth,
+        ));
         let listener = tokio::net::TcpListener::bind(api_addr).await.unwrap();
         info!("HTTP API listening on {}", api_addr);
-        axum::serve(listener, app).await.unwrap();
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
 
     // Mobile API: read-only subset for iOS/Android companion apps, LAN-bound
