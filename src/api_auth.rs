@@ -41,7 +41,6 @@ impl ApiAuth {
             .or_else(|| config_token.clone())
     }
 
-    /// Drives the startup guard: a non-loopback bind with no token is refused.
     pub fn is_configured(&self) -> bool {
         self.token.is_some()
     }
@@ -72,8 +71,7 @@ fn effective_peer(peer: IpAddr, headers: &HeaderMap) -> IpAddr {
         .unwrap_or(peer)
 }
 
-/// Token from an `Authorization` header: `Bearer <token>`, or `Basic
-/// <base64(user:token)>` where the password is the token (username ignored).
+/// For `Basic <base64(user:token)>`, the password is the token (username ignored).
 fn credential(headers: &HeaderMap) -> Option<String> {
     let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     if let Some(token) = value.strip_prefix("Bearer ") {
@@ -94,7 +92,6 @@ fn ct_eq(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-/// Auth layer over the whole router; `/health` is exempt for liveness probes.
 pub async fn require_auth(
     State(auth): State<ApiAuth>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
