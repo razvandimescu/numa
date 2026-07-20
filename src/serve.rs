@@ -329,9 +329,10 @@ fn spawn_background_services(
 
     let api_ctx = Arc::clone(ctx);
     let api_addr: SocketAddr = format!("{}:{}", config.server.api_bind_addr, api_port).parse()?;
-    let api_token = crate::api_auth::ApiAuth::resolve_token(&config.server.api_token);
-    let api_auth = crate::api_auth::ApiAuth::new(api_token);
-    if !api_addr.ip().is_loopback() && !api_auth.is_configured() {
+    let api_auth = crate::api_auth::ApiAuth::from_config(&config.server.api_token);
+    if api_auth.is_configured() {
+        info!("HTTP API authentication enabled for non-loopback peers");
+    } else if !api_addr.ip().is_loopback() {
         return Err(format!(
             "[server] api_bind_addr {api_addr} exposes the dashboard/REST control plane to \
              non-loopback peers with no credential. Set [server] api_token (generate one with \
@@ -340,9 +341,6 @@ fn spawn_background_services(
              recipes/dnsdist-front.md."
         )
         .into());
-    }
-    if api_auth.is_configured() {
-        info!("HTTP API authentication enabled for non-loopback peers");
     }
     tokio::spawn(async move {
         let app = crate::api::router(api_ctx).layer(axum::middleware::from_fn_with_state(

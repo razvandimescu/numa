@@ -27,18 +27,20 @@ pub struct ApiAuth {
 }
 
 impl ApiAuth {
-    pub fn new(token: Option<String>) -> Self {
+    fn new(token: Option<String>) -> Self {
         ApiAuth {
             token: token.filter(|t| !t.is_empty()),
         }
     }
 
     /// `NUMA_API_TOKEN` wins over config so secrets can be injected at runtime.
-    pub fn resolve_token(config_token: &Option<String>) -> Option<String> {
-        std::env::var(TOKEN_ENV)
-            .ok()
-            .filter(|t| !t.is_empty())
-            .or_else(|| config_token.clone())
+    pub fn from_config(config_token: &Option<String>) -> Self {
+        Self::new(
+            std::env::var(TOKEN_ENV)
+                .ok()
+                .filter(|t| !t.is_empty())
+                .or_else(|| config_token.clone()),
+        )
     }
 
     pub fn is_configured(&self) -> bool {
