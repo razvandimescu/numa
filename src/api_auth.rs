@@ -2,8 +2,10 @@
 //! mutate how Numa resolves DNS. Loopback is always allowed (local dashboard +
 //! CLI), mirroring `acl.rs`; any other peer must present `api_token` via HTTP
 //! `Bearer` or `Basic` (so browsers prompt natively). The token is drive-by
-//! protection, not wire encryption — the API is plain HTTP, so for internet
-//! exposure terminate TLS in front. See `recipes/dnsdist-front.md`.
+//! protection, not wire encryption — the API is plain HTTP. Because loopback is
+//! exempt, a same-host TLS terminator pointed at the loopback API forwards
+//! *unauthenticated*; front it via a non-loopback bind instead. See
+//! `recipes/dnsdist-front.md`.
 
 use std::net::{IpAddr, SocketAddr};
 

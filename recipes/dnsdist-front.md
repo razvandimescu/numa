@@ -79,7 +79,23 @@ api_token = "…"               # `openssl rand -hex 32`; or pass NUMA_API_TOKEN
 
 Browsers get an HTTP Basic prompt (any username, token as the password); scripts send
 `Authorization: Bearer <token>`. The token is drive-by protection, not encryption — the API
-is plain HTTP, so terminate TLS in front for internet exposure. `/health` stays open for probes.
+is plain HTTP. `/health` stays open for probes.
+
+**Loopback is exempt from the token**, which makes one TLS-termination pattern a trap: a
+same-host reverse proxy (nginx/caddy) pointed at `127.0.0.1:5380` connects *from* loopback,
+so every request it forwards is treated as local and skips the token entirely. Don't do that.
+For HTTPS with the token still enforced, bind the API to the node's own interface and point
+the front proxy at *that* address, not loopback:
+
+```toml
+[server]
+api_bind_addr = "10.0.0.6"     # the node's LAN/tailnet IP, not 127.0.0.1
+api_token = "…"
+```
+
+Now the proxy's forwarded connection arrives as a non-loopback peer, so Numa checks the token
+(pass the client's `Authorization` header straight through). Alternatively, let the front
+proxy do the auth itself and keep the API on loopback.
 
 ## Numa config
 
