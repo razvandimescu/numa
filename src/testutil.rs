@@ -149,6 +149,41 @@ pub async fn mock_upstream_raw(mut bytes: Vec<u8>) -> SocketAddr {
     addr
 }
 
+/// Spawn a UDP socket that answers every query by qname from the given table
+/// (patching the query ID) — for chase tests where follow-up sub-queries hit
+/// the same upstream.
+pub async fn mock_upstream_by_qname(responses: Vec<(String, DnsPacket)>) -> SocketAddr {
+    let table: Vec<(String, Vec<u8>)> = responses
+        .into_iter()
+        .map(|(name, pkt)| {
+            let mut out = BytePacketBuffer::new();
+            pkt.write(&mut out).unwrap();
+            (name, out.filled().to_vec())
+        })
+        .collect();
+    let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addr = sock.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut buf = [0u8; 512];
+        while let Ok((n, src)) = sock.recv_from(&mut buf).await {
+            let mut query_buf = BytePacketBuffer::from_bytes(&buf[..n]);
+            let Ok(query) = DnsPacket::from_buffer(&mut query_buf) else {
+                continue;
+            };
+            let Some(qname) = query.questions.first().map(|q| q.name.clone()) else {
+                continue;
+            };
+            if let Some((_, bytes)) = table.iter().find(|(name, _)| *name == qname) {
+                let mut reply = bytes.clone();
+                reply[0] = buf[0];
+                reply[1] = buf[1];
+                let _ = sock.send_to(&reply, src).await;
+            }
+        }
+    });
+    addr
+}
+
 /// UDP socket that accepts connections but never replies.
 /// Useful as an upstream that triggers timeouts.
 pub fn blackhole_upstream() -> SocketAddr {

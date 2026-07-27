@@ -282,38 +282,53 @@ async fn resolve_with_cname_chase(
         {
             return (resp, path, dnssec, ut);
         }
-        let Some(target) = crate::recursive::extract_cname_target(&resp, &current_qname) else {
+        // Follow every link already present before sub-querying: upstreams
+        // return multiple chain links per response, and re-querying an
+        // intermediate name would append those links a second time (Chrome
+        // rejects responses with duplicate CNAMEs as malformed).
+        let mut advanced = false;
+        while let Some(target) = crate::recursive::extract_cname_target(&resp, &current_qname) {
+            if visited.len() > crate::recursive::MAX_CNAME_DEPTH as usize
+                || !visited.insert(target.to_ascii_lowercase())
+            {
+                return (
+                    DnsPacket::response_from(query, ResultCode::SERVFAIL),
+                    path,
+                    dnssec,
+                    ut,
+                );
+            }
+            current_qname = target;
+            advanced = true;
+        }
+        if !advanced {
             return (resp, path, dnssec, ut);
-        };
-        if visited.len() > crate::recursive::MAX_CNAME_DEPTH as usize
-            || !visited.insert(target.to_ascii_lowercase())
-        {
-            return (
-                DnsPacket::response_from(query, ResultCode::SERVFAIL),
-                path,
-                dnssec,
-                ut,
-            );
         }
 
-        let sub_query = DnsPacket::query(query.header.id, &target, qtype);
+        let sub_query = DnsPacket::query(query.header.id, &current_qname, qtype);
         let mut sub_buf = BytePacketBuffer::new();
         sub_query
             .write(&mut sub_buf)
             .expect("sub-query serialization");
         let (sub_resp, _, _, sub_ut) =
-            match resolve_local(&sub_query, src_addr, &target, qtype, ctx) {
+            match resolve_local(&sub_query, src_addr, &current_qname, qtype, ctx) {
                 Some((r, p, d)) => (r, p, d, None),
                 None => {
-                    resolve_remote(&sub_query, sub_buf.filled(), src_addr, &target, qtype, ctx)
-                        .await
+                    resolve_remote(
+                        &sub_query,
+                        sub_buf.filled(),
+                        src_addr,
+                        &current_qname,
+                        qtype,
+                        ctx,
+                    )
+                    .await
                 }
             };
 
         resp.answers.extend(sub_resp.answers);
         resp.header.rescode = sub_resp.header.rescode;
         ut = ut.or(sub_ut);
-        current_qname = target;
     }
 }
 
@@ -2802,6 +2817,64 @@ mod tests {
         );
         assert!(
             matches!(&resp.answers[1], DnsRecord::A { addr, .. } if *addr == Ipv4Addr::new(93, 184, 216, 34))
+        );
+    }
+
+    /// Amazon-style NODATA behind a multi-link CNAME chain: the upstream
+    /// returns both links in one response, and the sub-query for the
+    /// intermediate name re-answers the second link. The chase must not
+    /// append it twice — Chrome rejects duplicate CNAMEs as malformed
+    /// (eu.primevideo.com regression).
+    #[tokio::test]
+    async fn cname_chase_multi_link_response_has_no_duplicate_links() {
+        let mut chain = DnsPacket::new();
+        chain.header.response = true;
+        chain.header.rescode = ResultCode::NOERROR;
+        chain.answers.push(crate::testutil::cname_record(
+            "eu.video.test",
+            "tp.video.test",
+            300,
+        ));
+        chain.answers.push(crate::testutil::cname_record(
+            "tp.video.test",
+            "cdn.example.net",
+            300,
+        ));
+
+        let mut tail = DnsPacket::new();
+        tail.header.response = true;
+        tail.header.rescode = ResultCode::NOERROR;
+        tail.answers.push(crate::testutil::cname_record(
+            "tp.video.test",
+            "cdn.example.net",
+            300,
+        ));
+
+        let mut nodata = DnsPacket::new();
+        nodata.header.response = true;
+        nodata.header.rescode = ResultCode::NOERROR;
+
+        let upstream = crate::testutil::mock_upstream_by_qname(vec![
+            ("eu.video.test".to_string(), chain),
+            ("tp.video.test".to_string(), tail),
+            ("cdn.example.net".to_string(), nodata),
+        ])
+        .await;
+
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.upstream_pool = Mutex::new(crate::forward::UpstreamPool::new(
+            vec![crate::forward::Upstream::Udp(upstream)],
+            vec![],
+        ));
+        let ctx = Arc::new(ctx);
+
+        let (resp, _) = resolve_in_test(&ctx, "eu.video.test", QueryType::AAAA).await;
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+        assert_eq!(
+            resp.answers.len(),
+            2,
+            "chain must appear exactly once: {:?}",
+            resp.answers
         );
     }
 }
