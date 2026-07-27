@@ -267,8 +267,7 @@ async fn resolve_with_cname_chase(
     DnssecStatus,
     Option<crate::stats::UpstreamTransport>,
 ) {
-    let mut visited = HashSet::new();
-    visited.insert(qname.to_ascii_lowercase());
+    let mut visited = HashSet::from([qname.to_ascii_lowercase()]);
 
     let (mut resp, path, dnssec, mut ut) = match resolve_local(query, src_addr, qname, qtype, ctx) {
         Some((r, p, d)) => (r, p, d, None),
