@@ -250,7 +250,12 @@ pub(crate) fn resolve_iterative<'a>(
             }
 
             if !response.answers.is_empty() {
-                let has_target = response.answers.iter().any(|r| r.query_type() == qtype);
+                // Wire-number comparison: HTTPS/TXT/… parse as UNKNOWN(n),
+                // which never `==` the question's qtype.
+                let has_target = response
+                    .answers
+                    .iter()
+                    .any(|r| r.query_type().to_num() == qtype.to_num());
 
                 if has_target || qtype == QueryType::CNAME {
                     cache.write().unwrap().insert(qname, qtype, &response);

@@ -277,7 +277,12 @@ async fn resolve_with_cname_chase(
     let mut current_qname = qname.to_string();
 
     loop {
-        if resp.answers.iter().any(|r| r.query_type() == qtype)
+        // Compare wire numbers: types without a DnsRecord variant (HTTPS,
+        // TXT, …) parse as UNKNOWN(n), which never `==` the question's qtype.
+        if resp
+            .answers
+            .iter()
+            .any(|r| r.query_type().to_num() == qtype.to_num())
             || resp.header.rescode != ResultCode::NOERROR
         {
             return (resp, path, dnssec, ut);
@@ -2874,6 +2879,62 @@ mod tests {
             resp.answers.len(),
             2,
             "chain must appear exactly once: {:?}",
+            resp.answers
+        );
+    }
+
+    /// HTTPS (type 65) answers parse as `DnsRecord::UNKNOWN`, so the chase's
+    /// termination check must compare wire type numbers — `UNKNOWN(65)` never
+    /// `==` `QueryType::HTTPS`, which kept the chase running past a complete
+    /// answer and re-appended the terminal record (eu.primevideo.com
+    /// regression, second half).
+    #[tokio::test]
+    async fn cname_chase_terminates_on_unknown_variant_record_type() {
+        let https_terminal = DnsRecord::UNKNOWN {
+            domain: "cdn.example.net".to_string(),
+            qtype: 65,
+            data: vec![0, 1, 0, 0],
+            ttl: 300,
+        };
+        let mut chain = DnsPacket::new();
+        chain.header.response = true;
+        chain.header.rescode = ResultCode::NOERROR;
+        chain.answers.push(crate::testutil::cname_record(
+            "eu.video.test",
+            "tp.video.test",
+            300,
+        ));
+        chain.answers.push(crate::testutil::cname_record(
+            "tp.video.test",
+            "cdn.example.net",
+            300,
+        ));
+        chain.answers.push(https_terminal.clone());
+
+        let mut tail = DnsPacket::new();
+        tail.header.response = true;
+        tail.header.rescode = ResultCode::NOERROR;
+        tail.answers.push(https_terminal);
+
+        let upstream = crate::testutil::mock_upstream_by_qname(vec![
+            ("eu.video.test".to_string(), chain),
+            ("cdn.example.net".to_string(), tail),
+        ])
+        .await;
+
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.upstream_pool = Mutex::new(crate::forward::UpstreamPool::new(
+            vec![crate::forward::Upstream::Udp(upstream)],
+            vec![],
+        ));
+        let ctx = Arc::new(ctx);
+
+        let (resp, _) = resolve_in_test(&ctx, "eu.video.test", QueryType::HTTPS).await;
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+        assert_eq!(
+            resp.answers.len(),
+            3,
+            "complete answer must not be chased: {:?}",
             resp.answers
         );
     }
