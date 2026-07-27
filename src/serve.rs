@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 
 use crate::blocklist::{download_blocklists, parse_blocklist, BlocklistStore};
 use crate::bootstrap_resolver::NumaResolver;
@@ -329,18 +329,21 @@ fn spawn_background_services(
 
     let api_ctx = Arc::clone(ctx);
     let api_addr: SocketAddr = format!("{}:{}", config.server.api_bind_addr, api_port).parse()?;
-    let api_auth = crate::api_auth::ApiAuth::from_config(&config.server.api_token);
-    if api_auth.is_configured() {
-        info!("HTTP API authentication enabled for non-loopback peers");
-    } else if !api_addr.ip().is_loopback() {
-        return Err(format!(
-            "[server] api_bind_addr {api_addr} exposes the dashboard/REST control plane to \
-             non-loopback peers with no credential. Set [server] api_token (generate one with \
-             `openssl rand -hex 32`, or pass it via the NUMA_API_TOKEN env var), or bind \
-             api_bind_addr to 127.0.0.1 and reach it over Tailscale/WireGuard/SSH. See \
-             recipes/dnsdist-front.md."
-        )
-        .into());
+    let (api_auth, minted) =
+        crate::api_auth::ensure_token(config.server.api_token.as_deref(), &ctx.data_dir);
+    if let Some(m) = minted {
+        info!(
+            "generated an API token for the HTTP control plane: {}",
+            m.token
+        );
+        match m.stored {
+            Some(path) => info!("API token stored at {}", path.display()),
+            None => warn!(
+                "could not persist the API token under {} — it will change on restart; \
+                 set [server] api_token or NUMA_API_TOKEN to pin it",
+                ctx.data_dir.display()
+            ),
+        }
     }
     tokio::spawn(async move {
         let app = crate::api::router(api_ctx).layer(axum::middleware::from_fn_with_state(

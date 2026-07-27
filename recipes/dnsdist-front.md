@@ -68,8 +68,19 @@ it as an admin panel; locking it down and exposing the resolver are independent 
 
 `api_bind_addr` defaults to `127.0.0.1`, and loopback is always allowed without a credential.
 For a remote node, keep it there and reach it over a private network (Tailscale/WireGuard) or
-an SSH tunnel. If you must bind a non-loopback address, a token is **mandatory** — Numa
-refuses to start otherwise:
+an SSH tunnel.
+
+Every non-loopback client needs a token, and one always exists: if you set neither
+`api_token` nor `NUMA_API_TOKEN`, Numa mints one on first start, logs it once, and stores it
+owner-only as `api_token` in `data_dir`. No deployment is unauthenticated, and none fails to
+start over it — a resolver that won't run costs the host its DNS. To read one back:
+
+```sh
+cat /var/lib/numa/api_token                        # or data_dir/api_token
+docker compose exec numa cat /var/lib/numa/api_token
+```
+
+Pin your own instead when you want it in config management:
 
 ```toml
 [server]
@@ -96,6 +107,11 @@ api_token = "…"
 Now the proxy's forwarded connection arrives as a non-loopback peer, so Numa checks the token
 (pass the client's `Authorization` header straight through). Alternatively, let the front
 proxy do the auth itself and keep the API on loopback.
+
+The same trap has a second door: a front end on the *same host* reaching the dashboard through
+Numa's `.numa` proxy on `:443` also arrives from loopback, and with PROXY protocol off (or a
+`LOCAL` command) Numa has no truer address to attribute the request to. Run the front end on a
+different host, or enable `[server.proxy_protocol]` so the real client IP survives the hop.
 
 ## Numa config
 

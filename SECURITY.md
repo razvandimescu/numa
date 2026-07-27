@@ -39,8 +39,11 @@ Out of scope:
 - Vulnerabilities in third-party crates — those are tracked by `cargo audit`
   (run on every CI build) and Dependabot. Report an unpatched dependency
   advisory only if Numa's own use of it is exploitable.
-- Deployment misconfiguration (e.g. exposing the plaintext control plane to the
-  internet without a token or TLS — see `recipes/dnsdist-front.md`).
+- Deployment misconfiguration in a config *you* wrote — e.g. terminating TLS in
+  front of the control plane incorrectly, or publishing it to the internet on
+  purpose (see `recipes/dnsdist-front.md`). A default or shipped config that
+  leaves the control plane reachable without a credential is **in scope**, not
+  misconfiguration.
 - Denial of service that requires privileged local access.
 
 ## What we run

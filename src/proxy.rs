@@ -193,12 +193,7 @@ async fn accept_loop_tls(
                 )
                 .fallback(any(proxy_handler))
                 .with_state(proxy_state)
-                .layer(axum::middleware::from_fn(
-                    move |mut req: Request, next: Next| async move {
-                        req.extensions_mut().insert(ConnectInfo(remote_addr));
-                        next.run(req).await
-                    },
-                ));
+                .layer(axum::Extension(ConnectInfo(remote_addr)));
 
             let tls_stream = match acceptor.accept(stream).await {
                 Ok(s) => s,
@@ -440,12 +435,12 @@ async fn proxy_handler(
 
     // Stamp the real client IP so the backend — and the API auth layer, which
     // would otherwise see this loopback hop as exempt — sees the true peer.
-    // Overwrite unconditionally so a client can't smuggle the trusted header.
-    req.headers_mut().remove(crate::api_auth::CLIENT_IP_HEADER);
-    if let Ok(v) = HeaderValue::from_str(&peer.ip().to_canonical().to_string()) {
-        req.headers_mut()
-            .insert(crate::api_auth::CLIENT_IP_HEADER, v);
-    }
+    // `insert` replaces any client-supplied value, so the header can't be smuggled.
+    req.headers_mut().insert(
+        crate::api_auth::CLIENT_IP_HEADER,
+        HeaderValue::from_str(&peer.ip().to_canonical().to_string())
+            .expect("an IP renders as a valid header value"),
+    );
 
     // Check for upgrade request (WebSocket, etc.)
     let is_upgrade = req.headers().get(hyper::header::UPGRADE).is_some();
