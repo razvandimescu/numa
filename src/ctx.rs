@@ -277,48 +277,31 @@ async fn resolve_with_cname_chase(
     let mut current_qname = qname.to_string();
 
     loop {
-        // Compare wire numbers: types without a DnsRecord variant (HTTPS,
-        // TXT, …) parse as UNKNOWN(n), which never `==` the question's qtype.
-        if resp
-            .answers
-            .iter()
-            .any(|r| r.query_type().to_num() == qtype.to_num())
-            || resp.header.rescode != ResultCode::NOERROR
-        {
+        if resp.has_answer_of_type(qtype) || resp.header.rescode != ResultCode::NOERROR {
             return (resp, path, dnssec, ut);
         }
-        // Follow every link already present before sub-querying: upstreams
-        // return multiple chain links per response, and re-querying an
-        // intermediate name would append those links a second time (Chrome
-        // rejects responses with duplicate CNAMEs as malformed).
-        let mut advanced = false;
-        while let Some(target) = crate::recursive::extract_cname_target(&resp, &current_qname) {
-            if visited.len() > crate::recursive::MAX_CNAME_DEPTH as usize
-                || !visited.insert(target.to_ascii_lowercase())
-            {
+        match crate::recursive::follow_cname_links(&resp, &current_qname, &mut visited) {
+            Err(()) => {
                 return (
                     DnsPacket::response_from(query, ResultCode::SERVFAIL),
                     path,
                     dnssec,
                     ut,
-                );
+                )
             }
-            current_qname = target;
-            advanced = true;
-        }
-        if !advanced {
-            return (resp, path, dnssec, ut);
+            Ok(None) => return (resp, path, dnssec, ut),
+            Ok(Some(target)) => current_qname = target,
         }
 
         let sub_query = DnsPacket::query(query.header.id, &current_qname, qtype);
-        let mut sub_buf = BytePacketBuffer::new();
-        sub_query
-            .write(&mut sub_buf)
-            .expect("sub-query serialization");
         let (sub_resp, _, _, sub_ut) =
             match resolve_local(&sub_query, src_addr, &current_qname, qtype, ctx) {
                 Some((r, p, d)) => (r, p, d, None),
                 None => {
+                    let mut sub_buf = BytePacketBuffer::new();
+                    sub_query
+                        .write(&mut sub_buf)
+                        .expect("sub-query serialization");
                     resolve_remote(
                         &sub_query,
                         sub_buf.filled(),
@@ -2825,6 +2808,15 @@ mod tests {
         );
     }
 
+    async fn ctx_with_upstream(upstream: SocketAddr) -> Arc<ServerCtx> {
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.upstream_pool = Mutex::new(crate::forward::UpstreamPool::new(
+            vec![crate::forward::Upstream::Udp(upstream)],
+            vec![],
+        ));
+        Arc::new(ctx)
+    }
+
     /// Amazon-style NODATA behind a multi-link CNAME chain: the upstream
     /// returns both links in one response, and the sub-query for the
     /// intermediate name re-answers the second link. The chase must not
@@ -2832,46 +2824,24 @@ mod tests {
     /// (eu.primevideo.com regression).
     #[tokio::test]
     async fn cname_chase_multi_link_response_has_no_duplicate_links() {
-        let mut chain = DnsPacket::new();
-        chain.header.response = true;
-        chain.header.rescode = ResultCode::NOERROR;
-        chain.answers.push(crate::testutil::cname_record(
-            "eu.video.test",
-            "tp.video.test",
-            300,
-        ));
-        chain.answers.push(crate::testutil::cname_record(
+        let chain = crate::testutil::noerror_response(vec![
+            crate::testutil::cname_record("eu.video.test", "tp.video.test", 300),
+            crate::testutil::cname_record("tp.video.test", "cdn.example.net", 300),
+        ]);
+        let tail = crate::testutil::noerror_response(vec![crate::testutil::cname_record(
             "tp.video.test",
             "cdn.example.net",
             300,
-        ));
-
-        let mut tail = DnsPacket::new();
-        tail.header.response = true;
-        tail.header.rescode = ResultCode::NOERROR;
-        tail.answers.push(crate::testutil::cname_record(
-            "tp.video.test",
-            "cdn.example.net",
-            300,
-        ));
-
-        let mut nodata = DnsPacket::new();
-        nodata.header.response = true;
-        nodata.header.rescode = ResultCode::NOERROR;
+        )]);
+        let nodata = crate::testutil::noerror_response(vec![]);
 
         let upstream = crate::testutil::mock_upstream_by_qname(vec![
-            ("eu.video.test".to_string(), chain),
-            ("tp.video.test".to_string(), tail),
-            ("cdn.example.net".to_string(), nodata),
+            ("eu.video.test", chain),
+            ("tp.video.test", tail),
+            ("cdn.example.net", nodata),
         ])
         .await;
-
-        let mut ctx = crate::testutil::test_ctx().await;
-        ctx.upstream_pool = Mutex::new(crate::forward::UpstreamPool::new(
-            vec![crate::forward::Upstream::Udp(upstream)],
-            vec![],
-        ));
-        let ctx = Arc::new(ctx);
+        let ctx = ctx_with_upstream(upstream).await;
 
         let (resp, _) = resolve_in_test(&ctx, "eu.video.test", QueryType::AAAA).await;
         assert_eq!(resp.header.rescode, ResultCode::NOERROR);
@@ -2896,38 +2866,19 @@ mod tests {
             data: vec![0, 1, 0, 0],
             ttl: 300,
         };
-        let mut chain = DnsPacket::new();
-        chain.header.response = true;
-        chain.header.rescode = ResultCode::NOERROR;
-        chain.answers.push(crate::testutil::cname_record(
-            "eu.video.test",
-            "tp.video.test",
-            300,
-        ));
-        chain.answers.push(crate::testutil::cname_record(
-            "tp.video.test",
-            "cdn.example.net",
-            300,
-        ));
-        chain.answers.push(https_terminal.clone());
-
-        let mut tail = DnsPacket::new();
-        tail.header.response = true;
-        tail.header.rescode = ResultCode::NOERROR;
-        tail.answers.push(https_terminal);
+        let chain = crate::testutil::noerror_response(vec![
+            crate::testutil::cname_record("eu.video.test", "tp.video.test", 300),
+            crate::testutil::cname_record("tp.video.test", "cdn.example.net", 300),
+            https_terminal.clone(),
+        ]);
+        let tail = crate::testutil::noerror_response(vec![https_terminal]);
 
         let upstream = crate::testutil::mock_upstream_by_qname(vec![
-            ("eu.video.test".to_string(), chain),
-            ("cdn.example.net".to_string(), tail),
+            ("eu.video.test", chain),
+            ("cdn.example.net", tail),
         ])
         .await;
-
-        let mut ctx = crate::testutil::test_ctx().await;
-        ctx.upstream_pool = Mutex::new(crate::forward::UpstreamPool::new(
-            vec![crate::forward::Upstream::Udp(upstream)],
-            vec![],
-        ));
-        let ctx = Arc::new(ctx);
+        let ctx = ctx_with_upstream(upstream).await;
 
         let (resp, _) = resolve_in_test(&ctx, "eu.video.test", QueryType::HTTPS).await;
         assert_eq!(resp.header.rescode, ResultCode::NOERROR);

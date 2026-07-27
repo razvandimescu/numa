@@ -93,6 +93,14 @@ impl DnsPacket {
         self.resources.iter_mut().for_each(&mut f);
     }
 
+    /// Compares wire numbers: types without a DnsRecord variant (HTTPS,
+    /// TXT, …) parse as UNKNOWN(n), which never `==` a named QueryType.
+    pub fn has_answer_of_type(&self, qtype: crate::question::QueryType) -> bool {
+        self.answers
+            .iter()
+            .any(|r| r.query_type().to_num() == qtype.to_num())
+    }
+
     pub fn response_from(query: &DnsPacket, rescode: crate::header::ResultCode) -> DnsPacket {
         let mut resp = DnsPacket::new();
         resp.header.id = query.header.id;

@@ -99,31 +99,28 @@ pub fn cname_record(domain: &str, host: &str, ttl: u32) -> DnsRecord {
     }
 }
 
-/// Build a NOERROR response containing a single A record — the shape used
-/// repeatedly by pipeline/forwarding tests to seed `mock_upstream`.
-pub fn a_record_response(domain: &str, addr: Ipv4Addr, ttl: u32) -> DnsPacket {
+/// Build a NOERROR response with the given answer records.
+pub fn noerror_response(answers: Vec<DnsRecord>) -> DnsPacket {
     let mut pkt = DnsPacket::new();
     pkt.header.response = true;
     pkt.header.rescode = ResultCode::NOERROR;
-    pkt.answers.push(DnsRecord::A {
-        domain: domain.to_string(),
-        addr,
-        ttl,
-    });
+    pkt.answers = answers;
     pkt
+}
+
+/// Build a NOERROR response containing a single A record — the shape used
+/// repeatedly by pipeline/forwarding tests to seed `mock_upstream`.
+pub fn a_record_response(domain: &str, addr: Ipv4Addr, ttl: u32) -> DnsPacket {
+    noerror_response(vec![a_record(domain, addr, ttl)])
 }
 
 /// AAAA counterpart of `a_record_response`, for filter_aaaa pipeline tests.
 pub fn aaaa_record_response(domain: &str, addr: std::net::Ipv6Addr, ttl: u32) -> DnsPacket {
-    let mut pkt = DnsPacket::new();
-    pkt.header.response = true;
-    pkt.header.rescode = ResultCode::NOERROR;
-    pkt.answers.push(DnsRecord::AAAA {
+    noerror_response(vec![DnsRecord::AAAA {
         domain: domain.to_string(),
         addr,
         ttl,
-    });
-    pkt
+    }])
 }
 
 /// Spawn a UDP socket that replies to the first DNS query with the given
@@ -152,13 +149,13 @@ pub async fn mock_upstream_raw(mut bytes: Vec<u8>) -> SocketAddr {
 /// Spawn a UDP socket that answers every query by qname from the given table
 /// (patching the query ID) — for chase tests where follow-up sub-queries hit
 /// the same upstream.
-pub async fn mock_upstream_by_qname(responses: Vec<(String, DnsPacket)>) -> SocketAddr {
+pub async fn mock_upstream_by_qname(responses: Vec<(&str, DnsPacket)>) -> SocketAddr {
     let table: Vec<(String, Vec<u8>)> = responses
         .into_iter()
         .map(|(name, pkt)| {
             let mut out = BytePacketBuffer::new();
             pkt.write(&mut out).unwrap();
-            (name, out.filled().to_vec())
+            (name.to_string(), out.filled().to_vec())
         })
         .collect();
     let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -170,10 +167,10 @@ pub async fn mock_upstream_by_qname(responses: Vec<(String, DnsPacket)>) -> Sock
             let Ok(query) = DnsPacket::from_buffer(&mut query_buf) else {
                 continue;
             };
-            let Some(qname) = query.questions.first().map(|q| q.name.clone()) else {
+            let Some(question) = query.questions.first() else {
                 continue;
             };
-            if let Some((_, bytes)) = table.iter().find(|(name, _)| *name == qname) {
+            if let Some((_, bytes)) = table.iter().find(|(name, _)| *name == question.name) {
                 let mut reply = bytes.clone();
                 reply[0] = buf[0];
                 reply[1] = buf[1];
