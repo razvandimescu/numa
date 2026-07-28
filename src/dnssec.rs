@@ -796,19 +796,7 @@ pub fn name_to_wire(name: &str) -> Vec<u8> {
     buf.write_qname(name)
         .expect("name_to_wire: input must parse as a valid DNS name");
     let mut wire = buf.filled().to_vec();
-
-    let mut i = 0;
-    while i < wire.len() {
-        let label_len = wire[i] as usize;
-        if label_len == 0 {
-            break;
-        }
-        i += 1;
-        let end = i + label_len;
-        wire[i..end].make_ascii_lowercase();
-        i = end;
-    }
-
+    downcase_wire_name(&mut wire, 0);
     wire
 }
 
@@ -970,7 +958,7 @@ fn record_rdata_canonical(record: &DnsRecord) -> Vec<u8> {
             rdata.extend(&minimum.to_be_bytes());
             rdata
         }
-        DnsRecord::UNKNOWN { qtype, data, .. } => canonical_unknown_rdata(*qtype, data),
+        DnsRecord::UNKNOWN { data, .. } => canonical_unknown_rdata(record.query_type(), data),
         DnsRecord::RRSIG { .. } => Vec::new(),
     }
 }
@@ -978,8 +966,8 @@ fn record_rdata_canonical(record: &DnsRecord) -> Vec<u8> {
 // RFC 4034 §6.2: SRV and NAPTR embed a domain name that is downcased in
 // canonical form; every other type carried as UNKNOWN (TXT, HTTPS, SVCB, LOC)
 // signs its rdata verbatim.
-fn canonical_unknown_rdata(qtype: u16, data: &[u8]) -> Vec<u8> {
-    let name_offset = match QueryType::from_num(qtype) {
+fn canonical_unknown_rdata(qtype: QueryType, data: &[u8]) -> Vec<u8> {
+    let name_offset = match qtype {
         QueryType::SRV => Some(6), // priority + weight + port
         QueryType::NAPTR => naptr_replacement_offset(data),
         _ => None,
@@ -2167,20 +2155,10 @@ mod tests {
         );
     }
 
-    fn tamper_signature(rrsig: &mut DnsRecord) {
-        if let DnsRecord::RRSIG { signature, .. } = rrsig {
-            signature[0] ^= 0xFF;
-        }
-    }
-
-    // Issue #324: TXT has no DnsRecord variant, so group_rrsets keys the rrset
-    // UNKNOWN(16) while matching_rrsigs_for compares against from_num(16) = TXT.
-    // No RRSIG ever matches, the rrset is skipped, and a tampered answer
-    // falls through to Secure.
-    #[tokio::test]
-    async fn issue_324_tampered_txt_must_not_report_secure() {
+    // Sign `record` in zone "test" (DNSKEY pre-seeded in cache), corrupt the
+    // signature, and validate the full response.
+    async fn tampered_rrset_status(record: DnsRecord) -> DnssecStatus {
         let (cache, srtt, _stats) = empty_ctx();
-
         let zsk = mk_signer(256);
         cache.write().unwrap().insert(
             "test",
@@ -2188,20 +2166,24 @@ mod tests {
             &mk_pkt(vec![mk_dnskey("test", &zsk)]),
         );
 
-        let txt = DnsRecord::UNKNOWN {
-            domain: "www.test".into(),
-            qtype: QueryType::TXT.to_num(),
-            data: b"\x10v=spf1 -all TAMPERED".to_vec(),
-            ttl: 3600,
-        };
-        let txt_refs = [&txt];
-        let mut rrsig = mk_rrsig(&zsk, "test", QueryType::TXT, &txt_refs);
-        tamper_signature(&mut rrsig);
+        let mut rrsig = mk_rrsig(&zsk, "test", record.query_type(), &[&record]);
+        if let DnsRecord::RRSIG { signature, .. } = &mut rrsig {
+            signature[0] ^= 0xFF;
+        }
 
-        let response = mk_pkt(vec![txt, rrsig]);
-        let (status, _) = validate_response(&response, &cache, &[], &srtt).await;
+        let response = mk_pkt(vec![record, rrsig]);
+        validate_response(&response, &cache, &[], &srtt).await.0
+    }
+
+    // Issue #324: TXT has no DnsRecord variant, so group_rrsets keyed the rrset
+    // UNKNOWN(16) while matching_rrsigs_for compares against from_num(16) = TXT.
+    // No RRSIG ever matched, the rrset was skipped, and a tampered answer
+    // fell through to Secure.
+    #[tokio::test]
+    async fn issue_324_tampered_txt_must_not_report_secure() {
+        let txt = mk_unknown("www.test", QueryType::TXT, b"\x10v=spf1 -all TAMPERED");
         assert_eq!(
-            status,
+            tampered_rrset_status(txt).await,
             DnssecStatus::Bogus,
             "TXT rrset with an unverifiable signature must not report Secure"
         );
@@ -2210,27 +2192,12 @@ mod tests {
     // Control: the identical tamper on a type WITH a DnsRecord variant is caught.
     #[tokio::test]
     async fn issue_324_control_tampered_a_is_bogus() {
-        let (cache, srtt, _stats) = empty_ctx();
-
-        let zsk = mk_signer(256);
-        cache.write().unwrap().insert(
-            "test",
-            QueryType::DNSKEY,
-            &mk_pkt(vec![mk_dnskey("test", &zsk)]),
-        );
-
         let a = DnsRecord::A {
             domain: "www.test".into(),
             addr: "6.6.6.6".parse().unwrap(),
             ttl: 3600,
         };
-        let a_refs = [&a];
-        let mut rrsig = mk_rrsig(&zsk, "test", QueryType::A, &a_refs);
-        tamper_signature(&mut rrsig);
-
-        let response = mk_pkt(vec![a, rrsig]);
-        let (status, _) = validate_response(&response, &cache, &[], &srtt).await;
-        assert_eq!(status, DnssecStatus::Bogus);
+        assert_eq!(tampered_rrset_status(a).await, DnssecStatus::Bogus);
     }
 
     fn mk_unknown(domain: &str, qtype: QueryType, data: &[u8]) -> DnsRecord {
@@ -2296,7 +2263,7 @@ mod tests {
         rdata.extend(b"\x01S\x07SIP+D2U\x00");
         rdata.extend(b"\x03Sip\x04Test\x00");
 
-        let canon = canonical_unknown_rdata(QueryType::NAPTR.to_num(), &rdata);
+        let canon = canonical_unknown_rdata(QueryType::NAPTR, &rdata);
         let mut want = vec![0, 100, 0, 10];
         want.extend(b"\x01S\x07SIP+D2U\x00"); // character-strings untouched
         want.extend(b"\x03sip\x04test\x00");
