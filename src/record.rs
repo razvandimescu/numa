@@ -136,7 +136,7 @@ impl DnsRecord {
             DnsRecord::RRSIG { .. } => QueryType::RRSIG,
             DnsRecord::NSEC { .. } => QueryType::NSEC,
             DnsRecord::NSEC3 { .. } => QueryType::NSEC3,
-            DnsRecord::UNKNOWN { qtype, .. } => QueryType::UNKNOWN(*qtype),
+            DnsRecord::UNKNOWN { qtype, .. } => QueryType::from_num(*qtype),
         }
     }
 
@@ -795,6 +795,17 @@ mod tests {
             .query_type(),
             QueryType::DS
         );
+        // Types without a variant normalize to their named QueryType (issue #324):
+        // DNSSEC rrset grouping and qtype comparisons rely on this.
+        let unknown = |qtype| DnsRecord::UNKNOWN {
+            domain: String::new(),
+            qtype,
+            data: vec![],
+            ttl: 0,
+        };
+        assert_eq!(unknown(16).query_type(), QueryType::TXT);
+        assert_eq!(unknown(65).query_type(), QueryType::HTTPS);
+        assert_eq!(unknown(999).query_type(), QueryType::UNKNOWN(999));
     }
 
     #[test]
