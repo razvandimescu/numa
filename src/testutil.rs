@@ -181,6 +181,38 @@ pub async fn mock_upstream_by_qname(responses: Vec<(&str, DnsPacket)>) -> Socket
     addr
 }
 
+/// Stub UDP upstream: answers every query NOERROR with one A record and
+/// reports each inbound query wire on the returned channel, so tests can
+/// assert what actually went upstream (e.g. the DO bit, issue #191).
+pub async fn stub_udp_upstream() -> (SocketAddr, tokio::sync::mpsc::Receiver<Vec<u8>>) {
+    let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addr = sock.local_addr().unwrap();
+    let (tx, rx) = tokio::sync::mpsc::channel(8);
+    tokio::spawn(async move {
+        let mut buf = [0u8; 1500];
+        while let Ok((n, peer)) = sock.recv_from(&mut buf).await {
+            let wire = buf[..n].to_vec();
+            let mut pb = BytePacketBuffer::from_bytes(&wire);
+            if let Ok(query) = DnsPacket::from_buffer(&mut pb) {
+                let mut resp = DnsPacket::response_from(&query, ResultCode::NOERROR);
+                resp.answers.push(a_record(
+                    "example.com",
+                    Ipv4Addr::new(93, 184, 216, 34),
+                    300,
+                ));
+                let mut out = BytePacketBuffer::new();
+                if resp.write(&mut out).is_ok() {
+                    let _ = sock.send_to(out.filled(), peer).await;
+                }
+            }
+            if tx.send(wire).await.is_err() {
+                break;
+            }
+        }
+    });
+    (addr, rx)
+}
+
 /// UDP socket that accepts connections but never replies.
 /// Useful as an upstream that triggers timeouts.
 pub fn blackhole_upstream() -> SocketAddr {

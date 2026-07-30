@@ -2888,4 +2888,28 @@ mod tests {
             resp.answers
         );
     }
+
+    // ---- DO bit upstream (issue #191) ----
+
+    #[tokio::test]
+    async fn refresh_entry_sends_do_bit_upstream() {
+        let (addr, mut seen) = crate::testutil::stub_udp_upstream().await;
+        let ctx = crate::testutil::test_ctx().await;
+        *ctx.upstream_pool.lock().unwrap() =
+            crate::forward::UpstreamPool::new(vec![crate::forward::Upstream::Udp(addr)], vec![]);
+
+        refresh_entry(&ctx, "example.com", QueryType::A).await;
+
+        let sent = tokio::time::timeout(std::time::Duration::from_secs(1), seen.recv())
+            .await
+            .expect("stub upstream saw the refresh query within 1s")
+            .unwrap();
+        let mut buf = BytePacketBuffer::from_bytes(&sent);
+        let outbound = DnsPacket::from_buffer(&mut buf).unwrap();
+        assert!(
+            outbound.edns.is_some_and(|e| e.do_bit),
+            "cache refresh must query upstream with DO=1, or the first background \
+             refresh silently downgrades an RRSIG-populated entry (issue #191)"
+        );
+    }
 }

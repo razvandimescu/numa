@@ -526,6 +526,20 @@ pub async fn forward_with_hedging_raw(
     }
 }
 
+/// Rewrite a query wire so the outbound OPT carries DO=1, preserving any
+/// client EDNS options. Cached wires then always hold RRSIGs;
+/// `shape_response_for_client` strips them for non-DO clients (issue #191).
+fn ensure_do_bit(wire: &[u8]) -> Result<Vec<u8>> {
+    let mut buf = BytePacketBuffer::from_bytes(wire);
+    let mut pkt = DnsPacket::from_buffer(&mut buf)?;
+    let mut edns = pkt.edns.take().unwrap_or_default();
+    edns.do_bit = true;
+    pkt.edns = Some(edns);
+    let mut out = BytePacketBuffer::new();
+    pkt.write(&mut out)?;
+    Ok(out.filled().to_vec())
+}
+
 pub async fn forward_with_failover_raw(
     wire: &[u8],
     pool: &UpstreamPool,
@@ -533,6 +547,7 @@ pub async fn forward_with_failover_raw(
     timeout_duration: Duration,
     hedge_delay: Duration,
 ) -> Result<Vec<u8>> {
+    let wire = &ensure_do_bit(wire)?[..];
     let mut candidates: Vec<(usize, u64)> = {
         let srtt_read = srtt.read().unwrap();
         pool.primary
@@ -792,6 +807,31 @@ mod tests {
 
         let result = forward_query(&make_query(), &upstream, Duration::from_millis(100)).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn failover_forward_sets_do_bit_upstream() {
+        let (addr, mut seen) = crate::testutil::stub_udp_upstream().await;
+        let pool = UpstreamPool::new(vec![Upstream::Udp(addr)], vec![]);
+        let srtt = std::sync::RwLock::new(crate::srtt::SrttCache::new(true));
+
+        // Client wire with no EDNS at all, the common stub-resolver case.
+        let wire = to_wire(&make_query());
+        forward_with_failover_raw(&wire, &pool, &srtt, Duration::from_secs(1), Duration::ZERO)
+            .await
+            .expect("forward should succeed");
+
+        let sent = tokio::time::timeout(Duration::from_secs(1), seen.recv())
+            .await
+            .expect("stub upstream saw the query within 1s")
+            .unwrap();
+        let mut buf = BytePacketBuffer::from_bytes(&sent);
+        let outbound = DnsPacket::from_buffer(&mut buf).unwrap();
+        assert!(
+            outbound.edns.is_some_and(|e| e.do_bit),
+            "outbound upstream query must carry DO=1 regardless of the client wire, \
+             or the cached answer has no RRSIGs to serve +dnssec clients (issue #191)"
+        );
     }
 
     #[test]
