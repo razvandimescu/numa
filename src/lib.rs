@@ -21,6 +21,7 @@ pub mod mobileconfig;
 pub mod odoh;
 pub mod override_store;
 pub mod packet;
+pub mod palette;
 pub mod persist;
 pub mod pp2;
 pub mod pp2_udp;

@@ -111,8 +111,9 @@ pub fn try_port53_advisory(bind_addr: &str, err: &std::io::Error) -> Option<Stri
         ),
         _ => return None,
     };
-    let o = "\x1b[1;38;2;192;98;58m"; // bold orange
-    let r = "\x1b[0m";
+    let palette = crate::palette::get();
+    let o = palette.brand_bold;
+    let r = palette.reset;
     Some(format!(
         "
 {o}Numa{r} — cannot bind to {bind_addr}: {title}.

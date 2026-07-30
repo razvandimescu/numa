@@ -535,12 +535,13 @@ fn print_banner(
     .unwrap_or(30);
     let w = (val_w + 12).max(42).max(1 + title_plain.chars().count());
 
-    let o = "\x1b[38;2;192;98;58m";
-    let g = "\x1b[38;2;107;124;78m";
-    let d = "\x1b[38;2;163;152;136m";
-    let r = "\x1b[0m";
-    let b = "\x1b[1;38;2;192;98;58m";
-    let it = "\x1b[3;38;2;163;152;136m";
+    let palette = crate::palette::get();
+    let o = palette.brand;
+    let g = palette.olive;
+    let d = palette.dim;
+    let r = palette.reset;
+    let b = palette.brand_bold;
+    let it = palette.dim_italic;
 
     let bar_top = "═".repeat(w);
     let bar_mid = "─".repeat(w);
@@ -592,10 +593,9 @@ fn print_banner(
     if let Some(ref label) = proxy_label {
         row("Proxy", g, label);
         if config.proxy.bind_addr == "127.0.0.1" {
-            let y = "\x1b[38;2;204;176;59m";
             row(
                 "",
-                y,
+                palette.warning,
                 &format!(
                     "⚠ proxy on 127.0.0.1 — .{} not LAN reachable",
                     config.proxy.tld
