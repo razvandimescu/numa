@@ -62,7 +62,7 @@ jobs:
       # Split restore/save rather than actions/cache: its post-step only fires
       # on success, and the run that crashes is the one whose corpus matters.
       - name: Restore corpus
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: fuzz/corpus/${{ matrix.target }}
           key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
@@ -82,7 +82,7 @@ jobs:
         run: cargo fuzz cmin --target "$FUZZ_TRIPLE" ${{ matrix.target }} -- -timeout=25
       - name: Save corpus
         if: always()
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: fuzz/corpus/${{ matrix.target }}
           key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
