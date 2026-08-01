@@ -42,7 +42,7 @@ jobs:
       matrix:
         target: [packet_parse, packet_roundtrip, svcb_strip, dnssec_validate]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly-2025-12-01
