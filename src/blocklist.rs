@@ -12,8 +12,34 @@ pub struct BlocklistStore {
     manual: PersistedDomainList, // UI/API-blocked domains; survives list refresh
     enabled: bool,
     paused_until: Option<Instant>,
-    list_sources: Vec<String>,
+    sources: Vec<SourceState>,
     last_refresh: Option<Instant>,
+}
+
+#[derive(Debug, PartialEq)]
+enum SourceOutcome {
+    Pending,
+    Ok,
+    Failed(String),
+}
+
+/// Every *configured* source, loaded or not. A source that fails still belongs
+/// here: dropping it is what let a dead list look like no list at all (#336).
+#[derive(Debug)]
+struct SourceState {
+    url: String,
+    outcome: SourceOutcome,
+    last_ok: Option<Instant>,
+}
+
+#[derive(serde::Serialize)]
+pub struct SourceStatus {
+    pub url: String,
+    /// `pending` | `ok` | `failed`. One field rather than a pair of booleans,
+    /// so a not-yet-fetched source cannot read as a failed one.
+    pub status: &'static str,
+    pub error: Option<String>,
+    pub last_ok_secs_ago: Option<u64>,
 }
 
 #[derive(serde::Serialize)]
@@ -59,7 +85,8 @@ pub struct BlocklistStats {
     pub paused: bool,
     pub domains_loaded: usize,
     pub allowlist_size: usize,
-    pub list_sources: Vec<String>,
+    pub health: &'static str,
+    pub list_sources: Vec<SourceStatus>,
     pub last_refresh_secs_ago: Option<u64>,
 }
 
@@ -73,7 +100,7 @@ impl BlocklistStore {
             manual,
             enabled: true,
             paused_until: None,
-            list_sources: Vec::new(),
+            sources: Vec::new(),
             last_refresh: None,
         }
     }
@@ -135,10 +162,77 @@ impl BlocklistStore {
 
     /// Atomically swap in a new domain set. Build the set outside the lock,
     /// then call this to swap — keeps lock hold time sub-microsecond.
-    pub fn swap_domains(&mut self, domains: HashSet<String>, sources: Vec<String>) {
+    pub fn swap_domains(&mut self, domains: HashSet<String>) {
         self.domains = domains;
-        self.list_sources = sources;
         self.last_refresh = Some(Instant::now());
+    }
+
+    /// Seed the configured sources before the first fetch, so an empty source
+    /// list means "none configured" rather than "none has loaded yet".
+    ///
+    /// Deduplicated: `record_outcomes` matches by URL, so a repeated entry
+    /// would leave a second state stuck `Pending` and health stuck `loading`.
+    pub fn set_sources(&mut self, urls: &[String]) {
+        self.sources = dedup_sources(urls)
+            .iter()
+            .map(|url| SourceState {
+                url: url.clone(),
+                outcome: SourceOutcome::Pending,
+                last_ok: None,
+            })
+            .collect();
+    }
+
+    /// `None` means the source loaded. Recorded whether or not the domains were
+    /// swapped in, because a refresh that keeps the live list still has to say
+    /// why it kept it.
+    pub fn record_outcomes(&mut self, outcomes: &[(String, Option<String>)]) {
+        let now = Instant::now();
+        for (url, error) in outcomes {
+            let Some(state) = self.sources.iter_mut().find(|s| &s.url == url) else {
+                continue;
+            };
+            match error {
+                None => {
+                    state.outcome = SourceOutcome::Ok;
+                    state.last_ok = Some(now);
+                }
+                Some(e) => state.outcome = SourceOutcome::Failed(e.clone()),
+            }
+        }
+    }
+
+    /// Meant to be the one field a monitor reads, so it reports the switch too:
+    /// list state is moot when nothing is being blocked on purpose, and a box
+    /// with blocking off would otherwise report `loading` forever.
+    pub fn health(&self) -> &'static str {
+        if !self.enabled {
+            return "off";
+        }
+        if self.sources.is_empty() {
+            return "unconfigured";
+        }
+        if self
+            .sources
+            .iter()
+            .any(|s| s.outcome == SourceOutcome::Pending)
+        {
+            return "loading";
+        }
+        let failed = self
+            .sources
+            .iter()
+            .any(|s| matches!(s.outcome, SourceOutcome::Failed(_)));
+        if !failed {
+            return "ok";
+        }
+        // Domains present means something is still being blocked, from the
+        // sources that did load or from a list a failed refresh left alone.
+        if self.domains.is_empty() {
+            "failed"
+        } else {
+            "degraded"
+        }
     }
 
     pub fn domains_loaded(&self) -> usize {
@@ -208,10 +302,38 @@ impl BlocklistStore {
             paused: self.is_paused(),
             domains_loaded: self.domains.len(),
             allowlist_size: self.allowlist.len(),
-            list_sources: self.list_sources.clone(),
+            health: self.health(),
+            list_sources: self
+                .sources
+                .iter()
+                .map(|s| SourceStatus {
+                    url: s.url.clone(),
+                    status: match s.outcome {
+                        SourceOutcome::Pending => "pending",
+                        SourceOutcome::Ok => "ok",
+                        SourceOutcome::Failed(_) => "failed",
+                    },
+                    error: match &s.outcome {
+                        SourceOutcome::Failed(e) => Some(e.clone()),
+                        _ => None,
+                    },
+                    last_ok_secs_ago: s.last_ok.map(|t| t.elapsed().as_secs()),
+                })
+                .collect(),
             last_refresh_secs_ago: self.last_refresh.map(|t| t.elapsed().as_secs()),
         }
     }
+}
+
+/// First occurrence of each URL wins, order preserved. Fetching the same list
+/// twice is pure waste, and a repeat also strands a source in `Pending`.
+pub fn dedup_sources(lists: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    lists
+        .iter()
+        .filter(|url| seen.insert((*url).clone()))
+        .cloned()
+        .collect()
 }
 
 /// Parse a blocklist text file into a set of domains.
@@ -313,7 +435,7 @@ mod tests {
             PersistedDomainList::unpersisted(),
             PersistedDomainList::unpersisted(),
         );
-        store.swap_domains(domains.iter().map(|s| s.to_string()).collect(), vec![]);
+        store.swap_domains(domains.iter().map(|s| s.to_string()).collect());
         for d in allowlist {
             store.add_to_allowlist(d);
         }
@@ -382,7 +504,6 @@ mod tests {
             ]
             .into_iter()
             .collect(),
-            vec![],
         );
         assert!(!store.remove_from_allowlist("safe.example.com"));
         assert!(!store.is_blocked("safe.example.com"));
@@ -403,7 +524,7 @@ mod tests {
         // Allowlist wins over a manual block, same as over list blocks.
         assert!(!store.is_blocked("safe.example.com"));
         // List refresh replaces `domains` wholesale; manual entries survive.
-        store.swap_domains(HashSet::new(), vec![]);
+        store.swap_domains(HashSet::new());
         assert!(store.is_blocked("bad.example.com"));
         assert_eq!(store.check("bad.example.com").reason, "manually blocked");
         assert!(store.remove_from_blocklist("bad.example.com"));
@@ -546,8 +667,113 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        store.swap_domains(domains, vec![]);
+        store.swap_domains(domains);
         assert!(store.heap_bytes() > empty);
+    }
+
+    fn empty_store() -> BlocklistStore {
+        BlocklistStore::new(
+            PersistedDomainList::unpersisted(),
+            PersistedDomainList::unpersisted(),
+        )
+    }
+
+    #[test]
+    fn health_walks_from_unconfigured_to_failed() {
+        let mut store = empty_store();
+        assert_eq!(store.health(), "unconfigured");
+
+        let (a, b) = ("https://a.example/l.txt", "https://b.example/l.txt");
+        store.set_sources(&[a.to_string(), b.to_string()]);
+        assert_eq!(store.health(), "loading", "configured but not yet fetched");
+        assert_eq!(
+            store.stats().list_sources[0].status,
+            "pending",
+            "not yet fetched is not the same as failed"
+        );
+
+        store.record_outcomes(&[(a.to_string(), None), (b.to_string(), None)]);
+        assert_eq!(
+            store.health(),
+            "ok",
+            "sources that loaded and parsed to nothing are an emptied list"
+        );
+
+        store.swap_domains(["ads.example.com".to_string()].into_iter().collect());
+        store.record_outcomes(&[(b.to_string(), Some("HTTP 404".to_string()))]);
+        assert_eq!(
+            store.health(),
+            "degraded",
+            "one source down, still blocking"
+        );
+
+        store.swap_domains(HashSet::new());
+        assert_eq!(store.health(), "failed", "nothing left to block with");
+    }
+
+    /// `record_outcomes` matches by URL, so a repeated entry used to strand a
+    /// second state in Pending and pin health at "loading" forever.
+    #[test]
+    fn a_duplicate_source_does_not_pin_health_at_loading() {
+        let mut store = empty_store();
+        let a = "https://a.example/l.txt";
+        store.set_sources(&[a.to_string(), a.to_string()]);
+        assert_eq!(store.stats().list_sources.len(), 1, "deduplicated");
+
+        store.record_outcomes(&[(a.to_string(), None)]);
+        assert_eq!(store.health(), "ok");
+    }
+
+    /// Blocking switched off must not report the same as a box with no lists.
+    #[test]
+    fn a_disabled_store_keeps_its_sources() {
+        let mut store = empty_store();
+        store.set_sources(&["https://a.example/l.txt".to_string()]);
+        store.set_enabled(false);
+
+        assert_eq!(store.health(), "off");
+        let sources = store.stats().list_sources;
+        assert_eq!(sources.len(), 1, "still configured, just not running");
+        assert_eq!(sources[0].status, "pending");
+    }
+
+    /// The #336 shape: a source that failed has to keep its identity, or the
+    /// dashboard cannot tell it apart from a source nobody configured.
+    #[test]
+    fn a_failed_source_keeps_its_url_and_reason() {
+        let mut store = empty_store();
+        let (a, b) = ("https://a.example/l.txt", "https://b.example/l.txt");
+        store.set_sources(&[a.to_string(), b.to_string()]);
+        store.record_outcomes(&[
+            (a.to_string(), None),
+            (b.to_string(), Some("HTTP 404".to_string())),
+        ]);
+
+        let stats = store.stats();
+        assert_eq!(stats.list_sources.len(), 2);
+        let good = stats.list_sources.iter().find(|s| s.url == a).unwrap();
+        assert_eq!(good.status, "ok");
+        assert!(good.error.is_none());
+        assert!(good.last_ok_secs_ago.is_some());
+        let bad = stats.list_sources.iter().find(|s| s.url == b).unwrap();
+        assert_eq!(bad.status, "failed");
+        assert_eq!(bad.error.as_deref(), Some("HTTP 404"));
+        assert!(bad.last_ok_secs_ago.is_none(), "it never loaded");
+    }
+
+    /// A source that recovers must stop reporting the old error.
+    #[test]
+    fn a_recovered_source_clears_its_error() {
+        let mut store = empty_store();
+        let a = "https://a.example/l.txt";
+        store.set_sources(&[a.to_string()]);
+        store.record_outcomes(&[(a.to_string(), Some("timeout".to_string()))]);
+        store.record_outcomes(&[(a.to_string(), None)]);
+
+        let stats = store.stats();
+        assert_eq!(stats.list_sources[0].status, "ok");
+        assert!(stats.list_sources[0].error.is_none());
+        assert_eq!(store.health(), "ok");
     }
 }
 
@@ -556,7 +782,7 @@ const RETRY_DELAYS_SECS: &[u64] = &[2, 10, 30];
 pub async fn download_blocklists(
     lists: &[String],
     resolver: Option<std::sync::Arc<crate::bootstrap_resolver::NumaResolver>>,
-) -> Vec<(String, String)> {
+) -> Vec<(String, Result<String, String>)> {
     let mut builder = crate::forward::numa_tls_builder()
         .timeout(Duration::from_secs(30))
         .gzip(true);
@@ -572,7 +798,7 @@ pub async fn download_blocklists(
                 match tokio::fs::read_to_string(&path).await {
                     Ok(t) => {
                         info!("loaded local blocklist: {} ({} bytes)", source, t.len());
-                        t
+                        Ok(t)
                     }
                     Err(e) => {
                         warn!(
@@ -580,21 +806,24 @@ pub async fn download_blocklists(
                             source,
                             format_error_chain(&e)
                         );
-                        return None;
+                        Err("unreadable".to_string())
                     }
                 }
             } else {
-                let t = fetch_with_retry(client, source).await?;
-                info!("downloaded blocklist: {} ({} bytes)", source, t.len());
-                t
+                match fetch_with_retry(client, source).await {
+                    Ok(t) => {
+                        info!("downloaded blocklist: {} ({} bytes)", source, t.len());
+                        Ok(t)
+                    }
+                    Err(e) => Err(e),
+                }
             };
-            Some((source.clone(), text))
+            (source.clone(), text)
         }
     });
     futures::future::join_all(fetches)
         .await
         .into_iter()
-        .flatten()
         .collect()
 }
 
@@ -608,7 +837,7 @@ fn local_path(source: &str) -> Option<std::path::PathBuf> {
     None
 }
 
-async fn fetch_with_retry(client: &reqwest::Client, url: &str) -> Option<String> {
+async fn fetch_with_retry(client: &reqwest::Client, url: &str) -> Result<String, String> {
     fetch_with_retry_delays(client, url, RETRY_DELAYS_SECS).await
 }
 
@@ -616,39 +845,67 @@ async fn fetch_with_retry_delays(
     client: &reqwest::Client,
     url: &str,
     delays: &[u64],
-) -> Option<String> {
+) -> Result<String, String> {
     let total = delays.len() + 1;
+    let mut last = "fetch failed".to_string();
     for attempt in 1..=total {
         match fetch_once(client, url).await {
-            Ok(text) => return Some(text),
-            Err(msg) if attempt < total => {
+            Ok(text) => return Ok(text),
+            Err(e) if attempt < total => {
                 let delay = delays[attempt - 1];
                 warn!(
                     "blocklist {} attempt {}/{} failed: {} — retrying in {}s",
-                    url, attempt, total, msg, delay
+                    url, attempt, total, e.detail, delay
                 );
+                last = e.short;
                 tokio::time::sleep(Duration::from_secs(delay)).await;
             }
-            Err(msg) => {
+            Err(e) => {
                 warn!(
                     "blocklist {} attempt {}/{} failed: {} — giving up",
-                    url, attempt, total, msg
+                    url, attempt, total, e.detail
                 );
+                last = e.short;
             }
         }
     }
-    None
+    Err(last)
 }
 
-async fn fetch_once(client: &reqwest::Client, url: &str) -> Result<String, String> {
+/// `short` is for the dashboard and must stay a terse token; `detail` is the
+/// full chain the logs already carried.
+struct FetchError {
+    short: String,
+    detail: String,
+}
+
+impl FetchError {
+    fn new(e: reqwest::Error) -> Self {
+        let short = if let Some(status) = e.status() {
+            format!("HTTP {}", status.as_u16())
+        } else if e.is_timeout() {
+            "timeout".to_string()
+        } else if e.is_connect() {
+            "connection failed".to_string()
+        } else {
+            "fetch failed".to_string()
+        };
+        FetchError {
+            short,
+            detail: format_error_chain(&e),
+        }
+    }
+}
+
+async fn fetch_once(client: &reqwest::Client, url: &str) -> Result<String, FetchError> {
     let resp = client
         .get(url)
         .send()
         .await
-        .map_err(|e| format_error_chain(&e))?
+        .map_err(FetchError::new)?
         .error_for_status()
-        .map_err(|e| format_error_chain(&e))?;
-    resp.text().await.map_err(|e| format_error_chain(&e))
+        .map_err(FetchError::new)?;
+    resp.text().await.map_err(FetchError::new)
 }
 
 fn format_error_chain(e: &(dyn std::error::Error + 'static)) -> String {
@@ -714,7 +971,7 @@ mod retry_tests {
         let client = crate::forward::default_client();
         let url = format!("http://{addr}/");
         let result = fetch_with_retry_delays(&client, &url, &delays).await;
-        assert_eq!(result.as_deref(), Some(body));
+        assert_eq!(result.as_deref(), Ok(body));
     }
 
     fn unique_temp_path(prefix: &str) -> std::path::PathBuf {
@@ -738,7 +995,7 @@ mod retry_tests {
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].0, url);
-        let domains = parse_blocklist(&result[0].1);
+        let domains = parse_blocklist(result[0].1.as_ref().unwrap());
         assert!(domains.contains("a.com"));
         assert!(domains.contains("b.com"));
     }
@@ -754,18 +1011,22 @@ mod retry_tests {
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].0, source);
-        assert!(result[0].1.contains("ads.example.com"));
+        assert!(result[0].1.as_ref().unwrap().contains("ads.example.com"));
     }
 
+    /// A missing file is reported as a failed source, not dropped: dropping it
+    /// is what made a dead list indistinguishable from no list (#336).
     #[tokio::test]
-    async fn download_blocklists_skips_missing_local_file() {
+    async fn download_blocklists_reports_missing_local_file() {
         let path = unique_temp_path("numa_blocklist_missing");
         let url = format!(
             "file:///does/not/exist/{}",
             path.file_name().unwrap().to_string_lossy()
         );
-        let result = download_blocklists(&[url], None).await;
-        assert!(result.is_empty());
+        let result = download_blocklists(std::slice::from_ref(&url), None).await;
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, url);
+        assert_eq!(result[0].1.as_ref().unwrap_err(), "unreadable");
     }
 
     #[tokio::test]
@@ -775,7 +1036,7 @@ mod retry_tests {
         let client = crate::forward::default_client();
         let url = format!("http://{addr}/");
         let result = fetch_with_retry_delays(&client, &url, &delays).await;
-        assert_eq!(result, None);
+        assert!(result.is_err());
     }
 
     /// The issue #336 outage: jsDelivr answered 403 with a plain-text error
@@ -791,7 +1052,11 @@ mod retry_tests {
         let client = crate::forward::default_client();
         let url = format!("http://{addr}/");
         let result = fetch_with_retry_delays(&client, &url, &[0]).await;
-        assert_eq!(result, None, "403 body must not be taken as a blocklist");
+        assert_eq!(
+            result.unwrap_err(),
+            "HTTP 403",
+            "403 body must not be taken as a blocklist"
+        );
     }
 
     /// CI canary. Fetches the URL actually compiled into the binary and parses
@@ -802,8 +1067,13 @@ mod retry_tests {
     async fn shipped_default_blocklist_still_loads() {
         let lists = crate::config::default_blocklists();
         let downloaded = download_blocklists(&lists, None).await;
-        assert_eq!(downloaded.len(), lists.len(), "a default source failed");
-        for (source, text) in &downloaded {
+        assert_eq!(downloaded.len(), lists.len());
+        for (source, result) in &downloaded {
+            // Every source now comes back whether it loaded or not, so the
+            // count above proves nothing on its own — this is the real check.
+            let text = result
+                .as_ref()
+                .unwrap_or_else(|e| panic!("default blocklist {source} failed: {e}"));
             let domains = parse_blocklist(text);
             assert!(
                 domains.len() > 100_000,

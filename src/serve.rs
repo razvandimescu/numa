@@ -70,6 +70,11 @@ pub async fn run(config_path: String) -> crate::Result<()> {
         ),
         crate::domain_list::PersistedDomainList::new("blocking-block.json", &[]),
     );
+    // Seeded before the first fetch so the dashboard can tell a source that has
+    // not loaded yet from one that is not configured at all. Seeded even when
+    // blocking is off, or a disabled box reports its configured lists as though
+    // it had none; `health` reports the switch separately.
+    blocklist.set_sources(&config.blocking.lists);
     if !config.blocking.enabled {
         blocklist.set_enabled(false);
     }
@@ -281,7 +286,7 @@ fn spawn_background_services(
     bootstrap_resolver: &Arc<NumaResolver>,
     api_port: u16,
 ) -> crate::Result<()> {
-    let blocklist_lists = config.blocking.lists.clone();
+    let blocklist_lists = crate::blocklist::dedup_sources(&config.blocking.lists);
     let refresh_hours = config.blocking.refresh_hours;
     if config.blocking.enabled && !blocklist_lists.is_empty() {
         let bl_ctx = Arc::clone(ctx);
@@ -819,18 +824,27 @@ async fn load_blocklists(
 
     // Parse outside the lock to avoid blocking DNS queries during parse (~100ms)
     let mut all_domains = std::collections::HashSet::new();
-    let mut sources = Vec::new();
-    let mut failed = lists.len().saturating_sub(downloaded.len());
-    for (source, text) in &downloaded {
+    let mut outcomes = Vec::with_capacity(downloaded.len());
+    let mut failed = 0;
+    for (source, fetched) in &downloaded {
+        let text = match fetched {
+            Ok(text) => text,
+            Err(why) => {
+                failed += 1;
+                outcomes.push((source.clone(), Some(why.clone())));
+                continue;
+            }
+        };
         let domains = parse_blocklist(text);
         if let Some(why) = source_defect(source, text, &domains) {
             error!("blocklist source failed: {source} — {why}");
             failed += 1;
+            outcomes.push((source.clone(), Some("not a domain list".to_string())));
             continue;
         }
         info!("blocklist: {} domains from {}", domains.len(), source);
         all_domains.extend(domains);
-        sources.push(source.clone());
+        outcomes.push((source.clone(), None));
     }
     let total = all_domains.len();
 
@@ -838,7 +852,10 @@ async fn load_blocklists(
     // sources that all loaded and parsed to nothing are a deliberately emptied
     // list and must be allowed to clear the old one.
     if total == 0 && failed > 0 {
-        let kept = ctx.blocklist.read().unwrap().domains_loaded();
+        let mut store = ctx.blocklist.write().unwrap();
+        store.record_outcomes(&outcomes);
+        let kept = store.domains_loaded();
+        drop(store);
         error!(
             "blocklist refresh failed for {failed} of {} lists — keeping {kept} domains already loaded",
             lists.len()
@@ -846,12 +863,12 @@ async fn load_blocklists(
         return kept > 0;
     }
 
-    let loaded = sources.len();
+    let loaded = outcomes.len() - failed;
     // Swap under lock — sub-microsecond
-    ctx.blocklist
-        .write()
-        .unwrap()
-        .swap_domains(all_domains, sources);
+    let mut store = ctx.blocklist.write().unwrap();
+    store.record_outcomes(&outcomes);
+    store.swap_domains(all_domains);
+    drop(store);
     if failed > 0 {
         warn!(
             "blocking degraded: {total} unique domains from {loaded} of {} lists",
@@ -938,10 +955,10 @@ mod tests {
 
     async fn ctx_blocking(domains: &[&str]) -> ServerCtx {
         let ctx = crate::testutil::test_ctx().await;
-        ctx.blocklist.write().unwrap().swap_domains(
-            domains.iter().map(|d| d.to_string()).collect(),
-            vec!["seed".to_string()],
-        );
+        ctx.blocklist
+            .write()
+            .unwrap()
+            .swap_domains(domains.iter().map(|d| d.to_string()).collect());
         ctx
     }
 

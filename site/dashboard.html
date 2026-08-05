@@ -1325,10 +1325,13 @@ async function refresh() {
     document.getElementById('overrideCount').textContent = stats.overrides.active;
     document.getElementById('blockedCount').textContent = formatNumber(q.blocked);
     const bl = stats.blocking;
-    document.getElementById('blockedSub').textContent =
-      bl.paused ? 'paused' :
-      !bl.enabled ? 'disabled' :
-      bl.domains_loaded > 0 ? `${formatNumber(bl.domains_loaded)} in blocklist` : 'no domains loaded';
+    const subEl = document.getElementById('blockedSub');
+    subEl.textContent = blockingSubline(bl, blockingInfo);
+    // The big number is a lifetime counter, so it keeps looking healthy while
+    // nothing is being blocked. Colour it, or the card still reads as fine.
+    const alarm = bl.enabled && !bl.paused ? blockingAlarm(blockingInfo) : '';
+    subEl.style.color = alarm;
+    document.getElementById('blockedCount').style.color = alarm;
 
     // Blocking controls — single primary button + secondary toggle
     const toggleBtn = document.getElementById('toggleBtn');
@@ -1484,6 +1487,40 @@ function shortenUrl(url) {
   } catch { return url; }
 }
 
+// A source that has not been fetched yet is not a broken one — saying so was
+// the same mistake as rendering a dead list as "loading".
+function sourceNote(s) {
+  if (s.status === 'ok') return '';
+  if (s.status === 'pending') {
+    return '<span style="color:var(--text-dim);margin-left:0.5rem;">not fetched yet</span>';
+  }
+  const when = s.last_ok_secs_ago != null ? `last ok ${formatUptime(s.last_ok_secs_ago)} ago` : 'never loaded';
+  return `<span style="color:var(--rose);margin-left:0.5rem;">${h(s.error || 'failed')} &middot; ${when}</span>`;
+}
+
+// Copy carries the truth, colour only carries urgency — a state must never be
+// distinguishable by colour alone.
+function blockingSubline(bl, info) {
+  if (bl.paused) return 'paused';
+  if (!bl.enabled) return 'disabled';
+  const loaded = `${formatNumber(bl.domains_loaded)} in blocklist`;
+  const sources = (info && info.list_sources) || [];
+  switch (info && info.health) {
+    case 'unconfigured': return 'no lists configured';
+    case 'loading': return 'loading…';
+    case 'failed': return 'all lists failed · not blocking';
+    case 'degraded': return `${loaded} · ${sources.filter(s => s.status === 'failed').length} of ${sources.length} lists failing`;
+    default: return loaded;
+  }
+}
+
+function blockingAlarm(info) {
+  if (!info) return '';
+  if (info.health === 'failed') return 'var(--rose)';
+  if (info.health === 'degraded') return 'var(--amber)';
+  return '';
+}
+
 function renderBlockingInfo(info) {
   const el = document.getElementById('blockingSources');
   const refreshEl = document.getElementById('blockingRefresh');
@@ -1494,14 +1531,15 @@ function renderBlockingInfo(info) {
   }
   const sources = info.list_sources || [];
   if (!sources.length) {
-    el.innerHTML = '';
+    el.innerHTML = '<div class="empty-state">No blocklists configured</div>';
     return;
   }
   el.innerHTML = `
     <div style="font-size:0.65rem;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-dim);margin-bottom:0.4rem;">Sources &middot; ${formatNumber(info.domains_loaded)} domains</div>
     ${sources.map(s => `
       <div style="padding:0.3rem 0;font-family:var(--font-mono);font-size:0.72rem;">
-        <a href="${s}" target="_blank" rel="noopener" style="color:var(--text-secondary);text-decoration:none;" title="${s}">${shortenUrl(s)}</a>
+        <a href="${h(s.url)}" target="_blank" rel="noopener" style="color:var(--text-secondary);text-decoration:none;" title="${h(s.url)}">${shortenUrl(s.url)}</a>
+        ${sourceNote(s)}
       </div>
     `).join('')}
   `;

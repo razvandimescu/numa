@@ -709,6 +709,7 @@ async fn blocking_stats(State(ctx): State<Arc<ServerCtx>>) -> Json<serde_json::V
         "paused": stats.paused,
         "domains_loaded": stats.domains_loaded,
         "allowlist_size": stats.allowlist_size,
+        "health": stats.health,
         "list_sources": stats.list_sources,
         "last_refresh_secs_ago": stats.last_refresh_secs_ago,
     }))

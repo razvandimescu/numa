@@ -70,7 +70,7 @@ impl ClientPolicySet {
                 allow,
                 crate::domain_list::PersistedDomainList::unpersisted(),
             );
-            store.swap_domains(blocks, vec![]);
+            store.swap_domains(blocks);
             rules.push(ClientPolicy {
                 nets: CidrMatcher::from_entries(&cfg.from, &cfg.exclude, &format!("{ctx}.from"))?,
                 store,
