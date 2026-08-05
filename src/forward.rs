@@ -550,22 +550,24 @@ fn ensure_do_bit(wire: &[u8]) -> Cow<'_, [u8]> {
             out[ttl + 2] |= DO_FLAG;
             Cow::Owned(out)
         }
-        OptSite::Absent => Cow::Owned(append_do_opt(wire)),
+        OptSite::Absent => append_do_opt(wire).map_or(Cow::Borrowed(wire), Cow::Owned),
         OptSite::Unparsable => Cow::Borrowed(wire),
     }
 }
 
-fn append_do_opt(wire: &[u8]) -> Vec<u8> {
+/// `None` when ARCOUNT cannot cover one more record, since an appended OPT
+/// the count does not reach is trailing garbage to the upstream.
+fn append_do_opt(wire: &[u8]) -> Option<Vec<u8>> {
+    let arcount = u16::from_be_bytes([wire[10], wire[11]]).checked_add(1)?;
     let mut out = Vec::with_capacity(wire.len() + 11);
     out.extend_from_slice(wire);
-    let arcount = u16::from_be_bytes([out[10], out[11]]).saturating_add(1);
     out[10..12].copy_from_slice(&arcount.to_be_bytes());
     out.push(0); // root name
     out.extend_from_slice(&OPT_RECORD_TYPE.to_be_bytes());
     out.extend_from_slice(&crate::packet::DEFAULT_EDNS_PAYLOAD.to_be_bytes());
     out.extend_from_slice(&[0, 0, DO_FLAG, 0]); // ext-rcode, version, DO=1
     out.extend_from_slice(&[0, 0]); // RDLENGTH
-    out
+    Some(out)
 }
 
 fn locate_opt(wire: &[u8]) -> OptSite {
@@ -597,7 +599,9 @@ fn locate_opt(wire: &[u8]) -> OptSite {
         }
         pos = next;
     }
-    if pos <= wire.len() {
+    // Exactly at the end, or trailing uncounted bytes would sit between
+    // ARCOUNT's last record and the OPT we append.
+    if pos == wire.len() {
         OptSite::Absent
     } else {
         OptSite::Unparsable
@@ -1003,6 +1007,15 @@ mod tests {
     fn ensure_do_bit_passes_malformed_wires_through_untouched() {
         let truncated = &to_wire(&make_query())[..8];
         assert_eq!(&ensure_do_bit(truncated)[..], truncated);
+    }
+
+    #[test]
+    fn ensure_do_bit_never_appends_behind_trailing_bytes() {
+        // An OPT appended after uncounted bytes is not the record ARCOUNT
+        // reaches — upstream would parse the trailing junk as our OPT.
+        let mut wire = to_wire(&make_query());
+        wire.extend_from_slice(&[0xDE, 0xAD]);
+        assert_eq!(&ensure_do_bit(&wire)[..], &wire[..]);
     }
 
     #[test]
