@@ -41,6 +41,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "wire_patch"
+path = "fuzz_targets/wire_patch.rs"
+test = false
+doc = false
+bench = false
+
 # Keep fuzzers out of the workspace so they don't perturb the main build graph.
 [workspace]
 members = ["."]

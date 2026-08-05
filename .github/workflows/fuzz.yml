@@ -40,7 +40,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [packet_parse, packet_roundtrip, svcb_strip, dnssec_validate]
+        target: [packet_parse, packet_roundtrip, svcb_strip, dnssec_validate, wire_patch]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
