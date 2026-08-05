@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, RwLock};
@@ -526,18 +527,102 @@ pub async fn forward_with_hedging_raw(
     }
 }
 
-/// Rewrite a query wire so the outbound OPT carries DO=1, preserving any
-/// client EDNS options. Cached wires then always hold RRSIGs;
-/// `shape_response_for_client` strips them for non-DO clients (issue #191).
-fn ensure_do_bit(wire: &[u8]) -> Result<Vec<u8>> {
-    let mut buf = BytePacketBuffer::from_bytes(wire);
-    let mut pkt = DnsPacket::from_buffer(&mut buf)?;
-    let mut edns = pkt.edns.take().unwrap_or_default();
-    edns.do_bit = true;
-    pkt.edns = Some(edns);
-    let mut out = BytePacketBuffer::new();
-    pkt.write(&mut out)?;
-    Ok(out.filled().to_vec())
+const OPT_RECORD_TYPE: u16 = 41;
+const DO_FLAG: u8 = 0x80;
+
+enum OptSite {
+    /// Offset of the OPT record's TTL field, whose third byte holds DO.
+    Ttl(usize),
+    Absent,
+    Unparsable,
+}
+
+/// Make the outbound query carry DO=1 by patching the client's own bytes —
+/// flip DO on an existing OPT, else append one. Never reserializes, so client
+/// EDNS options, name compression and oversized wires all survive untouched.
+/// Cached wires then always hold RRSIGs; `shape_response_for_client` strips
+/// them for non-DO clients (issue #191).
+fn ensure_do_bit(wire: &[u8]) -> Cow<'_, [u8]> {
+    match locate_opt(wire) {
+        OptSite::Ttl(ttl) if wire[ttl + 2] & DO_FLAG != 0 => Cow::Borrowed(wire),
+        OptSite::Ttl(ttl) => {
+            let mut out = wire.to_vec();
+            out[ttl + 2] |= DO_FLAG;
+            Cow::Owned(out)
+        }
+        OptSite::Absent => Cow::Owned(append_do_opt(wire)),
+        OptSite::Unparsable => Cow::Borrowed(wire),
+    }
+}
+
+fn append_do_opt(wire: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(wire.len() + 11);
+    out.extend_from_slice(wire);
+    let arcount = u16::from_be_bytes([out[10], out[11]]).saturating_add(1);
+    out[10..12].copy_from_slice(&arcount.to_be_bytes());
+    out.push(0); // root name
+    out.extend_from_slice(&OPT_RECORD_TYPE.to_be_bytes());
+    out.extend_from_slice(&crate::packet::DEFAULT_EDNS_PAYLOAD.to_be_bytes());
+    out.extend_from_slice(&[0, 0, DO_FLAG, 0]); // ext-rcode, version, DO=1
+    out.extend_from_slice(&[0, 0]); // RDLENGTH
+    out
+}
+
+fn locate_opt(wire: &[u8]) -> OptSite {
+    let Some(header) = wire.get(..12) else {
+        return OptSite::Unparsable;
+    };
+    let count = |i: usize| u16::from_be_bytes([header[i], header[i + 1]]);
+
+    let mut pos = 12;
+    for _ in 0..count(4) {
+        match skip_name(wire, pos) {
+            Some(p) => pos = p + 4,
+            None => return OptSite::Unparsable,
+        }
+    }
+    for _ in 0..u32::from(count(6)) + u32::from(count(8)) {
+        match skip_record(wire, pos) {
+            Some(p) => pos = p,
+            None => return OptSite::Unparsable,
+        }
+    }
+    for _ in 0..count(10) {
+        // skip_record validates the fixed fields, so TTL is in bounds below
+        let (Some(after_name), Some(next)) = (skip_name(wire, pos), skip_record(wire, pos)) else {
+            return OptSite::Unparsable;
+        };
+        if wire.get(after_name..after_name + 2) == Some(&OPT_RECORD_TYPE.to_be_bytes()[..]) {
+            return OptSite::Ttl(after_name + 4);
+        }
+        pos = next;
+    }
+    if pos <= wire.len() {
+        OptSite::Absent
+    } else {
+        OptSite::Unparsable
+    }
+}
+
+/// Advance past one RR: name, then the 10-byte fixed fields plus RDATA.
+fn skip_record(wire: &[u8], pos: usize) -> Option<usize> {
+    let pos = skip_name(wire, pos)?;
+    let rdlength = u16::from_be_bytes([*wire.get(pos + 8)?, *wire.get(pos + 9)?]) as usize;
+    let end = pos + 10 + rdlength;
+    (end <= wire.len()).then_some(end)
+}
+
+/// Advance past a wire-format name. A compression pointer ends it in 2 bytes.
+fn skip_name(wire: &[u8], mut pos: usize) -> Option<usize> {
+    loop {
+        let len = *wire.get(pos)?;
+        match len & 0xC0 {
+            0 if len == 0 => return Some(pos + 1),
+            0 => pos += 1 + len as usize,
+            0xC0 => return (pos + 2 <= wire.len()).then_some(pos + 2),
+            _ => return None,
+        }
+    }
 }
 
 pub async fn forward_with_failover_raw(
@@ -547,7 +632,7 @@ pub async fn forward_with_failover_raw(
     timeout_duration: Duration,
     hedge_delay: Duration,
 ) -> Result<Vec<u8>> {
-    let wire = &ensure_do_bit(wire)?[..];
+    let wire = &ensure_do_bit(wire)[..];
     let mut candidates: Vec<(usize, u64)> = {
         let srtt_read = srtt.read().unwrap();
         pool.primary
@@ -832,6 +917,92 @@ mod tests {
             "outbound upstream query must carry DO=1 regardless of the client wire, \
              or the cached answer has no RRSIGs to serve +dnssec clients (issue #191)"
         );
+    }
+
+    fn parse_wire(wire: &[u8]) -> DnsPacket {
+        DnsPacket::from_buffer(&mut BytePacketBuffer::from_bytes(wire)).unwrap()
+    }
+
+    #[test]
+    fn ensure_do_bit_appends_opt_when_client_sent_none() {
+        let wire = to_wire(&make_query());
+        let out = ensure_do_bit(&wire);
+
+        assert_eq!(out.len(), wire.len() + 11, "one bare OPT appended");
+        assert_eq!(&out[12..wire.len()], &wire[12..], "client bytes untouched");
+        assert_eq!(&out[10..12], &1u16.to_be_bytes(), "ARCOUNT incremented");
+        let edns = parse_wire(&out).edns.expect("OPT present");
+        assert!(edns.do_bit);
+        assert_eq!(edns.udp_payload_size, crate::packet::DEFAULT_EDNS_PAYLOAD);
+    }
+
+    #[test]
+    fn ensure_do_bit_preserves_client_edns_options() {
+        let mut query = make_query();
+        query.edns = Some(crate::packet::EdnsOpt {
+            udp_payload_size: 512,
+            do_bit: false,
+            // an EDNS cookie (opt code 10) the upstream must still see
+            options: vec![0, 10, 0, 8, 1, 2, 3, 4, 5, 6, 7, 8],
+            ..Default::default()
+        });
+        let wire = to_wire(&query);
+        let out = ensure_do_bit(&wire);
+
+        assert_eq!(out.len(), wire.len(), "patched in place, not rebuilt");
+        let edns = parse_wire(&out).edns.expect("OPT present");
+        assert!(edns.do_bit);
+        assert_eq!(edns.udp_payload_size, 512, "client payload size preserved");
+        assert_eq!(edns.options, vec![0, 10, 0, 8, 1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn ensure_do_bit_leaves_do_queries_byte_identical() {
+        let mut query = make_query();
+        query.edns = Some(crate::packet::EdnsOpt {
+            do_bit: true,
+            ..Default::default()
+        });
+        let wire = to_wire(&query);
+        assert_eq!(&ensure_do_bit(&wire)[..], &wire[..]);
+    }
+
+    #[test]
+    fn ensure_do_bit_patches_wire_larger_than_the_packet_buffer() {
+        // Parse-and-reserialize truncates at BytePacketBuffer's 4096 bytes;
+        // a padded TCP/DoH query that size must still forward intact.
+        let (wire, do_byte) = oversized_padded_query();
+        let out = ensure_do_bit(&wire);
+
+        assert!(wire.len() > 4096);
+        assert_eq!(out.len(), wire.len(), "oversized wire kept whole");
+        assert_eq!(out[do_byte] & DO_FLAG, DO_FLAG, "DO set in place");
+        assert_eq!(&out[..do_byte], &wire[..do_byte]);
+        assert_eq!(&out[do_byte + 1..], &wire[do_byte + 1..]);
+    }
+
+    /// Header + question + an OPT carrying 4096 bytes of EDNS padding, and
+    /// the offset of its DO byte. Hand-built: `DnsPacket::write` caps at 4096.
+    fn oversized_padded_query() -> (Vec<u8>, usize) {
+        const PADDING: usize = 4096;
+        let mut wire = to_wire(&make_query());
+        wire[10..12].copy_from_slice(&1u16.to_be_bytes()); // ARCOUNT
+        let do_byte = wire.len() + 7; // root name + type + class + 2 into TTL
+        wire.push(0);
+        wire.extend_from_slice(&OPT_RECORD_TYPE.to_be_bytes());
+        wire.extend_from_slice(&crate::packet::DEFAULT_EDNS_PAYLOAD.to_be_bytes());
+        wire.extend_from_slice(&[0, 0, 0, 0]); // TTL, DO clear
+        wire.extend_from_slice(&((4 + PADDING) as u16).to_be_bytes()); // RDLENGTH
+        wire.extend_from_slice(&[0, 12]); // opt code: padding (RFC 7830)
+        wire.extend_from_slice(&(PADDING as u16).to_be_bytes());
+        wire.extend(std::iter::repeat_n(0u8, PADDING));
+        (wire, do_byte)
+    }
+
+    #[test]
+    fn ensure_do_bit_passes_malformed_wires_through_untouched() {
+        let truncated = &to_wire(&make_query())[..8];
+        assert_eq!(&ensure_do_bit(truncated)[..], truncated);
     }
 
     #[test]
