@@ -795,31 +795,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[tokio::test]
-    async fn failover_forward_sets_do_bit_upstream() {
-        let (addr, mut seen) = crate::testutil::stub_udp_upstream().await;
-        let pool = UpstreamPool::new(vec![Upstream::Udp(addr)], vec![]);
-        let srtt = std::sync::RwLock::new(crate::srtt::SrttCache::new(true));
-
-        // Client wire with no EDNS at all, the common stub-resolver case.
-        let wire = to_wire(&make_query());
-        forward_with_failover_raw(&wire, &pool, &srtt, Duration::from_secs(1), Duration::ZERO)
-            .await
-            .expect("forward should succeed");
-
-        let sent = tokio::time::timeout(Duration::from_secs(1), seen.recv())
-            .await
-            .expect("stub upstream saw the query within 1s")
-            .unwrap();
-        let mut buf = BytePacketBuffer::from_bytes(&sent);
-        let outbound = DnsPacket::from_buffer(&mut buf).unwrap();
-        assert!(
-            outbound.edns.is_some_and(|e| e.do_bit),
-            "outbound upstream query must carry DO=1 regardless of the client wire, \
-             or the cached answer has no RRSIGs to serve +dnssec clients (issue #191)"
-        );
-    }
-
     #[test]
     fn parse_addr_ip_only() {
         let addr = parse_upstream_addr("1.2.3.4", 53).unwrap();

@@ -2893,7 +2893,10 @@ mod tests {
 
     #[tokio::test]
     async fn refresh_entry_sends_do_bit_upstream() {
-        let (addr, mut seen) = crate::testutil::stub_udp_upstream().await;
+        let (addr, mut seen) = crate::testutil::recording_upstream(
+            crate::testutil::a_record_response("example.com", Ipv4Addr::new(93, 184, 216, 34), 300),
+        )
+        .await;
         let ctx = crate::testutil::test_ctx().await;
         *ctx.upstream_pool.lock().unwrap() =
             crate::forward::UpstreamPool::new(vec![crate::forward::Upstream::Udp(addr)], vec![]);

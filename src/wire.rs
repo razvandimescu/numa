@@ -19,6 +19,15 @@ pub struct WireMeta {
     pub answer_count: usize,
 }
 
+/// An OPT record always carries the root name (RFC 6891 §6.1.2), so these
+/// three bytes — root label, then type 41 — identify one without walking it.
+const OPT_RECORD_HEAD: [u8; 3] = [0x00, 0x00, 41];
+
+/// Read a 16-bit section count from the header.
+fn count(wire: &[u8], at: usize) -> usize {
+    u16::from_be_bytes([wire[at], wire[at + 1]]) as usize
+}
+
 /// Scan a DNS response's wire bytes and return metadata about TTL field locations.
 ///
 /// Walks the header, skips the question section, then for each resource record in
@@ -29,66 +38,31 @@ pub fn scan_ttl_offsets(wire: &[u8]) -> Result<WireMeta> {
         return Err("wire too short for DNS header".into());
     }
 
-    let qdcount = u16::from_be_bytes([wire[4], wire[5]]) as usize;
-    let ancount = u16::from_be_bytes([wire[6], wire[7]]) as usize;
-    let nscount = u16::from_be_bytes([wire[8], wire[9]]) as usize;
-    let arcount = u16::from_be_bytes([wire[10], wire[11]]) as usize;
-
     let mut pos = 12;
-
-    // Skip question section
-    for _ in 0..qdcount {
-        skip_wire_name(wire, &mut pos)?;
-        if pos + 4 > wire.len() {
-            return Err("wire truncated in question section".into());
-        }
-        pos += 4; // QTYPE(2) + QCLASS(2)
+    for _ in 0..count(wire, 4) {
+        skip_question(wire, &mut pos)?;
     }
 
     let mut ttl_offsets = Vec::new();
+    let mut answer_count = 0;
 
-    // Process answer + authority + additional sections
-    let section_counts = [ancount, nscount, arcount];
-    let mut answer_offset_count = 0;
-
-    for (section_idx, &count) in section_counts.iter().enumerate() {
-        for _ in 0..count {
-            // Check if this is an OPT record: root name (0x00) + type 41
-            let is_opt = pos < wire.len()
-                && wire[pos] == 0x00
-                && pos + 3 <= wire.len()
-                && u16::from_be_bytes([wire[pos + 1], wire[pos + 2]]) == 41;
-
-            // Skip name
-            skip_wire_name(wire, &mut pos)?;
-
-            if pos + 10 > wire.len() {
-                return Err("wire truncated in resource record".into());
-            }
-
-            // TYPE(2) + CLASS(2) = 4 bytes before TTL
-            let ttl_offset = pos + 4;
-
+    // ANCOUNT, NSCOUNT, ARCOUNT: answers first, so they lead `ttl_offsets`.
+    for (section, at) in [6, 8, 10].into_iter().enumerate() {
+        for _ in 0..count(wire, at) {
+            let is_opt = wire.get(pos..pos + 3) == Some(&OPT_RECORD_HEAD[..]);
+            let ttl_offset = skip_record(wire, &mut pos)?;
             if !is_opt {
                 ttl_offsets.push(ttl_offset);
-                if section_idx == 0 {
-                    answer_offset_count += 1;
+                if section == 0 {
+                    answer_count += 1;
                 }
-            }
-
-            // Skip TYPE(2) + CLASS(2) + TTL(4) + RDLENGTH(2) = 10 bytes
-            let rdlength = u16::from_be_bytes([wire[pos + 8], wire[pos + 9]]) as usize;
-            pos += 10 + rdlength;
-
-            if pos > wire.len() {
-                return Err("wire truncated in resource record RDATA".into());
             }
         }
     }
 
     Ok(WireMeta {
         ttl_offsets,
-        answer_count: answer_offset_count,
+        answer_count,
     })
 }
 
@@ -130,32 +104,23 @@ pub fn patch_ttls(wire: &mut [u8], offsets: &[usize], new_ttl: u32) {
     }
 }
 
-/// An OPT record always carries the root name (RFC 6891 §6.1.2), so these
-/// three bytes — root label, then type 41 — identify one without walking it.
-const OPT_RECORD_HEAD: [u8; 3] = [0x00, 0x00, 41];
 const DO_FLAG: u8 = 0x80;
-
-enum OptSite {
-    /// Offset of the OPT record's TTL field, whose third byte holds DO.
-    Ttl(usize),
-    Absent,
-    Unparsable,
-}
 
 /// Make a query wire carry DO=1: flip the flag on the client's OPT, or append
 /// one and bump ARCOUNT. Patches bytes rather than reserializing, so client
 /// EDNS options, name compression and wires past `BytePacketBuffer`'s 4096-byte
-/// ceiling all survive untouched (issue #191).
+/// ceiling all survive untouched (issue #191). Wires we cannot walk go upstream
+/// as they came.
 pub fn ensure_do_bit(wire: &[u8]) -> Cow<'_, [u8]> {
-    match locate_opt(wire) {
-        OptSite::Ttl(ttl) if wire[ttl + 2] & DO_FLAG != 0 => Cow::Borrowed(wire),
-        OptSite::Ttl(ttl) => {
+    match locate_opt_ttl(wire) {
+        Ok(Some(ttl)) if wire[ttl + 2] & DO_FLAG != 0 => Cow::Borrowed(wire),
+        Ok(Some(ttl)) => {
             let mut out = wire.to_vec();
             out[ttl + 2] |= DO_FLAG;
             Cow::Owned(out)
         }
-        OptSite::Absent => append_do_opt(wire).map_or(Cow::Borrowed(wire), Cow::Owned),
-        OptSite::Unparsable => Cow::Borrowed(wire),
+        Ok(None) => append_do_opt(wire).map_or(Cow::Borrowed(wire), Cow::Owned),
+        Err(_) => Cow::Borrowed(wire),
     }
 }
 
@@ -173,55 +138,61 @@ fn append_do_opt(wire: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-fn locate_opt(wire: &[u8]) -> OptSite {
+/// Offset of the OPT record's TTL field, whose third byte holds DO; `None` when
+/// the query carries no OPT and one can safely be appended.
+fn locate_opt_ttl(wire: &[u8]) -> Result<Option<usize>> {
     if wire.len() < 12 {
-        return OptSite::Unparsable;
+        return Err("wire too short for DNS header".into());
     }
-    let count = |i: usize| u16::from_be_bytes([wire[i], wire[i + 1]]) as usize;
-    let mut pos = 12;
 
-    for _ in 0..count(4) {
-        if skip_wire_name(wire, &mut pos).is_err() {
-            return OptSite::Unparsable;
-        }
-        pos += 4; // QTYPE(2) + QCLASS(2)
+    let mut pos = 12;
+    for _ in 0..count(wire, 4) {
+        skip_question(wire, &mut pos)?;
     }
-    for _ in 0..count(6) + count(8) {
-        if skip_record(wire, &mut pos).is_err() {
-            return OptSite::Unparsable;
-        }
+    for _ in 0..count(wire, 6) + count(wire, 8) {
+        skip_record(wire, &mut pos)?;
     }
-    for _ in 0..count(10) {
-        let start = pos;
-        let is_opt = wire.get(start..start + 3) == Some(&OPT_RECORD_HEAD[..]);
-        if skip_record(wire, &mut pos).is_err() {
-            return OptSite::Unparsable;
-        }
+    for _ in 0..count(wire, 10) {
+        let is_opt = wire.get(pos..pos + 3) == Some(&OPT_RECORD_HEAD[..]);
+        let ttl_offset = skip_record(wire, &mut pos)?;
         if is_opt {
-            return OptSite::Ttl(start + 5); // root name + TYPE(2) + CLASS(2)
+            return Ok(Some(ttl_offset));
         }
     }
+
     // Trailing uncounted bytes would sit between ARCOUNT's last record and
     // the OPT we append, so upstream would read them as that record.
     if pos == wire.len() {
-        OptSite::Absent
+        Ok(None)
     } else {
-        OptSite::Unparsable
+        Err("trailing bytes past the counted records".into())
     }
 }
 
-/// Skip one resource record: name, fixed fields, then RDATA.
-fn skip_record(wire: &[u8], pos: &mut usize) -> Result<()> {
+/// Skip one question entry: name, then QTYPE(2) + QCLASS(2).
+fn skip_question(wire: &[u8], pos: &mut usize) -> Result<()> {
+    skip_wire_name(wire, pos)?;
+    if *pos + 4 > wire.len() {
+        return Err("wire truncated in question section".into());
+    }
+    *pos += 4;
+    Ok(())
+}
+
+/// Skip one resource record: name, fixed fields, then RDATA. Returns the offset
+/// of its TTL field, which sits after TYPE(2) + CLASS(2).
+fn skip_record(wire: &[u8], pos: &mut usize) -> Result<usize> {
     skip_wire_name(wire, pos)?;
     if *pos + 10 > wire.len() {
         return Err("wire truncated in resource record".into());
     }
+    let ttl_offset = *pos + 4;
     let rdlength = u16::from_be_bytes([wire[*pos + 8], wire[*pos + 9]]) as usize;
     *pos += 10 + rdlength;
     if *pos > wire.len() {
         return Err("wire truncated in resource record RDATA".into());
     }
-    Ok(())
+    Ok(ttl_offset)
 }
 
 /// Skip a DNS name in wire bytes, advancing `pos` past it.
