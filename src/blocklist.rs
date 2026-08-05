@@ -141,6 +141,10 @@ impl BlocklistStore {
         self.last_refresh = Some(Instant::now());
     }
 
+    pub fn domains_loaded(&self) -> usize {
+        self.domains.len()
+    }
+
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
     }
@@ -238,6 +242,38 @@ pub fn parse_blocklist(text: &str) -> HashSet<String> {
         insert_if_valid(&mut domains, d.trim_end_matches('^'));
     }
     domains
+}
+
+/// Share of entry lines that must parse as domains for a body to be a list at
+/// all. Every format Numa parses — hosts lines, bare domains, adblock syntax —
+/// yields a domain from essentially every entry line, so anything under half is
+/// something else wearing a 200.
+const MIN_PARSED_PERCENT: usize = 50;
+
+/// Why this source is not a usable blocklist, or `None` if it is one.
+///
+/// Judges shape, never size: a twelve-domain personal list parses all of its
+/// entry lines and stays valid, while an error page parses almost none. An
+/// empty local file is a deliberate "block nothing"; an empty remote body is a
+/// broken upstream, never an instruction.
+pub(crate) fn source_defect(source: &str, text: &str, domains: &HashSet<String>) -> Option<String> {
+    let entries = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with('!'))
+        .count();
+    if entries == 0 {
+        return local_path(source)
+            .is_none()
+            .then(|| "response body has no entries".to_string());
+    }
+    if domains.len() * 100 < entries * MIN_PARSED_PERCENT {
+        return Some(format!(
+            "only {} of {entries} entry lines parsed as domains",
+            domains.len()
+        ));
+    }
+    None
 }
 
 pub(crate) fn normalize(domain: &str) -> String {
@@ -453,6 +489,52 @@ mod tests {
         assert!(local_path("http://example.com/list.txt").is_none());
     }
 
+    fn defect(source: &str, text: &str) -> Option<String> {
+        source_defect(source, text, &parse_blocklist(text))
+    }
+
+    /// A soft-error page small enough to yield one domain-shaped token still
+    /// must not replace a working list — the count is not the test, the share
+    /// of entry lines that parsed is.
+    #[test]
+    fn small_error_page_with_one_domain_shaped_line_is_rejected() {
+        let body = "<html>\n<head><title>404 Not Found</title></head>\n<body>\n<center><h1>404 Not Found</h1></center>\n<hr><center>nginx/1.18.0</center>\n</body>\n</html>\n";
+        assert!(
+            !parse_blocklist(body).is_empty(),
+            "precondition: parses > 0"
+        );
+        assert!(defect("https://cdn.example/list.txt", body).is_some());
+    }
+
+    /// Size is never the test — a tiny personal list must survive validation
+    /// that an error page fails.
+    #[test]
+    fn tiny_custom_list_is_accepted() {
+        assert!(defect("https://cdn.example/list.txt", "# mine\nads.example.com\n").is_none());
+    }
+
+    #[test]
+    fn real_list_shapes_are_accepted() {
+        assert!(defect("https://cdn.example/l.txt", "a.com\nb.com\nc.com\n").is_none());
+        assert!(defect(
+            "https://cdn.example/l.txt",
+            "0.0.0.0 a.com\n0.0.0.0 b.com\n"
+        )
+        .is_none());
+        assert!(defect("https://cdn.example/l.txt", "||a.com^\n||b.com^\n").is_none());
+    }
+
+    /// Emptying your own list file is an instruction to block nothing; an empty
+    /// remote body is a broken upstream.
+    #[test]
+    fn empty_local_file_is_valid_but_empty_remote_body_is_not() {
+        // temp_dir() rather than a literal: `/etc/...` has no drive prefix, so
+        // Path::is_absolute is false for it on Windows.
+        let local = std::env::temp_dir().join("numa-local.txt");
+        assert!(defect(&local.display().to_string(), "# all clear\n").is_none());
+        assert!(defect("https://cdn.example/list.txt", "").is_some());
+    }
+
     #[test]
     fn heap_bytes_grows_with_domains() {
         let mut store = BlocklistStore::new(
@@ -563,6 +645,8 @@ async fn fetch_once(client: &reqwest::Client, url: &str) -> Result<String, Strin
         .get(url)
         .send()
         .await
+        .map_err(|e| format_error_chain(&e))?
+        .error_for_status()
         .map_err(|e| format_error_chain(&e))?;
     resp.text().await.map_err(|e| format_error_chain(&e))
 }
@@ -584,7 +668,11 @@ mod retry_tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    async fn flaky_http_server(drop_first_n: usize, body: &'static str) -> SocketAddr {
+    async fn flaky_http_server(
+        drop_first_n: usize,
+        status: &'static str,
+        body: &'static str,
+    ) -> SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -601,7 +689,8 @@ mod retry_tests {
                     let mut buf = [0u8; 2048];
                     let _ = sock.read(&mut buf).await;
                     let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n{}",
+                        "HTTP/1.1 {}\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n{}",
+                        status,
                         body.len(),
                         body,
                     );
@@ -621,7 +710,7 @@ mod retry_tests {
     async fn retry_succeeds_on_final_attempt() {
         let body = "ads.example.com\ntracker.example.net\n";
         let delays = zero_delays();
-        let addr = flaky_http_server(delays.len(), body).await;
+        let addr = flaky_http_server(delays.len(), "200 OK", body).await;
         let client = crate::forward::default_client();
         let url = format!("http://{addr}/");
         let result = fetch_with_retry_delays(&client, &url, &delays).await;
@@ -682,10 +771,45 @@ mod retry_tests {
     #[tokio::test]
     async fn retry_gives_up_when_all_attempts_fail() {
         let delays = zero_delays();
-        let addr = flaky_http_server(delays.len() + 2, "unreachable").await;
+        let addr = flaky_http_server(delays.len() + 2, "200 OK", "unreachable").await;
         let client = crate::forward::default_client();
         let url = format!("http://{addr}/");
         let result = fetch_with_retry_delays(&client, &url, &delays).await;
         assert_eq!(result, None);
+    }
+
+    /// The issue #336 outage: jsDelivr answered 403 with a plain-text error
+    /// body, which was accepted as a successful download of zero domains.
+    #[tokio::test]
+    async fn non_2xx_is_a_failure_not_an_empty_list() {
+        let addr = flaky_http_server(
+            0,
+            "403 Forbidden",
+            "Package size exceeded the configured limit of 150 MB.",
+        )
+        .await;
+        let client = crate::forward::default_client();
+        let url = format!("http://{addr}/");
+        let result = fetch_with_retry_delays(&client, &url, &[0]).await;
+        assert_eq!(result, None, "403 body must not be taken as a blocklist");
+    }
+
+    /// CI canary. Fetches the URL actually compiled into the binary and parses
+    /// it with Numa's own parser, so a discontinued format fails here rather
+    /// than in the field.
+    #[tokio::test]
+    #[ignore = "network"]
+    async fn shipped_default_blocklist_still_loads() {
+        let lists = crate::config::default_blocklists();
+        let downloaded = download_blocklists(&lists, None).await;
+        assert_eq!(downloaded.len(), lists.len(), "a default source failed");
+        for (source, text) in &downloaded {
+            let domains = parse_blocklist(text);
+            assert!(
+                domains.len() > 100_000,
+                "default blocklist {source} parsed only {} domains",
+                domains.len()
+            );
+        }
     }
 }

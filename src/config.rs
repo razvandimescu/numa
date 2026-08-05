@@ -573,8 +573,17 @@ fn default_blocking_enabled() -> bool {
     true
 }
 
-fn default_blocklists() -> Vec<String> {
-    vec!["https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/hosts/pro.txt".to_string()]
+/// HaGeZi discontinued the `hosts/` and `domains/` formats on 2026-08-01; the
+/// wildcard list is the maintained equivalent. Bare domains there rely on
+/// `find_in_set`'s parent-suffix match to cover subdomains, which is what the
+/// hosts format was already getting anyway. The repo is past jsDelivr's 150 MB
+/// package cap — `hosts/` already 403s there — so raw GitHub is the path least
+/// likely to be withdrawn next.
+pub(crate) fn default_blocklists() -> Vec<String> {
+    vec![
+        "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/pro-onlydomains.txt"
+            .to_string(),
+    ]
 }
 
 fn default_refresh_hours() -> u64 {

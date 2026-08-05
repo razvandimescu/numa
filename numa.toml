@@ -116,12 +116,16 @@ api_port = 5380
 # [blocking]
 # enabled = true               # set to false to disable ad blocking
 # refresh_hours = 24
+# Every entry blocks the domain and all its subdomains, whatever the list
+# format — hosts lines, bare domains, adblock syntax, remote or local.
 # lists = [
-#     "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/hosts/pro.txt",
-#     "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/wildcard/nsfw-onlydomains.txt",  # adult-content (opt-in; hagezi ships nsfw only as wildcard/adblock, not hosts/)
-#     "file:///etc/numa/local-blocklist.txt",  # local hosts-style file
+#     "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/pro-onlydomains.txt",
+#     "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/nsfw-onlydomains.txt",  # adult-content (opt-in)
+#     "file:///etc/numa/local-blocklist.txt",  # local file: hosts lines or bare domains
 #     "/etc/numa/extra-blocks.txt",            # bare absolute path also works
 # ]
+# Where raw.githubusercontent.com is unreachable, the jsDelivr mirror of the
+# same file works: https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/wildcard/pro-onlydomains.txt
 # allowlist = ["example.com"]  # domains to never block
 
 # ── Per-client domain policies ─────────────────────────────────────

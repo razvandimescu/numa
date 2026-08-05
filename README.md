@@ -66,7 +66,7 @@ Add path-based routing (`app.numa/api → :5001`), share services across machine
 
 ## Ad Blocking & Privacy
 
-385K+ domains blocked via [Hagezi Pro](https://github.com/hagezi/dns-blocklists). Works on any network — coffee shops, hotels, airports. Travels with your laptop.
+Ad and tracker blocking via [Hagezi Pro](https://github.com/hagezi/dns-blocklists), refreshed daily. Works on any network — coffee shops, hotels, airports. Travels with your laptop.
 
 Three resolution modes:
 
@@ -141,7 +141,7 @@ Turnkey compose recipes:
 | Developer overrides (REST API) | — | — | — | Auto-revert, scriptable |
 | Recursive resolver | — | — | Yes | Yes, with SRTT selection |
 | DNSSEC validation | — | — | Yes | Yes (RSA, ECDSA, Ed25519) |
-| Ad blocking | Yes | Yes | — | 385K+ domains |
+| Ad blocking | Yes | Yes | — | Hagezi Pro |
 | Web admin UI | Full | Full | — | Dashboard |
 | Encrypted upstream (DoH/DoT) | Needs cloudflared | DoH only | DoT only | DoH + DoT (`tls://`) |
 | Encrypted clients (DoT listener) | Needs stunnel sidecar | Yes | Yes | Native (RFC 7858) |

@@ -8,7 +8,7 @@
 #   container /etc/resolv.conf  →  nameserver 127.0.0.1
 #   numa bound on :53           →  upstream DoH by hostname (quad9)
 #   numa boots → spawns blocklist download
-#   reqwest::get → getaddrinfo("cdn.jsdelivr.net")
+#   reqwest::get → getaddrinfo("raw.githubusercontent.com")
 #     → loopback UDP :53 → numa → cache miss → DoH upstream
 #     → getaddrinfo("dns.quad9.net") → same loop → glibc EAI_AGAIN
 #
@@ -81,7 +81,7 @@ timeout_ms = 3000
 
 [blocking]
 enabled = true
-lists = ["https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/hosts/pro.txt"]
+lists = ["https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/pro-onlydomains.txt"]
 CONF
 
 mkdir -p /tmp/numa-data
