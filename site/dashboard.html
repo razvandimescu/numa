@@ -1328,7 +1328,7 @@ async function refresh() {
     document.getElementById('blockedSub').textContent =
       bl.paused ? 'paused' :
       !bl.enabled ? 'disabled' :
-      bl.domains_loaded > 0 ? `${formatNumber(bl.domains_loaded)} in blocklist` : 'loading...';
+      bl.domains_loaded > 0 ? `${formatNumber(bl.domains_loaded)} in blocklist` : 'no domains loaded';
 
     // Blocking controls — single primary button + secondary toggle
     const toggleBtn = document.getElementById('toggleBtn');
@@ -1489,6 +1489,8 @@ function renderBlockingInfo(info) {
   const refreshEl = document.getElementById('blockingRefresh');
   if (info.last_refresh_secs_ago != null) {
     refreshEl.textContent = `refreshed ${formatUptime(info.last_refresh_secs_ago)} ago`;
+  } else {
+    refreshEl.textContent = 'never updated';
   }
   const sources = info.list_sources || [];
   if (!sources.length) {
