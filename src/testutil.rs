@@ -133,15 +133,16 @@ pub async fn mock_upstream(response: DnsPacket) -> SocketAddr {
 
 /// Like `mock_upstream` but sends raw wire bytes — for intentionally
 /// malformed responses that can't survive our own serializer.
-pub async fn mock_upstream_raw(mut bytes: Vec<u8>) -> SocketAddr {
+pub async fn mock_upstream_raw(bytes: Vec<u8>) -> SocketAddr {
     let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let addr = sock.local_addr().unwrap();
     tokio::spawn(async move {
-        let mut buf = [0u8; 512];
-        let (_, src) = sock.recv_from(&mut buf).await.unwrap();
-        bytes[0] = buf[0];
-        bytes[1] = buf[1];
-        sock.send_to(&bytes, src).await.unwrap();
+        let mut buf = [0u8; 4096];
+        let (n, src) = sock.recv_from(&mut buf).await.unwrap();
+        let mut reply = reply_within_budget(&bytes, &buf[..n]);
+        reply[0] = buf[0];
+        reply[1] = buf[1];
+        sock.send_to(&reply, src).await.unwrap();
     });
     addr
 }
@@ -171,7 +172,7 @@ pub async fn mock_upstream_by_qname(responses: Vec<(&str, DnsPacket)>) -> Socket
                 continue;
             };
             if let Some((_, bytes)) = table.iter().find(|(name, _)| *name == question.name) {
-                let mut reply = bytes.clone();
+                let mut reply = reply_within_budget(bytes, &buf[..n]);
                 reply[0] = buf[0];
                 reply[1] = buf[1];
                 let _ = sock.send_to(&reply, src).await;
@@ -189,7 +190,7 @@ pub async fn recording_upstream(
 ) -> (SocketAddr, tokio::sync::mpsc::Receiver<Vec<u8>>) {
     let mut out = BytePacketBuffer::new();
     response.write(&mut out).unwrap();
-    let mut bytes = out.filled().to_vec();
+    let bytes = out.filled().to_vec();
 
     let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let addr = sock.local_addr().unwrap();
@@ -197,15 +198,40 @@ pub async fn recording_upstream(
     tokio::spawn(async move {
         let mut buf = [0u8; 1500];
         while let Ok((n, peer)) = sock.recv_from(&mut buf).await {
-            bytes[0] = buf[0];
-            bytes[1] = buf[1];
-            let _ = sock.send_to(&bytes, peer).await;
+            let mut reply = reply_within_budget(&bytes, &buf[..n]);
+            reply[0] = buf[0];
+            reply[1] = buf[1];
+            let _ = sock.send_to(&reply, peer).await;
             if tx.send(buf[..n].to_vec()).await.is_err() {
                 break;
             }
         }
     });
     (addr, rx)
+}
+
+/// A resolver honors the requestor's advertised payload size: an answer that
+/// does not fit comes back with TC=1 and no records (RFC 6891 §6.2.4). A stub
+/// that always replies in full is blind to every bug the outbound OPT can
+/// cause, since that OPT is precisely what upstream acts on (issue #191).
+fn reply_within_budget(full: &[u8], query_wire: &[u8]) -> Vec<u8> {
+    let mut parse = BytePacketBuffer::from_bytes(query_wire);
+    let Ok(query) = DnsPacket::from_buffer(&mut parse) else {
+        return full.to_vec();
+    };
+    let budget = query
+        .edns
+        .as_ref()
+        .map_or(512, |e| e.udp_payload_size as usize);
+    if full.len() <= budget {
+        return full.to_vec();
+    }
+
+    let mut tc = DnsPacket::response_from(&query, ResultCode::NOERROR);
+    tc.header.truncated_message = true;
+    let mut out = BytePacketBuffer::new();
+    tc.write(&mut out).unwrap();
+    out.filled().to_vec()
 }
 
 /// UDP socket that accepts connections but never replies.
