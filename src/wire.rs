@@ -105,23 +105,52 @@ pub fn patch_ttls(wire: &mut [u8], offsets: &[usize], new_ttl: u32) {
 }
 
 const DO_FLAG: u8 = 0x80;
+const TC_FLAG: u8 = 0x02;
 
-/// Make a query wire carry DO=1: flip the flag on the client's OPT, or append
-/// one and bump ARCOUNT. Patches bytes rather than reserializing, so client
-/// EDNS options, name compression and wires past `BytePacketBuffer`'s 4096-byte
-/// ceiling all survive untouched (issue #191). Wires we cannot walk go upstream
-/// as they came.
+/// TC=1 (RFC 1035 §4.1.1, header byte 2) means "this answer did not fit, ask
+/// again over TCP". Cached, it would answer every later client — including the
+/// ones already on TCP, where the retry has nowhere left to go.
+pub fn is_truncated(wire: &[u8]) -> bool {
+    wire.get(2).is_some_and(|flags| flags & TC_FLAG != 0)
+}
+
+/// Make a query wire carry DO=1 within a budget that can hold the answer:
+/// flip the flag on the client's OPT, or append one and bump ARCOUNT. Patches
+/// bytes rather than reserializing, so client EDNS options, name compression
+/// and wires past `BytePacketBuffer`'s 4096-byte ceiling all survive untouched
+/// (issue #191). Wires we cannot walk go upstream as they came.
 pub fn ensure_do_bit(wire: &[u8]) -> Cow<'_, [u8]> {
-    match locate_opt_ttl(wire) {
-        Ok(Some(ttl)) if wire[ttl + 2] & DO_FLAG != 0 => Cow::Borrowed(wire),
-        Ok(Some(ttl)) => {
+    match locate_opt(wire) {
+        Ok(OptSite::Flag(ttl))
+            if wire[ttl + 2] & DO_FLAG != 0 && payload_fits_dnssec(wire, ttl) =>
+        {
+            Cow::Borrowed(wire)
+        }
+        Ok(OptSite::Flag(ttl)) => {
             let mut out = wire.to_vec();
             out[ttl + 2] |= DO_FLAG;
+            if !payload_fits_dnssec(&out, ttl) {
+                out[ttl - 2..ttl].copy_from_slice(&MIN_UPSTREAM_PAYLOAD.to_be_bytes());
+            }
             Cow::Owned(out)
         }
-        Ok(None) => append_do_opt(wire).map_or(Cow::Borrowed(wire), Cow::Owned),
+        Ok(OptSite::End(end)) => {
+            append_do_opt(&wire[..end]).map_or(Cow::Borrowed(wire), Cow::Owned)
+        }
         Err(_) => Cow::Borrowed(wire),
     }
+}
+
+/// EDNS payload size is hop-by-hop (RFC 6891 §6.2.3) — upstream answers to us,
+/// not to our client, so the client's budget is not ours to pass on. Forwarding
+/// a small one alongside DO=1 asks for RRSIGs that cannot fit and earns a TC=1
+/// with no records, for answers that fit unsigned.
+const MIN_UPSTREAM_PAYLOAD: u16 = crate::packet::DEFAULT_EDNS_PAYLOAD;
+
+/// The OPT's CLASS field, which holds the payload size, sits in the two bytes
+/// before its TTL.
+fn payload_fits_dnssec(wire: &[u8], ttl: usize) -> bool {
+    u16::from_be_bytes([wire[ttl - 2], wire[ttl - 1]]) >= MIN_UPSTREAM_PAYLOAD
 }
 
 /// `None` when ARCOUNT cannot cover one more record, since an appended OPT
@@ -138,9 +167,17 @@ fn append_do_opt(wire: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Offset of the OPT record's TTL field, whose third byte holds DO; `None` when
-/// the query carries no OPT and one can safely be appended.
-fn locate_opt_ttl(wire: &[u8]) -> Result<Option<usize>> {
+/// Where DO belongs in a query wire.
+enum OptSite {
+    /// Offset of the OPT record's TTL field, whose third byte holds DO.
+    Flag(usize),
+    /// End of the counted records — where an OPT can be appended. Any bytes
+    /// past it are uncounted trailing junk that must not survive the append,
+    /// or upstream reads them as the record ARCOUNT now reaches.
+    End(usize),
+}
+
+fn locate_opt(wire: &[u8]) -> Result<OptSite> {
     if wire.len() < 12 {
         return Err("wire too short for DNS header".into());
     }
@@ -156,17 +193,11 @@ fn locate_opt_ttl(wire: &[u8]) -> Result<Option<usize>> {
         let is_opt = wire.get(pos..pos + 3) == Some(&OPT_RECORD_HEAD[..]);
         let ttl_offset = skip_record(wire, &mut pos)?;
         if is_opt {
-            return Ok(Some(ttl_offset));
+            return Ok(OptSite::Flag(ttl_offset));
         }
     }
 
-    // Trailing uncounted bytes would sit between ARCOUNT's last record and
-    // the OPT we append, so upstream would read them as that record.
-    if pos == wire.len() {
-        Ok(None)
-    } else {
-        Err("trailing bytes past the counted records".into())
-    }
+    Ok(OptSite::End(pos))
 }
 
 /// Skip one question entry: name, then QTYPE(2) + QCLASS(2).
@@ -1520,8 +1551,43 @@ mod tests {
         assert_eq!(out.len(), wire.len(), "patched in place, not rebuilt");
         let edns = parse_wire(&out).edns.expect("OPT present");
         assert!(edns.do_bit);
-        assert_eq!(edns.udp_payload_size, 512, "client payload size preserved");
         assert_eq!(edns.options, vec![0, 10, 0, 8, 1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn ensure_do_bit_raises_a_payload_size_that_cannot_hold_dnssec() {
+        // EDNS payload size is hop-by-hop (RFC 6891 §6.2.3): upstream answers
+        // to *us*, so the client's budget is not ours to forward. Asking for
+        // DNSSEC records inside 512 bytes earns a TC=1 with no records, which
+        // the cache then serves to every later client, TCP included.
+        let mut query = DnsPacket::query(0xABCD, "example.com", QueryType::A);
+        query.edns = Some(EdnsOpt {
+            udp_payload_size: 512,
+            do_bit: false,
+            ..Default::default()
+        });
+        let wire = to_wire(&query);
+        let edns = parse_wire(&ensure_do_bit(&wire)).edns.expect("OPT present");
+
+        assert!(edns.do_bit);
+        assert_eq!(
+            edns.udp_payload_size,
+            crate::packet::DEFAULT_EDNS_PAYLOAD,
+            "a DO=1 query must carry a budget that can hold the RRSIGs it asks for"
+        );
+    }
+
+    #[test]
+    fn ensure_do_bit_keeps_a_payload_size_above_the_default() {
+        let mut query = DnsPacket::query(0xABCD, "example.com", QueryType::A);
+        query.edns = Some(EdnsOpt {
+            udp_payload_size: 4096,
+            ..Default::default()
+        });
+        let wire = to_wire(&query);
+        let edns = parse_wire(&ensure_do_bit(&wire)).edns.expect("OPT present");
+
+        assert_eq!(edns.udp_payload_size, 4096, "never lower a roomier budget");
     }
 
     #[test]
@@ -1573,11 +1639,25 @@ mod tests {
     }
 
     #[test]
-    fn ensure_do_bit_never_appends_behind_trailing_bytes() {
-        // An OPT appended after uncounted bytes is not the record ARCOUNT
-        // reaches — upstream would parse the trailing junk as our OPT.
+    fn ensure_do_bit_drops_trailing_bytes_rather_than_forwarding_do_0() {
+        // An OPT appended *behind* uncounted bytes is not the record ARCOUNT
+        // reaches, so the trailing junk goes at the counted boundary instead.
+        // Forwarding the wire untouched is not the safe alternative: it keeps
+        // DO=0, and any client can pin an RRSIG-less entry in the shared cache
+        // by padding its query (issue #191).
         let mut wire = query_wire();
         wire.extend_from_slice(&[0xDE, 0xAD]);
-        assert_eq!(&ensure_do_bit(&wire)[..], &wire[..]);
+        let out = ensure_do_bit(&wire);
+
+        let edns = parse_wire(&out).edns.expect("OPT appended");
+        assert!(
+            edns.do_bit,
+            "trailing bytes must not defeat DO normalization"
+        );
+        assert_eq!(
+            out.len(),
+            wire.len() - 2 + 11,
+            "junk dropped, one bare OPT appended at the counted boundary"
+        );
     }
 }

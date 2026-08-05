@@ -2655,6 +2655,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pipeline_small_buffer_client_does_not_poison_the_cache() {
+        // Forwarding the client's 512-byte budget upstream while adding DO=1
+        // asks for DNSSEC records that cannot fit, so upstream answers TC=1
+        // with no records. Caching that wire hands the empty answer to every
+        // later client — TCP included, where truncation has no meaning and no
+        // retry escapes it — until the entry expires (issue #191).
+        let big = crate::testutil::noerror_response(vec![DnsRecord::UNKNOWN {
+            domain: "big.test".into(),
+            qtype: 99,
+            data: vec![0u8; 600], // over a 512-byte budget, under 4096
+            ttl: 300,
+        }]);
+        let (upstream_addr, _seen) = crate::testutil::recording_upstream(big).await;
+
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.forwarding_rules = vec![ForwardingRule::new(
+            "big.test".to_string(),
+            UpstreamPool::new(vec![Upstream::Udp(upstream_addr)], vec![]),
+        )];
+        let ctx = Arc::new(ctx);
+
+        let mut cramped = DnsPacket::query(0xBEEF, "big.test", QueryType::UNKNOWN(99));
+        cramped.edns = Some(crate::packet::EdnsOpt {
+            udp_payload_size: 512,
+            ..Default::default()
+        });
+        let _ = resolve_in_test_with_query(&ctx, cramped).await;
+
+        let mut roomy = DnsPacket::query(0xBEF0, "big.test", QueryType::UNKNOWN(99));
+        roomy.edns = Some(crate::packet::EdnsOpt::default());
+        let (resp, path) = resolve_in_test_with_query(&ctx, roomy).await;
+
+        assert!(
+            !resp.header.truncated_message,
+            "{path:?} client with a 1232-byte budget got a truncated answer it never asked for"
+        );
+        assert_eq!(
+            resp.answers.len(),
+            1,
+            "the full answer must survive a small-buffer client touching the same name"
+        );
+    }
+
+    #[tokio::test]
     async fn handle_query_reply_leaves_provided_socket() {
         let sock_a = Arc::new(UdpListener::bind("127.0.0.1:0").await.unwrap());
         let sock_b = Arc::new(UdpListener::bind("127.0.0.1:0").await.unwrap());
