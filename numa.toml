@@ -115,7 +115,11 @@ api_port = 5380
 
 # [blocking]
 # enabled = true               # set to false to disable ad blocking
-# refresh_hours = 24
+# refresh_hours = 24           # a refresh that leaves nothing loaded retries in
+#                              # an hour instead of waiting the full cycle.
+# The last good copy of each remote list is kept under <data_dir>/blocklists so
+# a restart while the upstream is down still blocks. It never expires: age is
+# reported in the dashboard, but an old list always beats no list.
 # Every entry blocks the domain and all its subdomains, whatever the list
 # format — hosts lines, bare domains, adblock syntax, remote or local.
 # lists = [

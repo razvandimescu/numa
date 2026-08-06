@@ -10,7 +10,10 @@ use std::time::Duration;
 
 use log::{debug, error, info, warn};
 
-use crate::blocklist::{download_blocklists, parse_blocklist, source_defect, BlocklistStore};
+use crate::blocklist::{
+    download_blocklists, parse_blocklist, source_defect, BlocklistStore, SourceResult,
+};
+use crate::blocklist_cache::BlocklistCache;
 use crate::bootstrap_resolver::NumaResolver;
 use crate::buffer::BytePacketBuffer;
 use crate::cache::DnsCache;
@@ -826,26 +829,49 @@ async fn load_blocklists(
     let mut all_domains = std::collections::HashSet::new();
     let mut outcomes = Vec::with_capacity(downloaded.len());
     let mut failed = 0;
+    let mut stale = 0;
+    let cache = BlocklistCache::new(&ctx.data_dir);
     for (source, fetched) in &downloaded {
-        let text = match fetched {
-            Ok(text) => text,
-            Err(why) => {
-                failed += 1;
-                outcomes.push((source.clone(), Some(why.clone())));
-                continue;
+        let live_error = match fetched {
+            Err(why) => why.clone(),
+            Ok(text) => {
+                let domains = parse_blocklist(text);
+                match source_defect(source, text, &domains) {
+                    Some(why) => {
+                        error!("blocklist source failed: {source} — {why}");
+                        "not a domain list".to_string()
+                    }
+                    None => {
+                        info!("blocklist: {} domains from {}", domains.len(), source);
+                        cache.store(source, text);
+                        all_domains.extend(domains);
+                        outcomes.push((source.clone(), SourceResult::Loaded));
+                        continue;
+                    }
+                }
             }
         };
-        let domains = parse_blocklist(text);
-        if let Some(why) = source_defect(source, text, &domains) {
-            error!("blocklist source failed: {source} — {why}");
-            failed += 1;
-            outcomes.push((source.clone(), Some("not a domain list".to_string())));
-            continue;
+        // A stale list still blocks; nothing at all does not. The cached copy
+        // is never refused for being old (issue #336).
+        match cache.load(source) {
+            Some(cached) => {
+                stale += 1;
+                all_domains.extend(parse_blocklist(&cached.text));
+                outcomes.push((
+                    source.clone(),
+                    SourceResult::Cached {
+                        error: live_error,
+                        fetched_unix: cached.fetched_unix,
+                    },
+                ));
+            }
+            None => {
+                failed += 1;
+                outcomes.push((source.clone(), SourceResult::Failed(live_error)));
+            }
         }
-        info!("blocklist: {} domains from {}", domains.len(), source);
-        all_domains.extend(domains);
-        outcomes.push((source.clone(), None));
     }
+    cache.prune(lists);
     let total = all_domains.len();
 
     // Nothing to swap in is a failure only if something broke (issue #336);
@@ -863,15 +889,25 @@ async fn load_blocklists(
         return kept > 0;
     }
 
-    let loaded = outcomes.len() - failed;
+    // Live only. A cached source is contributing domains but is not evidence
+    // its upstream works, and counting it as loaded is the overstatement this
+    // reporting exists to remove.
+    let loaded = outcomes.len() - failed - stale;
     // Swap under lock — sub-microsecond
     let mut store = ctx.blocklist.write().unwrap();
     store.record_outcomes(&outcomes);
     store.swap_domains(all_domains);
     drop(store);
     if failed > 0 {
+        // Spells out stale too — the degraded branch wins the `if`, so a box
+        // that is both would otherwise never mention its cached lists.
         warn!(
-            "blocking degraded: {total} unique domains from {loaded} of {} lists",
+            "blocking degraded: {total} unique domains, {loaded} of {} lists live, {stale} from cache, {failed} failed",
+            lists.len()
+        );
+    } else if stale > 0 {
+        warn!(
+            "blocking stale: {total} unique domains, {stale} of {} lists served from cache",
             lists.len()
         );
     } else {

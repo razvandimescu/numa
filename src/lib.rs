@@ -2,6 +2,7 @@ pub mod acl;
 pub mod api;
 pub mod api_auth;
 pub mod blocklist;
+pub mod blocklist_cache;
 pub mod bootstrap_resolver;
 pub mod buffer;
 pub mod cache;

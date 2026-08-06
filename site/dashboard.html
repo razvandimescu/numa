@@ -1487,19 +1487,39 @@ function shortenUrl(url) {
   } catch { return url; }
 }
 
+// Copy carries the truth, colour only carries urgency — a state must never be
+// distinguishable by colour alone.
+// One missed 24h cycle is a blip; two is a pattern; a week is real drift. The
+// wording never changes with age, only the colour — a stale list is still
+// blocking, so the copy must not start claiming otherwise.
+const STALE_AMBER_SECS = 48 * 3600;
+const STALE_ROSE_SECS = 7 * 86400;
+
+function oldestStaleAge(info) {
+  const ages = ((info && info.list_sources) || [])
+    .filter(s => s.status === 'stale' && s.last_ok_secs_ago != null)
+    .map(s => s.last_ok_secs_ago);
+  return ages.length ? Math.max(...ages) : null;
+}
+
 // A source that has not been fetched yet is not a broken one — saying so was
 // the same mistake as rendering a dead list as "loading".
 function sourceNote(s) {
   if (s.status === 'ok') return '';
+  const age = s.last_ok_secs_ago != null ? `${formatUptime(s.last_ok_secs_ago)} ago` : null;
   if (s.status === 'pending') {
     return '<span style="color:var(--text-dim);margin-left:0.5rem;">not fetched yet</span>';
   }
-  const when = s.last_ok_secs_ago != null ? `last ok ${formatUptime(s.last_ok_secs_ago)} ago` : 'never loaded';
-  return `<span style="color:var(--rose);margin-left:0.5rem;">${h(s.error || 'failed')} &middot; ${when}</span>`;
+  const colour = s.status === 'stale' ? 'var(--amber)' : 'var(--rose)';
+  const when = age ? `${s.status === 'stale' ? 'cached' : 'last ok'} ${age}` : 'never loaded';
+  return `<span style="color:${colour};margin-left:0.5rem;">${h(s.error || 'failed')} &middot; ${when}</span>`;
 }
 
-// Copy carries the truth, colour only carries urgency — a state must never be
-// distinguishable by colour alone.
+function formatStaleAge(secs) {
+  if (secs == null) return 'unknown age';
+  return secs < STALE_AMBER_SECS ? `${Math.round(secs / 3600)}h` : `${Math.round(secs / 86400)}d`;
+}
+
 function blockingSubline(bl, info) {
   if (bl.paused) return 'paused';
   if (!bl.enabled) return 'disabled';
@@ -1510,6 +1530,7 @@ function blockingSubline(bl, info) {
     case 'loading': return 'loading…';
     case 'failed': return 'all lists failed · not blocking';
     case 'degraded': return `${loaded} · ${sources.filter(s => s.status === 'failed').length} of ${sources.length} lists failing`;
+    case 'stale': return `${loaded} · stale ${formatStaleAge(oldestStaleAge(info))}`;
     default: return loaded;
   }
 }
@@ -1518,6 +1539,11 @@ function blockingAlarm(info) {
   if (!info) return '';
   if (info.health === 'failed') return 'var(--rose)';
   if (info.health === 'degraded') return 'var(--amber)';
+  if (info.health === 'stale') {
+    const age = oldestStaleAge(info);
+    if (age > STALE_ROSE_SECS) return 'var(--rose)';
+    if (age > STALE_AMBER_SECS) return 'var(--amber)';
+  }
   return '';
 }
 

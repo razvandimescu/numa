@@ -20,6 +20,9 @@ pub struct BlocklistStore {
 enum SourceOutcome {
     Pending,
     Ok,
+    /// Live fetch failed, but a cached copy is being served. The string is why
+    /// the fetch failed, which is still worth showing.
+    Stale(String),
     Failed(String),
 }
 
@@ -29,14 +32,23 @@ enum SourceOutcome {
 struct SourceState {
     url: String,
     outcome: SourceOutcome,
-    last_ok: Option<Instant>,
+    /// Wall clock, not `Instant`, because it has to survive a restart to say
+    /// anything useful about a cached copy.
+    last_ok_unix: Option<u64>,
+}
+
+/// What a single source did on the last refresh.
+pub enum SourceResult {
+    Loaded,
+    Cached { error: String, fetched_unix: u64 },
+    Failed(String),
 }
 
 #[derive(serde::Serialize)]
 pub struct SourceStatus {
     pub url: String,
-    /// `pending` | `ok` | `failed`. One field rather than a pair of booleans,
-    /// so a not-yet-fetched source cannot read as a failed one.
+    /// `pending` | `ok` | `stale` | `failed`. One field rather than a pair of
+    /// booleans, so a not-yet-fetched source cannot read as a failed one.
     pub status: &'static str,
     pub error: Option<String>,
     pub last_ok_secs_ago: Option<u64>,
@@ -178,26 +190,31 @@ impl BlocklistStore {
             .map(|url| SourceState {
                 url: url.clone(),
                 outcome: SourceOutcome::Pending,
-                last_ok: None,
+                last_ok_unix: None,
             })
             .collect();
     }
 
-    /// `None` means the source loaded. Recorded whether or not the domains were
-    /// swapped in, because a refresh that keeps the live list still has to say
-    /// why it kept it.
-    pub fn record_outcomes(&mut self, outcomes: &[(String, Option<String>)]) {
-        let now = Instant::now();
-        for (url, error) in outcomes {
+    /// Recorded whether or not the domains were swapped in, because a refresh
+    /// that keeps the live list still has to say why it kept it.
+    pub fn record_outcomes(&mut self, outcomes: &[(String, SourceResult)]) {
+        for (url, result) in outcomes {
             let Some(state) = self.sources.iter_mut().find(|s| &s.url == url) else {
                 continue;
             };
-            match error {
-                None => {
+            match result {
+                SourceResult::Loaded => {
                     state.outcome = SourceOutcome::Ok;
-                    state.last_ok = Some(now);
+                    state.last_ok_unix = Some(crate::blocklist_cache::now_unix());
                 }
-                Some(e) => state.outcome = SourceOutcome::Failed(e.clone()),
+                SourceResult::Cached {
+                    error,
+                    fetched_unix,
+                } => {
+                    state.outcome = SourceOutcome::Stale(error.clone());
+                    state.last_ok_unix = Some(*fetched_unix);
+                }
+                SourceResult::Failed(e) => state.outcome = SourceOutcome::Failed(e.clone()),
             }
         }
     }
@@ -219,20 +236,29 @@ impl BlocklistStore {
         {
             return "loading";
         }
-        let failed = self
+        if self
             .sources
             .iter()
-            .any(|s| matches!(s.outcome, SourceOutcome::Failed(_)));
-        if !failed {
-            return "ok";
+            .any(|s| matches!(s.outcome, SourceOutcome::Failed(_)))
+        {
+            // Domains present means something is still being blocked, from the
+            // sources that did load or from a list a failed refresh left alone.
+            return if self.domains.is_empty() {
+                "failed"
+            } else {
+                "degraded"
+            };
         }
-        // Domains present means something is still being blocked, from the
-        // sources that did load or from a list a failed refresh left alone.
-        if self.domains.is_empty() {
-            "failed"
-        } else {
-            "degraded"
+        // A cached copy still blocks, so this ranks below a source contributing
+        // nothing at all. Age is reported, never a reason to refuse the copy.
+        if self
+            .sources
+            .iter()
+            .any(|s| matches!(s.outcome, SourceOutcome::Stale(_)))
+        {
+            return "stale";
         }
+        "ok"
     }
 
     pub fn domains_loaded(&self) -> usize {
@@ -311,13 +337,16 @@ impl BlocklistStore {
                     status: match s.outcome {
                         SourceOutcome::Pending => "pending",
                         SourceOutcome::Ok => "ok",
+                        SourceOutcome::Stale(_) => "stale",
                         SourceOutcome::Failed(_) => "failed",
                     },
                     error: match &s.outcome {
-                        SourceOutcome::Failed(e) => Some(e.clone()),
+                        SourceOutcome::Failed(e) | SourceOutcome::Stale(e) => Some(e.clone()),
                         _ => None,
                     },
-                    last_ok_secs_ago: s.last_ok.map(|t| t.elapsed().as_secs()),
+                    last_ok_secs_ago: s
+                        .last_ok_unix
+                        .map(|t| crate::blocklist_cache::now_unix().saturating_sub(t)),
                 })
                 .collect(),
             last_refresh_secs_ago: self.last_refresh.map(|t| t.elapsed().as_secs()),
@@ -692,7 +721,10 @@ mod tests {
             "not yet fetched is not the same as failed"
         );
 
-        store.record_outcomes(&[(a.to_string(), None), (b.to_string(), None)]);
+        store.record_outcomes(&[
+            (a.to_string(), SourceResult::Loaded),
+            (b.to_string(), SourceResult::Loaded),
+        ]);
         assert_eq!(
             store.health(),
             "ok",
@@ -700,7 +732,7 @@ mod tests {
         );
 
         store.swap_domains(["ads.example.com".to_string()].into_iter().collect());
-        store.record_outcomes(&[(b.to_string(), Some("HTTP 404".to_string()))]);
+        store.record_outcomes(&[(b.to_string(), SourceResult::Failed("HTTP 404".to_string()))]);
         assert_eq!(
             store.health(),
             "degraded",
@@ -720,7 +752,7 @@ mod tests {
         store.set_sources(&[a.to_string(), a.to_string()]);
         assert_eq!(store.stats().list_sources.len(), 1, "deduplicated");
 
-        store.record_outcomes(&[(a.to_string(), None)]);
+        store.record_outcomes(&[(a.to_string(), SourceResult::Loaded)]);
         assert_eq!(store.health(), "ok");
     }
 
@@ -745,8 +777,8 @@ mod tests {
         let (a, b) = ("https://a.example/l.txt", "https://b.example/l.txt");
         store.set_sources(&[a.to_string(), b.to_string()]);
         store.record_outcomes(&[
-            (a.to_string(), None),
-            (b.to_string(), Some("HTTP 404".to_string())),
+            (a.to_string(), SourceResult::Loaded),
+            (b.to_string(), SourceResult::Failed("HTTP 404".to_string())),
         ]);
 
         let stats = store.stats();
@@ -761,14 +793,57 @@ mod tests {
         assert!(bad.last_ok_secs_ago.is_none(), "it never loaded");
     }
 
+    /// Serving a cached copy is not a failure — it is still blocking, and the
+    /// cache is never refused for being old.
+    #[test]
+    fn a_cached_copy_reports_stale_and_still_counts_as_blocking() {
+        let mut store = empty_store();
+        let a = "https://a.example/l.txt";
+        store.set_sources(&[a.to_string()]);
+        store.swap_domains(["ads.example.com".to_string()].into_iter().collect());
+        store.record_outcomes(&[(
+            a.to_string(),
+            SourceResult::Cached {
+                error: "HTTP 404".to_string(),
+                fetched_unix: crate::blocklist_cache::now_unix() - 3 * 86400,
+            },
+        )]);
+
+        assert_eq!(store.health(), "stale");
+        let s = &store.stats().list_sources[0];
+        assert_eq!(s.status, "stale", "a served cache is still blocking");
+        assert_eq!(s.error.as_deref(), Some("HTTP 404"), "why it went stale");
+        assert!(s.last_ok_secs_ago.unwrap() >= 3 * 86400, "age survives");
+    }
+
+    /// A source contributing nothing is worse news than an old copy.
+    #[test]
+    fn a_dead_source_outranks_a_stale_one() {
+        let mut store = empty_store();
+        let (a, b) = ("https://a.example/l.txt", "https://b.example/l.txt");
+        store.set_sources(&[a.to_string(), b.to_string()]);
+        store.swap_domains(["ads.example.com".to_string()].into_iter().collect());
+        store.record_outcomes(&[
+            (
+                a.to_string(),
+                SourceResult::Cached {
+                    error: "timeout".to_string(),
+                    fetched_unix: crate::blocklist_cache::now_unix(),
+                },
+            ),
+            (b.to_string(), SourceResult::Failed("HTTP 404".to_string())),
+        ]);
+        assert_eq!(store.health(), "degraded");
+    }
+
     /// A source that recovers must stop reporting the old error.
     #[test]
     fn a_recovered_source_clears_its_error() {
         let mut store = empty_store();
         let a = "https://a.example/l.txt";
         store.set_sources(&[a.to_string()]);
-        store.record_outcomes(&[(a.to_string(), Some("timeout".to_string()))]);
-        store.record_outcomes(&[(a.to_string(), None)]);
+        store.record_outcomes(&[(a.to_string(), SourceResult::Failed("timeout".to_string()))]);
+        store.record_outcomes(&[(a.to_string(), SourceResult::Loaded)]);
 
         let stats = store.stats();
         assert_eq!(stats.list_sources[0].status, "ok");

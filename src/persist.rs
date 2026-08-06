@@ -45,8 +45,22 @@ pub fn save_json<T: Serialize>(path: &Path, value: &T) {
     }
 }
 
+/// Same durability as `save_json`, for payloads that are not JSON.
+pub fn save_text(path: &Path, contents: &str) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = write_atomic(path, contents) {
+        warn!("failed to write {path:?}: {e}");
+    }
+}
+
 fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
-    let tmp = path.with_extension("json.tmp");
+    // Appended, not `with_extension`, so a non-JSON payload keeps its own
+    // extension and two files in the same dir cannot collide on the temp name.
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = std::path::PathBuf::from(tmp);
     let mut file = std::fs::File::create(&tmp)?;
     file.write_all(contents.as_bytes())?;
     file.sync_all()?;
