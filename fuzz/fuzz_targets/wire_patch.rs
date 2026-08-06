@@ -24,7 +24,14 @@ fuzz_target!(|data: &[u8]| {
     }
 
     let patched = ensure_do_bit(data);
-    assert!(patched.len() >= data.len(), "ensure_do_bit lost bytes");
+    // Uncounted trailing bytes are dropped, so a shorter result is legal — but
+    // only from the append path, which ends in the OPT it just wrote. Any other
+    // shrink means counted records went missing.
+    const APPENDED_OPT: [u8; 11] = [0, 0, 41, 0x04, 0xD0, 0, 0, 0x80, 0, 0, 0];
+    assert!(
+        patched.len() >= data.len() || patched.ends_with(&APPENDED_OPT),
+        "ensure_do_bit dropped bytes without appending an OPT"
+    );
     if data.len() >= 12 {
         // ID, flags and QDCOUNT are never ours to touch; only ARCOUNT and the
         // OPT's own DO byte may move.

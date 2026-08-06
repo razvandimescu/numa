@@ -1639,6 +1639,32 @@ mod tests {
     }
 
     #[test]
+    fn ensure_do_bit_appends_behind_counted_records_not_behind_junk() {
+        // libFuzzer, CI job 92347736024: ANCOUNT=2 with uncounted bytes past
+        // the last counted record, so the append path returns a wire *shorter*
+        // than its input. Legal — what it drops is junk upstream would have
+        // read as the record ARCOUNT now reaches.
+        const FUZZED: [u8; 54] = [
+            18, 52, 129, 44, 0, 1, 0, 2, 0, 0, 0, 0, 0, 0, 80, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0,
+            0, 0, 1, 0, 0, 0, 0, 0, 2, 229, 0, 0, 0, 0, 0, 0, 0, 0, 93, 1, 0, 46, 0, 0, 184, 216,
+            35,
+        ];
+        let out = ensure_do_bit(&FUZZED);
+
+        assert!(out.len() < FUZZED.len(), "trailing junk dropped");
+        assert_eq!(
+            &out[out.len() - 11..],
+            &[0, 0, 41, 0x04, 0xD0, 0, 0, DO_FLAG, 0, 0, 0],
+            "wire ends with the OPT we appended"
+        );
+        assert_eq!(
+            &ensure_do_bit(&out)[..],
+            &out[..],
+            "an appended OPT the walker cannot find again is one upstream cannot find either"
+        );
+    }
+
+    #[test]
     fn ensure_do_bit_drops_trailing_bytes_rather_than_forwarding_do_0() {
         // An OPT appended *behind* uncounted bytes is not the record ARCOUNT
         // reaches, so the trailing junk goes at the counted boundary instead.
