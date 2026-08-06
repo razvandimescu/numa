@@ -715,6 +715,13 @@ pub(crate) fn shape_response_for_client(
 
     response.header.authoritative_answer = false;
 
+    // RFC 6840 §5.7: AD answers a question only DO or AD asks. Forward modes
+    // pass upstream's claim through and recursive sets its own, so without
+    // this both hand the verdict to clients that opted out of DNSSEC.
+    if !client_do && !query.header.authed_data {
+        response.header.authed_data = false;
+    }
+
     if !client_do {
         strip_dnssec_records(response);
         if filter_aaaa {
@@ -2485,6 +2492,55 @@ mod tests {
         let mut v = vec![0, 15, 0, 2];
         v.extend_from_slice(&code.to_be_bytes());
         v
+    }
+
+    #[test]
+    fn shape_clears_ad_for_a_client_that_asked_for_neither_do_nor_ad() {
+        // RFC 6840 §5.7: AD belongs only in replies to requestors that set DO
+        // or AD. A client that opted out of DNSSEC has no way to act on it,
+        // and in forward mode the bit is upstream's claim rather than ours.
+        let query = DnsPacket::query(0x1, "example.com", QueryType::A);
+        let mut response = DnsPacket::response_from(&query, ResultCode::NOERROR);
+        response.header.authed_data = true;
+
+        shape_response_for_client(&mut response, &query, false);
+
+        assert!(
+            !response.header.authed_data,
+            "AD went to a client that asked for neither DO nor AD"
+        );
+    }
+
+    #[test]
+    fn shape_keeps_ad_for_a_client_that_set_only_the_ad_bit() {
+        // RFC 6840 §5.7 again: AD=1 with DO=0 is how a client asks for the
+        // verdict without wanting the RRSIGs that back it.
+        let mut query = DnsPacket::query(0x1, "example.com", QueryType::A);
+        query.header.authed_data = true;
+        let mut response = DnsPacket::response_from(&query, ResultCode::NOERROR);
+        response.header.authed_data = true;
+
+        shape_response_for_client(&mut response, &query, false);
+
+        assert!(
+            response.header.authed_data,
+            "a client that set AD asked for the verdict and must keep it"
+        );
+    }
+
+    #[test]
+    fn shape_keeps_ad_for_a_do_client() {
+        let mut query = DnsPacket::query(0x1, "example.com", QueryType::A);
+        query.edns = Some(crate::packet::EdnsOpt {
+            do_bit: true,
+            ..Default::default()
+        });
+        let mut response = DnsPacket::response_from(&query, ResultCode::NOERROR);
+        response.header.authed_data = true;
+
+        shape_response_for_client(&mut response, &query, false);
+
+        assert!(response.header.authed_data);
     }
 
     #[test]
