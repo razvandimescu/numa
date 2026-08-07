@@ -86,13 +86,11 @@ impl BlocklistCache {
         };
         for entry in entries.flatten() {
             let name = entry.file_name();
-            match name.to_str() {
-                Some(name) if !keep.contains(name) => {
-                    if std::fs::remove_file(entry.path()).is_ok() {
-                        info!("dropped unused blocklist cache file {name}");
-                    }
-                }
-                _ => {}
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if !keep.contains(name) && std::fs::remove_file(entry.path()).is_ok() {
+                info!("dropped unused blocklist cache file {name}");
             }
         }
     }
