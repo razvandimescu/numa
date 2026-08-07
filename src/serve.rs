@@ -11,7 +11,8 @@ use std::time::Duration;
 use log::{debug, error, info, warn};
 
 use crate::blocklist::{
-    download_blocklists, parse_blocklist, source_defect, BlocklistStore, SourceResult,
+    download_blocklists, parse_blocklist, parse_blocklist_counted, source_defect, BlocklistStore,
+    SourceResult,
 };
 use crate::blocklist_cache::BlocklistCache;
 use crate::bootstrap_resolver::NumaResolver;
@@ -835,16 +836,16 @@ async fn load_blocklists(
         let live_error = match fetched {
             Err(why) => why.clone(),
             Ok(text) => {
-                let domains = parse_blocklist(text);
-                match source_defect(source, text, &domains) {
+                let parsed = parse_blocklist_counted(text);
+                match source_defect(source, &parsed) {
                     Some(why) => {
                         error!("blocklist source failed: {source} — {why}");
                         "not a domain list".to_string()
                     }
                     None => {
-                        info!("blocklist: {} domains from {}", domains.len(), source);
+                        info!("blocklist: {} domains from {}", parsed.domains.len(), source);
                         cache.store(source, text);
-                        all_domains.extend(domains);
+                        all_domains.extend(parsed.domains);
                         outcomes.push((source.clone(), SourceResult::Loaded));
                         continue;
                     }

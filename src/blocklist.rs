@@ -242,8 +242,9 @@ impl BlocklistStore {
             .any(|s| matches!(s.outcome, SourceOutcome::Failed(_)))
         {
             // Domains present means something is still being blocked, from the
-            // sources that did load or from a list a failed refresh left alone.
-            return if self.domains.is_empty() {
+            // sources that did load, a list a failed refresh left alone, or the
+            // manual list, which enforces independently of the sources.
+            return if self.domains.is_empty() && self.manual.is_empty() {
                 "failed"
             } else {
                 "degraded"
@@ -365,21 +366,40 @@ pub fn dedup_sources(lists: &[String]) -> Vec<String> {
         .collect()
 }
 
+pub struct ParsedList {
+    pub domains: HashSet<String>,
+    entry_lines: usize,
+    parsed_lines: usize,
+}
+
 /// Parse a blocklist text file into a set of domains.
 pub fn parse_blocklist(text: &str) -> HashSet<String> {
+    parse_blocklist_counted(text).domains
+}
+
+/// One walk that also counts how many entry lines yielded a domain, so
+/// `source_defect` never re-derives that from a second pass with a filter that
+/// could drift. Lines are judged for validity, not novelty: a dual-stack hosts
+/// file names every domain on both a `0.0.0.0` and a `::` line, and both count.
+pub(crate) fn parse_blocklist_counted(text: &str) -> ParsedList {
     let mut domains = HashSet::new();
+    let mut entry_lines = 0;
+    let mut parsed_lines = 0;
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
             continue;
         }
+        entry_lines += 1;
 
         if line.starts_with("0.0.0.0") || line.starts_with("127.0.0.1") || line.starts_with("::") {
             // BSD hosts(5): an IP followed by N aliases; '#' starts an inline comment.
             let payload = line.split('#').next().unwrap_or(line);
+            let mut any = false;
             for alias in payload.split_whitespace().skip(1) {
-                insert_if_valid(&mut domains, alias);
+                any |= insert_if_valid(&mut domains, alias);
             }
+            parsed_lines += usize::from(any);
             continue;
         }
 
@@ -390,9 +410,13 @@ pub fn parse_blocklist(text: &str) -> HashSet<String> {
         // Plain domain or adblock filter syntax.
         let d = line.trim_start_matches("*.").trim_start_matches("||");
         let d = d.split('$').next().unwrap_or(d); // strip adblock $options
-        insert_if_valid(&mut domains, d.trim_end_matches('^'));
+        parsed_lines += usize::from(insert_if_valid(&mut domains, d.trim_end_matches('^')));
     }
-    domains
+    ParsedList {
+        domains,
+        entry_lines,
+        parsed_lines,
+    }
 }
 
 /// Share of entry lines that must parse as domains for a body to be a list at
@@ -407,21 +431,16 @@ const MIN_PARSED_PERCENT: usize = 50;
 /// entry lines and stays valid, while an error page parses almost none. An
 /// empty local file is a deliberate "block nothing"; an empty remote body is a
 /// broken upstream, never an instruction.
-pub(crate) fn source_defect(source: &str, text: &str, domains: &HashSet<String>) -> Option<String> {
-    let entries = text
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with('!'))
-        .count();
-    if entries == 0 {
+pub(crate) fn source_defect(source: &str, parsed: &ParsedList) -> Option<String> {
+    if parsed.entry_lines == 0 {
         return local_path(source)
             .is_none()
             .then(|| "response body has no entries".to_string());
     }
-    if domains.len() * 100 < entries * MIN_PARSED_PERCENT {
+    if parsed.parsed_lines * 100 < parsed.entry_lines * MIN_PARSED_PERCENT {
         return Some(format!(
-            "only {} of {entries} entry lines parsed as domains",
-            domains.len()
+            "only {} of {} entry lines parsed as domains",
+            parsed.parsed_lines, parsed.entry_lines
         ));
     }
     None
@@ -448,11 +467,14 @@ pub(crate) fn find_in_set<'a>(domain: &'a str, set: &HashSet<String>) -> Option<
     None
 }
 
-fn insert_if_valid(set: &mut HashSet<String>, raw: &str) {
+fn insert_if_valid(set: &mut HashSet<String>, raw: &str) -> bool {
     let d = normalize(raw);
-    if !d.is_empty() && d.contains('.') && d != "localhost" && d != "localhost.localdomain" {
+    let valid =
+        !d.is_empty() && d.contains('.') && d != "localhost" && d != "localhost.localdomain";
+    if valid {
         set.insert(d);
     }
+    valid
 }
 
 #[cfg(test)]
@@ -640,7 +662,7 @@ mod tests {
     }
 
     fn defect(source: &str, text: &str) -> Option<String> {
-        source_defect(source, text, &parse_blocklist(text))
+        source_defect(source, &parse_blocklist_counted(text))
     }
 
     /// A soft-error page small enough to yield one domain-shaped token still
@@ -672,6 +694,41 @@ mod tests {
         )
         .is_none());
         assert!(defect("https://cdn.example/l.txt", "||a.com^\n||b.com^\n").is_none());
+    }
+
+    /// A dual-stack hosts file carries every domain on two entry lines
+    /// (`0.0.0.0 d` and `:: d`) plus localhost boilerplate, so unique domains
+    /// land under half the entry count. v0.22.0 loaded these; the parse-ratio
+    /// gate must not read one as an error page.
+    #[test]
+    fn dual_stack_hosts_list_is_not_a_defect() {
+        let body = "# StevenBlack-style header\n\
+            127.0.0.1 localhost\n\
+            ::1 localhost\n\
+            255.255.255.255 broadcasthost\n\
+            0.0.0.0 ads.example\n\
+            :: ads.example\n\
+            0.0.0.0 tracker.example\n\
+            :: tracker.example\n\
+            0.0.0.0 metrics.example\n\
+            :: metrics.example\n";
+        let domains = parse_blocklist(body);
+        assert_eq!(domains.len(), 3, "precondition: aliases parse");
+        assert_eq!(defect("https://cdn.example/hosts", body), None);
+    }
+
+    /// All remote lists down while the user holds manual blocks: `is_blocked`
+    /// still consults the manual list, so "failed" (rendered as `all lists
+    /// failed · not blocking`) contradicts what the resolver actually does.
+    #[test]
+    fn manual_blocks_keep_health_out_of_failed() {
+        let mut store = empty_store();
+        let a = "https://a.example/l.txt";
+        store.set_sources(&[a.to_string()]);
+        store.record_outcomes(&[(a.to_string(), SourceResult::Failed("HTTP 403".to_string()))]);
+        store.add_to_blocklist("ads.example.com");
+        assert!(store.is_blocked("ads.example.com"));
+        assert_eq!(store.health(), "degraded", "still blocking manual domains");
     }
 
     /// Emptying your own list file is an instruction to block nothing; an empty
