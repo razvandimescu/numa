@@ -329,6 +329,18 @@ fn resolve_local(
     qtype: QueryType,
     ctx: &ServerCtx,
 ) -> Option<(DnsPacket, QueryPath, DnssecStatus)> {
+    // RFC 8482: ANY is answered with a minimal HINFO, never resolved. Kills
+    // the amplification value of qtype 255 before any stage can act on it.
+    if qtype.to_num() == 255 {
+        let mut resp = DnsPacket::response_from(query, ResultCode::NOERROR);
+        resp.answers.push(DnsRecord::UNKNOWN {
+            domain: qname.to_string(),
+            qtype: 13, // HINFO
+            data: b"\x07RFC8482\x00".to_vec(),
+            ttl: 3600,
+        });
+        return Some((resp, QueryPath::Local, DnssecStatus::Indeterminate));
+    }
     if let Some(record) = ctx.overrides.read().unwrap().lookup(qname) {
         let mut resp = DnsPacket::response_from(query, ResultCode::NOERROR);
         resp.answers.push(record);
@@ -1401,7 +1413,11 @@ mod tests {
                 ttl,
             } => {
                 assert_eq!(domain, "example.com");
-                assert_eq!(data.as_slice(), b"\x07RFC8482\x00", "CPU=\"RFC8482\" OS=\"\"");
+                assert_eq!(
+                    data.as_slice(),
+                    b"\x07RFC8482\x00",
+                    "CPU=\"RFC8482\" OS=\"\""
+                );
                 assert!(*ttl >= 3600, "cacheable TTL so clients stop re-asking");
             }
             other => panic!("expected HINFO, got {:?}", other),
