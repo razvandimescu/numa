@@ -1374,6 +1374,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn any_query_refused_with_rfc8482_hinfo() {
+        // Upstream would gladly answer ANY; numa must never ask it (RFC 8482).
+        let upstream_addr = crate::testutil::mock_upstream(crate::testutil::a_record_response(
+            "example.com",
+            Ipv4Addr::new(93, 184, 216, 34),
+            300,
+        ))
+        .await;
+
+        let ctx = crate::testutil::test_ctx().await;
+        *ctx.upstream_pool.lock().unwrap() =
+            UpstreamPool::new(vec![Upstream::Udp(upstream_addr)], vec![]);
+        let ctx = Arc::new(ctx);
+
+        let (resp, path) = resolve_in_test(&ctx, "example.com", QueryType::UNKNOWN(255)).await;
+
+        assert_eq!(path, QueryPath::Local, "ANY must not reach an upstream");
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+        assert_eq!(resp.answers.len(), 1, "exactly one synthesized HINFO");
+        match &resp.answers[0] {
+            DnsRecord::UNKNOWN {
+                domain,
+                qtype: 13,
+                data,
+                ttl,
+            } => {
+                assert_eq!(domain, "example.com");
+                assert_eq!(data.as_slice(), b"\x07RFC8482\x00", "CPU=\"RFC8482\" OS=\"\"");
+                assert!(*ttl >= 3600, "cacheable TTL so clients stop re-asking");
+            }
+            other => panic!("expected HINFO, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
     async fn forwarding_rule_overrides_special_use_domain() {
         let mut resp = DnsPacket::new();
         resp.header.response = true;
