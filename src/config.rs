@@ -552,10 +552,28 @@ pub struct BlockingConfig {
     pub enabled: bool,
     #[serde(default = "default_blocklists")]
     pub lists: Vec<String>,
-    #[serde(default = "default_refresh_hours")]
+    #[serde(
+        default = "default_refresh_hours",
+        deserialize_with = "nonzero_refresh_hours"
+    )]
     pub refresh_hours: u64,
     #[serde(default)]
     pub allowlist: Vec<String>,
+}
+
+/// A zero would spin the refresh loop with a zero-second sleep, re-downloading
+/// every list back to back; the config is the one place that can refuse it.
+fn nonzero_refresh_hours<'de, D>(deserializer: D) -> std::result::Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let hours = u64::deserialize(deserializer)?;
+    if hours == 0 {
+        return Err(serde::de::Error::custom(
+            "blocking.refresh_hours must be at least 1",
+        ));
+    }
+    Ok(hours)
 }
 
 impl Default for BlockingConfig {
@@ -1050,6 +1068,15 @@ key_path = "/etc/numa/proxy/key.pem"
     fn lan_enabled_parses() {
         let config: Config = toml::from_str("[lan]\nenabled = true").unwrap();
         assert!(config.lan.enabled);
+    }
+
+    /// `refresh_hours = 0` would spin the refresh loop with a zero sleep.
+    #[test]
+    fn blocking_refresh_hours_zero_is_rejected() {
+        let err = toml::from_str::<Config>("[blocking]\nrefresh_hours = 0\n")
+            .err()
+            .expect("zero must be rejected");
+        assert!(err.to_string().contains("refresh_hours must be at least 1"));
     }
 
     #[test]
