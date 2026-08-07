@@ -331,7 +331,7 @@ fn resolve_local(
 ) -> Option<(DnsPacket, QueryPath, DnssecStatus)> {
     // RFC 8482: ANY is answered with a minimal HINFO, never resolved. Kills
     // the amplification value of qtype 255 before any stage can act on it.
-    if qtype.to_num() == 255 {
+    if qtype == QueryType::ANY {
         let mut resp = DnsPacket::response_from(query, ResultCode::NOERROR);
         resp.answers.push(DnsRecord::UNKNOWN {
             domain: qname.to_string(),
@@ -1400,7 +1400,7 @@ mod tests {
             UpstreamPool::new(vec![Upstream::Udp(upstream_addr)], vec![]);
         let ctx = Arc::new(ctx);
 
-        let (resp, path) = resolve_in_test(&ctx, "example.com", QueryType::UNKNOWN(255)).await;
+        let (resp, path) = resolve_in_test(&ctx, "example.com", QueryType::ANY).await;
 
         assert_eq!(path, QueryPath::Local, "ANY must not reach an upstream");
         assert_eq!(resp.header.rescode, ResultCode::NOERROR);

@@ -61,6 +61,7 @@ define_qtypes! {
     NSEC3  = 50, "NSEC3",
     SVCB   = 64, "SVCB",
     HTTPS  = 65, "HTTPS",
+    ANY    = 255, "ANY",
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
