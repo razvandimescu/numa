@@ -301,11 +301,12 @@ fn spawn_background_services(
             loop {
                 // A refresh that left us with nothing is not blocking at all, so
                 // waiting the full cycle to try again turns a brief upstream
-                // outage into a day without blocking (issue #336).
+                // outage into a day without blocking (issue #336). The config
+                // rejects refresh_hours = 0, so the retry is never the longer wait.
                 let wait = if loaded {
                     refresh_hours * 3600
                 } else {
-                    BLOCKLIST_RETRY_SECS.min(refresh_hours * 3600)
+                    BLOCKLIST_RETRY_SECS
                 };
                 tokio::time::sleep(Duration::from_secs(wait)).await;
                 info!("refreshing blocklists...");
@@ -879,12 +880,14 @@ async fn load_blocklists(
     cache.prune(lists);
     let total = all_domains.len();
 
+    // Lock work stays sub-microsecond: record, then swap or keep.
+    let mut store = ctx.blocklist.write().unwrap();
+    store.record_outcomes(&outcomes);
+
     // Nothing to swap in is a failure only if something broke (issue #336);
     // sources that all loaded and parsed to nothing are a deliberately emptied
     // list and must be allowed to clear the old one.
     if total == 0 && failed > 0 {
-        let mut store = ctx.blocklist.write().unwrap();
-        store.record_outcomes(&outcomes);
         let kept = store.domains_loaded();
         drop(store);
         error!(
@@ -898,9 +901,6 @@ async fn load_blocklists(
     // its upstream works, and counting it as loaded is the overstatement this
     // reporting exists to remove.
     let loaded = outcomes.len() - failed - stale;
-    // Swap under lock — sub-microsecond
-    let mut store = ctx.blocklist.write().unwrap();
-    store.record_outcomes(&outcomes);
     store.swap_domains(all_domains);
     drop(store);
     if failed > 0 {
