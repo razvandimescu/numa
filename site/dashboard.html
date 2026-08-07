@@ -1564,7 +1564,7 @@ function renderBlockingInfo(info) {
     <div style="font-size:0.65rem;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-dim);margin-bottom:0.4rem;">Sources &middot; ${formatNumber(info.domains_loaded)} domains</div>
     ${sources.map(s => `
       <div style="padding:0.3rem 0;font-family:var(--font-mono);font-size:0.72rem;">
-        <a href="${h(s.url)}" target="_blank" rel="noopener" style="color:var(--text-secondary);text-decoration:none;" title="${h(s.url)}">${shortenUrl(s.url)}</a>
+        <a href="${h(s.url)}" target="_blank" rel="noopener" style="color:var(--text-secondary);text-decoration:none;" title="${h(s.url)}">${h(shortenUrl(s.url))}</a>
         ${sourceNote(s)}
       </div>
     `).join('')}

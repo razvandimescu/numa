@@ -843,7 +843,11 @@ async fn load_blocklists(
                         "not a domain list".to_string()
                     }
                     None => {
-                        info!("blocklist: {} domains from {}", parsed.domains.len(), source);
+                        info!(
+                            "blocklist: {} domains from {}",
+                            parsed.domains.len(),
+                            source
+                        );
                         cache.store(source, text);
                         all_domains.extend(parsed.domains);
                         outcomes.push((source.clone(), SourceResult::Loaded));
