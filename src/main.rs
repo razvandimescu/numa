@@ -63,6 +63,17 @@ fn main() -> numa::Result<()> {
                 }
             };
         }
+        "config" => {
+            let sub = std::env::args().nth(2).unwrap_or_default();
+            return match sub.as_str() {
+                "path" => numa::config_cli::print_config_path().map_err(|e| e.into()),
+                "edit" => numa::config_cli::edit_config().map_err(|e| e.into()),
+                _ => {
+                    eprintln!("Usage: numa config <path|edit>");
+                    Ok(())
+                }
+            };
+        }
         "setup-phone" => {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -141,6 +152,8 @@ fn main() -> numa::Result<()> {
             eprintln!("  service stop    Uninstall the system service");
             eprintln!("  service restart Restart the service with updated binary");
             eprintln!("  service status  Check if the service is running");
+            eprintln!("  config path     Show the effective config file");
+            eprintln!("  config edit     Open the effective config file in an editor");
             eprintln!("  lan on|off      Enable/disable LAN service discovery (mDNS)");
             eprintln!("  block on|off    Enable/disable ad-blocking");
             eprintln!("  dnssec on|off   Enable/disable DNSSEC validation");

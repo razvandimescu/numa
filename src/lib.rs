@@ -8,6 +8,7 @@ pub mod buffer;
 pub mod cache;
 pub mod client_policy;
 pub mod config;
+pub mod config_cli;
 pub mod ctx;
 pub mod dnssec;
 pub mod doh;
