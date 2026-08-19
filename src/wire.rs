@@ -141,7 +141,7 @@ pub fn ensure_do_bit(wire: &[u8]) -> Cow<'_, [u8]> {
             out[ttl + 2] |= DO_FLAG;
             if !payload_in_budget(&out, ttl) {
                 let clamped = payload(&out, ttl).clamp(MIN_UPSTREAM_PAYLOAD, MAX_UPSTREAM_PAYLOAD);
-                out[ttl - 2..ttl].copy_from_slice(&clamped.to_be_bytes());
+                set_payload(&mut out, ttl, clamped);
             }
             Cow::Owned(out)
         }
@@ -161,7 +161,7 @@ pub fn maximize_payload(wire: &[u8]) -> Cow<'_, [u8]> {
     match locate_opt(wire) {
         Ok(OptSite::Flag(ttl)) if payload(wire, ttl) != MAX_UPSTREAM_PAYLOAD => {
             let mut out = wire.to_vec();
-            out[ttl - 2..ttl].copy_from_slice(&MAX_UPSTREAM_PAYLOAD.to_be_bytes());
+            set_payload(&mut out, ttl, MAX_UPSTREAM_PAYLOAD);
             Cow::Owned(out)
         }
         _ => Cow::Borrowed(wire),
@@ -193,6 +193,10 @@ pub const APPENDED_DO_OPT: [u8; 11] = {
 /// before its TTL.
 fn payload(wire: &[u8], ttl: usize) -> u16 {
     u16::from_be_bytes([wire[ttl - 2], wire[ttl - 1]])
+}
+
+fn set_payload(wire: &mut [u8], ttl: usize, size: u16) {
+    wire[ttl - 2..ttl].copy_from_slice(&size.to_be_bytes());
 }
 
 fn payload_in_budget(wire: &[u8], ttl: usize) -> bool {
