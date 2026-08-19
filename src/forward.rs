@@ -434,7 +434,7 @@ pub async fn forward_query_raw(
     timeout_duration: Duration,
 ) -> Result<Vec<u8>> {
     match upstream {
-        Upstream::Udp(addr) => forward_udp_raw(wire, *addr, timeout_duration).await,
+        Upstream::Udp(addr) => forward_udp_with_tc_retry(wire, *addr, timeout_duration).await,
         Upstream::Tcp(addr) => forward_tcp_raw(wire, *addr, timeout_duration).await,
         Upstream::Doh { url, client } => forward_doh_raw(wire, url, client, timeout_duration).await,
         Upstream::Dot {
@@ -577,17 +577,6 @@ pub async fn forward_with_failover_raw(
                     let rtt_ms = start.elapsed().as_millis() as u64;
                     srtt.write().unwrap().record_rtt(ip, t, rtt_ms);
                 }
-                // TC=1 says "retry over TCP" (RFC 1035 §4.2.1) and DO=1/1232
-                // makes it routine for large signed answers. Our own clients'
-                // TCP retries re-enter this same UDP path, so the protocol
-                // switch has to happen here or nowhere.
-                if crate::wire::is_truncated(&resp) {
-                    if let Upstream::Udp(addr) = upstream {
-                        if let Ok(full) = forward_tcp_raw(wire, *addr, timeout_duration).await {
-                            return Ok(full);
-                        }
-                    }
-                }
                 return Ok(resp);
             }
             Err(e) => {
@@ -603,6 +592,35 @@ pub async fn forward_with_failover_raw(
     Err(last_err.unwrap_or_else(|| "no upstream configured".into()))
 }
 
+/// UDP leg plus the TC=1 retry over TCP (RFC 1035 §4.2.1) — routine under
+/// DO=1/1232 for large signed answers. A truncated reply never leaves this
+/// function: it is uncacheable, and our own clients' TCP retries re-enter
+/// this same UDP path. Either the retry lands a usable full answer within
+/// what remains of the timeout budget, or the upstream counts as failed and
+/// the caller's failover moves on.
+async fn forward_udp_with_tc_retry(
+    wire: &[u8],
+    upstream: SocketAddr,
+    timeout_duration: Duration,
+) -> Result<Vec<u8>> {
+    let start = Instant::now();
+    let resp = forward_udp_raw(wire, upstream, timeout_duration).await?;
+    if !crate::wire::is_truncated(&resp) {
+        return Ok(resp);
+    }
+
+    let budget = timeout_duration.saturating_sub(start.elapsed());
+    let full = timeout(budget, forward_tcp_raw(wire, upstream, budget)).await??;
+    let usable = full.len() <= crate::wire::MAX_UPSTREAM_PAYLOAD as usize
+        && full.len() >= 12
+        && full.get(..2) == wire.get(..2)
+        && crate::wire::is_response(&full);
+    if !usable {
+        return Err("TCP retry after TC=1 returned an unusable reply".into());
+    }
+    Ok(full)
+}
+
 async fn forward_udp_raw(
     wire: &[u8],
     upstream: SocketAddr,
@@ -611,7 +629,7 @@ async fn forward_udp_raw(
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
     socket.send_to(wire, upstream).await?;
 
-    let mut recv_buf = vec![0u8; 4096];
+    let mut recv_buf = vec![0u8; crate::wire::MAX_UPSTREAM_PAYLOAD as usize];
     let (size, _) = timeout(timeout_duration, socket.recv_from(&mut recv_buf)).await??;
     recv_buf.truncate(size);
     Ok(recv_buf)
@@ -995,49 +1013,24 @@ mod tests {
         assert_eq!(result.answers.len(), 1);
     }
 
-    #[tokio::test]
-    async fn failover_retries_truncated_udp_over_tcp() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let query = make_query();
-        let full_wire = to_wire(&make_response(&query));
-
-        // UDP and TCP share the port: UDP always answers TC=1 with no
-        // records, TCP has the full answer — the shape of a signed response
-        // that outgrows the 1232-byte UDP budget. Without the TCP retry the
-        // TC reply is final: the client's own TCP retry re-enters this same
-        // UDP path and loops forever.
-        let udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let addr = udp.local_addr().unwrap();
-        let tcp = tokio::net::TcpListener::bind(addr).await.unwrap();
-
-        let mut tc = make_response(&query);
+    /// A TC=1 reply with no records — the shape of a signed response that
+    /// outgrows the UDP budget.
+    fn truncated_response(query: &DnsPacket) -> Vec<u8> {
+        let mut tc = make_response(query);
         tc.answers.clear();
         tc.header.truncated_message = true;
-        let tc_wire = to_wire(&tc);
-        tokio::spawn(async move {
-            let mut buf = [0u8; 4096];
-            while let Ok((n, src)) = udp.recv_from(&mut buf).await {
-                let mut reply = tc_wire.clone();
-                reply[0] = buf[0];
-                reply[1] = buf[1];
-                let _ = udp.send_to(&reply, src).await;
-                let _ = n;
-            }
-        });
-        tokio::spawn(async move {
-            let (mut stream, _) = tcp.accept().await.unwrap();
-            let mut len_buf = [0u8; 2];
-            stream.read_exact(&mut len_buf).await.unwrap();
-            let mut query_wire = vec![0u8; u16::from_be_bytes(len_buf) as usize];
-            stream.read_exact(&mut query_wire).await.unwrap();
-            let mut reply = full_wire.clone();
-            reply[0] = query_wire[0];
-            reply[1] = query_wire[1];
-            let mut out = Vec::with_capacity(2 + reply.len());
-            out.extend_from_slice(&(reply.len() as u16).to_be_bytes());
-            out.extend_from_slice(&reply);
-            stream.write_all(&out).await.unwrap();
-        });
+        to_wire(&tc)
+    }
+
+    #[tokio::test]
+    async fn failover_retries_truncated_udp_over_tcp() {
+        // UDP and TCP share the port: UDP always answers TC=1, TCP has the
+        // full answer. Without the TCP retry the TC reply is final: the
+        // client's own TCP retry re-enters this same UDP path and loops
+        // forever.
+        let query = make_query();
+        let addr = crate::testutil::mock_upstream_raw(truncated_response(&query)).await;
+        crate::testutil::tcp_upstream_raw_on(addr, to_wire(&make_response(&query))).await;
 
         let pool = UpstreamPool::new(vec![Upstream::Udp(addr)], vec![]);
         let srtt = RwLock::new(SrttCache::new(true));
@@ -1050,6 +1043,36 @@ mod tests {
         )
         .await
         .expect("truncated UDP answer must resolve over TCP");
+
+        assert!(!crate::wire::is_truncated(&resp_wire));
+        let mut buf = BytePacketBuffer::from_bytes(&resp_wire);
+        let result = DnsPacket::from_buffer(&mut buf).unwrap();
+        assert_eq!(result.answers.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn failover_moves_on_when_the_tcp_retry_fails() {
+        // Upstream A truncates and has no TCP listener (asymmetric port-53
+        // filtering); upstream B holds the answer. The truncated reply must
+        // not count as pool success, or B never fires.
+        let query = make_query();
+        let tc_addr = crate::testutil::mock_upstream_raw(truncated_response(&query)).await;
+        let good_addr = crate::testutil::mock_upstream(make_response(&query)).await;
+
+        let pool = UpstreamPool::new(
+            vec![Upstream::Udp(tc_addr), Upstream::Udp(good_addr)],
+            vec![],
+        );
+        let srtt = RwLock::new(SrttCache::new(true));
+        let resp_wire = forward_with_failover_raw(
+            &to_wire(&query),
+            &pool,
+            &srtt,
+            Duration::from_millis(500),
+            Duration::ZERO,
+        )
+        .await
+        .expect("failed TCP retry must fail over to the next upstream");
 
         assert!(!crate::wire::is_truncated(&resp_wire));
         let mut buf = BytePacketBuffer::from_bytes(&resp_wire);
