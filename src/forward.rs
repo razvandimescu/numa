@@ -638,8 +638,14 @@ async fn forward_udp_raw(
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
     socket.send_to(wire, upstream).await?;
 
-    let mut recv_buf = vec![0u8; crate::wire::MAX_UPSTREAM_PAYLOAD as usize];
+    // One byte of headroom: a datagram sized exactly to the buffer is
+    // indistinguishable from one the kernel cut to fit, and a cut wire parses
+    // as garbage rather than failing.
+    let mut recv_buf = vec![0u8; crate::wire::MAX_UPSTREAM_PAYLOAD as usize + 1];
     let (size, _) = timeout(timeout_duration, socket.recv_from(&mut recv_buf)).await??;
+    if size > crate::wire::MAX_UPSTREAM_PAYLOAD as usize {
+        return Err("upstream reply exceeds the maximum payload".into());
+    }
     recv_buf.truncate(size);
     Ok(recv_buf)
 }
@@ -1162,6 +1168,30 @@ mod tests {
         .await;
 
         assert!(result.is_err(), "oversized TCP retry must not be returned");
+    }
+
+    #[tokio::test]
+    async fn udp_refuses_a_datagram_the_kernel_had_to_cut() {
+        // The kernel cuts an oversized datagram to whatever the receive buffer
+        // holds, so a cut wire and a legitimately full one are the same length
+        // — only headroom past the cap tells them apart.
+        let query = make_query();
+        let mut big = to_wire(&make_response(&query));
+        big.resize(5000, 0);
+        let addr = crate::testutil::mock_upstream_raw(big).await;
+
+        let pool = UpstreamPool::new(vec![Upstream::Udp(addr)], vec![]);
+        let srtt = RwLock::new(SrttCache::new(true));
+        let result = forward_with_failover_raw(
+            &to_wire(&query),
+            &pool,
+            &srtt,
+            Duration::from_millis(500),
+            Duration::ZERO,
+        )
+        .await;
+
+        assert!(result.is_err(), "cut UDP datagram must not be returned");
     }
 
     #[test]
