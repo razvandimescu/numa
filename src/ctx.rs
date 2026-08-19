@@ -190,7 +190,8 @@ pub async fn resolve_query(
         response.resources.len(),
     );
 
-    let resp_buffer = serialize_with_fallback(&mut response, &query, &qname, filter_aaaa)?;
+    let resp_buffer =
+        serialize_with_fallback(&mut response, &query, &qname, filter_aaaa, transport)?;
 
     // Record stats and query log
     {
@@ -218,27 +219,46 @@ pub async fn resolve_query(
     Ok((resp_buffer, path))
 }
 
-/// Buffer-full → TC bit, serializer-rejected → SERVFAIL (#142).
-/// TODO: TC is UDP-specific; once BytePacketBuffer supports >4096 bytes,
-/// skip truncation for TCP/TLS (which can carry up to 65535).
+/// RFC 6891 §6.2.3: a UDP reply must fit the requestor's advertised payload
+/// size, 512 when no OPT (RFC 1035 §4.2.1). Values below 512 are treated as 512.
+fn client_udp_budget(query: &DnsPacket, transport: Transport) -> usize {
+    const MIN: usize = 512;
+    match transport {
+        Transport::Udp => query
+            .edns
+            .as_ref()
+            .map_or(MIN, |e| usize::from(e.udp_payload_size).max(MIN)),
+        _ => usize::MAX,
+    }
+}
+
+/// Buffer-full or over the client's UDP budget → TC bit, serializer-rejected
+/// → SERVFAIL (#142).
+/// TODO: once BytePacketBuffer supports >4096 bytes, skip the overflow
+/// truncation for TCP/TLS (which can carry up to 65535).
 fn serialize_with_fallback(
     response: &mut DnsPacket,
     query: &DnsPacket,
     qname: &str,
     filter_aaaa: bool,
+    transport: Transport,
 ) -> crate::Result<BytePacketBuffer> {
+    let truncated = |rescode| -> crate::Result<BytePacketBuffer> {
+        debug!("response too large, setting TC bit for {}", qname);
+        let mut tc = DnsPacket::response_from(query, rescode);
+        tc.header.truncated_message = true;
+        shape_response_for_client(&mut tc, query, filter_aaaa);
+        let mut out = BytePacketBuffer::new();
+        tc.write(&mut out)?;
+        Ok(out)
+    };
     let mut buf = BytePacketBuffer::new();
     match response.write(&mut buf) {
-        Ok(()) => Ok(buf),
-        Err(_) if buf.overflowed() => {
-            debug!("response too large, setting TC bit for {}", qname);
-            let mut tc = DnsPacket::response_from(query, response.header.rescode);
-            tc.header.truncated_message = true;
-            shape_response_for_client(&mut tc, query, filter_aaaa);
-            let mut out = BytePacketBuffer::new();
-            tc.write(&mut out)?;
-            Ok(out)
+        Ok(()) if buf.pos() > client_udp_budget(query, transport) => {
+            truncated(response.header.rescode)
         }
+        Ok(()) => Ok(buf),
+        Err(_) if buf.overflowed() => truncated(response.header.rescode),
         Err(e) => {
             warn!("response serialize error for {}: {}", qname, e);
             // mirror to caller's rescode so the query log reflects SERVFAIL
@@ -2452,7 +2472,9 @@ mod tests {
             addr: Ipv4Addr::new(192, 0, 2, 1),
             ttl: 300,
         });
-        let buf = serialize_with_fallback(&mut response, &query, "example.com", false).unwrap();
+        let buf =
+            serialize_with_fallback(&mut response, &query, "example.com", false, Transport::Udp)
+                .unwrap();
         let parsed =
             DnsPacket::from_buffer(&mut BytePacketBuffer::from_bytes(buf.filled())).unwrap();
         assert_eq!(parsed.header.rescode, ResultCode::NOERROR);
@@ -2473,7 +2495,9 @@ mod tests {
                 ttl: 300,
             });
         }
-        let buf = serialize_with_fallback(&mut response, &query, "example.com", false).unwrap();
+        let buf =
+            serialize_with_fallback(&mut response, &query, "example.com", false, Transport::Udp)
+                .unwrap();
         let parsed =
             DnsPacket::from_buffer(&mut BytePacketBuffer::from_bytes(buf.filled())).unwrap();
         assert!(parsed.header.truncated_message, "TC bit must be set");
@@ -2491,7 +2515,9 @@ mod tests {
             addr: Ipv4Addr::new(192, 0, 2, 1),
             ttl: 300,
         });
-        let buf = serialize_with_fallback(&mut response, &query, "example.com", false).unwrap();
+        let buf =
+            serialize_with_fallback(&mut response, &query, "example.com", false, Transport::Udp)
+                .unwrap();
         let parsed =
             DnsPacket::from_buffer(&mut BytePacketBuffer::from_bytes(buf.filled())).unwrap();
         assert_eq!(parsed.header.rescode, ResultCode::SERVFAIL);
@@ -2504,6 +2530,77 @@ mod tests {
             ResultCode::SERVFAIL,
             "caller-visible rescode must reflect SERVFAIL for query logging"
         );
+    }
+
+    /// ~`bytes` of TXT-as-UNKNOWN answers (55 bytes each, uncompressed owner).
+    fn bulky_response(query: &DnsPacket, bytes: usize) -> DnsPacket {
+        let mut response = DnsPacket::response_from(query, ResultCode::NOERROR);
+        for _ in 0..bytes / 55 {
+            response.answers.push(DnsRecord::UNKNOWN {
+                domain: "example.com".into(),
+                qtype: QueryType::TXT.to_num(),
+                data: vec![0u8; 32],
+                ttl: 300,
+            });
+        }
+        response
+    }
+
+    fn serialize(query: &DnsPacket, bytes: usize, transport: Transport) -> DnsPacket {
+        let mut response = bulky_response(query, bytes);
+        let buf =
+            serialize_with_fallback(&mut response, query, "example.com", false, transport).unwrap();
+        assert!(buf.pos() <= client_udp_budget(query, transport));
+        DnsPacket::from_buffer(&mut BytePacketBuffer::from_bytes(buf.filled())).unwrap()
+    }
+
+    fn edns_query(payload: u16) -> DnsPacket {
+        let mut query = DnsPacket::query(0x1234, "example.com", QueryType::TXT);
+        query.edns = Some(crate::packet::EdnsOpt {
+            udp_payload_size: payload,
+            ..Default::default()
+        });
+        query
+    }
+
+    // #348: the reply path must honor the client's advertised UDP payload size.
+    #[test]
+    fn udp_reply_over_512_to_opt_less_client_is_truncated() {
+        let query = DnsPacket::query(0x1234, "example.com", QueryType::TXT);
+        let parsed = serialize(&query, 800, Transport::Udp);
+        assert!(parsed.header.truncated_message);
+        assert_eq!(parsed.header.rescode, ResultCode::NOERROR);
+        assert!(parsed.answers.is_empty());
+        assert!(parsed.edns.is_none(), "no OPT for an OPT-less client");
+    }
+
+    #[test]
+    fn udp_reply_within_advertised_payload_passes() {
+        let parsed = serialize(&edns_query(1232), 800, Transport::Udp);
+        assert!(!parsed.header.truncated_message);
+        assert_eq!(parsed.answers.len(), 800 / 55);
+    }
+
+    #[test]
+    fn udp_reply_over_advertised_payload_is_truncated_and_keeps_opt() {
+        let parsed = serialize(&edns_query(512), 800, Transport::Udp);
+        assert!(parsed.header.truncated_message);
+        assert!(parsed.answers.is_empty());
+        assert!(parsed.edns.is_some(), "EDNS client gets an OPT back");
+    }
+
+    #[test]
+    fn advertised_payload_below_512_is_treated_as_512() {
+        let parsed = serialize(&edns_query(100), 400, Transport::Udp);
+        assert!(!parsed.header.truncated_message);
+    }
+
+    #[test]
+    fn tcp_reply_ignores_udp_payload_budget() {
+        let query = DnsPacket::query(0x1234, "example.com", QueryType::TXT);
+        let parsed = serialize(&query, 3000, Transport::Tcp);
+        assert!(!parsed.header.truncated_message);
+        assert_eq!(parsed.answers.len(), 3000 / 55);
     }
 
     /// #188: cache entries synthesized internally (e.g. NS delegation snapshots)
