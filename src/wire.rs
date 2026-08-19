@@ -234,7 +234,14 @@ fn locate_opt(wire: &[u8]) -> Result<OptSite> {
     }
     let mut opt = None;
     for _ in 0..count(wire, 10) {
-        let ttl_offset = skip_record(wire, &mut pos)?;
+        // A record we cannot skip ends the walk, but not the search: an OPT
+        // already found stays patchable, since nothing behind an unwalkable
+        // record is a TSIG the upstream could verify either. With no OPT yet
+        // there is no trustworthy end to append one at.
+        let ttl_offset = match skip_record(wire, &mut pos) {
+            Ok(offset) => offset,
+            Err(e) => return opt.map(OptSite::Flag).ok_or(e),
+        };
         match record_type(wire, ttl_offset) {
             TYPE_OPT => opt = opt.or(Some(ttl_offset)),
             // A TSIG must stay the last record and its MAC covers the header
@@ -1745,6 +1752,31 @@ mod tests {
         rec.extend_from_slice(&[0, 0, 0, 0]); // TTL
         rec.extend_from_slice(&[0, 0]); // RDLENGTH
         rec
+    }
+
+    #[test]
+    fn ensure_do_bit_patches_an_opt_ahead_of_an_unwalkable_record() {
+        // ARCOUNT claims a record that is not there. Letting the failed walk
+        // discard the OPT we already found would send the query on with DO
+        // clear and the client's own budget — both guarantees lost silently.
+        let mut wire = query_wire();
+        wire[10..12].copy_from_slice(&2u16.to_be_bytes()); // ARCOUNT: OPT + junk
+        let do_byte = wire.len() + 7;
+        wire.extend_from_slice(&[0, 0, 41]); // root name, TYPE=OPT
+        wire.extend_from_slice(&512u16.to_be_bytes()); // payload below budget
+        wire.extend_from_slice(&[0, 0, 0, 0]); // TTL, DO clear
+        wire.extend_from_slice(&[0, 0]); // RDLENGTH
+        wire.extend_from_slice(&[0, 0, 1]); // a second record, cut short
+
+        let out = ensure_do_bit(&wire);
+
+        assert_eq!(out.len(), wire.len(), "patched in place");
+        assert_eq!(out[do_byte] & DO_FLAG, DO_FLAG, "DO set on the found OPT");
+        assert_eq!(
+            u16::from_be_bytes([out[do_byte - 4], out[do_byte - 3]]),
+            MIN_UPSTREAM_PAYLOAD,
+            "budget raised to hold the RRSIGs DO asks for"
+        );
     }
 
     #[test]
