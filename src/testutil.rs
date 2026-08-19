@@ -123,28 +123,20 @@ pub fn aaaa_record_response(domain: &str, addr: std::net::Ipv6Addr, ttl: u32) ->
     }])
 }
 
-/// Spawn a UDP socket that replies to the first DNS query with the given
-/// response packet (patching the query ID to match). Returns the socket address.
+/// Spawn a UDP socket that answers every DNS query with the given response
+/// packet, honoring the query's advertised payload budget (TC=1 when the
+/// answer does not fit) and patching the query ID. Returns the socket address.
 pub async fn mock_upstream(response: DnsPacket) -> SocketAddr {
     let mut out = BytePacketBuffer::new();
     response.write(&mut out).unwrap();
-    mock_upstream_raw(out.filled().to_vec()).await
+    spawn_stub(out.filled().to_vec(), true, None).await
 }
 
-/// Like `mock_upstream` but sends raw wire bytes — for intentionally
-/// malformed responses that can't survive our own serializer.
+/// Like `mock_upstream` but sends raw wire bytes verbatim — for intentionally
+/// malformed responses that can't survive our own serializer, which must reach
+/// the resolver's parser untouched (no budget substitution).
 pub async fn mock_upstream_raw(bytes: Vec<u8>) -> SocketAddr {
-    let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let addr = sock.local_addr().unwrap();
-    tokio::spawn(async move {
-        let mut buf = [0u8; 4096];
-        let (n, src) = sock.recv_from(&mut buf).await.unwrap();
-        let mut reply = reply_within_budget(&bytes, &buf[..n]);
-        reply[0] = buf[0];
-        reply[1] = buf[1];
-        sock.send_to(&reply, src).await.unwrap();
-    });
-    addr
+    spawn_stub(bytes, false, None).await
 }
 
 /// Spawn a UDP socket that answers every query by qname from the given table
@@ -162,7 +154,7 @@ pub async fn mock_upstream_by_qname(responses: Vec<(&str, DnsPacket)>) -> Socket
     let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let addr = sock.local_addr().unwrap();
     tokio::spawn(async move {
-        let mut buf = [0u8; 512];
+        let mut buf = [0u8; 4096];
         while let Ok((n, src)) = sock.recv_from(&mut buf).await {
             let mut query_buf = BytePacketBuffer::from_bytes(&buf[..n]);
             let Ok(query) = DnsPacket::from_buffer(&mut query_buf) else {
@@ -187,27 +179,45 @@ pub async fn mock_upstream_by_qname(responses: Vec<(&str, DnsPacket)>) -> Socket
 /// (e.g. the DO bit, issue #191).
 pub async fn recording_upstream(
     response: DnsPacket,
-) -> (SocketAddr, tokio::sync::mpsc::Receiver<Vec<u8>>) {
+) -> (SocketAddr, tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) {
     let mut out = BytePacketBuffer::new();
     response.write(&mut out).unwrap();
-    let bytes = out.filled().to_vec();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let addr = spawn_stub(out.filled().to_vec(), true, Some(tx)).await;
+    (addr, rx)
+}
 
+/// The one stub-upstream socket loop behind `mock_upstream`,
+/// `mock_upstream_raw` and `recording_upstream`: answer every query with
+/// `bytes` (ID patched), optionally within the query's advertised budget,
+/// optionally reporting each inbound query wire. The unbounded recorder
+/// cannot block the reply loop, whatever the test's drain cadence.
+async fn spawn_stub(
+    bytes: Vec<u8>,
+    honor_budget: bool,
+    record: Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>,
+) -> SocketAddr {
     let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let addr = sock.local_addr().unwrap();
-    let (tx, rx) = tokio::sync::mpsc::channel(8);
     tokio::spawn(async move {
-        let mut buf = [0u8; 1500];
-        while let Ok((n, peer)) = sock.recv_from(&mut buf).await {
-            let mut reply = reply_within_budget(&bytes, &buf[..n]);
+        let mut buf = [0u8; 4096];
+        while let Ok((n, src)) = sock.recv_from(&mut buf).await {
+            let mut reply = if honor_budget {
+                reply_within_budget(&bytes, &buf[..n])
+            } else {
+                bytes.clone()
+            };
             reply[0] = buf[0];
             reply[1] = buf[1];
-            let _ = sock.send_to(&reply, peer).await;
-            if tx.send(buf[..n].to_vec()).await.is_err() {
-                break;
+            let _ = sock.send_to(&reply, src).await;
+            if let Some(tx) = &record {
+                if tx.send(buf[..n].to_vec()).is_err() {
+                    break;
+                }
             }
         }
     });
-    (addr, rx)
+    addr
 }
 
 /// A resolver honors the requestor's advertised payload size: an answer that
