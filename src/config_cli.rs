@@ -1,9 +1,10 @@
 use crate::config::{ConfigLoad, ServerConfig};
 use serde::Deserialize;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::io::{Read, Write};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
 use std::path::Path;
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const DAEMON_TIMEOUT: Duration = Duration::from_millis(500);
 const DEFAULTS_NOTE: &str = "file does not exist yet, defaults apply";
@@ -119,44 +120,51 @@ fn probe_addr(server: &ServerConfig) -> SocketAddr {
     SocketAddr::new(ip, server.api_port)
 }
 
+/// One plaintext GET against the daemon's API — a bare `TcpStream`, like the
+/// liveness probe in system_dns.rs. `Connection: close` plus axum's sized
+/// `Json` bodies make read-to-EOF safe, with the read timeout shrinking
+/// toward a fixed deadline so a dribbling port squatter cannot hold us past
+/// `DAEMON_TIMEOUT`.
 fn query_daemon_config_path(server: &ServerConfig) -> Result<StatsConfigPath, String> {
     let addr = probe_addr(server);
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|error| format!("failed to start probe runtime: {error}"))?;
-    runtime.block_on(fetch_daemon_config(addr))
+    let deadline = Instant::now() + DAEMON_TIMEOUT;
+    let mut stream = TcpStream::connect_timeout(&addr, DAEMON_TIMEOUT)
+        .map_err(|_| format!("daemon not reachable at {addr}"))?;
+    stream
+        .set_write_timeout(Some(DAEMON_TIMEOUT))
+        .and_then(|()| {
+            let request =
+                format!("GET /stats HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+            stream.write_all(request.as_bytes())
+        })
+        .map_err(|error| format!("daemon probe failed: {error}"))?;
+
+    let mut response = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() || response.len() > 1 << 20 {
+            return Err("daemon response timed out".to_string());
+        }
+        let _ = stream.set_read_timeout(Some(remaining));
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => response.extend_from_slice(&buf[..n]),
+            Err(error) => return Err(format!("daemon probe failed: {error}")),
+        }
+    }
+    parse_stats_response(&response)
 }
 
-async fn fetch_daemon_config(addr: SocketAddr) -> Result<StatsConfigPath, String> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    let client = reqwest::Client::builder()
-        .timeout(DAEMON_TIMEOUT)
-        .build()
-        .map_err(|error| format!("failed to build probe client: {error}"))?;
-    let response = client
-        .get(format!("http://{addr}/stats"))
-        .send()
-        .await
-        .map_err(|error| {
-            if error.is_connect() || error.is_timeout() {
-                format!("daemon not reachable at {addr}")
-            } else {
-                format!("daemon probe failed: {}", error.without_url())
-            }
-        })?;
-    if response.status() != reqwest::StatusCode::OK {
-        return Err(format!(
-            "daemon returned HTTP {}",
-            response.status().as_u16()
-        ));
+fn parse_stats_response(response: &[u8]) -> Result<StatsConfigPath, String> {
+    let unexpected = || "unexpected daemon response".to_string();
+    let text = std::str::from_utf8(response).map_err(|_| unexpected())?;
+    let (head, body) = text.split_once("\r\n\r\n").ok_or_else(unexpected)?;
+    let status = head.split_whitespace().nth(1).ok_or_else(unexpected)?;
+    if status != "200" {
+        return Err(format!("daemon returned HTTP {status}"));
     }
-    let body = response
-        .text()
-        .await
-        .map_err(|error| format!("failed to read daemon response: {}", error.without_url()))?;
-    let stats: StatsConfigPath =
-        serde_json::from_str(&body).map_err(|_| "unexpected daemon response".to_string())?;
+    let stats: StatsConfigPath = serde_json::from_str(body).map_err(|_| unexpected())?;
     if stats.config_path.is_empty() {
         return Err("daemon returned an empty config path".to_string());
     }
