@@ -185,6 +185,7 @@ struct StatsResponse {
     upstream: String,
     mode: &'static str, // "recursive" or "forward" — never "auto" at runtime
     config_path: String,
+    config_found: bool,
     data_dir: String,
     proxy_tld: String,
     dnssec: bool,
@@ -585,6 +586,7 @@ async fn stats(State(ctx): State<Arc<ServerCtx>>) -> Json<StatsResponse> {
         upstream,
         mode: ctx.upstream_mode.as_str(),
         config_path: ctx.config_path.clone(),
+        config_found: ctx.config_found,
         data_dir: ctx.data_dir.to_string_lossy().to_string(),
         proxy_tld: ctx.proxy_tld.clone(),
         dnssec: ctx.dnssec_enabled,

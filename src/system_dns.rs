@@ -1350,7 +1350,10 @@ fn parse_launchctl_program(stdout: &[u8]) -> Result<String, String> {
 
 /// Show the service status.
 pub fn service_status() -> Result<(), String> {
-    eprintln!("  config: {}", crate::config_cli::service_config_path()?);
+    match crate::config_cli::service_config_path() {
+        Ok(path) => eprintln!("  config: {path}"),
+        Err(error) => eprintln!("  config: <unavailable: {error}>"),
+    }
     #[cfg(target_os = "macos")]
     {
         service_status_macos()
