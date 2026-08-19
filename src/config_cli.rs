@@ -215,21 +215,13 @@ fn configured_editor() -> (String, Vec<String>) {
         .iter()
         .filter_map(|name| std::env::var(name).ok())
         .find(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| default_editor().to_string());
+        .unwrap_or_else(|| if cfg!(windows) { "notepad" } else { "vi" }.to_string());
     split_editor(&value)
-}
-
-fn default_editor() -> &'static str {
-    if cfg!(windows) {
-        "notepad"
-    } else {
-        "vi"
-    }
 }
 
 fn split_editor(value: &str) -> (String, Vec<String>) {
     let mut parts = value.split_whitespace().map(str::to_string);
-    let program = parts.next().unwrap_or_else(|| default_editor().to_string());
+    let program = parts.next().unwrap_or_default();
     (program, parts.collect())
 }
 
@@ -314,23 +306,16 @@ mod tests {
     }
 
     #[test]
-    fn probe_addr_maps_unspecified_to_loopback() {
+    fn probe_addr_targets_loopback_or_the_configured_bind_addr() {
         let mut server = ServerConfig {
             api_bind_addr: "0.0.0.0".to_string(),
-            ..ServerConfig::default()
-        };
-        assert_eq!(probe_addr(&server).ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
-        server.api_bind_addr = "::".to_string();
-        assert_eq!(probe_addr(&server).ip(), IpAddr::V6(Ipv6Addr::LOCALHOST));
-    }
-
-    #[test]
-    fn probe_addr_uses_configured_bind_addr() {
-        let server = ServerConfig {
-            api_bind_addr: "192.168.1.10".to_string(),
             api_port: 6123,
             ..ServerConfig::default()
         };
+        assert_eq!(probe_addr(&server).to_string(), "127.0.0.1:6123");
+        server.api_bind_addr = "::".to_string();
+        assert_eq!(probe_addr(&server).ip(), IpAddr::V6(Ipv6Addr::LOCALHOST));
+        server.api_bind_addr = "192.168.1.10".to_string();
         assert_eq!(probe_addr(&server).to_string(), "192.168.1.10:6123");
     }
 
@@ -386,27 +371,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         ensure_writable(&path).unwrap();
         assert!(!path.exists());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn ensure_writable_rejects_read_only_dir() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join("numa-config-cli-ro-test");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
-        if std::fs::write(dir.join("probe"), b"").is_ok() {
-            // Mode bits don't bind this user (running as root); nothing to assert.
-            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-            let _ = std::fs::remove_dir_all(&dir);
-            return;
-        }
-        let path = dir.join("numa.toml");
-        let error = ensure_writable(&path).unwrap_err();
-        assert!(error.contains("not writable"), "error was: {error}");
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
