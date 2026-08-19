@@ -233,10 +233,11 @@ fn client_udp_budget(query: &DnsPacket, transport: Transport) -> usize {
 }
 
 /// Buffer-full or over the client's UDP budget → TC bit, serializer-rejected
-/// → SERVFAIL (#142).
+/// → SERVFAIL (#142). Public so the fuzz oracle (`serialize_budget`) drives it
+/// with adversarial responses.
 /// TODO: once BytePacketBuffer supports >4096 bytes, skip the overflow
 /// truncation for TCP/TLS (which can carry up to 65535).
-fn serialize_with_fallback(
+pub fn serialize_with_fallback(
     response: &mut DnsPacket,
     query: &DnsPacket,
     qname: &str,

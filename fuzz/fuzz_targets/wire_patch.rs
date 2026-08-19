@@ -5,8 +5,50 @@
 //! index slices directly, and the offsets the scan returns are handed to
 //! `patch_ttls`, which does not re-check them — a bad offset there is an
 //! out-of-bounds write on the cache path, reachable from any upstream reply.
+//! `maximize_payload` patches the same way over every client query bound for a
+//! stream upstream, after `ensure_do_bit` — so both orders are exercised here.
 use libfuzzer_sys::fuzz_target;
-use numa::wire::{ensure_do_bit, min_ttl_from_wire, patch_ttls, scan_ttl_offsets, APPENDED_DO_OPT};
+use numa::wire::{
+    ensure_do_bit, maximize_payload, min_ttl_from_wire, patch_ttls, scan_ttl_offsets,
+    APPENDED_DO_OPT, MAX_UPSTREAM_PAYLOAD,
+};
+
+/// The only legal edit is rewriting one OPT payload field to the receive
+/// ceiling, in place: same length, same header, at most two adjacent bytes
+/// changed, and those bytes now read as the ceiling.
+fn assert_maximize_invariants(wire: &[u8]) {
+    let maxed = maximize_payload(wire);
+    assert_eq!(
+        maxed.len(),
+        wire.len(),
+        "maximize_payload changed the wire's length"
+    );
+    if wire.len() >= 12 {
+        assert_eq!(
+            &maxed[..12],
+            &wire[..12],
+            "maximize_payload rewrote the header"
+        );
+    }
+    let diffs: Vec<usize> = (0..wire.len()).filter(|&i| maxed[i] != wire[i]).collect();
+    if let (Some(&first), Some(&last)) = (diffs.first(), diffs.last()) {
+        assert!(
+            last - first <= 1,
+            "maximize_payload touched bytes outside one payload field"
+        );
+        let ceiling = MAX_UPSTREAM_PAYLOAD.to_be_bytes();
+        let pair_at = |p: usize| maxed.get(p..p + 2) == Some(&ceiling[..]);
+        assert!(
+            pair_at(first) || (first > 0 && pair_at(first - 1)),
+            "maximize_payload wrote something other than the receive ceiling"
+        );
+    }
+    assert_eq!(
+        &maximize_payload(&maxed)[..],
+        &maxed[..],
+        "maximize_payload is not idempotent"
+    );
+}
 
 fuzz_target!(|data: &[u8]| {
     if let Ok(meta) = scan_ttl_offsets(data) {
@@ -47,4 +89,7 @@ fuzz_target!(|data: &[u8]| {
         &patched[..],
         "ensure_do_bit is not idempotent"
     );
+
+    assert_maximize_invariants(data);
+    assert_maximize_invariants(&patched);
 });

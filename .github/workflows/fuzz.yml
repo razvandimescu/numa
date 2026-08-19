@@ -15,6 +15,7 @@ on:
       - 'src/wire.rs'
       - 'src/buffer.rs'
       - 'src/dnssec.rs'
+      - 'src/ctx.rs'
       - 'fuzz/**'
       - '.github/workflows/fuzz.yml'
   schedule:
@@ -40,7 +41,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [packet_parse, packet_roundtrip, svcb_strip, dnssec_validate, wire_patch]
+        target: [packet_parse, packet_roundtrip, svcb_strip, dnssec_validate, wire_patch, serialize_budget]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master

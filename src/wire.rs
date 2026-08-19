@@ -178,8 +178,9 @@ const MIN_UPSTREAM_PAYLOAD: u16 = crate::packet::DEFAULT_EDNS_PAYLOAD;
 /// `BytePacketBuffer`'s capacity, which `from_bytes` silently cuts to — a
 /// larger wire becomes one that cannot parse. Never invite (or prefer, see the
 /// TC=1 retry) an answer we cannot receive. `forward_udp_raw` sizes its
-/// receive buffer from this same constant.
-pub(crate) const MAX_UPSTREAM_PAYLOAD: u16 = crate::buffer::BUF_SIZE as u16;
+/// receive buffer from this same constant. Public so the fuzz oracle asserts
+/// against the same value.
+pub const MAX_UPSTREAM_PAYLOAD: u16 = crate::buffer::BUF_SIZE as u16;
 const _: () = assert!(crate::buffer::BUF_SIZE <= u16::MAX as usize);
 
 /// The bare OPT `append_do_opt` writes: root name, TYPE=41, our payload
