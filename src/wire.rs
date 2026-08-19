@@ -112,12 +112,18 @@ pub fn patch_ttls(wire: &mut [u8], offsets: &[usize], new_ttl: u32) {
 
 const DO_FLAG: u8 = 0x80;
 const TC_FLAG: u8 = 0x02;
+const QR_FLAG: u8 = 0x80;
 
 /// TC=1 (RFC 1035 §4.1.1, header byte 2) means "this answer did not fit, ask
 /// again over TCP". Cached, it would answer every later client — including the
 /// ones already on TCP, where the retry has nowhere left to go.
 pub fn is_truncated(wire: &[u8]) -> bool {
     wire.get(2).is_some_and(|flags| flags & TC_FLAG != 0)
+}
+
+/// QR=1 (RFC 1035 §4.1.1, header byte 2): the wire is a response.
+pub fn is_response(wire: &[u8]) -> bool {
+    wire.get(2).is_some_and(|flags| flags & QR_FLAG != 0)
 }
 
 /// Make a query wire carry DO=1 within a budget that can hold the answer:
@@ -152,10 +158,13 @@ pub fn ensure_do_bit(wire: &[u8]) -> Cow<'_, [u8]> {
 /// with no records, for answers that fit unsigned.
 const MIN_UPSTREAM_PAYLOAD: u16 = crate::packet::DEFAULT_EDNS_PAYLOAD;
 
-/// Ceiling on the budget we advertise: `forward_udp_raw` receives into 4096
-/// bytes, and a reply larger than the buffer is silently cut into a wire that
-/// cannot parse. Never invite an answer we cannot receive.
-const MAX_UPSTREAM_PAYLOAD: u16 = 4096;
+/// Ceiling on the budget we advertise and on any reply we accept:
+/// `BytePacketBuffer`'s capacity, which `from_bytes` silently cuts to — a
+/// larger wire becomes one that cannot parse. Never invite (or prefer, see the
+/// TC=1 retry) an answer we cannot receive. `forward_udp_raw` sizes its
+/// receive buffer from this same constant.
+pub(crate) const MAX_UPSTREAM_PAYLOAD: u16 = crate::buffer::BUF_SIZE as u16;
+const _: () = assert!(crate::buffer::BUF_SIZE <= u16::MAX as usize);
 
 /// The bare OPT `append_do_opt` writes: root name, TYPE=41, our payload
 /// budget, DO=1. Public so the fuzz oracle asserts against the same bytes.
@@ -207,19 +216,25 @@ fn locate_opt(wire: &[u8]) -> Result<OptSite> {
     for _ in 0..count(wire, 6) + count(wire, 8) {
         skip_record(wire, &mut pos)?;
     }
+    let mut opt = None;
     for _ in 0..count(wire, 10) {
         let ttl_offset = skip_record(wire, &mut pos)?;
         match record_type(wire, ttl_offset) {
-            TYPE_OPT => return Ok(OptSite::Flag(ttl_offset)),
+            TYPE_OPT => opt = opt.or(Some(ttl_offset)),
             // A TSIG must stay the last record and its MAC covers the header
-            // (RFC 8945 §5.1) — appending an OPT behind it, or bumping
-            // ARCOUNT, voids the signature. Not ours to patch.
+            // (RFC 8945 §5.1) — so a signed query's OPT sits in front of it,
+            // inside the MAC. Patching that OPT, appending one, or bumping
+            // ARCOUNT voids the signature: scan the whole section before
+            // deciding. Not ours to patch.
             TYPE_TSIG => return Err("TSIG-signed message".into()),
             _ => {}
         }
     }
 
-    Ok(OptSite::End(pos))
+    match opt {
+        Some(ttl_offset) => Ok(OptSite::Flag(ttl_offset)),
+        None => Ok(OptSite::End(pos)),
+    }
 }
 
 /// Skip one question entry: name, then QTYPE(2) + QCLASS(2).
@@ -1655,13 +1670,35 @@ mod tests {
         // (RFC 8945 §5.1); patching would void the signature upstream.
         let mut wire = query_wire();
         wire[10..12].copy_from_slice(&1u16.to_be_bytes()); // ARCOUNT
-        wire.extend_from_slice(&[0]); // root name
-        wire.extend_from_slice(&250u16.to_be_bytes()); // TYPE=TSIG
-        wire.extend_from_slice(&[0, 255]); // CLASS=ANY
-        wire.extend_from_slice(&[0, 0, 0, 0]); // TTL
-        wire.extend_from_slice(&[0, 0]); // RDLENGTH
+        wire.extend_from_slice(&tsig_record());
 
         assert_eq!(&ensure_do_bit(&wire)[..], &wire[..]);
+    }
+
+    #[test]
+    fn ensure_do_bit_leaves_opt_plus_tsig_wires_untouched() {
+        // The standard signed-and-EDNS layout: TSIG last (RFC 8945 §5.3), so
+        // the OPT sits in front of it, covered by the MAC. DO clear and a
+        // payload below budget would both normally be patched.
+        let mut wire = query_wire();
+        wire[10..12].copy_from_slice(&2u16.to_be_bytes()); // ARCOUNT
+        wire.extend_from_slice(&[0, 0, 41]); // root name, TYPE=OPT
+        wire.extend_from_slice(&512u16.to_be_bytes()); // payload below budget
+        wire.extend_from_slice(&[0, 0, 0, 0]); // TTL, DO clear
+        wire.extend_from_slice(&[0, 0]); // RDLENGTH
+        wire.extend_from_slice(&tsig_record());
+
+        assert_eq!(&ensure_do_bit(&wire)[..], &wire[..]);
+    }
+
+    /// A minimal empty-RDATA TSIG record.
+    fn tsig_record() -> Vec<u8> {
+        let mut rec = vec![0]; // root name
+        rec.extend_from_slice(&TYPE_TSIG.to_be_bytes());
+        rec.extend_from_slice(&[0, 255]); // CLASS=ANY
+        rec.extend_from_slice(&[0, 0, 0, 0]); // TTL
+        rec.extend_from_slice(&[0, 0]); // RDLENGTH
+        rec
     }
 
     #[test]

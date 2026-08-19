@@ -1,6 +1,6 @@
 use crate::Result;
 
-const BUF_SIZE: usize = 4096;
+pub(crate) const BUF_SIZE: usize = 4096;
 
 pub struct BytePacketBuffer {
     pub buf: [u8; BUF_SIZE],
