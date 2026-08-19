@@ -430,26 +430,30 @@ async fn forward_dot_raw(
 
 /// One reply path for every transport: dispatch, validate, and resolve TC=1.
 /// A truncated reply never leaves this function — it is uncacheable, and our
-/// own clients' TCP retries re-enter this same path. UDP escalates to TCP
-/// (RFC 1035 §4.2.1, routine under DO=1/1232 for large signed answers) within
-/// what remains of the timeout budget; a stream transport has nothing bigger
-/// to escalate to, so its TC — like a failed or unusable retry — counts as a
-/// failed upstream and the caller's failover moves on.
+/// own clients' TCP retries re-enter this same path. UDP keeps the datagram
+/// budget and escalates to TCP (RFC 1035 §4.2.1, routine under DO=1/1232 for
+/// large signed answers) within what remains of the timeout; every stream
+/// transport asks for our full ceiling up front, so its TC means an answer
+/// past what we could parse anyway — that, like a failed or unusable retry,
+/// counts as a failed upstream and the caller's failover moves on.
 pub async fn forward_query_raw(
     wire: &[u8],
     upstream: &Upstream,
     timeout_duration: Duration,
 ) -> Result<Vec<u8>> {
     let start = Instant::now();
+    let stream_wire = crate::wire::maximize_payload(wire);
     let resp = match upstream {
         Upstream::Udp(addr) => forward_udp_raw(wire, *addr, timeout_duration).await,
-        Upstream::Tcp(addr) => forward_tcp_raw(wire, *addr, timeout_duration).await,
-        Upstream::Doh { url, client } => forward_doh_raw(wire, url, client, timeout_duration).await,
+        Upstream::Tcp(addr) => forward_tcp_raw(&stream_wire, *addr, timeout_duration).await,
+        Upstream::Doh { url, client } => {
+            forward_doh_raw(&stream_wire, url, client, timeout_duration).await
+        }
         Upstream::Dot {
             addr,
             tls_name,
             connector,
-        } => forward_dot_raw(wire, *addr, tls_name, connector, timeout_duration).await,
+        } => forward_dot_raw(&stream_wire, *addr, tls_name, connector, timeout_duration).await,
         Upstream::Odoh {
             relay_url,
             target_path,
@@ -457,7 +461,7 @@ pub async fn forward_query_raw(
             target_config,
         } => {
             query_through_relay(
-                wire,
+                &stream_wire,
                 relay_url,
                 target_path,
                 client,
@@ -476,7 +480,7 @@ pub async fn forward_query_raw(
         return Err("upstream truncated a stream-transport reply".into());
     };
     let budget = timeout_duration.saturating_sub(start.elapsed());
-    let full = timeout(budget, forward_tcp_raw(wire, *addr, budget)).await??;
+    let full = timeout(budget, forward_tcp_raw(&stream_wire, *addr, budget)).await??;
     let full = usable_reply(wire, full)?;
     if crate::wire::is_truncated(&full) {
         return Err("upstream truncated the TCP retry".into());
@@ -1168,6 +1172,50 @@ mod tests {
         .await;
 
         assert!(result.is_err(), "oversized TCP retry must not be returned");
+    }
+
+    #[tokio::test]
+    async fn a_stream_upstream_is_asked_for_the_full_ceiling() {
+        // The 1232 default is a datagram-fragmentation budget. Passing it to a
+        // DoH server that honors it (RFC 8484 §5.1) earns a TC=1 the stream
+        // path cannot escalate past, and the whole pool SERVFAILs.
+        let query = make_query();
+        let response_bytes = to_wire(&make_response(&query));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+
+        let app = axum::Router::new().route(
+            "/dns-query",
+            axum::routing::post(move |body: axum::body::Bytes| {
+                let reply = response_bytes.clone();
+                let tx = tx.clone();
+                async move {
+                    let _ = tx.send(body.to_vec());
+                    (
+                        [(axum::http::header::CONTENT_TYPE, "application/dns-message")],
+                        reply,
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, app).into_future());
+
+        let upstream = Upstream::Doh {
+            url: format!("http://{}/dns-query", addr),
+            client: crate::forward::default_client(),
+        };
+        let wire = crate::wire::ensure_do_bit(&to_wire(&query)).into_owned();
+        forward_query_raw(&wire, &upstream, Duration::from_secs(2))
+            .await
+            .expect("DoH forward should succeed");
+
+        let sent = rx.recv().await.expect("upstream recorded the query");
+        let mut buf = BytePacketBuffer::from_bytes(&sent);
+        let asked = DnsPacket::from_buffer(&mut buf).unwrap();
+        let edns = asked.edns.expect("OPT present");
+        assert_eq!(edns.udp_payload_size, crate::wire::MAX_UPSTREAM_PAYLOAD);
+        assert!(edns.do_bit, "DO survives the payload patch");
     }
 
     #[tokio::test]

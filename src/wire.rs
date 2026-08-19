@@ -152,6 +152,22 @@ pub fn ensure_do_bit(wire: &[u8]) -> Cow<'_, [u8]> {
     }
 }
 
+/// Raise the advertised budget to our full receive ceiling. A stream transport
+/// has no datagram to fragment, and its TC=1 has nothing left to escalate to —
+/// so a smaller budget only invites a truncated answer we would have to fail
+/// (RFC 8484 §5.1: the server honors what the requestor advertised). Wires with
+/// no OPT to patch go upstream as they came.
+pub fn maximize_payload(wire: &[u8]) -> Cow<'_, [u8]> {
+    match locate_opt(wire) {
+        Ok(OptSite::Flag(ttl)) if payload(wire, ttl) != MAX_UPSTREAM_PAYLOAD => {
+            let mut out = wire.to_vec();
+            out[ttl - 2..ttl].copy_from_slice(&MAX_UPSTREAM_PAYLOAD.to_be_bytes());
+            Cow::Owned(out)
+        }
+        _ => Cow::Borrowed(wire),
+    }
+}
+
 /// EDNS payload size is hop-by-hop (RFC 6891 §6.2.3) — upstream answers to us,
 /// not to our client, so the client's budget is not ours to pass on. Forwarding
 /// a small one alongside DO=1 asks for RRSIGs that cannot fit and earns a TC=1
@@ -1689,6 +1705,36 @@ mod tests {
         wire.extend_from_slice(&tsig_record());
 
         assert_eq!(&ensure_do_bit(&wire)[..], &wire[..]);
+    }
+
+    #[test]
+    fn maximize_payload_raises_the_stream_budget_to_the_ceiling() {
+        // Over DoH/DoT the 1232 default only invites a TC=1 with nothing left
+        // to escalate to, so every stream transport asks for the ceiling.
+        let wire = ensure_do_bit(&query_wire()).into_owned();
+        assert_eq!(
+            parse_wire(&wire).edns.unwrap().udp_payload_size,
+            MIN_UPSTREAM_PAYLOAD
+        );
+
+        let out = maximize_payload(&wire);
+
+        assert_eq!(out.len(), wire.len(), "patched in place");
+        let edns = parse_wire(&out).edns.expect("OPT present");
+        assert_eq!(edns.udp_payload_size, MAX_UPSTREAM_PAYLOAD);
+        assert!(edns.do_bit, "DO survives the payload patch");
+    }
+
+    #[test]
+    fn maximize_payload_leaves_unpatchable_wires_untouched() {
+        // No OPT to patch, and a TSIG whose MAC we must not void.
+        let bare = query_wire();
+        assert_eq!(&maximize_payload(&bare)[..], &bare[..]);
+
+        let mut signed = query_wire();
+        signed[10..12].copy_from_slice(&1u16.to_be_bytes()); // ARCOUNT
+        signed.extend_from_slice(&tsig_record());
+        assert_eq!(&maximize_payload(&signed)[..], &signed[..]);
     }
 
     /// A minimal empty-RDATA TSIG record.
