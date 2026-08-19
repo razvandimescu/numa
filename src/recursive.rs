@@ -229,11 +229,22 @@ pub(crate) fn resolve_iterative<'a>(
             if (q_type != qtype || !q_name.eq_ignore_ascii_case(qname))
                 && (!response.authorities.is_empty() || !response.answers.is_empty())
             {
-                if let Some(zone) = referral_zone(&response) {
-                    current_zone = zone;
-                    let mut cache_w = cache.write().unwrap();
-                    cache_ns_delegation(&mut cache_w, &current_zone, &response);
-                    drop(cache_w);
+                match referral_zone(&response) {
+                    Some(zone) if !zone_in_bailiwick(&zone, &current_zone) => {
+                        debug!(
+                            "recursive: rejecting out-of-bailiwick referral to {} from zone {}",
+                            zone, current_zone
+                        );
+                        ns_idx += 1;
+                        continue;
+                    }
+                    Some(zone) => {
+                        current_zone = zone;
+                        let mut cache_w = cache.write().unwrap();
+                        cache_ns_delegation(&mut cache_w, &current_zone, &response);
+                        drop(cache_w);
+                    }
+                    None => {}
                 }
                 let mut all_ns = extract_ns_from_records(&response.answers);
                 if all_ns.is_empty() {
@@ -294,6 +305,14 @@ pub(crate) fn resolve_iterative<'a>(
             }
 
             if let Some(zone) = referral_zone(&response) {
+                if !zone_in_bailiwick(&zone, &current_zone) {
+                    debug!(
+                        "recursive: rejecting out-of-bailiwick referral to {} from zone {}",
+                        zone, current_zone
+                    );
+                    ns_idx += 1;
+                    continue;
+                }
                 current_zone = zone;
             }
             let ns_names = extract_ns_names(&response);
@@ -442,6 +461,19 @@ fn referral_zone(response: &DnsPacket) -> Option<String> {
         DnsRecord::NS { domain, .. } => Some(domain.clone()),
         _ => None,
     })
+}
+
+/// RFC 5452 §6: a referral may only introduce a zone at or below the zone of
+/// the server that sent it. Without this a nameserver reached while resolving
+/// one domain can hand back a delegation for an unrelated zone (say `google.com`
+/// while we walk under `attacker.com`) and poison its NS in cache. Names carry
+/// no trailing dot; the root (`.`) is above everything.
+fn zone_in_bailiwick(zone: &str, parent: &str) -> bool {
+    parent == "."
+        || zone.eq_ignore_ascii_case(parent)
+        || zone
+            .to_ascii_lowercase()
+            .ends_with(&format!(".{}", parent.to_ascii_lowercase()))
 }
 
 /// RFC 7816 query minimization (conservative): only minimize at root.
@@ -937,6 +969,32 @@ mod tests {
         ];
         let addrs = parse_root_hints(&hints);
         assert_eq!(addrs.len(), 2);
+    }
+
+    #[test]
+    fn bailiwick_accepts_normal_descent() {
+        // Every hop of a real recursive walk toward the query name: current_zone
+        // and the referral zone are both suffixes of the qname, referral deeper.
+        assert!(zone_in_bailiwick("com", "."));
+        assert!(zone_in_bailiwick("amazon.com", "com"));
+        assert!(zone_in_bailiwick("eu.amazon.com", "amazon.com"));
+        assert!(zone_in_bailiwick(
+            "s3.eu-west-1.amazonaws.com",
+            "amazonaws.com"
+        ));
+        assert!(zone_in_bailiwick("amazon.com", "amazon.com")); // NODATA re-lists own NS
+        assert!(zone_in_bailiwick("Amazon.COM", "com")); // case-insensitive
+    }
+
+    #[test]
+    fn bailiwick_rejects_cross_zone_referral() {
+        // The PoC: a server we reached under attacker.com refers us to an
+        // unrelated zone. Also reject referrals up (sibling/parent/root).
+        assert!(!zone_in_bailiwick("google.com", "attacker.com"));
+        assert!(!zone_in_bailiwick("attacker.net", "com")); // different TLD
+        assert!(!zone_in_bailiwick("com", "amazon.com")); // refer up
+        assert!(!zone_in_bailiwick("evil.com", "com.evil.com")); // suffix-substring, not label boundary
+        assert!(!zone_in_bailiwick("notamazon.com", "amazon.com")); // shares suffix, wrong label
     }
 
     #[test]
