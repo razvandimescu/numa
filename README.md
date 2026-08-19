@@ -162,7 +162,7 @@ Turnkey compose recipes:
 - [Blog: DNS-over-TLS from Scratch in Rust](https://numa.rs/blog/posts/dot-from-scratch.html)
 - [Blog: Implementing DNSSEC from Scratch in Rust](https://numa.rs/blog/posts/dnssec-from-scratch.html)
 - [Blog: I Built a DNS Resolver from Scratch](https://numa.rs/blog/posts/dns-from-scratch.html)
-- [Configuration reference](numa.toml) — all options documented inline
+- [Configuration reference](numa.toml) — all options documented inline; `numa config path` shows which file your install is using, `numa config edit` opens it
 - [REST API](src/api.rs) — overrides, cache, blocking, services, diagnostics
 - [numa-metrics](https://github.com/razvandimescu/numa-metrics) — durable query history & analytics, off-host by design (no SD-card writes)
 

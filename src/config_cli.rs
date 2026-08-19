@@ -61,7 +61,12 @@ pub fn edit_config() -> Result<(), String> {
     }
 
     if resolved.from_daemon {
-        eprintln!("note: restart numa to apply changes (numa service restart)");
+        let restart = if cfg!(windows) {
+            "numa service restart"
+        } else {
+            "sudo numa service restart"
+        };
+        eprintln!("note: restart numa to apply changes ({restart})");
     }
     Ok(())
 }
