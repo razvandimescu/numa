@@ -428,13 +428,21 @@ async fn forward_dot_raw(
     Ok(data)
 }
 
+/// One reply path for every transport: dispatch, validate, and resolve TC=1.
+/// A truncated reply never leaves this function — it is uncacheable, and our
+/// own clients' TCP retries re-enter this same path. UDP escalates to TCP
+/// (RFC 1035 §4.2.1, routine under DO=1/1232 for large signed answers) within
+/// what remains of the timeout budget; a stream transport has nothing bigger
+/// to escalate to, so its TC — like a failed or unusable retry — counts as a
+/// failed upstream and the caller's failover moves on.
 pub async fn forward_query_raw(
     wire: &[u8],
     upstream: &Upstream,
     timeout_duration: Duration,
 ) -> Result<Vec<u8>> {
-    match upstream {
-        Upstream::Udp(addr) => forward_udp_with_tc_retry(wire, *addr, timeout_duration).await,
+    let start = Instant::now();
+    let resp = match upstream {
+        Upstream::Udp(addr) => forward_udp_raw(wire, *addr, timeout_duration).await,
         Upstream::Tcp(addr) => forward_tcp_raw(wire, *addr, timeout_duration).await,
         Upstream::Doh { url, client } => forward_doh_raw(wire, url, client, timeout_duration).await,
         Upstream::Dot {
@@ -458,7 +466,37 @@ pub async fn forward_query_raw(
             )
             .await
         }
+    }?;
+
+    let resp = usable_reply(wire, resp)?;
+    if !crate::wire::is_truncated(&resp) {
+        return Ok(resp);
     }
+    let Upstream::Udp(addr) = upstream else {
+        return Err("upstream truncated a stream-transport reply".into());
+    };
+    let budget = timeout_duration.saturating_sub(start.elapsed());
+    let full = timeout(budget, forward_tcp_raw(wire, *addr, budget)).await??;
+    let full = usable_reply(wire, full)?;
+    if crate::wire::is_truncated(&full) {
+        return Err("upstream truncated the TCP retry".into());
+    }
+    Ok(full)
+}
+
+/// A reply the pipeline can act on: the ID we sent, QR=1, and within
+/// `BytePacketBuffer`'s capacity — `from_bytes` silently cuts a larger wire
+/// into one that parses as garbage, becoming SERVFAIL plus a cache entry that
+/// never parses until TTL expiry.
+fn usable_reply(wire: &[u8], resp: Vec<u8>) -> Result<Vec<u8>> {
+    let usable = resp.len() <= crate::wire::MAX_UPSTREAM_PAYLOAD as usize
+        && resp.len() >= 12
+        && resp.get(..2) == wire.get(..2)
+        && crate::wire::is_response(&resp);
+    if !usable {
+        return Err("unusable upstream reply".into());
+    }
+    Ok(resp)
 }
 
 pub async fn forward_with_hedging_raw(
@@ -590,35 +628,6 @@ pub async fn forward_with_failover_raw(
     }
 
     Err(last_err.unwrap_or_else(|| "no upstream configured".into()))
-}
-
-/// UDP leg plus the TC=1 retry over TCP (RFC 1035 §4.2.1) — routine under
-/// DO=1/1232 for large signed answers. A truncated reply never leaves this
-/// function: it is uncacheable, and our own clients' TCP retries re-enter
-/// this same UDP path. Either the retry lands a usable full answer within
-/// what remains of the timeout budget, or the upstream counts as failed and
-/// the caller's failover moves on.
-async fn forward_udp_with_tc_retry(
-    wire: &[u8],
-    upstream: SocketAddr,
-    timeout_duration: Duration,
-) -> Result<Vec<u8>> {
-    let start = Instant::now();
-    let resp = forward_udp_raw(wire, upstream, timeout_duration).await?;
-    if !crate::wire::is_truncated(&resp) {
-        return Ok(resp);
-    }
-
-    let budget = timeout_duration.saturating_sub(start.elapsed());
-    let full = timeout(budget, forward_tcp_raw(wire, upstream, budget)).await??;
-    let usable = full.len() <= crate::wire::MAX_UPSTREAM_PAYLOAD as usize
-        && full.len() >= 12
-        && full.get(..2) == wire.get(..2)
-        && crate::wire::is_response(&full);
-    if !usable {
-        return Err("TCP retry after TC=1 returned an unusable reply".into());
-    }
-    Ok(full)
 }
 
 async fn forward_udp_raw(
@@ -1078,6 +1087,81 @@ mod tests {
         let mut buf = BytePacketBuffer::from_bytes(&resp_wire);
         let result = DnsPacket::from_buffer(&mut buf).unwrap();
         assert_eq!(result.answers.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn failover_moves_on_when_a_stream_transport_truncates() {
+        // TC over DoH has nothing bigger to escalate to — the upstream must
+        // count as failed, not answer the pool with an uncacheable TC wire.
+        let query = make_query();
+        let tc_wire = truncated_response(&query);
+        let app = axum::Router::new().route(
+            "/dns-query",
+            axum::routing::post(move || {
+                let body = tc_wire.clone();
+                async move {
+                    (
+                        [(axum::http::header::CONTENT_TYPE, "application/dns-message")],
+                        body,
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let doh_addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, app).into_future());
+        let good_addr = crate::testutil::mock_upstream(make_response(&query)).await;
+
+        let pool = UpstreamPool::new(
+            vec![
+                Upstream::Doh {
+                    url: format!("http://{}/dns-query", doh_addr),
+                    client: crate::forward::default_client(),
+                },
+                Upstream::Udp(good_addr),
+            ],
+            vec![],
+        );
+        let srtt = RwLock::new(SrttCache::new(true));
+        let resp_wire = forward_with_failover_raw(
+            &to_wire(&query),
+            &pool,
+            &srtt,
+            Duration::from_millis(500),
+            Duration::ZERO,
+        )
+        .await
+        .expect("truncating DoH upstream must fail over");
+
+        assert!(!crate::wire::is_truncated(&resp_wire));
+        let mut buf = BytePacketBuffer::from_bytes(&resp_wire);
+        let result = DnsPacket::from_buffer(&mut buf).unwrap();
+        assert_eq!(result.answers.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn tc_retry_refuses_a_reply_the_parse_buffer_would_cut() {
+        // A TCP answer past BytePacketBuffer's capacity would be silently
+        // cut into a parse error and a poisoned cache slot — refusing it
+        // turns that into a plain upstream failure.
+        let query = make_query();
+        let addr = crate::testutil::mock_upstream_raw(truncated_response(&query)).await;
+        let mut big = to_wire(&make_response(&query));
+        big.resize(5000, 0);
+        crate::testutil::tcp_upstream_raw_on(addr, big).await;
+
+        let pool = UpstreamPool::new(vec![Upstream::Udp(addr)], vec![]);
+        let srtt = RwLock::new(SrttCache::new(true));
+        let result = forward_with_failover_raw(
+            &to_wire(&query),
+            &pool,
+            &srtt,
+            Duration::from_millis(500),
+            Duration::ZERO,
+        )
+        .await;
+
+        assert!(result.is_err(), "oversized TCP retry must not be returned");
     }
 
     #[test]
