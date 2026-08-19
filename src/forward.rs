@@ -577,6 +577,17 @@ pub async fn forward_with_failover_raw(
                     let rtt_ms = start.elapsed().as_millis() as u64;
                     srtt.write().unwrap().record_rtt(ip, t, rtt_ms);
                 }
+                // TC=1 says "retry over TCP" (RFC 1035 §4.2.1) and DO=1/1232
+                // makes it routine for large signed answers. Our own clients'
+                // TCP retries re-enter this same UDP path, so the protocol
+                // switch has to happen here or nowhere.
+                if crate::wire::is_truncated(&resp) {
+                    if let Upstream::Udp(addr) = upstream {
+                        if let Ok(full) = forward_tcp_raw(wire, *addr, timeout_duration).await {
+                            return Ok(full);
+                        }
+                    }
+                }
                 return Ok(resp);
             }
             Err(e) => {
@@ -981,6 +992,68 @@ mod tests {
         let mut buf = BytePacketBuffer::from_bytes(&resp_wire);
         let result = DnsPacket::from_buffer(&mut buf).unwrap();
         assert_eq!(result.header.id, 0xABCD);
+        assert_eq!(result.answers.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn failover_retries_truncated_udp_over_tcp() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let query = make_query();
+        let full_wire = to_wire(&make_response(&query));
+
+        // UDP and TCP share the port: UDP always answers TC=1 with no
+        // records, TCP has the full answer — the shape of a signed response
+        // that outgrows the 1232-byte UDP budget. Without the TCP retry the
+        // TC reply is final: the client's own TCP retry re-enters this same
+        // UDP path and loops forever.
+        let udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = udp.local_addr().unwrap();
+        let tcp = tokio::net::TcpListener::bind(addr).await.unwrap();
+
+        let mut tc = make_response(&query);
+        tc.answers.clear();
+        tc.header.truncated_message = true;
+        let tc_wire = to_wire(&tc);
+        tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            while let Ok((n, src)) = udp.recv_from(&mut buf).await {
+                let mut reply = tc_wire.clone();
+                reply[0] = buf[0];
+                reply[1] = buf[1];
+                let _ = udp.send_to(&reply, src).await;
+                let _ = n;
+            }
+        });
+        tokio::spawn(async move {
+            let (mut stream, _) = tcp.accept().await.unwrap();
+            let mut len_buf = [0u8; 2];
+            stream.read_exact(&mut len_buf).await.unwrap();
+            let mut query_wire = vec![0u8; u16::from_be_bytes(len_buf) as usize];
+            stream.read_exact(&mut query_wire).await.unwrap();
+            let mut reply = full_wire.clone();
+            reply[0] = query_wire[0];
+            reply[1] = query_wire[1];
+            let mut out = Vec::with_capacity(2 + reply.len());
+            out.extend_from_slice(&(reply.len() as u16).to_be_bytes());
+            out.extend_from_slice(&reply);
+            stream.write_all(&out).await.unwrap();
+        });
+
+        let pool = UpstreamPool::new(vec![Upstream::Udp(addr)], vec![]);
+        let srtt = RwLock::new(SrttCache::new(true));
+        let resp_wire = forward_with_failover_raw(
+            &to_wire(&query),
+            &pool,
+            &srtt,
+            Duration::from_millis(500),
+            Duration::ZERO,
+        )
+        .await
+        .expect("truncated UDP answer must resolve over TCP");
+
+        assert!(!crate::wire::is_truncated(&resp_wire));
+        let mut buf = BytePacketBuffer::from_bytes(&resp_wire);
+        let result = DnsPacket::from_buffer(&mut buf).unwrap();
         assert_eq!(result.answers.len(), 1);
     }
 
