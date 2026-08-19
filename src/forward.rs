@@ -640,13 +640,17 @@ async fn forward_udp_raw(
     timeout_duration: Duration,
 ) -> Result<Vec<u8>> {
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
-    socket.send_to(wire, upstream).await?;
+    // Connected: the kernel drops datagrams from anyone but the upstream, so an
+    // off-path answer has to win a race the source address alone would let it
+    // skip. The ID check downstream is the second half of that guard.
+    socket.connect(upstream).await?;
+    socket.send(wire).await?;
 
     // One byte of headroom: a datagram sized exactly to the buffer is
     // indistinguishable from one the kernel cut to fit, and a cut wire parses
     // as garbage rather than failing.
     let mut recv_buf = vec![0u8; crate::wire::MAX_UPSTREAM_PAYLOAD as usize + 1];
-    let (size, _) = timeout(timeout_duration, socket.recv_from(&mut recv_buf)).await??;
+    let size = timeout(timeout_duration, socket.recv(&mut recv_buf)).await??;
     if size > crate::wire::MAX_UPSTREAM_PAYLOAD as usize {
         return Err("upstream reply exceeds the maximum payload".into());
     }
@@ -1216,6 +1220,34 @@ mod tests {
         let edns = asked.edns.expect("OPT present");
         assert_eq!(edns.udp_payload_size, crate::wire::MAX_UPSTREAM_PAYLOAD);
         assert!(edns.do_bit, "DO survives the payload patch");
+    }
+
+    #[tokio::test]
+    async fn udp_ignores_a_reply_from_another_source() {
+        // The stub reads the query on the addressed port but answers from a
+        // different one — the shape of an off-path injection. A connected
+        // socket never sees it.
+        let query = make_query();
+        let mut reply = to_wire(&make_response(&query));
+        let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = sock.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            let (_, src) = sock.recv_from(&mut buf).await.unwrap();
+            reply[0] = buf[0];
+            reply[1] = buf[1];
+            let off_path = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let _ = off_path.send_to(&reply, src).await;
+        });
+
+        let result = forward_query_raw(
+            &to_wire(&query),
+            &Upstream::Udp(addr),
+            Duration::from_millis(300),
+        )
+        .await;
+
+        assert!(result.is_err(), "an off-path reply must not answer");
     }
 
     #[tokio::test]
