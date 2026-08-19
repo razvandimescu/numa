@@ -6,7 +6,7 @@
 //! `patch_ttls`, which does not re-check them — a bad offset there is an
 //! out-of-bounds write on the cache path, reachable from any upstream reply.
 use libfuzzer_sys::fuzz_target;
-use numa::wire::{ensure_do_bit, min_ttl_from_wire, patch_ttls, scan_ttl_offsets};
+use numa::wire::{ensure_do_bit, min_ttl_from_wire, patch_ttls, scan_ttl_offsets, APPENDED_DO_OPT};
 
 fuzz_target!(|data: &[u8]| {
     if let Ok(meta) = scan_ttl_offsets(data) {
@@ -27,9 +27,8 @@ fuzz_target!(|data: &[u8]| {
     // Uncounted trailing bytes are dropped, so a shorter result is legal — but
     // only from the append path, which ends in the OPT it just wrote. Any other
     // shrink means counted records went missing.
-    const APPENDED_OPT: [u8; 11] = [0, 0, 41, 0x04, 0xD0, 0, 0, 0x80, 0, 0, 0];
     assert!(
-        patched.len() >= data.len() || patched.ends_with(&APPENDED_OPT),
+        patched.len() >= data.len() || patched.ends_with(&APPENDED_DO_OPT),
         "ensure_do_bit dropped bytes without appending an OPT"
     );
     if data.len() >= 12 {

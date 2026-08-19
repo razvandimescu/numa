@@ -19,14 +19,21 @@ pub struct WireMeta {
     pub answer_count: usize,
 }
 
-/// An OPT record always carries the root name (RFC 6891 §6.1.2), so these
-/// three bytes — root label, then type 41 — identify one without walking it.
-const OPT_RECORD_HEAD: [u8; 3] = [0x00, 0x00, 41];
-
 /// Read a 16-bit section count from the header.
 fn count(wire: &[u8], at: usize) -> usize {
     u16::from_be_bytes([wire[at], wire[at + 1]]) as usize
 }
+
+/// A record's TYPE sits in the two bytes before its CLASS, four before its
+/// TTL. Matching on it (not on literal root-name bytes) catches an OPT whose
+/// owner name reaches root through a compression pointer — the same trap
+/// `DnsPacket::read` already guards against.
+fn record_type(wire: &[u8], ttl_offset: usize) -> u16 {
+    u16::from_be_bytes([wire[ttl_offset - 4], wire[ttl_offset - 3]])
+}
+
+const TYPE_OPT: u16 = 41;
+const TYPE_TSIG: u16 = 250;
 
 /// Scan a DNS response's wire bytes and return metadata about TTL field locations.
 ///
@@ -49,9 +56,8 @@ pub fn scan_ttl_offsets(wire: &[u8]) -> Result<WireMeta> {
     // ANCOUNT, NSCOUNT, ARCOUNT: answers first, so they lead `ttl_offsets`.
     for (section, at) in [6, 8, 10].into_iter().enumerate() {
         for _ in 0..count(wire, at) {
-            let is_opt = wire.get(pos..pos + 3) == Some(&OPT_RECORD_HEAD[..]);
             let ttl_offset = skip_record(wire, &mut pos)?;
-            if !is_opt {
+            if record_type(wire, ttl_offset) != TYPE_OPT {
                 ttl_offsets.push(ttl_offset);
                 if section == 0 {
                     answer_count += 1;
@@ -121,16 +127,15 @@ pub fn is_truncated(wire: &[u8]) -> bool {
 /// (issue #191). Wires we cannot walk go upstream as they came.
 pub fn ensure_do_bit(wire: &[u8]) -> Cow<'_, [u8]> {
     match locate_opt(wire) {
-        Ok(OptSite::Flag(ttl))
-            if wire[ttl + 2] & DO_FLAG != 0 && payload_fits_dnssec(wire, ttl) =>
-        {
+        Ok(OptSite::Flag(ttl)) if wire[ttl + 2] & DO_FLAG != 0 && payload_in_budget(wire, ttl) => {
             Cow::Borrowed(wire)
         }
         Ok(OptSite::Flag(ttl)) => {
             let mut out = wire.to_vec();
             out[ttl + 2] |= DO_FLAG;
-            if !payload_fits_dnssec(&out, ttl) {
-                out[ttl - 2..ttl].copy_from_slice(&MIN_UPSTREAM_PAYLOAD.to_be_bytes());
+            if !payload_in_budget(&out, ttl) {
+                let clamped = payload(&out, ttl).clamp(MIN_UPSTREAM_PAYLOAD, MAX_UPSTREAM_PAYLOAD);
+                out[ttl - 2..ttl].copy_from_slice(&clamped.to_be_bytes());
             }
             Cow::Owned(out)
         }
@@ -147,23 +152,36 @@ pub fn ensure_do_bit(wire: &[u8]) -> Cow<'_, [u8]> {
 /// with no records, for answers that fit unsigned.
 const MIN_UPSTREAM_PAYLOAD: u16 = crate::packet::DEFAULT_EDNS_PAYLOAD;
 
+/// Ceiling on the budget we advertise: `forward_udp_raw` receives into 4096
+/// bytes, and a reply larger than the buffer is silently cut into a wire that
+/// cannot parse. Never invite an answer we cannot receive.
+const MAX_UPSTREAM_PAYLOAD: u16 = 4096;
+
+/// The bare OPT `append_do_opt` writes: root name, TYPE=41, our payload
+/// budget, DO=1. Public so the fuzz oracle asserts against the same bytes.
+pub const APPENDED_DO_OPT: [u8; 11] = {
+    let p = MIN_UPSTREAM_PAYLOAD.to_be_bytes();
+    [0, 0, 41, p[0], p[1], 0, 0, DO_FLAG, 0, 0, 0]
+};
+
 /// The OPT's CLASS field, which holds the payload size, sits in the two bytes
 /// before its TTL.
-fn payload_fits_dnssec(wire: &[u8], ttl: usize) -> bool {
-    u16::from_be_bytes([wire[ttl - 2], wire[ttl - 1]]) >= MIN_UPSTREAM_PAYLOAD
+fn payload(wire: &[u8], ttl: usize) -> u16 {
+    u16::from_be_bytes([wire[ttl - 2], wire[ttl - 1]])
+}
+
+fn payload_in_budget(wire: &[u8], ttl: usize) -> bool {
+    (MIN_UPSTREAM_PAYLOAD..=MAX_UPSTREAM_PAYLOAD).contains(&payload(wire, ttl))
 }
 
 /// `None` when ARCOUNT cannot cover one more record, since an appended OPT
 /// the count does not reach is trailing garbage to the upstream.
 fn append_do_opt(wire: &[u8]) -> Option<Vec<u8>> {
     let arcount = u16::from_be_bytes([wire[10], wire[11]]).checked_add(1)?;
-    let mut out = Vec::with_capacity(wire.len() + 11);
+    let mut out = Vec::with_capacity(wire.len() + APPENDED_DO_OPT.len());
     out.extend_from_slice(wire);
     out[10..12].copy_from_slice(&arcount.to_be_bytes());
-    out.extend_from_slice(&OPT_RECORD_HEAD);
-    out.extend_from_slice(&crate::packet::DEFAULT_EDNS_PAYLOAD.to_be_bytes());
-    out.extend_from_slice(&[0, 0, DO_FLAG, 0]); // ext-rcode, version, DO=1
-    out.extend_from_slice(&[0, 0]); // RDLENGTH
+    out.extend_from_slice(&APPENDED_DO_OPT);
     Some(out)
 }
 
@@ -190,10 +208,14 @@ fn locate_opt(wire: &[u8]) -> Result<OptSite> {
         skip_record(wire, &mut pos)?;
     }
     for _ in 0..count(wire, 10) {
-        let is_opt = wire.get(pos..pos + 3) == Some(&OPT_RECORD_HEAD[..]);
         let ttl_offset = skip_record(wire, &mut pos)?;
-        if is_opt {
-            return Ok(OptSite::Flag(ttl_offset));
+        match record_type(wire, ttl_offset) {
+            TYPE_OPT => return Ok(OptSite::Flag(ttl_offset)),
+            // A TSIG must stay the last record and its MAC covers the header
+            // (RFC 8945 §5.1) — appending an OPT behind it, or bumping
+            // ARCOUNT, voids the signature. Not ours to patch.
+            TYPE_TSIG => return Err("TSIG-signed message".into()),
+            _ => {}
         }
     }
 
@@ -1591,6 +1613,58 @@ mod tests {
     }
 
     #[test]
+    fn ensure_do_bit_lowers_a_payload_size_the_receive_buffer_cannot_hold() {
+        // `forward_udp_raw` receives into 4096 bytes; advertising 65535 invites
+        // a reply the kernel cuts mid-record into a wire that cannot parse.
+        let mut query = DnsPacket::query(0xABCD, "example.com", QueryType::A);
+        query.edns = Some(EdnsOpt {
+            udp_payload_size: 65535,
+            do_bit: true,
+            ..Default::default()
+        });
+        let wire = to_wire(&query);
+        let edns = parse_wire(&ensure_do_bit(&wire)).edns.expect("OPT present");
+
+        assert_eq!(edns.udp_payload_size, MAX_UPSTREAM_PAYLOAD);
+    }
+
+    #[test]
+    fn ensure_do_bit_patches_an_opt_named_via_compression_pointer() {
+        // RFC 6891 wants a literal root name on the OPT, but a peer can reach
+        // root through a compression pointer — packet.rs guards this exact
+        // shape. Missing it here would append a second OPT (FORMERR upstream).
+        let mut wire = query_wire();
+        wire[10..12].copy_from_slice(&1u16.to_be_bytes()); // ARCOUNT
+        let root_offset = wire.len() - 5; // qname's terminating root label
+        assert_eq!(wire[root_offset], 0);
+        let do_byte = wire.len() + 8; // pointer(2) + type + class + 2 into TTL
+        wire.extend_from_slice(&[0xC0, root_offset as u8]);
+        wire.extend_from_slice(&[0, 41]); // TYPE=OPT
+        wire.extend_from_slice(&MIN_UPSTREAM_PAYLOAD.to_be_bytes());
+        wire.extend_from_slice(&[0, 0, 0, 0, 0, 0]); // TTL (DO clear), RDLENGTH
+
+        let out = ensure_do_bit(&wire);
+
+        assert_eq!(out.len(), wire.len(), "patched in place, no second OPT");
+        assert_eq!(out[do_byte] & DO_FLAG, DO_FLAG, "DO set on the found OPT");
+    }
+
+    #[test]
+    fn ensure_do_bit_leaves_tsig_signed_wires_untouched() {
+        // A TSIG's MAC covers the header and the record must stay last
+        // (RFC 8945 §5.1); patching would void the signature upstream.
+        let mut wire = query_wire();
+        wire[10..12].copy_from_slice(&1u16.to_be_bytes()); // ARCOUNT
+        wire.extend_from_slice(&[0]); // root name
+        wire.extend_from_slice(&250u16.to_be_bytes()); // TYPE=TSIG
+        wire.extend_from_slice(&[0, 255]); // CLASS=ANY
+        wire.extend_from_slice(&[0, 0, 0, 0]); // TTL
+        wire.extend_from_slice(&[0, 0]); // RDLENGTH
+
+        assert_eq!(&ensure_do_bit(&wire)[..], &wire[..]);
+    }
+
+    #[test]
     fn ensure_do_bit_leaves_do_queries_byte_identical() {
         let mut query = DnsPacket::query(0xABCD, "example.com", QueryType::A);
         query.edns = Some(EdnsOpt {
@@ -1622,7 +1696,7 @@ mod tests {
         let mut wire = query_wire();
         wire[10..12].copy_from_slice(&1u16.to_be_bytes()); // ARCOUNT
         let do_byte = wire.len() + 7; // root name + type + class + 2 into TTL
-        wire.extend_from_slice(&OPT_RECORD_HEAD);
+        wire.extend_from_slice(&[0, 0, 41]); // root name, TYPE=OPT
         wire.extend_from_slice(&crate::packet::DEFAULT_EDNS_PAYLOAD.to_be_bytes());
         wire.extend_from_slice(&[0, 0, 0, 0]); // TTL, DO clear
         wire.extend_from_slice(&((4 + PADDING) as u16).to_be_bytes()); // RDLENGTH
@@ -1653,8 +1727,8 @@ mod tests {
 
         assert!(out.len() < FUZZED.len(), "trailing junk dropped");
         assert_eq!(
-            &out[out.len() - 11..],
-            &[0, 0, 41, 0x04, 0xD0, 0, 0, DO_FLAG, 0, 0, 0],
+            &out[out.len() - APPENDED_DO_OPT.len()..],
+            &APPENDED_DO_OPT,
             "wire ends with the OPT we appended"
         );
         assert_eq!(
