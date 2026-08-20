@@ -25,6 +25,12 @@ const MAX_CNAME_DEPTH: u8 = 8;
 /// Above hickory's 24, well under BIND's `max-recursion-queries` 100 — generous
 /// enough that legit deep names survive, tight enough to kill the amplification.
 const MAX_TOTAL_QUERIES: usize = 48;
+/// Max glue-less NS names one referral may trigger address lookups for
+/// (MaxFetch(k) from the NXNSAttack paper). The fan-out stops early on the first
+/// name that resolves, so this only bites a referral whose names keep failing —
+/// the amplification vector. PowerDNS ships 13; a legit delegation rarely lists
+/// more than a handful.
+const MAX_NS_FETCH: usize = 10;
 const NS_QUERY_TIMEOUT: Duration = Duration::from_millis(400);
 const TCP_TIMEOUT: Duration = Duration::from_millis(400);
 const UDP_FAIL_THRESHOLD: u8 = 3;
@@ -381,7 +387,7 @@ pub(crate) fn resolve_iterative<'a>(
                 resolve_ns_addrs_from_glue(&response, &ns_names, &server_zone, cache);
 
             if new_ns_addrs.is_empty() {
-                for ns_name in &ns_names {
+                for ns_name in ns_names.iter().take(MAX_NS_FETCH) {
                     if referral_depth < MAX_REFERRAL_DEPTH {
                         debug!("recursive: resolving glue-less NS {}", ns_name);
                         for qt in [QueryType::A, QueryType::AAAA] {
