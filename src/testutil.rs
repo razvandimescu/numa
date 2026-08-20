@@ -234,7 +234,7 @@ fn reply_within_budget(full: &[u8], query_wire: &[u8]) -> Vec<u8> {
         .as_ref()
         .map_or(512, |e| e.udp_payload_size as usize);
     if full.len() <= budget {
-        return full.to_vec();
+        return echo_question(full, &query);
     }
 
     let mut tc = DnsPacket::response_from(&query, ResultCode::NOERROR);
@@ -242,6 +242,26 @@ fn reply_within_budget(full: &[u8], query_wire: &[u8]) -> Vec<u8> {
     let mut out = BytePacketBuffer::new();
     tc.write(&mut out).unwrap();
     out.filled().to_vec()
+}
+
+/// Real upstreams echo the query's question; the record-only fixture builders
+/// (`noerror_response`, `a_record_response`) omit it. Graft it back so replies
+/// pass the resolver's RFC 5452 question check, leaving already-questioned or
+/// unparseable fixtures untouched.
+fn echo_question(full: &[u8], query: &DnsPacket) -> Vec<u8> {
+    let mut parse = BytePacketBuffer::from_bytes(full);
+    let Ok(mut resp) = DnsPacket::from_buffer(&mut parse) else {
+        return full.to_vec();
+    };
+    if !resp.questions.is_empty() {
+        return full.to_vec();
+    }
+    resp.questions = query.questions.clone();
+    let mut out = BytePacketBuffer::new();
+    match resp.write(&mut out) {
+        Ok(_) => out.filled().to_vec(),
+        Err(_) => full.to_vec(),
+    }
 }
 
 /// TCP counterpart of `mock_upstream_raw`, bound to the given address —

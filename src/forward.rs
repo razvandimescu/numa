@@ -528,6 +528,9 @@ pub async fn forward_query_raw(
     }?;
 
     let resp = usable_reply(wire, resp)?;
+    if matches!(upstream, Upstream::Udp(_)) && !udp_reply_answers_question(wire, &resp) {
+        return Err("plain-UDP upstream answered a different question".into());
+    }
     if !crate::wire::is_truncated(&resp) {
         return Ok(resp);
     }
@@ -542,6 +545,18 @@ pub async fn forward_query_raw(
         return Err("upstream truncated the TCP retry".into());
     }
     Ok(full)
+}
+
+/// Plain-UDP forwarding shares the recursive path's off-path exposure, so it
+/// gets the same RFC 5452 check: `usable_reply` gates id + QR, this adds the
+/// question match. The TLS/HTTPS transports authenticate the peer, so they skip
+/// it. Byte-level because `forward_query_raw` trades in wire, not packets.
+fn udp_reply_answers_question(query_wire: &[u8], resp: &[u8]) -> bool {
+    let parse = |b: &[u8]| {
+        let mut buf = BytePacketBuffer::from_bytes(b);
+        DnsPacket::from_buffer(&mut buf).ok()
+    };
+    matches!((parse(query_wire), parse(resp)), (Some(q), Some(r)) if response_matches(&q, &r))
 }
 
 /// A reply the pipeline can act on: the ID we sent, QR=1, and within
@@ -1190,6 +1205,33 @@ mod tests {
         let edns = asked.edns.expect("OPT present");
         assert_eq!(edns.udp_payload_size, crate::wire::MAX_UPSTREAM_PAYLOAD);
         assert!(edns.do_bit, "DO survives the payload patch");
+    }
+
+    #[tokio::test]
+    async fn forward_udp_refuses_a_reply_for_a_different_question() {
+        // Right id (the stub patches it), well-formed, but its question names
+        // another host — the off-path "answer for a name we didn't ask" shape.
+        let query = make_query();
+        let mut evil = DnsPacket::response_from(&query, ResultCode::NOERROR);
+        evil.questions[0].name = "evil.example".to_string();
+        evil.answers.push(DnsRecord::A {
+            domain: "evil.example".to_string(),
+            addr: "6.6.6.6".parse().unwrap(),
+            ttl: 300,
+        });
+        let addr = crate::testutil::mock_upstream_raw(to_wire(&evil)).await;
+
+        let result = forward_query_raw(
+            &to_wire(&query),
+            &Upstream::Udp(addr),
+            Duration::from_millis(300),
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "a reply for another question must be refused"
+        );
     }
 
     #[tokio::test]
