@@ -18,18 +18,10 @@ use crate::stats::UpstreamTransport;
 
 const MAX_REFERRAL_DEPTH: u8 = 10;
 const MAX_CNAME_DEPTH: u8 = 8;
-/// Total upstream queries one client resolution may spend across *every* branch
-/// (referral chain, glue-less NS fan-out, CNAME re-chase). Depth caps bound each
-/// branch in isolation; only this bounds the sum, so a crafted referral tree
-/// can't turn one client query into unbounded work (NXNS / NRDelegation class).
-/// Above hickory's 24, well under BIND's `max-recursion-queries` 100 — generous
-/// enough that legit deep names survive, tight enough to kill the amplification.
+// Depth bounds each branch; these bound the whole resolution against NXNS /
+// NRDelegation fan-out. 48 total upstream queries (~hickory 24, <BIND 100), and
+// MaxFetch(k) caps glue-less NS names chased per referral (only balloons on failure).
 const MAX_TOTAL_QUERIES: usize = 48;
-/// Max glue-less NS names one referral may trigger address lookups for
-/// (MaxFetch(k) from the NXNSAttack paper). The fan-out stops early on the first
-/// name that resolves, so this only bites a referral whose names keep failing —
-/// the amplification vector. PowerDNS ships 13; a legit delegation rarely lists
-/// more than a handful.
 const MAX_NS_FETCH: usize = 10;
 const NS_QUERY_TIMEOUT: Duration = Duration::from_millis(400);
 const TCP_TIMEOUT: Duration = Duration::from_millis(400);
@@ -44,10 +36,7 @@ fn next_id() -> u16 {
     QUERY_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-/// Claim one unit of the per-resolution query budget. Returns false once
-/// `MAX_TOTAL_QUERIES` have been spent. One logical upstream query (a single
-/// `send_query_hedged`, hedging included) = one unit; the counter is shared by
-/// reference across the whole recursion, so branches draw from one pool.
+// Shared by reference across the whole recursion, so every branch draws from one pool.
 fn claim_query_budget(spent: &AtomicUsize) -> bool {
     spent.fetch_add(1, Ordering::Relaxed) < MAX_TOTAL_QUERIES
 }
@@ -213,9 +202,7 @@ pub async fn resolve_recursive(
     root_hints: &[SocketAddr],
     srtt: &RwLock<SrttCache>,
 ) -> crate::Result<DnsPacket> {
-    // Each hop is bounded by NS_QUERY_TIMEOUT (UDP + TCP fallback), MAX_REFERRAL_DEPTH
-    // caps the chain length, and `budget` caps the total upstream queries this one
-    // client resolution may spend across all branches.
+    // `budget` caps the total upstream queries this one client resolution may spend.
     let budget = AtomicUsize::new(0);
     let mut resp = resolve_iterative(qname, qtype, cache, root_hints, srtt, 0, 0, &budget).await?;
 
