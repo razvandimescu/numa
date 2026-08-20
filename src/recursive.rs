@@ -1,11 +1,12 @@
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU16, Ordering};
-use std::sync::RwLock;
+use std::sync::{LazyLock, RwLock};
 use std::time::{Duration, Instant};
 
 use log::{debug, info};
 
+use crate::acl::CidrMatcher;
 use crate::cache::DnsCache;
 use crate::forward::forward_udp;
 use crate::header::ResultCode;
@@ -35,11 +36,32 @@ fn dns_addr(ip: impl Into<IpAddr>) -> SocketAddr {
 }
 
 fn record_to_addr(rec: &DnsRecord) -> Option<SocketAddr> {
-    match rec {
-        DnsRecord::A { addr, .. } => Some(dns_addr(*addr)),
-        DnsRecord::AAAA { addr, .. } => Some(dns_addr(*addr)),
-        _ => None,
-    }
+    let addr = match rec {
+        DnsRecord::A { addr, .. } => dns_addr(*addr),
+        DnsRecord::AAAA { addr, .. } => dns_addr(*addr),
+        _ => return None,
+    };
+    (!is_bogon(addr.ip())).then_some(addr)
+}
+
+/// A public authoritative server is only ever reachable at a globally-routable
+/// address, so refuse glue/NS addresses that point inward before we query them.
+/// Without this a malicious server can glue an NS at `127.0.0.1` or an RFC1918
+/// host and turn recursion into an internal-network probe (bounded to :53 by
+/// `dns_addr`, but a probe all the same). Shares the rebind filter's
+/// private-range list; `CidrMatcher` unmaps v4-mapped v6 before matching. Root
+/// priming funnels through here too, but real root/TLD glue is public and passes.
+static BOGON_RANGES: LazyLock<CidrMatcher> = LazyLock::new(|| {
+    let ranges: Vec<String> = crate::acl::PRIVATE_RANGES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    CidrMatcher::from_entries(&ranges, &[], "bogon nameserver filter")
+        .expect("built-in private ranges are valid CIDRs")
+});
+
+fn is_bogon(ip: IpAddr) -> bool {
+    BOGON_RANGES.matches(ip)
 }
 
 pub fn reset_udp_state() {
@@ -958,6 +980,48 @@ mod tests {
             dns_addr("2001:db8::1".parse::<Ipv6Addr>().unwrap())
         );
         assert_eq!(addrs[1], dns_addr(Ipv4Addr::new(1, 2, 3, 4)));
+    }
+
+    #[test]
+    fn bogon_filter_rejects_internal_addrs() {
+        for ip in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.0.1",
+            "192.168.1.1",
+            "169.254.0.1",
+            "100.64.0.1",
+            "0.0.0.0",
+        ] {
+            assert!(is_bogon(ip.parse().unwrap()), "{ip} should be a bogon");
+        }
+        for ip in [
+            "::1",
+            "fc00::1",
+            "fe80::1",
+            "::ffff:127.0.0.1",
+            "64:ff9b::7f00:1",
+        ] {
+            assert!(is_bogon(ip.parse().unwrap()), "{ip} should be a bogon");
+        }
+    }
+
+    #[test]
+    fn bogon_filter_accepts_public_addrs() {
+        for ip in ["8.8.8.8", "1.1.1.1", "2001:4860:4860::8888"] {
+            assert!(!is_bogon(ip.parse().unwrap()), "{ip} should be routable");
+        }
+    }
+
+    #[test]
+    fn glue_bogon_dropped_from_addrs() {
+        let mut pkt = DnsPacket::new();
+        pkt.resources.push(DnsRecord::A {
+            domain: "ns1.attacker.com".into(),
+            addr: Ipv4Addr::new(127, 0, 0, 1),
+            ttl: 3600,
+        });
+        assert!(glue_addrs_for(&pkt, "ns1.attacker.com").is_empty());
     }
 
     #[test]
