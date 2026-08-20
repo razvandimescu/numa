@@ -226,9 +226,9 @@ pub(crate) fn resolve_iterative<'a>(
                 }
             };
 
-            // Glue in this response is trustworthy only within the zone of the
-            // server we queried; capture it before a referral moves current_zone
-            // down to the child (else root-supplied gTLD glue looks out-of-zone).
+            // The zone we queried, captured before a referral moves current_zone
+            // to the child: glue/DS trust is judged against the server's zone,
+            // not the child's, so root-supplied gTLD glue stays valid.
             let server_zone = current_zone.clone();
 
             if (q_type != qtype || !q_name.eq_ignore_ascii_case(qname))
@@ -448,10 +448,8 @@ fn resolve_ns_addrs_from_glue(
     server_zone: &str,
     cache: &RwLock<DnsCache>,
 ) -> Vec<SocketAddr> {
-    // RFC 1034/1035 bailiwick: glue is trustworthy only for names within the
-    // zone of the server that sent it. Out-of-bailiwick glue (e.g. an attacker
-    // gluing a victim name so a client query for it is served the attacker's
-    // address) is dropped and never cached; those NS names fall through to the
+    // RFC 1034/1035 bailiwick: drop glue whose owner is outside the sending
+    // server's zone (and never cache it); those names fall through to the
     // caller's glue-less re-resolution, which fetches their real address.
     let trusted: Vec<String> = ns_names
         .iter()
@@ -578,11 +576,9 @@ fn cache_glue(cache: &mut DnsCache, response: &DnsPacket, ns_names: &[String]) {
     }
 }
 
-/// Cache DS + DS-covering RRSIG records from referral authority sections.
-/// DS (and its RRSIG) is cached keyed by owner name; like glue, an owner outside
-/// the sending server's zone (`server_zone`) is a cross-zone injection — a
-/// poisoned DS makes the victim's real DNSKEY fail validation (downgrade/DoS),
-/// so it is dropped. Prime passes `.` (root-sourced, trusted).
+/// Cache DS + DS-covering RRSIG from referral authority sections, keyed by
+/// owner. Owners outside `server_zone` are dropped: a poisoned DS makes the
+/// victim's real DNSKEY fail validation (DNSSEC downgrade/DoS).
 fn cache_ds_from_authority(cache: &mut DnsCache, response: &DnsPacket, server_zone: &str) {
     let mut ds_by_domain: Vec<(String, DnsPacket)> = Vec::new();
 
@@ -1026,10 +1022,8 @@ mod tests {
 
     #[test]
     fn glue_bailiwick_drops_out_of_zone_glue() {
-        // A server for attacker.com names a victim as its NS and glues it. The
-        // glue owner is outside the server's zone, so it must not be used or
-        // cached — otherwise a later client query for www.google.com is served
-        // the attacker's address.
+        // attacker.com names a victim as its NS and glues it — the glue owner
+        // is outside the server's zone, so it must not be used or cached.
         let cache = RwLock::new(DnsCache::new(100, 60, 86400));
         let mut resp = DnsPacket::new();
         resp.header.response = true;
