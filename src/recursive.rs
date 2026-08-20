@@ -535,6 +535,9 @@ fn glue_addrs_for(response: &DnsPacket, ns_name: &str) -> Vec<SocketAddr> {
         .collect()
 }
 
+/// Caches whatever `ns_names` it is handed with no bailiwick check — callers
+/// must pre-filter to owners in-bailiwick of the sending server (see
+/// `resolve_ns_addrs_from_glue`). Prime is exempt: it sources glue from root.
 fn cache_glue(cache: &mut DnsCache, response: &DnsPacket, ns_names: &[String]) {
     for ns_name in ns_names {
         let mut a_pkt: Option<DnsPacket> = None;
