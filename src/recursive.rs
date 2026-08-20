@@ -137,7 +137,7 @@ pub async fn prime_tld_cache(
             let mut cache_w = cache.write().unwrap();
             cache_w.insert(tld, QueryType::NS, &response);
             cache_glue(&mut cache_w, &response, &ns_names);
-            cache_ds_from_authority(&mut cache_w, &response);
+            cache_ds_from_authority(&mut cache_w, &response, ".");
         }
 
         // Fetch DNSKEY for this TLD (needed for DNSSEC chain validation)
@@ -329,7 +329,7 @@ pub(crate) fn resolve_iterative<'a>(
             {
                 let mut cache_w = cache.write().unwrap();
                 cache_ns_delegation(&mut cache_w, &current_zone, &response);
-                cache_ds_from_authority(&mut cache_w, &response);
+                cache_ds_from_authority(&mut cache_w, &response, &server_zone);
             }
             let mut new_ns_addrs =
                 resolve_ns_addrs_from_glue(&response, &ns_names, &server_zone, cache);
@@ -579,12 +579,16 @@ fn cache_glue(cache: &mut DnsCache, response: &DnsPacket, ns_names: &[String]) {
 }
 
 /// Cache DS + DS-covering RRSIG records from referral authority sections.
-fn cache_ds_from_authority(cache: &mut DnsCache, response: &DnsPacket) {
+/// DS (and its RRSIG) is cached keyed by owner name; like glue, an owner outside
+/// the sending server's zone (`server_zone`) is a cross-zone injection — a
+/// poisoned DS makes the victim's real DNSKEY fail validation (downgrade/DoS),
+/// so it is dropped. Prime passes `.` (root-sourced, trusted).
+fn cache_ds_from_authority(cache: &mut DnsCache, response: &DnsPacket, server_zone: &str) {
     let mut ds_by_domain: Vec<(String, DnsPacket)> = Vec::new();
 
     for r in &response.authorities {
         match r {
-            DnsRecord::DS { domain, .. } => {
+            DnsRecord::DS { domain, .. } if zone_in_bailiwick(domain, server_zone) => {
                 let key = domain.to_lowercase();
                 let pkt = match ds_by_domain.iter_mut().find(|(d, _)| *d == key) {
                     Some((_, pkt)) => pkt,
@@ -599,7 +603,9 @@ fn cache_ds_from_authority(cache: &mut DnsCache, response: &DnsPacket) {
                 domain,
                 type_covered,
                 ..
-            } if QueryType::from_num(*type_covered) == QueryType::DS => {
+            } if QueryType::from_num(*type_covered) == QueryType::DS
+                && zone_in_bailiwick(domain, server_zone) =>
+            {
                 let key = domain.to_lowercase();
                 let pkt = match ds_by_domain.iter_mut().find(|(d, _)| *d == key) {
                     Some((_, pkt)) => pkt,
@@ -1074,6 +1080,65 @@ mod tests {
         let addrs =
             resolve_ns_addrs_from_glue(&resp, &["ns1.example.com".to_string()], "com", &cache);
         assert_eq!(addrs, vec![dns_addr(Ipv4Addr::new(192, 0, 2, 1))]);
+    }
+
+    #[test]
+    fn ds_bailiwick_drops_out_of_zone_ds() {
+        // A server for attacker.com injects a DS for a victim zone. Caching it
+        // would make the victim's real DNSKEY fail validation (downgrade/DoS).
+        let cache = RwLock::new(DnsCache::new(100, 60, 86400));
+        let mut resp = DnsPacket::new();
+        resp.header.response = true;
+        resp.authorities.push(DnsRecord::DS {
+            domain: "google.com".into(),
+            key_tag: 1234,
+            algorithm: 8,
+            digest_type: 2,
+            digest: vec![0xab; 32],
+            ttl: 3600,
+        });
+
+        {
+            let mut c = cache.write().unwrap();
+            cache_ds_from_authority(&mut c, &resp, "attacker.com");
+        }
+        assert!(
+            cache
+                .read()
+                .unwrap()
+                .lookup("google.com", QueryType::DS)
+                .is_none(),
+            "out-of-bailiwick DS must not be cached"
+        );
+    }
+
+    #[test]
+    fn ds_bailiwick_keeps_in_zone_ds() {
+        // A com server delegating example.com legitimately carries its DS.
+        let cache = RwLock::new(DnsCache::new(100, 60, 86400));
+        let mut resp = DnsPacket::new();
+        resp.header.response = true;
+        resp.authorities.push(DnsRecord::DS {
+            domain: "example.com".into(),
+            key_tag: 1234,
+            algorithm: 8,
+            digest_type: 2,
+            digest: vec![0xcd; 32],
+            ttl: 3600,
+        });
+
+        {
+            let mut c = cache.write().unwrap();
+            cache_ds_from_authority(&mut c, &resp, "com");
+        }
+        assert!(
+            cache
+                .read()
+                .unwrap()
+                .lookup("example.com", QueryType::DS)
+                .is_some(),
+            "in-bailiwick DS must be cached"
+        );
     }
 
     #[test]
