@@ -1,12 +1,16 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use std::borrow::Cow;
 use std::net::Ipv4Addr;
 
 use numa::buffer::BytePacketBuffer;
 use numa::cache::DnsCache;
+use numa::ctx::serialize_with_fallback;
 use numa::header::ResultCode;
-use numa::packet::DnsPacket;
+use numa::packet::{DnsPacket, EdnsOpt, DEFAULT_EDNS_PAYLOAD};
 use numa::question::{DnsQuestion, QueryType};
 use numa::record::DnsRecord;
+use numa::stats::Transport;
+use numa::wire::{ensure_do_bit, maximize_payload, MAX_UPSTREAM_PAYLOAD};
 
 fn make_response(domain: &str) -> DnsPacket {
     let mut pkt = DnsPacket::new();
@@ -119,15 +123,7 @@ fn bench_cache_insert(c: &mut Criterion) {
 
 fn bench_round_trip(c: &mut Criterion) {
     // Simulates the cached hot path: parse query → cache hit → serialize response
-    let query_pkt = {
-        let mut q = DnsPacket::new();
-        q.header.id = 0xABCD;
-        q.header.recursion_desired = true;
-        q.questions
-            .push(DnsQuestion::new("example.com".to_string(), QueryType::A));
-        q
-    };
-    let query_wire = to_wire(&query_pkt);
+    let query_wire = to_wire(&make_query("example.com", None));
 
     let response = make_response("example.com");
     let mut cache = DnsCache::new(10_000, 60, 86400);
@@ -198,6 +194,95 @@ fn bench_zone_lookup_miss(c: &mut Criterion) {
     });
 }
 
+fn make_query(domain: &str, edns: Option<EdnsOpt>) -> DnsPacket {
+    let mut pkt = DnsPacket::query(0x1234, domain, QueryType::A);
+    pkt.edns = edns;
+    pkt
+}
+
+fn edns(udp_payload_size: u16, do_bit: bool) -> EdnsOpt {
+    EdnsOpt {
+        udp_payload_size,
+        do_bit,
+        ..EdnsOpt::default()
+    }
+}
+
+/// Clears 512 but stays inside the 4096 buffer, so the UDP budget decides
+/// whether it truncates, not the serializer.
+fn make_large_response(domain: &str) -> DnsPacket {
+    let mut pkt = make_response(domain);
+    pkt.answers.clear();
+    for i in 0..60 {
+        pkt.answers.push(DnsRecord::A {
+            domain: format!("host{i}.{domain}"),
+            addr: Ipv4Addr::new(93, 184, 216, (i % 256) as u8),
+            ttl: 300,
+        });
+    }
+    pkt
+}
+
+/// Both walkers patch a query wire in place or hand back the original.
+type Walker = fn(&[u8]) -> Cow<'_, [u8]>;
+
+fn bench_do_bit_walkers(c: &mut Criterion) {
+    let with_do = to_wire(&make_query(
+        "example.com",
+        Some(edns(DEFAULT_EDNS_PAYLOAD, true)),
+    ));
+    let without_do = to_wire(&make_query(
+        "example.com",
+        Some(edns(DEFAULT_EDNS_PAYLOAD, false)),
+    ));
+    let no_opt = to_wire(&make_query("example.com", None));
+    let maxed = to_wire(&make_query(
+        "example.com",
+        Some(edns(MAX_UPSTREAM_PAYLOAD, true)),
+    ));
+
+    let cases: [(&str, Walker, &[u8]); 5] = [
+        ("ensure_do_bit_borrowed", ensure_do_bit, &with_do),
+        ("ensure_do_bit_patched", ensure_do_bit, &without_do),
+        ("ensure_do_bit_appended", ensure_do_bit, &no_opt),
+        ("maximize_payload_rewritten", maximize_payload, &with_do),
+        ("maximize_payload_borrowed", maximize_payload, &maxed),
+    ];
+    for (name, walk, wire) in cases {
+        c.bench_function(name, |b| b.iter(|| walk(black_box(wire))));
+    }
+}
+
+/// Same response both ways: only the UDP budget separates the arm that
+/// serializes once from the arm that discovers the overflow and builds a TC
+/// packet on top.
+fn bench_serialize_with_fallback(c: &mut Criterion) {
+    let query = make_query("example.com", Some(edns(512, false)));
+    let mut large = make_large_response("example.com");
+    assert!(
+        to_wire(&large).len() > 512,
+        "large response must exceed the budget"
+    );
+
+    for (name, transport) in [
+        ("serialize_udp_over_budget", Transport::Udp),
+        ("serialize_tcp_unbudgeted", Transport::Tcp),
+    ] {
+        c.bench_function(name, |b| {
+            b.iter(|| {
+                serialize_with_fallback(
+                    black_box(&mut large),
+                    black_box(&query),
+                    "example.com",
+                    false,
+                    transport,
+                )
+                .unwrap()
+            })
+        });
+    }
+}
+
 criterion_group!(
     benches,
     bench_buffer_parse,
@@ -209,5 +294,7 @@ criterion_group!(
     bench_round_trip,
     bench_cache_populated_lookup,
     bench_zone_lookup_miss,
+    bench_do_bit_walkers,
+    bench_serialize_with_fallback,
 );
 criterion_main!(benches);

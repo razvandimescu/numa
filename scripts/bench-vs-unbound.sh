@@ -5,12 +5,20 @@
 # Usage:
 #   scripts/bench-vs-unbound.sh           # warm cache, forwarding mode
 #   scripts/bench-vs-unbound.sh --cold    # unique subdomains, recursive mode
+#
+# One --cold run is not a result. The first of a session has been seen to read
+# 2x slow on the Numa side alone, with Unbound in the same run unaffected, so a
+# single run cannot separate a build from its turn in the order. Re-run any
+# apparent regression, and compare only runs that repeat.
 set -euo pipefail
 
 NUMA_PORT="${NUMA_PORT:-5454}"
 UNBOUND_PORT="${UNBOUND_PORT:-5456}"
 UPSTREAM="${UPSTREAM:-9.9.9.9}"
 UNBOUND_BIN="${UNBOUND_BIN:-/opt/homebrew/sbin/unbound}"
+# Point NUMA_BIN at another build (see bench-baseline.sh's worktree) to bench a
+# release against this tree's Unbound setup without rebuilding.
+NUMA_BIN="${NUMA_BIN:-}"
 
 if [[ "${1:-}" == "--cold" ]]; then
   MODE="cold"
@@ -63,15 +71,18 @@ fi
 
 echo "==> mode: $MODE (numa: $NUMA_TOML)"
 
-echo "==> building numa (release)"
-cargo build --release --bin numa 2>&1 | tail -3
+if [[ -z "$NUMA_BIN" ]]; then
+  echo "==> building numa (release)"
+  cargo build --release --bin numa 2>&1 | tail -3
+  NUMA_BIN="$ROOT/target/release/numa"
+fi
 
 echo "==> starting unbound on 127.0.0.1:$UNBOUND_PORT"
 "$UNBOUND_BIN" -c "$WORK/unbound.conf" -d >"$WORK/unbound.stderr" 2>&1 &
 UNBOUND_PID=$!
 
-echo "==> starting numa-bench on 127.0.0.1:$NUMA_PORT"
-"$ROOT/target/release/numa" "$ROOT/$NUMA_TOML" >"$WORK/numa.log" 2>&1 &
+echo "==> starting numa-bench on 127.0.0.1:$NUMA_PORT ($("$NUMA_BIN" --version 2>&1 | head -1))"
+"$NUMA_BIN" "$ROOT/$NUMA_TOML" >"$WORK/numa.log" 2>&1 &
 NUMA_PID=$!
 
 echo "==> waiting for both servers"

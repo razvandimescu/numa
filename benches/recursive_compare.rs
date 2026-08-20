@@ -131,6 +131,10 @@ const DOMAINS: &[&str] = &[
 const ROUNDS: usize = 10;
 
 fn main() {
+    // Every path here that touches TLS, and reqwest's client builder even on
+    // plain HTTP, needs a provider installed first.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let arg = |flag: &str| std::env::args().any(|a| a == flag);
 
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -501,7 +505,6 @@ fn run_dot_comparison(rt: &tokio::runtime::Runtime, iterations: usize) {
     const NUMA_DOT: &str = "127.0.0.1:8530";
     const UNBOUND_DOT: &str = "127.0.0.1:8531";
 
-    let _ = rustls::crypto::ring::default_provider().install_default();
     let tls_config = build_insecure_tls_config();
 
     for (name, addr) in [("Numa", NUMA_DOT), ("Unbound", UNBOUND_DOT)] {
