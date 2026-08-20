@@ -226,6 +226,11 @@ pub(crate) fn resolve_iterative<'a>(
                 }
             };
 
+            // Glue in this response is trustworthy only within the zone of the
+            // server we queried; capture it before a referral moves current_zone
+            // down to the child (else root-supplied gTLD glue looks out-of-zone).
+            let server_zone = current_zone.clone();
+
             if (q_type != qtype || !q_name.eq_ignore_ascii_case(qname))
                 && (!response.authorities.is_empty() || !response.answers.is_empty())
             {
@@ -250,7 +255,8 @@ pub(crate) fn resolve_iterative<'a>(
                 if all_ns.is_empty() {
                     all_ns = extract_ns_names(&response);
                 }
-                let mut new_addrs = resolve_ns_addrs_from_glue(&response, &all_ns, cache);
+                let mut new_addrs =
+                    resolve_ns_addrs_from_glue(&response, &all_ns, &server_zone, cache);
                 if !new_addrs.is_empty() {
                     srtt.read().unwrap().sort_by_udp_rtt(&mut new_addrs);
                     ns_addrs = new_addrs;
@@ -325,7 +331,8 @@ pub(crate) fn resolve_iterative<'a>(
                 cache_ns_delegation(&mut cache_w, &current_zone, &response);
                 cache_ds_from_authority(&mut cache_w, &response);
             }
-            let mut new_ns_addrs = resolve_ns_addrs_from_glue(&response, &ns_names, cache);
+            let mut new_ns_addrs =
+                resolve_ns_addrs_from_glue(&response, &ns_names, &server_zone, cache);
 
             if new_ns_addrs.is_empty() {
                 for ns_name in &ns_names {
@@ -438,14 +445,25 @@ fn extract_ns_from_records(records: &[DnsRecord]) -> Vec<String> {
 fn resolve_ns_addrs_from_glue(
     response: &DnsPacket,
     ns_names: &[String],
+    server_zone: &str,
     cache: &RwLock<DnsCache>,
 ) -> Vec<SocketAddr> {
+    // RFC 1034/1035 bailiwick: glue is trustworthy only for names within the
+    // zone of the server that sent it. Out-of-bailiwick glue (e.g. an attacker
+    // gluing a victim name so a client query for it is served the attacker's
+    // address) is dropped and never cached; those NS names fall through to the
+    // caller's glue-less re-resolution, which fetches their real address.
+    let trusted: Vec<String> = ns_names
+        .iter()
+        .filter(|n| zone_in_bailiwick(n, server_zone))
+        .cloned()
+        .collect();
     let mut addrs = Vec::new();
     {
         let mut cache_w = cache.write().unwrap();
-        cache_glue(&mut cache_w, response, ns_names);
+        cache_glue(&mut cache_w, response, &trusted);
     }
-    for ns_name in ns_names {
+    for ns_name in &trusted {
         addrs.extend_from_slice(&glue_addrs_for(response, ns_name));
     }
     if addrs.is_empty() {
@@ -995,6 +1013,88 @@ mod tests {
         assert!(!zone_in_bailiwick("com", "amazon.com")); // refer up
         assert!(!zone_in_bailiwick("evil.com", "com.evil.com")); // suffix-substring, not label boundary
         assert!(!zone_in_bailiwick("notamazon.com", "amazon.com")); // shares suffix, wrong label
+    }
+
+    #[test]
+    fn glue_bailiwick_drops_out_of_zone_glue() {
+        // A server for attacker.com names a victim as its NS and glues it. The
+        // glue owner is outside the server's zone, so it must not be used or
+        // cached — otherwise a later client query for www.google.com is served
+        // the attacker's address.
+        let cache = RwLock::new(DnsCache::new(100, 60, 86400));
+        let mut resp = DnsPacket::new();
+        resp.header.response = true;
+        resp.authorities.push(DnsRecord::NS {
+            domain: "sub.attacker.com".into(),
+            host: "www.google.com".into(),
+            ttl: 3600,
+        });
+        resp.resources.push(DnsRecord::A {
+            domain: "www.google.com".into(),
+            addr: Ipv4Addr::new(6, 6, 6, 6),
+            ttl: 3600,
+        });
+
+        let addrs = resolve_ns_addrs_from_glue(
+            &resp,
+            &["www.google.com".to_string()],
+            "attacker.com",
+            &cache,
+        );
+        assert!(addrs.is_empty(), "out-of-bailiwick glue must not be used");
+        assert!(
+            cache
+                .read()
+                .unwrap()
+                .lookup("www.google.com", QueryType::A)
+                .is_none(),
+            "out-of-bailiwick glue must not be cached"
+        );
+    }
+
+    #[test]
+    fn glue_bailiwick_trusts_in_zone_glue() {
+        let cache = RwLock::new(DnsCache::new(100, 60, 86400));
+        let mut resp = DnsPacket::new();
+        resp.header.response = true;
+        resp.authorities.push(DnsRecord::NS {
+            domain: "example.com".into(),
+            host: "ns1.example.com".into(),
+            ttl: 3600,
+        });
+        resp.resources.push(DnsRecord::A {
+            domain: "ns1.example.com".into(),
+            addr: Ipv4Addr::new(192, 0, 2, 1),
+            ttl: 3600,
+        });
+
+        let addrs =
+            resolve_ns_addrs_from_glue(&resp, &["ns1.example.com".to_string()], "com", &cache);
+        assert_eq!(addrs, vec![dns_addr(Ipv4Addr::new(192, 0, 2, 1))]);
+    }
+
+    #[test]
+    fn glue_bailiwick_trusts_tld_glue_from_root() {
+        // Regression guard: root delegates `com` with glue for gtld-servers.net,
+        // which is out-of-bailiwick of `com` but in-bailiwick of the root that
+        // sent it. Checking against the server zone (".") keeps it trusted.
+        let cache = RwLock::new(DnsCache::new(100, 60, 86400));
+        let mut resp = DnsPacket::new();
+        resp.header.response = true;
+        resp.authorities.push(DnsRecord::NS {
+            domain: "com".into(),
+            host: "a.gtld-servers.net".into(),
+            ttl: 172800,
+        });
+        resp.resources.push(DnsRecord::A {
+            domain: "a.gtld-servers.net".into(),
+            addr: Ipv4Addr::new(192, 5, 6, 30),
+            ttl: 172800,
+        });
+
+        let addrs =
+            resolve_ns_addrs_from_glue(&resp, &["a.gtld-servers.net".to_string()], ".", &cache);
+        assert_eq!(addrs, vec![dns_addr(Ipv4Addr::new(192, 5, 6, 30))]);
     }
 
     #[test]
