@@ -917,7 +917,7 @@ async function initI18n() {
   const en = await loadLocale('en');
   const sel = document.getElementById('langSelect');
   if (sel && manifest.length > 1) {
-    sel.innerHTML = manifest.map(m => `<option value="${m.code}">${m.native_name}</option>`).join('');
+    sel.innerHTML = manifest.map(m => `<option value="${m.code}">${m.native_name}${m.reviewed === false ? ' (beta)' : ''}</option>`).join('');
     sel.style.display = '';
     sel.onchange = () => { localStorage.setItem('numa-lang', sel.value); setLang(sel.value, en).then(() => typeof refresh === 'function' && refresh()); };
   }
