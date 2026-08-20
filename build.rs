@@ -14,6 +14,39 @@ fn main() {
     }
 
     println!("cargo:rerun-if-changed=.git/HEAD");
+    embed_locales();
+}
+
+/// Emit a `(code, contents)` slice for every `site/locales/*.json`, so adding a
+/// language is one JSON file with no Rust edit. `manifest.json` rides along as
+/// the "manifest" entry.
+fn embed_locales() {
+    println!("cargo:rerun-if-changed=site/locales");
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir("site/locales")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        .collect();
+    files.sort();
+
+    let entries: String = files
+        .iter()
+        .map(|p| {
+            let stem = p.file_stem().unwrap().to_string_lossy();
+            let abs = std::fs::canonicalize(p).unwrap();
+            println!("cargo:rerun-if-changed={}", p.display());
+            format!("    ({:?}, include_str!({:?})),\n", stem, abs)
+        })
+        .collect();
+
+    let dest = std::path::Path::new(&std::env::var("OUT_DIR").unwrap()).join("locales.rs");
+    std::fs::write(
+        dest,
+        format!("pub static LOCALES: &[(&str, &str)] = &[\n{entries}];\n"),
+    )
+    .unwrap();
 }
 
 /// Parse `git describe --long` output into a SemVer-compatible string.

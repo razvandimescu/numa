@@ -14,6 +14,8 @@ use crate::query_log::QueryLogFilter;
 use crate::question::QueryType;
 use crate::stats::QueryPath;
 
+include!(concat!(env!("OUT_DIR"), "/locales.rs")); // LOCALES: &[(code, json)]
+
 const DASHBOARD_HTML: &str = include_str!("../site/dashboard.html");
 const FONTS_CSS: &str = include_str!("../site/fonts/fonts.css");
 const FONT_DM_SANS: &[u8] = include_bytes!("../site/fonts/dm-sans-latin.woff2");
@@ -71,6 +73,7 @@ pub fn router(ctx: Arc<ServerCtx>) -> Router {
         .route("/services/{name}/routes", delete(remove_route))
         .route("/ca.pem", get(serve_ca))
         .route("/qr", get(serve_qr))
+        .route("/locales/{file}", get(serve_locale))
         .route("/fonts/fonts.css", get(serve_fonts_css))
         .route(
             "/fonts/dm-sans-latin.woff2",
@@ -1156,6 +1159,23 @@ async fn serve_qr(State(ctx): State<Arc<ServerCtx>>) -> Result<impl IntoResponse
     ))
 }
 
+async fn serve_locale(Path(file): Path<String>) -> Result<impl IntoResponse, StatusCode> {
+    let stem = file.strip_suffix(".json").unwrap_or(&file);
+    LOCALES
+        .iter()
+        .find(|(code, _)| *code == stem)
+        .map(|(_, body)| {
+            (
+                [
+                    (header::CONTENT_TYPE, "application/json; charset=utf-8"),
+                    (header::CACHE_CONTROL, "no-cache"),
+                ],
+                *body,
+            )
+        })
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
 async fn serve_fonts_css() -> impl IntoResponse {
     (
         [
@@ -1439,5 +1459,74 @@ mod tests {
             .await
             .unwrap();
         assert!(String::from_utf8_lossy(&body).contains("Numa"));
+    }
+
+    #[tokio::test]
+    async fn serves_english_locale_and_404s_unknown() {
+        let app = router(test_ctx().await);
+        let ok = get_req(&app, "/locales/en.json").await;
+        assert_eq!(ok.status(), 200);
+        let body = axum::body::to_bytes(ok.into_body(), 100_000).await.unwrap();
+        let map: std::collections::BTreeMap<String, String> =
+            serde_json::from_slice(&body).expect("served en.json parses");
+        assert_eq!(
+            map.get("panel.blocking").map(String::as_str),
+            Some("Blocking")
+        );
+
+        assert_eq!(get_req(&app, "/locales/manifest.json").await.status(), 200);
+        assert_eq!(get_req(&app, "/locales/nope.json").await.status(), 404);
+    }
+
+    fn locale(stem: &str) -> std::collections::BTreeMap<String, String> {
+        let (_, body) = LOCALES
+            .iter()
+            .find(|(c, _)| *c == stem)
+            .expect("locale present");
+        serde_json::from_str(body).expect("locale is a flat string map")
+    }
+
+    #[test]
+    fn every_locale_is_a_subset_of_english() {
+        let en = locale("en");
+        for (code, body) in LOCALES {
+            if *code == "en" || *code == "manifest" {
+                continue;
+            }
+            let m: std::collections::BTreeMap<String, String> =
+                serde_json::from_str(body).unwrap_or_else(|e| panic!("{code}.json invalid: {e}"));
+            for key in m.keys() {
+                assert!(
+                    en.contains_key(key),
+                    "{code}.json has key '{key}' absent from en.json"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn manifest_lists_english_and_only_present_locales() {
+        #[derive(serde::Deserialize)]
+        struct Entry {
+            code: String,
+            native_name: String,
+        }
+        let (_, body) = LOCALES
+            .iter()
+            .find(|(c, _)| *c == "manifest")
+            .expect("manifest present");
+        let entries: Vec<Entry> = serde_json::from_str(body).expect("manifest is a JSON array");
+        assert!(
+            entries.iter().any(|e| e.code == "en"),
+            "manifest must list en"
+        );
+        for e in &entries {
+            assert!(!e.native_name.is_empty(), "{} missing native_name", e.code);
+            assert!(
+                LOCALES.iter().any(|(c, _)| c == &e.code),
+                "manifest code '{}' has no locale file",
+                e.code
+            );
+        }
     }
 }

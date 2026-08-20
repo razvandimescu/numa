@@ -629,17 +629,18 @@ body {
   <div class="header-left">
     <div class="logo">Numa</div>
     <span id="headerVersion" style="font-family:var(--font-mono);font-size:0.68rem;color:var(--text-dim);"></span>
-    <div class="tagline">DNS that governs itself</div>
+    <div class="tagline" data-i18n="header.tagline">DNS that governs itself</div>
   </div>
   <div style="display:flex;align-items:center;gap:1.2rem;">
-    <button class="btn" id="themeBtn" onclick="cycleTheme()" style="background:var(--bg-surface);color:var(--text-secondary);font-family:var(--font-mono);font-size:0.7rem;padding:0.35rem 0.6rem;border:1px solid var(--border);" title="Cycle theme: Auto → Light → Dark"></button>
+    <select id="langSelect" style="display:none;background:var(--bg-surface);color:var(--text-secondary);font-family:var(--font-mono);font-size:0.7rem;padding:0.35rem 0.4rem;border:1px solid var(--border);border-radius:5px;outline:none;cursor:pointer;"></select>
+    <button class="btn" id="themeBtn" onclick="cycleTheme()" style="background:var(--bg-surface);color:var(--text-secondary);font-family:var(--font-mono);font-size:0.7rem;padding:0.35rem 0.6rem;border:1px solid var(--border);" data-i18n-title="header.theme_title"></button>
     <div id="phoneSetup" style="position:relative;display:none;">
-      <button class="btn" onclick="togglePhoneSetup()" style="background:var(--bg-surface);color:var(--text-secondary);font-family:var(--font-mono);font-size:0.7rem;padding:0.35rem 0.6rem;border:1px solid var(--border);" title="Set up phone">Phone Setup</button>
+      <button class="btn" onclick="togglePhoneSetup()" style="background:var(--bg-surface);color:var(--text-secondary);font-family:var(--font-mono);font-size:0.7rem;padding:0.35rem 0.6rem;border:1px solid var(--border);" data-i18n-title="header.phone_setup_title" data-i18n="header.phone_setup">Phone Setup</button>
       <div id="phoneSetupPopover" style="display:none;position:absolute;top:calc(100% + 8px);right:0;z-index:100;background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:1.2rem;width:260px;box-shadow: 0 4px 20px var(--border);">
-        <div style="font-size:0.7rem;font-weight:600;text-transform:uppercase;letter-spacing:0.1em;color:var(--text-secondary);margin-bottom:0.8rem;">Phone Setup</div>
+        <div style="font-size:0.7rem;font-weight:600;text-transform:uppercase;letter-spacing:0.1em;color:var(--text-secondary);margin-bottom:0.8rem;" data-i18n="header.phone_setup">Phone Setup</div>
         <div id="qrContainer" style="display:flex;justify-content:center;margin-bottom:0.8rem;"></div>
         <div id="phoneSetupLink" style="display:none;text-align:center;margin-bottom:0.8rem;"></div>
-        <div style="font-family:var(--font-mono);font-size:0.62rem;color:var(--text-dim);line-height:1.6;">
+        <div style="font-family:var(--font-mono);font-size:0.62rem;color:var(--text-dim);line-height:1.6;" data-i18n-html="phone.steps">
           1. Scan QR &rarr; allow download<br>
           2. Settings &rarr; Profile Downloaded &rarr; Install<br>
           3. Settings &rarr; General &rarr; About &rarr;<br>
@@ -647,11 +648,11 @@ body {
         </div>
       </div>
     </div>
-    <button class="btn" id="pauseBtn" style="background:var(--amber);color:var(--text-on-btn);font-family:var(--font-mono);font-size:0.7rem;display:none;">Pause 5m</button>
+    <button class="btn" id="pauseBtn" style="background:var(--amber);color:var(--text-on-btn);font-family:var(--font-mono);font-size:0.7rem;display:none;" data-i18n="blocking.pause_5m">Pause 5m</button>
     <button class="btn" id="toggleBtn" onclick="toggleBlocking()" style="background:var(--rose);color:var(--text-on-btn);font-family:var(--font-mono);font-size:0.7rem;display:none;"></button>
     <div class="status-badge">
       <span class="status-dot" id="statusDot"></span>
-      <span id="statusText">connecting...</span>
+      <span id="statusText" data-i18n="status.connecting">connecting...</span>
     </div>
   </div>
 </div>
@@ -660,32 +661,32 @@ body {
   <!-- Stat cards -->
   <div class="stats-row">
     <div class="stat-card queries">
-      <div class="stat-label">Total Queries</div>
+      <div class="stat-label" data-i18n="stat.total_queries">Total Queries</div>
       <div class="stat-value" id="totalQueries">—</div>
       <div class="stat-sub" id="qps">—</div>
     </div>
     <div class="stat-card cache">
-      <div class="stat-label">Cache Hit Rate</div>
+      <div class="stat-label" data-i18n="stat.cache_hit_rate">Cache Hit Rate</div>
       <div class="stat-value" id="cacheRate">—</div>
       <div class="stat-sub" id="cacheEntries">—</div>
     </div>
     <div class="stat-card blocked">
-      <div class="stat-label">Blocked</div>
+      <div class="stat-label" data-i18n="stat.blocked">Blocked</div>
       <div class="stat-value" id="blockedCount">—</div>
       <div class="stat-sub" id="blockedSub">&nbsp;</div>
     </div>
     <div class="stat-card overrides">
-      <div class="stat-label">Active Overrides</div>
+      <div class="stat-label" data-i18n="stat.active_overrides">Active Overrides</div>
       <div class="stat-value" id="overrideCount">—</div>
       <div class="stat-sub">&nbsp;</div>
     </div>
     <div class="stat-card uptime">
-      <div class="stat-label">Uptime</div>
+      <div class="stat-label" data-i18n="stat.uptime">Uptime</div>
       <div class="stat-value" id="uptime">—</div>
       <div class="stat-sub" id="uptimeSub">&nbsp;</div>
     </div>
     <div class="stat-card memory">
-      <div class="stat-label">Memory</div>
+      <div class="stat-label" data-i18n="stat.memory">Memory</div>
       <div class="stat-value" id="memoryRss">—</div>
       <div class="stat-sub" id="memorySub">&nbsp;</div>
     </div>
@@ -694,7 +695,7 @@ body {
   <!-- Resolution paths -->
   <div class="panel">
     <div class="panel-header">
-      <span class="panel-title">Resolution Paths</span>
+      <span class="panel-title" data-i18n="panel.resolution_paths">Resolution Paths</span>
     </div>
     <div class="panel-body" id="pathBars">
       <!-- Populated by JS -->
@@ -704,7 +705,7 @@ body {
   <!-- Inbound wire (apps → numa) -->
   <div class="panel">
     <div class="panel-header">
-      <span class="panel-title">Inbound Wire <span style="color: var(--text-dim); font-weight: normal;">apps → numa</span></span>
+      <span class="panel-title" data-i18n="panel.inbound_wire">Inbound Wire</span> <span class="panel-title" style="color: var(--text-dim); font-weight: normal;" data-i18n="panel.inbound_wire_sub">apps → numa</span>
       <span class="panel-title" id="transportEncrypted" style="color: var(--text-dim)"></span>
     </div>
     <div class="panel-body" id="transportBars">
@@ -714,7 +715,7 @@ body {
   <!-- Outbound wire (numa → internet) -->
   <div class="panel">
     <div class="panel-header">
-      <span class="panel-title">Outbound Wire <span style="color: var(--text-dim); font-weight: normal;">numa → internet</span></span>
+      <span class="panel-title" data-i18n="panel.outbound_wire">Outbound Wire</span> <span class="panel-title" style="color: var(--text-dim); font-weight: normal;" data-i18n="panel.outbound_wire_sub">numa → internet</span>
       <span class="panel-title" id="upstreamWireEncrypted" style="color: var(--text-dim)"></span>
     </div>
     <div class="panel-body" id="upstreamWireBars">
@@ -726,27 +727,27 @@ body {
     <!-- Query log -->
     <div class="panel">
       <div class="panel-header">
-        <span class="panel-title">Recent Queries</span>
+        <span class="panel-title" data-i18n="panel.recent_queries">Recent Queries</span>
         <div style="display:flex;align-items:center;gap:0.5rem;">
-          <input type="text" id="logFilterDomain" placeholder="filter domain..." oninput="applyLogFilter()"
+          <input type="text" id="logFilterDomain" data-i18n-ph="log.filter_domain" placeholder="filter domain..." oninput="applyLogFilter()"
             style="font-family:var(--font-mono);font-size:0.7rem;padding:0.25rem 0.5rem;border:1px solid var(--border);border-radius:4px;background:var(--bg-surface);color:var(--text-primary);outline:none;width:150px;">
           <select id="logFilterPath" onchange="applyLogFilter()"
             style="font-family:var(--font-mono);font-size:0.7rem;padding:0.25rem 0.4rem;border:1px solid var(--border);border-radius:4px;background:var(--bg-surface);color:var(--text-secondary);outline:none;">
-            <option value="">all paths</option>
-            <option value="RECURSIVE">recursive</option>
-            <option value="COALESCED">coalesced</option>
-            <option value="FORWARD">forward</option>
-            <option value="UPSTREAM">upstream</option>
-            <option value="CACHED">cached</option>
-            <option value="BLOCKED">blocked</option>
-            <option value="OVERRIDE">override</option>
-            <option value="LOCAL">local</option>
-            <option value="SERVFAIL">error</option>
-            <option value="STRIPPED">stripped</option>
+            <option value="" data-i18n="log.all_paths">all paths</option>
+            <option value="RECURSIVE" data-i18n="log.path_recursive">recursive</option>
+            <option value="COALESCED" data-i18n="log.path_coalesced">coalesced</option>
+            <option value="FORWARD" data-i18n="log.path_forward">forward</option>
+            <option value="UPSTREAM" data-i18n="log.path_upstream">upstream</option>
+            <option value="CACHED" data-i18n="log.path_cached">cached</option>
+            <option value="BLOCKED" data-i18n="log.path_blocked">blocked</option>
+            <option value="OVERRIDE" data-i18n="log.path_override">override</option>
+            <option value="LOCAL" data-i18n="log.path_local">local</option>
+            <option value="SERVFAIL" data-i18n="log.path_error">error</option>
+            <option value="STRIPPED" data-i18n="log.path_stripped">stripped</option>
           </select>
           <select id="logFilterTransport" onchange="applyLogFilter()"
             style="font-family:var(--font-mono);font-size:0.7rem;padding:0.25rem 0.4rem;border:1px solid var(--border);border-radius:4px;background:var(--bg-surface);color:var(--text-secondary);outline:none;">
-            <option value="">all transports</option>
+            <option value="" data-i18n="log.all_transports">all transports</option>
             <option value="UDP">UDP</option>
             <option value="TCP">TCP</option>
             <option value="DOT">DoT</option>
@@ -760,13 +761,13 @@ body {
           <table>
             <thead>
               <tr>
-                <th>Time</th>
-                <th>Type</th>
-                <th>Domain</th>
-                <th>Path</th>
-                <th>Transport</th>
-                <th>Result</th>
-                <th>Latency</th>
+                <th data-i18n="log.col_time">Time</th>
+                <th data-i18n="log.col_type">Type</th>
+                <th data-i18n="log.col_domain">Domain</th>
+                <th data-i18n="log.col_path">Path</th>
+                <th data-i18n="log.col_transport">Transport</th>
+                <th data-i18n="log.col_result">Result</th>
+                <th data-i18n="log.col_latency">Latency</th>
               </tr>
             </thead>
             <tbody id="queryLogBody">
@@ -782,25 +783,25 @@ body {
       <div class="panel">
         <div class="panel-header">
           <div style="flex:1;">
-            <span class="panel-title">Local Services</span>
-            <div style="font-size:0.68rem;color:var(--text-dim);margin-top:0.15rem;">Give localhost apps clean URLs. Persistent, with HTTP proxy.</div>
+            <span class="panel-title" data-i18n="panel.local_services">Local Services</span>
+            <div style="font-size:0.68rem;color:var(--text-dim);margin-top:0.15rem;" data-i18n="services.desc">Give localhost apps clean URLs. Persistent, with HTTP proxy.</div>
           </div>
           <span id="lanToggle" style="font-family:var(--font-mono);font-size:0.68rem;cursor:default;user-select:none;" title=""></span>
         </div>
         <div class="panel-body">
           <form class="override-form" id="serviceForm" onsubmit="return addService(event)">
             <div class="override-form-row">
-              <input type="text" id="svcName" placeholder="service name" required style="flex:2">
-              <input type="number" id="svcPort" placeholder="port (e.g. 3000)" required min="1" max="65535" style="flex:1">
+              <input type="text" id="svcName" data-i18n-ph="services.name_ph" placeholder="service name" required style="flex:2">
+              <input type="number" id="svcPort" data-i18n-ph="services.port_ph" placeholder="port (e.g. 3000)" required min="1" max="65535" style="flex:1">
             </div>
             <div class="override-form-row">
-              <input type="text" id="svcHost" placeholder="target host (optional, defaults to localhost)" style="flex:3">
+              <input type="text" id="svcHost" data-i18n-ph="services.host_ph" placeholder="target host (optional, defaults to localhost)" style="flex:3">
             </div>
-            <button type="submit" class="btn btn-add">Add Service</button>
+            <button type="submit" class="btn btn-add" data-i18n="services.add">Add Service</button>
             <div class="override-error" id="serviceError"></div>
           </form>
           <div id="servicesList">
-            <div class="empty-state">No services configured</div>
+            <div class="empty-state" data-i18n="services.empty">No services configured</div>
           </div>
         </div>
       </div>
@@ -809,23 +810,23 @@ body {
       <div class="panel">
         <div class="panel-header">
           <div>
-            <span class="panel-title">Active Overrides</span>
-            <div style="font-size:0.68rem;color:var(--text-dim);margin-top:0.15rem;">Redirect any domain to any IP. Temporary, DNS-only.</div>
+            <span class="panel-title" data-i18n="panel.active_overrides">Active Overrides</span>
+            <div style="font-size:0.68rem;color:var(--text-dim);margin-top:0.15rem;" data-i18n="overrides.desc">Redirect any domain to any IP. Temporary, DNS-only.</div>
           </div>
         </div>
         <div class="panel-body">
           <form class="override-form" id="overrideForm" onsubmit="return addOverride(event)">
-            <input type="text" id="ovDomain" placeholder="domain (e.g. api.stripe.com)" required>
-            <input type="text" id="ovTarget" placeholder="target (e.g. 10.0.0.5 or 127.0.0.1)" required>
+            <input type="text" id="ovDomain" data-i18n-ph="overrides.domain_ph" placeholder="domain (e.g. api.stripe.com)" required>
+            <input type="text" id="ovTarget" data-i18n-ph="overrides.target_ph" placeholder="target (e.g. 10.0.0.5 or 127.0.0.1)" required>
             <div class="override-form-row">
-              <input type="number" id="ovTTL" placeholder="DNS TTL" value="60" min="1" title="How long clients may cache this DNS response">
-              <input type="number" id="ovDuration" placeholder="Expires in (s)" value="300" min="1">
+              <input type="number" id="ovTTL" data-i18n-ph="overrides.ttl_ph" placeholder="DNS TTL" value="60" min="1" data-i18n-title="overrides.ttl_title" title="How long clients may cache this DNS response">
+              <input type="number" id="ovDuration" data-i18n-ph="overrides.duration_ph" placeholder="Expires in (s)" value="300" min="1">
             </div>
-            <button type="submit" class="btn btn-add">Add Override</button>
+            <button type="submit" class="btn btn-add" data-i18n="overrides.add">Add Override</button>
             <div class="override-error" id="overrideError"></div>
           </form>
           <div id="overridesList">
-            <div class="empty-state">No active overrides</div>
+            <div class="empty-state" data-i18n="overrides.empty">No active overrides</div>
           </div>
         </div>
       </div>
@@ -833,14 +834,14 @@ body {
       <!-- Blocking -->
       <div class="panel" id="blockingPanel">
         <div class="panel-header">
-          <span class="panel-title">Blocking</span>
+          <span class="panel-title" data-i18n="panel.blocking">Blocking</span>
           <span class="panel-title" id="blockingRefresh" style="color:var(--text-dim);font-weight:400;"></span>
         </div>
         <div class="panel-body">
           <form class="override-form" onsubmit="return checkDomain(event)" style="margin-bottom:0;border-bottom:none;padding-bottom:0;">
             <div class="override-form-row">
-              <input type="text" id="checkDomainInput" placeholder="Is this domain blocked?" required style="flex:3">
-              <button type="submit" class="btn" style="background:var(--violet);color:var(--text-on-btn);flex-shrink:0;">Check</button>
+              <input type="text" id="checkDomainInput" data-i18n-ph="blocking.check_ph" placeholder="Is this domain blocked?" required style="flex:3">
+              <button type="submit" class="btn" style="background:var(--violet);color:var(--text-on-btn);flex-shrink:0;" data-i18n="blocking.check">Check</button>
             </div>
           </form>
           <div id="checkResult" style="display:none;margin-top:0.6rem;padding:0.5rem 0.6rem;border-radius:5px;font-family:var(--font-mono);font-size:0.72rem;"></div>
@@ -852,28 +853,78 @@ body {
       <!-- Memory breakdown -->
       <div class="panel" id="memoryPanel">
         <div class="panel-header">
-          <span class="panel-title">Memory</span>
+          <span class="panel-title" data-i18n="panel.memory">Memory</span>
           <span class="panel-title" id="memoryTotal" style="color: var(--text-dim)"></span>
         </div>
         <div class="panel-body" id="memoryBody">
-          <div class="empty-state">No memory data</div>
+          <div class="empty-state" data-i18n="memory.empty">No memory data</div>
         </div>
       </div>
 
       <!-- Cache entries -->
       <div class="panel">
         <div class="panel-header">
-          <span class="panel-title">Cached Domains</span>
+          <span class="panel-title" data-i18n="panel.cached_domains">Cached Domains</span>
           <span class="panel-title" id="cacheCount" style="color: var(--text-dim)"></span>
         </div>
         <div class="panel-body" id="cacheList" style="max-height: 240px; overflow-y: auto; scrollbar-width: thin;">
-          <div class="empty-state">Cache empty</div>
+          <div class="empty-state" data-i18n="cache.empty">Cache empty</div>
         </div>
       </div>
     </div>
   </div>
 </div>
 
+<script>
+// i18n — one JSON file per language served from /locales; English is the
+// fallback for any missing key, so a partial locale never breaks the dashboard.
+let I18N = {};
+let I18N_LANG = 'en';
+function t(key, params) {
+  let s = I18N[key];
+  if (s == null) return key;
+  if (params) for (const k in params) s = s.split('{' + k + '}').join(params[k]);
+  return s;
+}
+async function loadLocale(code) {
+  try {
+    const r = await fetch('/locales/' + code + '.json');
+    return r.ok ? await r.json() : {};
+  } catch { return {}; }
+}
+function pickLang(codes) {
+  const saved = localStorage.getItem('numa-lang');
+  if (saved && codes.includes(saved)) return saved;
+  const nav = (navigator.language || 'en').toLowerCase();
+  return codes.find(c => nav === c || nav.split('-')[0] === c.split('-')[0]) || 'en';
+}
+async function setLang(code, en) {
+  I18N_LANG = code;
+  const over = code === 'en' ? {} : await loadLocale(code);
+  I18N = Object.assign({}, en, over);
+  applyStatic();
+}
+function applyStatic() {
+  document.documentElement.lang = I18N_LANG;
+  document.querySelectorAll('[data-i18n]').forEach(el => el.textContent = t(el.dataset.i18n));
+  document.querySelectorAll('[data-i18n-html]').forEach(el => el.innerHTML = t(el.dataset.i18nHtml));
+  document.querySelectorAll('[data-i18n-ph]').forEach(el => el.placeholder = t(el.dataset.i18nPh));
+  document.querySelectorAll('[data-i18n-title]').forEach(el => el.title = t(el.dataset.i18nTitle));
+}
+async function initI18n() {
+  let manifest = [{ code: 'en', native_name: 'English' }];
+  try { const r = await fetch('/locales/manifest.json'); if (r.ok) manifest = await r.json(); } catch {}
+  const en = await loadLocale('en');
+  const sel = document.getElementById('langSelect');
+  if (sel && manifest.length > 1) {
+    sel.innerHTML = manifest.map(m => `<option value="${m.code}">${m.native_name}</option>`).join('');
+    sel.style.display = '';
+    sel.onchange = () => { localStorage.setItem('numa-lang', sel.value); setLang(sel.value, en).then(() => typeof refresh === 'function' && refresh()); };
+  }
+  await setLang(pickLang(manifest.map(m => m.code)), en);
+  if (sel) sel.value = I18N_LANG;
+}
+</script>
 <script>
 const API = '';
 const h = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
@@ -895,7 +946,7 @@ function applyTheme(mode) {
     document.documentElement.removeAttribute('data-theme');
   }
   const btn = document.getElementById('themeBtn');
-  if (btn) btn.textContent = 'Theme: ' + mode[0].toUpperCase() + mode.slice(1);
+  if (btn) btn.textContent = t('theme.label', { mode: t('theme.' + mode) });
 }
 function cycleTheme() {
   const cur = localStorage.getItem('numa-theme') || 'auto';
@@ -903,7 +954,6 @@ function cycleTheme() {
   localStorage.setItem('numa-theme', next);
   applyTheme(next);
 }
-applyTheme(localStorage.getItem('numa-theme') || 'auto');
 
 function formatUptime(secs) {
   if (secs < 60) return `${secs}s`;
@@ -947,12 +997,12 @@ function togglePhoneSetup() {
       const linkEl = document.getElementById('phoneSetupLink');
       const host = window.location.hostname;
       linkEl.style.display = 'block';
-      linkEl.innerHTML = `<a href="http://${host}:${mobilePort}/mobileconfig" style="display:inline-block;padding:0.5rem 1rem;background:var(--amber);color:var(--text-on-btn);border-radius:6px;text-decoration:none;font-family:var(--font-mono);font-size:0.75rem;">Install Profile</a>`;
+      linkEl.innerHTML = `<a href="http://${host}:${mobilePort}/mobileconfig" style="display:inline-block;padding:0.5rem 1rem;background:var(--amber);color:var(--text-on-btn);border-radius:6px;text-decoration:none;font-family:var(--font-mono);font-size:0.75rem;">${t('phone.install_profile')}</a>`;
     } else {
       fetch(API + '/qr').then(r => r.text()).then(svg => {
         document.getElementById('qrContainer').innerHTML = svg;
       }).catch(() => {
-        document.getElementById('qrContainer').innerHTML = '<div class="empty-state">Could not load QR</div>';
+        document.getElementById('qrContainer').innerHTML = `<div class="empty-state">${t('phone.qr_failed')}</div>`;
       });
     }
   }
@@ -972,10 +1022,10 @@ function shortSrc(addr) {
 }
 
 function formatRemaining(secs) {
-  if (secs == null) return 'permanent';
-  if (secs < 60) return `${secs}s left`;
-  if (secs < 3600) return `${Math.floor(secs / 60)}m ${secs % 60}s left`;
-  return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m left`;
+  if (secs == null) return t('overrides.permanent');
+  if (secs < 60) return t('overrides.left_s', { s: secs });
+  if (secs < 3600) return t('overrides.left_ms', { m: Math.floor(secs / 60), s: secs % 60 });
+  return t('overrides.left_hm', { h: Math.floor(secs / 3600), m: Math.floor((secs % 3600) / 60) });
 }
 
 function formatBytes(bytes) {
@@ -987,11 +1037,11 @@ function formatBytes(bytes) {
 }
 
 const MEMORY_COMPONENTS = [
-  { key: 'cache',     label: 'Cache',     cls: 'cache',     color: 'var(--teal)' },
-  { key: 'blocklist', label: 'Blocklist',  cls: 'blocklist', color: 'var(--rose)' },
-  { key: 'query_log', label: 'Query Log',  cls: 'querylog',  color: 'var(--amber)' },
-  { key: 'srtt',      label: 'SRTT',       cls: 'srtt',      color: 'var(--cyan)' },
-  { key: 'overrides', label: 'Overrides',  cls: 'overrides', color: 'var(--violet)' },
+  { key: 'cache',     label: 'memory.cache',     cls: 'cache',     color: 'var(--teal)' },
+  { key: 'blocklist', label: 'memory.blocklist', cls: 'blocklist', color: 'var(--rose)' },
+  { key: 'query_log', label: 'memory.query_log', cls: 'querylog',  color: 'var(--amber)' },
+  { key: 'srtt',      label: 'memory.srtt',      cls: 'srtt',      color: 'var(--cyan)' },
+  { key: 'overrides', label: 'memory.overrides', cls: 'overrides', color: 'var(--violet)' },
 ];
 
 function renderMemory(mem, stats) {
@@ -999,7 +1049,7 @@ function renderMemory(mem, stats) {
 
   // Stat card
   document.getElementById('memoryRss').textContent = formatBytes(mem.process_memory_bytes);
-  document.getElementById('memorySub').textContent = 'est. ' + formatBytes(mem.total_estimated_bytes);
+  document.getElementById('memorySub').textContent = t('stat.memory_est', { size: formatBytes(mem.total_estimated_bytes) });
 
   const entryCounts = {
     cache: stats.cache.entries,
@@ -1016,7 +1066,7 @@ function renderMemory(mem, stats) {
   const barSegments = MEMORY_COMPONENTS.map(c => {
     const bytes = mem[c.key + '_bytes'] || 0;
     const pct = ((bytes / total) * 100).toFixed(1);
-    return `<div class="memory-bar-seg ${c.cls}" style="width:${pct}%" title="${c.label}: ${formatBytes(bytes)} (${pct}%)"></div>`;
+    return `<div class="memory-bar-seg ${c.cls}" style="width:${pct}%" title="${t(c.label)}: ${formatBytes(bytes)} (${pct}%)"></div>`;
   }).join('');
 
   const rows = MEMORY_COMPONENTS.map(c => {
@@ -1025,9 +1075,9 @@ function renderMemory(mem, stats) {
     return `
       <div class="memory-row">
         <div class="memory-row-dot" style="background:${c.color}"></div>
-        <span class="memory-row-label">${c.label}</span>
+        <span class="memory-row-label">${t(c.label)}</span>
         <span class="memory-row-size">${formatBytes(bytes)}</span>
-        <span class="memory-row-entries">${formatNumber(entries)} entries</span>
+        <span class="memory-row-entries">${t('memory.entries', { n: formatNumber(entries) })}</span>
       </div>`;
   }).join('');
 
@@ -1035,7 +1085,7 @@ function renderMemory(mem, stats) {
     <div class="memory-bar">${barSegments}</div>
     ${rows}
     <div class="memory-rss">
-      <span>Process Footprint</span>
+      <span>${t('memory.process_footprint')}</span>
       <span>${formatBytes(mem.process_memory_bytes)}</span>
     </div>
   `;
@@ -1050,7 +1100,7 @@ function renderBarChart(containerId, defs, data, total) {
       const pct = ((count / total) * 100).toFixed(1);
       return `
       <div class="path-bar-row">
-        <span class="path-label">${d.label}</span>
+        <span class="path-label">${t(d.label)}</span>
         <div class="path-bar-track">
           <div class="path-bar-fill ${d.cls}" style="width: ${pct}%"></div>
         </div>
@@ -1067,14 +1117,14 @@ function encryptionPct(data, encryptedKeys, allKeys) {
 }
 
 const PATH_DEFS = [
-  { key: 'forwarded', label: 'Forward', cls: 'forward' },
-  { key: 'upstream',  label: 'Upstream', cls: 'upstream' },
-  { key: 'recursive', label: 'Recursive', cls: 'recursive' },
-  { key: 'cached',    label: 'Cached',  cls: 'cached' },
-  { key: 'local',     label: 'Local',   cls: 'local' },
-  { key: 'overridden', label: 'Override', cls: 'override' },
-  { key: 'blocked',   label: 'Blocked', cls: 'blocked' },
-  { key: 'errors',    label: 'Errors',  cls: 'error' },
+  { key: 'forwarded', label: 'paths.forward', cls: 'forward' },
+  { key: 'upstream',  label: 'paths.upstream', cls: 'upstream' },
+  { key: 'recursive', label: 'paths.recursive', cls: 'recursive' },
+  { key: 'cached',    label: 'paths.cached',  cls: 'cached' },
+  { key: 'local',     label: 'paths.local',   cls: 'local' },
+  { key: 'overridden', label: 'paths.override', cls: 'override' },
+  { key: 'blocked',   label: 'paths.blocked', cls: 'blocked' },
+  { key: 'errors',    label: 'paths.errors',  cls: 'error' },
 ];
 
 function renderPaths(queries) {
@@ -1093,7 +1143,7 @@ function renderTransport(transport) {
   renderBarChart('transportBars', TRANSPORT_DEFS, transport, total);
   const encPct = encryptionPct(transport, ['dot', 'doh'], ['udp', 'tcp', 'dot', 'doh']);
   const el = document.getElementById('transportEncrypted');
-  el.textContent = `${encPct}% encrypted inbound`;
+  el.textContent = t('wire.encrypted_inbound', { pct: encPct });
   el.style.color = encPct >= 80 ? 'var(--emerald)' : encPct >= 50 ? 'var(--amber)' : 'var(--rose)';
 }
 
@@ -1109,7 +1159,7 @@ function renderUpstreamWire(ut) {
   renderBarChart('upstreamWireBars', UPSTREAM_WIRE_DEFS, ut, total || 1);
   const encPct = encryptionPct(ut, ['doh', 'dot', 'odoh'], ['udp', 'doh', 'dot', 'odoh']);
   const el = document.getElementById('upstreamWireEncrypted');
-  el.textContent = total > 0 ? `${encPct}% encrypted outbound` : '';
+  el.textContent = total > 0 ? t('wire.encrypted_outbound', { pct: encPct }) : '';
   el.style.color = encPct >= 80 ? 'var(--emerald)' : encPct >= 50 ? 'var(--amber)' : 'var(--rose)';
 }
 
@@ -1139,30 +1189,30 @@ function applyLogFilter() {
   const tbody = document.getElementById('queryLogBody');
   document.getElementById('queryCount').textContent =
     filtered.length < lastLogEntries.length
-      ? `${filtered.length} / ${lastLogEntries.length}`
-      : `last ${filtered.length}`;
+      ? t('log.count_filtered', { n: filtered.length, total: lastLogEntries.length })
+      : t('log.count_last', { n: filtered.length });
 
   tbody.innerHTML = filtered.map(e => {
     const allowBtn = e.path === 'BLOCKED'
-      ? ` <button class="btn-delete" data-domain="${h(e.domain)}" onclick="unblockDomain(this.dataset.domain)" title="Allow this domain" style="color:var(--emerald);font-size:0.65rem;">allow</button>`
+      ? ` <button class="btn-delete" data-domain="${h(e.domain)}" onclick="unblockDomain(this.dataset.domain)" title="${t('log.allow_title')}" style="color:var(--emerald);font-size:0.65rem;">${t('log.allow')}</button>`
       : e.rebind_stripped && rebindAllowed.has(e.domain)
-      ? ` <span style="color:var(--emerald);font-size:0.65rem;" title="Allowlisted — new queries keep their private IPs">✓ allowed</span>`
+      ? ` <span style="color:var(--emerald);font-size:0.65rem;" title="${t('log.allowed_title')}">${t('log.allowed')}</span>`
       : e.rebind_stripped
-      ? ` <button class="btn-delete" data-domain="${h(e.domain)}" onclick="postDomain('/rebind/allowlist', this.dataset.domain, this)" title="Stop stripping private IPs for this domain" style="color:var(--emerald);font-size:0.65rem;">allow</button>`
+      ? ` <button class="btn-delete" data-domain="${h(e.domain)}" onclick="postDomain('/rebind/allowlist', this.dataset.domain, this)" title="${t('log.unstrip_title')}" style="color:var(--emerald);font-size:0.65rem;">${t('log.allow')}</button>`
       : e.path !== 'LOCAL'
-      ? ` <button class="btn-delete" data-domain="${h(e.domain)}" onclick="postDomain('/blocking/blocklist', this.dataset.domain, this)" title="Blocks this domain and its subdomains" style="font-size:0.65rem;">block</button>`
+      ? ` <button class="btn-delete" data-domain="${h(e.domain)}" onclick="postDomain('/blocking/blocklist', this.dataset.domain, this)" title="${t('log.block_title')}" style="font-size:0.65rem;">${t('log.block')}</button>`
       : '';
     const rebindTag = e.rebind_stripped
-      ? ` <span class="path-tag" style="background:rgba(192,98,58,0.12);color:var(--amber-dim);" title="Private IPs stripped by rebind protection">stripped</span>`
+      ? ` <span class="path-tag" style="background:rgba(192,98,58,0.12);color:var(--amber-dim);" title="${t('log.stripped_title')}">${t('log.stripped_tag')}</span>`
       : '';
     return `
-    <tr title="Source: ${e.src || 'unknown'}">
+    <tr title="${t('log.source_title', { src: e.src || t('log.src_unknown') })}">
       <td>${formatTime(e.timestamp_epoch)}<br><span class="src-tag">${shortSrc(e.src)}</span></td>
       <td>${e.query_type}</td>
       <td class="domain-cell" title="${h(e.domain)}">${h(e.domain)}${allowBtn}</td>
       <td><span class="path-tag ${e.path}">${e.path}</span>${rebindTag}</td>
       <td><span class="path-tag ${e.transport}">${e.transport}</span></td>
-      <td style="white-space:nowrap;"><span style="display:inline-block;width:15px;text-align:center;">${e.dnssec === 'secure' ? '<svg title="DNSSEC verified" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--emerald)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>' : ''}</span>${e.rescode}</td>
+      <td style="white-space:nowrap;"><span style="display:inline-block;width:15px;text-align:center;">${e.dnssec === 'secure' ? '<svg title="' + t('log.dnssec_title') + '" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--emerald)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>' : ''}</span>${e.rescode}</td>
       <td>${e.latency_ms.toFixed(1)}ms</td>
     </tr>`;
   }).join('');
@@ -1171,17 +1221,17 @@ function applyLogFilter() {
 function renderOverrides(entries) {
   const el = document.getElementById('overridesList');
   if (!entries.length) {
-    el.innerHTML = '<div class="empty-state">No active overrides</div>';
+    el.innerHTML = `<div class="empty-state">${t('overrides.empty')}</div>`;
     return;
   }
   el.innerHTML = entries.map(e => `
     <div class="override-item">
       <div class="override-item-header">
-        <span class="override-domain" style="cursor:pointer" onclick="editOverride('${e.domain}','${e.target}',${e.ttl || 60},${e.remaining_secs || 300})" title="Click to edit">${e.domain}</span>
-        <button class="btn-delete" onclick="deleteOverride('${e.domain}')" title="Remove override">&times;</button>
+        <span class="override-domain" style="cursor:pointer" onclick="editOverride('${e.domain}','${e.target}',${e.ttl || 60},${e.remaining_secs || 300})" title="${t('overrides.edit_title')}">${e.domain}</span>
+        <button class="btn-delete" onclick="deleteOverride('${e.domain}')" title="${t('overrides.remove_title')}">&times;</button>
       </div>
       <div class="override-target">${e.record_type} &rarr; ${e.target}</div>
-      <div class="override-ttl">${e.remaining_secs != null ? formatRemaining(e.remaining_secs) : 'permanent'}</div>
+      <div class="override-ttl">${e.remaining_secs != null ? formatRemaining(e.remaining_secs) : t('overrides.permanent')}</div>
     </div>
   `).join('');
 }
@@ -1233,9 +1283,9 @@ function editOverride(domain, target, ttl, duration) {
 
 function renderCache(entries) {
   const el = document.getElementById('cacheList');
-  document.getElementById('cacheCount').textContent = entries.length ? `${entries.length} entries` : '';
+  document.getElementById('cacheCount').textContent = entries.length ? t('cache.entries', { n: entries.length }) : '';
   if (!entries.length) {
-    el.innerHTML = '<div class="empty-state">Cache empty</div>';
+    el.innerHTML = `<div class="empty-state">${t('cache.empty')}</div>`;
     return;
   }
   // Show first 50, sorted by TTL remaining desc
@@ -1243,7 +1293,7 @@ function renderCache(entries) {
   el.innerHTML = sorted.map(e => `
     <div class="cache-item">
       <span class="cache-domain" title="${h(e.domain)}">${h(e.domain)}</span>
-      <span class="cache-ttl">${e.query_type} ${e.ttl_remaining}s</span>
+      <span class="cache-ttl">${t('cache.ttl', { type: e.query_type, ttl: e.ttl_remaining })}</span>
     </div>
   `).join('');
 }
@@ -1263,7 +1313,7 @@ async function refresh() {
 
     // Connection status
     document.getElementById('statusDot').className = 'status-dot';
-    document.getElementById('statusText').textContent = 'connected';
+    document.getElementById('statusText').textContent = t('status.connected');
 
     if (stats.proxy_tld) proxyTld = stats.proxy_tld;
 
@@ -1276,19 +1326,19 @@ async function refresh() {
     document.getElementById('footerUpstream').textContent = stats.upstream || '';
     document.getElementById('footerConfig').textContent = stats.config_path || '';
     document.getElementById('footerData').textContent = stats.data_dir || '';
-    document.getElementById('footerDnssec').textContent = stats.dnssec ? 'on' : 'off';
+    document.getElementById('footerDnssec').textContent = stats.dnssec ? t('footer.on') : t('footer.off');
     document.getElementById('footerDnssec').style.color = stats.dnssec ? 'var(--emerald)' : 'var(--text-dim)';
-    document.getElementById('footerSrtt').textContent = stats.srtt ? 'on' : 'off';
+    document.getElementById('footerSrtt').textContent = stats.srtt ? t('footer.on') : t('footer.off');
     document.getElementById('footerSrtt').style.color = stats.srtt ? 'var(--emerald)' : 'var(--text-dim)';
     const strippedCount = q.rebind_stripped || 0;
     const footerRebind = document.getElementById('footerRebind');
-    footerRebind.textContent = !stats.rebind ? 'off'
-      : strippedCount > 0 ? `on · ${formatNumber(strippedCount)} stripped` : 'on';
+    footerRebind.textContent = !stats.rebind ? t('footer.off')
+      : strippedCount > 0 ? t('footer.rebind_stripped', { n: formatNumber(strippedCount) }) : t('footer.on');
     footerRebind.style.color = !stats.rebind ? 'var(--text-dim)'
       : strippedCount > 0 ? 'var(--amber-dim)' : 'var(--emerald)';
     footerRebind.title = strippedCount > 0
-      ? 'Rebind protection removed private IPs from answers — filter the query log by "stripped" to see which domains'
-      : 'DNS rebinding protection';
+      ? t('footer.rebind_title_stripped')
+      : t('footer.rebind_title');
     if (!document.getElementById('footerLogs').textContent) {
       const isWin = stats.data_dir && stats.data_dir.includes(':\\');
       const isMac = stats.data_dir && stats.data_dir.includes('/usr/local/');
@@ -1304,13 +1354,13 @@ async function refresh() {
     if (stats.lan) {
       if (!stats.lan.enabled) {
         lanEl.style.color = 'var(--text-dim)';
-        lanEl.textContent = 'LAN off';
-        lanEl.title = 'Enable with: numa lan on';
+        lanEl.textContent = t('services.lan_off');
+        lanEl.title = t('services.lan_off_title');
       } else {
         const pc = stats.lan.peers || 0;
         lanEl.style.color = pc > 0 ? 'var(--emerald)' : 'var(--teal)';
-        lanEl.textContent = `LAN on · ${pc} peer${pc !== 1 ? 's' : ''}`;
-        lanEl.title = 'mDNS discovery active (_numa._tcp.local)';
+        lanEl.textContent = t(pc === 1 ? 'services.lan_on_one' : 'services.lan_on', { n: pc });
+        lanEl.title = t('services.lan_active_title');
       }
     }
 
@@ -1340,21 +1390,21 @@ async function refresh() {
     if (bl.paused) {
       // Primary action: unpause. Hide toggle to prevent accidental disable.
       pauseBtn.style.display = 'inline-block';
-      pauseBtn.textContent = 'Unpause';
+      pauseBtn.textContent = t('blocking.unpause');
       pauseBtn.onclick = unpauseBlocking;
-      toggleBtn.textContent = 'Paused';
+      toggleBtn.textContent = t('blocking.paused_btn');
       toggleBtn.style.background = 'var(--amber)';
       toggleBtn.onclick = unpauseBlocking; // clicking "Paused" unpauses, not disables
     } else if (bl.enabled) {
-      toggleBtn.textContent = 'Blocking On';
+      toggleBtn.textContent = t('blocking.on');
       toggleBtn.style.background = 'var(--emerald)';
     } else {
-      toggleBtn.textContent = 'Blocking Off';
+      toggleBtn.textContent = t('blocking.off');
       toggleBtn.style.background = 'var(--rose)';
     }
 
     document.getElementById('cacheEntries').textContent =
-      `${stats.cache.entries} / ${formatNumber(stats.cache.max_entries)} entries`;
+      t('stat.cache_entries', { n: stats.cache.entries, max: formatNumber(stats.cache.max_entries) });
 
     // QPS calculation
     const now = Date.now();
@@ -1363,8 +1413,8 @@ async function refresh() {
       const dt = (now - prevTime) / 1000;
       const dq = q.total - prevTotal;
       const qps = dt > 0 ? (dq / dt).toFixed(1) : '0.0';
-      const encTag = q.total > 0 ? ` · ${encPct}% enc` : '';
-      document.getElementById('qps').textContent = `~${qps}/s${encTag}`;
+      const encTag = q.total > 0 ? t('stat.enc_suffix', { pct: encPct }) : '';
+      document.getElementById('qps').textContent = t('stat.qps', { qps }) + encTag;
     }
     prevTotal = q.total;
     prevTime = now;
@@ -1389,7 +1439,7 @@ async function refresh() {
   } catch (err) {
     console.error('[numa dashboard] render failed:', err);
     document.getElementById('statusDot').className = 'status-dot error';
-    document.getElementById('statusText').textContent = 'disconnected';
+    document.getElementById('statusText').textContent = t('status.disconnected');
   }
 }
 
@@ -1437,7 +1487,7 @@ async function postDomain(path, domain, btn) {
     return true;
   } catch (err) {
     if (btn) {
-      btn.textContent = 'failed';
+      btn.textContent = t('log.failed');
       btn.style.color = 'var(--rose)';
       btn.title = err.message;
     }
@@ -1455,18 +1505,18 @@ async function checkDomain(event) {
     el.style.display = 'block';
     if (result.blocked) {
       el.className = 'check-result-blocked';
-      el.innerHTML = `<strong>Blocked</strong> — ${h(result.reason)}` +
-        (result.matched_rule ? `<br>Rule: <code>${h(result.matched_rule)}</code>` : '') +
-        ` <button class="btn-delete" data-domain="${h(domain)}" onclick="unblockDomain(this.dataset.domain)" style="color:var(--emerald);font-size:0.7rem;margin-left:0.4rem;">allow</button>`;
+      el.innerHTML = `<strong>${t('blocking.result_blocked')}</strong> — ${h(result.reason)}` +
+        (result.matched_rule ? `<br>${t('blocking.rule')} <code>${h(result.matched_rule)}</code>` : '') +
+        ` <button class="btn-delete" data-domain="${h(domain)}" onclick="unblockDomain(this.dataset.domain)" style="color:var(--emerald);font-size:0.7rem;margin-left:0.4rem;">${t('log.allow')}</button>`;
     } else {
       el.className = 'check-result-allowed';
-      el.innerHTML = `<strong>Allowed</strong> — ${h(result.reason)}` +
-        (result.matched_rule ? `<br>Rule: <code>${h(result.matched_rule)}</code>` : '');
+      el.innerHTML = `<strong>${t('blocking.result_allowed')}</strong> — ${h(result.reason)}` +
+        (result.matched_rule ? `<br>${t('blocking.rule')} <code>${h(result.matched_rule)}</code>` : '');
     }
   } catch (err) {
     el.style.display = 'block';
     el.className = 'check-result-blocked';
-    el.textContent = 'Error: ' + err.message;
+    el.textContent = t('blocking.error', { msg: err.message });
   }
   return false;
 }
@@ -1508,11 +1558,14 @@ function sourceNote(s) {
   if (s.status === 'ok') return '';
   const age = s.last_ok_secs_ago != null ? `${formatUptime(s.last_ok_secs_ago)} ago` : null;
   if (s.status === 'pending') {
-    return '<span style="color:var(--text-dim);margin-left:0.5rem;">not fetched yet</span>';
+    return `<span style="color:var(--text-dim);margin-left:0.5rem;">${t('blocking.not_fetched')}</span>`;
   }
   const colour = s.status === 'stale' ? 'var(--amber)' : 'var(--rose)';
-  const when = age ? `${s.status === 'stale' ? 'cached' : 'last ok'} ${age}` : 'never loaded';
-  return `<span style="color:${colour};margin-left:0.5rem;">${h(s.error || 'failed')} &middot; ${when}</span>`;
+  const when = age
+    ? t(s.status === 'stale' ? 'blocking.src_cached' : 'blocking.src_last_ok', { age })
+    : t('blocking.src_never');
+  const note = t('blocking.src_note', { err: h(s.error || t('blocking.src_failed')), when });
+  return `<span style="color:${colour};margin-left:0.5rem;">${note}</span>`;
 }
 
 function formatStaleAge(secs) {
@@ -1521,16 +1574,16 @@ function formatStaleAge(secs) {
 }
 
 function blockingSubline(bl, info) {
-  if (bl.paused) return 'paused';
-  if (!bl.enabled) return 'disabled';
-  const loaded = `${formatNumber(bl.domains_loaded)} in blocklist`;
+  if (bl.paused) return t('blocking.sub_paused');
+  if (!bl.enabled) return t('blocking.sub_disabled');
+  const loaded = t('blocking.sub_loaded', { n: formatNumber(bl.domains_loaded) });
   const sources = (info && info.list_sources) || [];
   switch (info && info.health) {
-    case 'unconfigured': return 'no lists configured';
-    case 'loading': return 'loading…';
-    case 'failed': return 'all lists failed · not blocking';
-    case 'degraded': return `${loaded} · ${sources.filter(s => s.status === 'failed').length} of ${sources.length} lists failing`;
-    case 'stale': return `${loaded} · stale ${formatStaleAge(oldestStaleAge(info))}`;
+    case 'unconfigured': return t('blocking.sub_unconfigured');
+    case 'loading': return t('blocking.sub_loading');
+    case 'failed': return t('blocking.sub_failed');
+    case 'degraded': return t('blocking.sub_degraded', { loaded, failed: sources.filter(s => s.status === 'failed').length, total: sources.length });
+    case 'stale': return t('blocking.sub_stale', { loaded, age: formatStaleAge(oldestStaleAge(info)) });
     default: return loaded;
   }
 }
@@ -1551,17 +1604,17 @@ function renderBlockingInfo(info) {
   const el = document.getElementById('blockingSources');
   const refreshEl = document.getElementById('blockingRefresh');
   if (info.last_refresh_secs_ago != null) {
-    refreshEl.textContent = `refreshed ${formatUptime(info.last_refresh_secs_ago)} ago`;
+    refreshEl.textContent = t('blocking.refreshed', { ago: formatUptime(info.last_refresh_secs_ago) });
   } else {
-    refreshEl.textContent = 'never updated';
+    refreshEl.textContent = t('blocking.never_updated');
   }
   const sources = info.list_sources || [];
   if (!sources.length) {
-    el.innerHTML = '<div class="empty-state">No blocklists configured</div>';
+    el.innerHTML = `<div class="empty-state">${t('blocking.no_sources')}</div>`;
     return;
   }
   el.innerHTML = `
-    <div style="font-size:0.65rem;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-dim);margin-bottom:0.4rem;">Sources &middot; ${formatNumber(info.domains_loaded)} domains</div>
+    <div style="font-size:0.65rem;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-dim);margin-bottom:0.4rem;">${t('blocking.sources', { n: formatNumber(info.domains_loaded) })}</div>
     ${sources.map(s => `
       <div style="padding:0.3rem 0;font-family:var(--font-mono);font-size:0.72rem;">
         <a href="${h(s.url)}" target="_blank" rel="noopener" style="color:var(--text-secondary);text-decoration:none;" title="${h(s.url)}">${h(shortenUrl(s.url))}</a>
@@ -1578,18 +1631,18 @@ function renderAllowlist(entries, manualBlocks) {
   const count = entries.length;
   const blocked = manualBlocks || [];
   el.innerHTML = `
-    <div style="font-size:0.65rem;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-dim);margin-bottom:0.4rem;">Allowlist${count ? ` (${count})` : ''}</div>
+    <div style="font-size:0.65rem;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-dim);margin-bottom:0.4rem;">${count ? t('blocking.allowlist_n', { n: count }) : t('blocking.allowlist')}</div>
     ${count ? entries.map(d => `
       <div style="display:flex;justify-content:space-between;align-items:center;padding:0.25rem 0;border-bottom:1px solid var(--border);">
         <span style="font-family:var(--font-mono);font-size:0.75rem;color:var(--emerald);">${h(d)}</span>
         <button class="btn-delete" data-domain="${h(d)}" onclick="deleteDomain('/blocking/allowlist', this.dataset.domain)">&times;</button>
       </div>
-    `).join('') : '<div class="empty-state">No exceptions</div>'}
+    `).join('') : `<div class="empty-state">${t('blocking.no_exceptions')}</div>`}
     <form onsubmit="return addDomain(event, '/blocking/allowlist')" style="display:flex;gap:0.4rem;margin-top:0.4rem;">
-      <input type="text" id="allowDomainInput" placeholder="domain to allow" required style="flex:1;font-family:var(--font-mono);font-size:0.75rem;padding:0.35rem 0.5rem;border:1px solid var(--border);border-radius:4px;background:var(--bg-surface);color:var(--text-primary);outline:none;">
-      <button type="submit" class="btn" style="background:var(--emerald);color:var(--text-on-btn);flex-shrink:0;">Allow</button>
+      <input type="text" id="allowDomainInput" placeholder="${t('blocking.allow_ph')}" required style="flex:1;font-family:var(--font-mono);font-size:0.75rem;padding:0.35rem 0.5rem;border:1px solid var(--border);border-radius:4px;background:var(--bg-surface);color:var(--text-primary);outline:none;">
+      <button type="submit" class="btn" style="background:var(--emerald);color:var(--text-on-btn);flex-shrink:0;">${t('blocking.allow_btn')}</button>
     </form>
-    <div style="font-size:0.65rem;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-dim);margin:0.8rem 0 0.4rem;">Manually blocked${blocked.length ? ` (${blocked.length})` : ''}</div>
+    <div style="font-size:0.65rem;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-dim);margin:0.8rem 0 0.4rem;">${blocked.length ? t('blocking.manually_blocked_n', { n: blocked.length }) : t('blocking.manually_blocked')}</div>
     ${blocked.map(d => `
       <div style="display:flex;justify-content:space-between;align-items:center;padding:0.25rem 0;border-bottom:1px solid var(--border);">
         <span style="font-family:var(--font-mono);font-size:0.75rem;color:var(--rose);">${h(d)}</span>
@@ -1597,8 +1650,8 @@ function renderAllowlist(entries, manualBlocks) {
       </div>
     `).join('')}
     <form onsubmit="return addDomain(event, '/blocking/blocklist')" style="display:flex;gap:0.4rem;margin-top:0.4rem;">
-      <input type="text" id="blockDomainInput" placeholder="domain to block" required style="flex:1;font-family:var(--font-mono);font-size:0.75rem;padding:0.35rem 0.5rem;border:1px solid var(--border);border-radius:4px;background:var(--bg-surface);color:var(--text-primary);outline:none;">
-      <button type="submit" class="btn" style="background:var(--rose);color:var(--text-on-btn);flex-shrink:0;">Block</button>
+      <input type="text" id="blockDomainInput" placeholder="${t('blocking.block_ph')}" required style="flex:1;font-family:var(--font-mono);font-size:0.75rem;padding:0.35rem 0.5rem;border:1px solid var(--border);border-radius:4px;background:var(--bg-surface);color:var(--text-primary);outline:none;">
+      <button type="submit" class="btn" style="background:var(--rose);color:var(--text-on-btn);flex-shrink:0;">${t('blocking.block_btn')}</button>
     </form>
   `;
 }
@@ -1634,35 +1687,35 @@ function renderServices(entries) {
   if (editingRoute) return;
   const el = document.getElementById('servicesList');
   if (!entries.length) {
-    el.innerHTML = '<div class="empty-state">No services configured</div>';
+    el.innerHTML = `<div class="empty-state">${t('services.empty')}</div>`;
     return;
   }
   el.innerHTML = entries.map(e => {
     const lanBadge = e.healthy
       ? (e.lan_accessible
-        ? '<span class="lan-badge shared" title="Reachable from other devices on the network">LAN</span>'
-        : '<span class="lan-badge local-only" title="Bound to localhost — not reachable from other devices. Start with 0.0.0.0 to share on LAN.">local only</span>')
+        ? `<span class="lan-badge shared" title="${t('services.lan_title')}">${t('services.lan')}</span>`
+        : `<span class="lan-badge local-only" title="${t('services.local_only_title')}">${t('services.local_only')}</span>`)
       : '';
     const routeLines = (e.routes || []).map(r =>
       `<div class="service-port" style="color:var(--text-dim);display:flex;align-items:center;gap:0.3rem;">` +
         `<span style="display:inline-block;min-width:60px;">${h(r.path)}</span> ` +
         `&rarr; :${parseInt(r.port)||0}` +
         (r.strip ? ` <span style="opacity:0.6;">(strip)</span>` : '') +
-        (e.name === 'numa' ? '' : ` <button class="btn-delete" onclick="deleteRoute('${h(e.name)}','${h(r.path)}')" title="Remove route" style="font-size:0.65rem;padding:0 0.25rem;min-width:auto;opacity:0.5;">&times;</button>`) +
+        (e.name === 'numa' ? '' : ` <button class="btn-delete" onclick="deleteRoute('${h(e.name)}','${h(r.path)}')" title="${t('services.remove_route_title')}" style="font-size:0.65rem;padding:0 0.25rem;min-width:auto;opacity:0.5;">&times;</button>`) +
       `</div>`
     ).join('');
     const deletable = e.source !== 'config' && e.name !== 'numa';
     const name = h(e.name);
     return `
     <div class="service-item">
-      <span class="health-dot ${e.healthy ? 'up' : 'down'}" title="${e.healthy ? 'running' : 'not reachable'}"></span>
+      <span class="health-dot ${e.healthy ? 'up' : 'down'}" title="${e.healthy ? t('services.running') : t('services.not_reachable')}"></span>
       <div class="service-info">
         <div class="service-name"><a href="${h(e.url)}" target="_blank">${name}.${h(proxyTld)}</a>${lanBadge}</div>
-        <div class="service-port">${h(e.target_host || 'localhost')}:${parseInt(e.target_port)||0} &rarr; proxied</div>
+        <div class="service-port">${h(e.target_host || 'localhost')}:${parseInt(e.target_port)||0} &rarr; ${t('services.proxied')}</div>
         ${routeLines}
-        ${e.name === 'numa' ? '' : `<div style="margin-top:0.3rem;"><button onclick="toggleRouteForm('${name}')" style="font-size:0.7rem;padding:0.1rem 0.4rem;background:var(--emerald);color:var(--bg);border:none;border-radius:4px;cursor:pointer;">+ route</button><div id="routeForm-${name}" style="display:none;margin-top:0.3rem;"><div style="display:flex;gap:0.3rem;align-items:center;"><input type="text" id="routePath-${name}" placeholder="/path" style="flex:2;padding:0.25rem 0.4rem;font-size:0.75rem;"><input type="number" id="routePort-${name}" value="${parseInt(e.target_port)||0}" min="1" max="65535" style="flex:1;padding:0.25rem 0.4rem;font-size:0.75rem;"><label style="font-size:0.7rem;color:var(--text-dim);display:flex;align-items:center;gap:0.2rem;"><input type="checkbox" id="routeStrip-${name}">strip</label><button onclick="addRoute('${name}')" style="font-size:0.7rem;padding:0.2rem 0.5rem;background:var(--emerald);color:var(--bg);border:none;border-radius:4px;cursor:pointer;">add</button></div><div class="override-error" id="routeError-${name}" style="display:none;font-size:0.7rem;"></div></div></div>`}
+        ${e.name === 'numa' ? '' : `<div style="margin-top:0.3rem;"><button onclick="toggleRouteForm('${name}')" style="font-size:0.7rem;padding:0.1rem 0.4rem;background:var(--emerald);color:var(--bg);border:none;border-radius:4px;cursor:pointer;">${t('services.add_route')}</button><div id="routeForm-${name}" style="display:none;margin-top:0.3rem;"><div style="display:flex;gap:0.3rem;align-items:center;"><input type="text" id="routePath-${name}" placeholder="${t('services.route_path_ph')}" style="flex:2;padding:0.25rem 0.4rem;font-size:0.75rem;"><input type="number" id="routePort-${name}" value="${parseInt(e.target_port)||0}" min="1" max="65535" style="flex:1;padding:0.25rem 0.4rem;font-size:0.75rem;"><label style="font-size:0.7rem;color:var(--text-dim);display:flex;align-items:center;gap:0.2rem;"><input type="checkbox" id="routeStrip-${name}">${t('services.strip')}</label><button onclick="addRoute('${name}')" style="font-size:0.7rem;padding:0.2rem 0.5rem;background:var(--emerald);color:var(--bg);border:none;border-radius:4px;cursor:pointer;">${t('services.route_add')}</button></div><div class="override-error" id="routeError-${name}" style="display:none;font-size:0.7rem;"></div></div></div>`}
       </div>
-      ${deletable ? `<button class="btn-delete" onclick="deleteService('${name}')" title="Remove service">&times;</button>` : ''}
+      ${deletable ? `<button class="btn-delete" onclick="deleteService('${name}')" title="${t('services.remove_title')}">&times;</button>` : ''}
     </div>
   `}).join('');
 }
@@ -1744,21 +1797,24 @@ async function deleteService(name) {
   } catch (err) { /* next refresh will update */ }
 }
 
-// Initial load + polling
-refresh();
-setInterval(refresh, 2000);
+// Initial load + polling — translations load first so t() is populated.
+initI18n().then(() => {
+  applyTheme(localStorage.getItem('numa-theme') || 'auto');
+  refresh();
+  setInterval(refresh, 2000);
+});
 </script>
 
 <div style="text-align:center;padding:0.8rem 0.8rem 0.4rem;font-family:var(--font-mono);font-size:0.68rem;color:var(--text-dim);line-height:1.8;">
-  Config: <span id="footerConfig" style="user-select:all;color:var(--emerald);"></span>
-  · Data: <span id="footerData" style="user-select:all;color:var(--emerald);"></span>
-  · Logs: <span id="footerLogs" style="user-select:all;color:var(--emerald);"></span>
+  <span data-i18n="footer.config">Config:</span> <span id="footerConfig" style="user-select:all;color:var(--emerald);"></span>
+  · <span data-i18n="footer.data">Data:</span> <span id="footerData" style="user-select:all;color:var(--emerald);"></span>
+  · <span data-i18n="footer.logs">Logs:</span> <span id="footerLogs" style="user-select:all;color:var(--emerald);"></span>
   <br>
-  Upstream: <span id="footerUpstream" style="user-select:all;color:var(--emerald);"></span>
-  · DNSSEC: <span id="footerDnssec" style="color:var(--text-dim);">—</span>
-  · SRTT: <span id="footerSrtt" style="color:var(--text-dim);">—</span>
-  · Rebind: <span id="footerRebind" style="color:var(--text-dim);">—</span>
-  · <a href="https://github.com/razvandimescu/numa" target="_blank" rel="noopener" style="color:var(--amber);text-decoration:none;">GitHub</a>
+  <span data-i18n="footer.upstream">Upstream:</span> <span id="footerUpstream" style="user-select:all;color:var(--emerald);"></span>
+  · <span data-i18n="footer.dnssec">DNSSEC:</span> <span id="footerDnssec" style="color:var(--text-dim);">—</span>
+  · <span data-i18n="footer.srtt">SRTT:</span> <span id="footerSrtt" style="color:var(--text-dim);">—</span>
+  · <span data-i18n="footer.rebind">Rebind:</span> <span id="footerRebind" style="color:var(--text-dim);">—</span>
+  · <a href="https://github.com/razvandimescu/numa" target="_blank" rel="noopener" style="color:var(--amber);text-decoration:none;" data-i18n="footer.github">GitHub</a>
 </div>
 
 </body>
