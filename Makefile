@@ -1,4 +1,11 @@
-.PHONY: all build lint fmt check audit test coverage bench clean deploy blog release
+.PHONY: all build lint fmt check audit test coverage bench fuzz clean deploy blog release
+
+FUZZ_TOOLCHAIN := nightly-2025-12-01
+FUZZ_TARGET ?= packet_parse
+FUZZ_SECONDS ?= 60
+# cargo-fuzz defaults to its own build triple, which is musl when it arrives via
+# cargo-binstall. Pin it to the toolchain's host.
+FUZZ_TRIPLE := $(shell rustc +$(FUZZ_TOOLCHAIN) -vV | sed -n 's/^host: //p')
 
 all: lint build test
 
@@ -24,6 +31,16 @@ coverage:
 
 bench:
 	cargo bench
+
+# cargo-fuzz resolves its toolchain from the repo root, so fuzz/rust-toolchain.toml
+# never applies; pin it explicitly here. On macOS 26 ASan deadlocks pre-main, so
+# sanitizers are off locally — CI runs the real thing on Linux.
+fuzz:
+	mkdir -p fuzz/corpus/$(FUZZ_TARGET)
+	cargo +$(FUZZ_TOOLCHAIN) fuzz run --target $(FUZZ_TRIPLE) \
+		$(if $(filter Darwin,$(shell uname -s)),-s none,) \
+		$(FUZZ_TARGET) fuzz/corpus/$(FUZZ_TARGET) fuzz/seeds/$(FUZZ_TARGET) \
+		-- -max_total_time=$(FUZZ_SECONDS) -max_len=4096 -timeout=25
 
 blog:
 	@mkdir -p site/blog/posts

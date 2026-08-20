@@ -137,8 +137,9 @@ pub fn try_data_dir_advisory(err: &crate::Error, data_dir: &Path) -> Option<Stri
     if io_err.kind() != std::io::ErrorKind::PermissionDenied {
         return None;
     }
-    let o = "\x1b[1;38;2;192;98;58m";
-    let r = "\x1b[0m";
+    let palette = crate::palette::get();
+    let o = palette.brand_bold;
+    let r = palette.reset;
     Some(format!(
         "
 {o}Numa{r} — HTTPS proxy disabled: cannot write TLS CA to {}.

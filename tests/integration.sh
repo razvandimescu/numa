@@ -12,10 +12,26 @@ MODE="${1:-release}"
 BINARY="./target/$MODE/numa"
 PORT=5354
 API_PORT=5381
-CONFIG="/tmp/numa-integration-test.toml"
-LOG="/tmp/numa-integration-test.log"
+TMP="${TMPDIR:-/tmp}"; TMP="${TMP%/}"   # macOS TMPDIR carries a trailing slash
+CONFIG="$TMP/numa-integration-test.toml"
+LOG="$TMP/numa-integration-test.log"
 PASSED=0
 FAILED=0
+
+# Every suite reassigns NUMA_PID, so one trap covers them all. Without it an
+# early exit leaks the instance, and because each suite binds the same ports
+# the leftover answers every later run — with the *previous* suite's config, so
+# local-zone tests fail and look like code regressions.
+NUMA_PID=""
+cleanup() {
+    # `|| true` is load-bearing: set -e applies inside the trap, and the last
+    # suite already reaped its instance, so an unguarded kill fails and bash
+    # takes *that* as the script's exit status — turning every green run red.
+    if [ -n "$NUMA_PID" ]; then
+        kill "$NUMA_PID" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
 
 # Suite filter: empty runs all; comma list runs a subset.
 SUITES="${SUITES:-}"
@@ -314,7 +330,7 @@ sleep 3
 
 echo ""
 echo "=== Blocking disabled ==="
-ADS_RESULT=$($DIG ads.google.com A +short 2>/dev/null)
+ADS_RESULT=$($DIG ads.google.com A +short 2>/dev/null || true)
 if echo "$ADS_RESULT" | grep -q "0.0.0.0"; then
     check "ads.google.com NOT blocked (blocking disabled)" "not-0.0.0.0" "0.0.0.0"
 else
@@ -440,7 +456,7 @@ check "Wildcard multi-label (deep.sub.foo.test A)" \
     "$($DIG deep.sub.foo.test A +short)"
 
 # Wildcard NODATA must not leak upstream (RFC 4592 §2.2.1).
-WILD_AAAA=$($DIG x.foo.test AAAA)
+WILD_AAAA=$($DIG x.foo.test AAAA || true)
 check "Wildcard NODATA: status NOERROR" \
     "status: NOERROR" \
     "$WILD_AAAA"
@@ -450,7 +466,7 @@ check "Wildcard NODATA: ANSWER: 0 (no upstream leak)" \
 
 # Exact-name NODATA also stays local (RFC 1034 §4.3.2 — PR #207
 # tightens this; previously fell through to upstream).
-EXACT_AAAA=$($DIG test.local AAAA)
+EXACT_AAAA=$($DIG test.local AAAA || true)
 check "Exact NODATA: ANSWER: 0 (no upstream leak)" \
     "ANSWER: 0" \
     "$EXACT_AAAA"
@@ -503,7 +519,7 @@ curl -s -X DELETE http://127.0.0.1:$API_PORT/overrides/override.test > /dev/null
 sleep 1
 
 # After delete, should not resolve to override
-AFTER_DELETE=$($DIG override.test A +short 2>/dev/null)
+AFTER_DELETE=$($DIG override.test A +short 2>/dev/null || true)
 if echo "$AFTER_DELETE" | grep -q "192.168.1.100"; then
     check "Override deleted" "not-192.168.1.100" "$AFTER_DELETE"
 else
@@ -818,6 +834,8 @@ fi
 fi  # end Suite 6
 
 # ---- Suite 7: filter_aaaa (IPv4-only networks) ----
+# Upstream is DoH, not plain UDP: filter_aaaa is transport-agnostic, and a
+# UDP:53 upstream makes the whole suite unrunnable on networks that block it.
 if should_run_suite 7; then
 echo ""
 echo "╔══════════════════════════════════════════╗"
@@ -833,8 +851,7 @@ filter_aaaa = true
 
 [upstream]
 mode = "forward"
-address = "9.9.9.9"
-port = 53
+address = "https://9.9.9.9/dns-query"
 
 [cache]
 max_entries = 10000
@@ -887,7 +904,7 @@ check "Local [[zones]] AAAA bypasses filter" \
 # cloudflare.com's ipv6hint values sit under the 2606:4700 prefix —
 # checking that `26064700` is absent from the rdata hex is a precise,
 # upstream-stable signal that the TLV was stripped.
-HTTPS_OUT=$($DIG cloudflare.com type65 2>&1)
+HTTPS_OUT=$($DIG cloudflare.com type65 2>&1 || true)
 if echo "$HTTPS_OUT" | grep -qE "cloudflare\.com\..*IN[[:space:]]+TYPE65"; then
     HTTPS_HEX=$(echo "$HTTPS_OUT" | grep -A5 "IN[[:space:]]*TYPE65" | tr -d " \t\n")
     if echo "$HTTPS_HEX" | grep -qi "26064700"; then
@@ -914,8 +931,7 @@ api_port = 5381
 
 [upstream]
 mode = "forward"
-address = "9.9.9.9"
-port = 53
+address = "https://9.9.9.9/dns-query"
 
 [cache]
 max_entries = 10000

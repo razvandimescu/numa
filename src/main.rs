@@ -6,6 +6,7 @@ use numa::system_dns::{
 const NO_SYSTEM_DNS_FLAG: &str = "--no-system-dns";
 
 fn main() -> numa::Result<()> {
+    let palette = numa::palette::get();
     // Handle CLI subcommands
     let arg1 = std::env::args().nth(1).unwrap_or_default();
 
@@ -35,16 +36,22 @@ fn main() -> numa::Result<()> {
 
     match arg1.as_str() {
         "install" => {
-            eprintln!("\x1b[1;38;2;192;98;58mNuma\x1b[0m — installing\n");
+            eprintln!("{}Numa{} — installing\n", palette.brand_bold, palette.reset);
             return install_service(skip_system_dns).map_err(|e| e.into());
         }
         "uninstall" => {
-            eprintln!("\x1b[1;38;2;192;98;58mNuma\x1b[0m — uninstalling\n");
+            eprintln!(
+                "{}Numa{} — uninstalling\n",
+                palette.brand_bold, palette.reset
+            );
             return uninstall_service().map_err(|e| e.into());
         }
         "service" => {
             let sub = std::env::args().nth(2).unwrap_or_default();
-            eprintln!("\x1b[1;38;2;192;98;58mNuma\x1b[0m — service management\n");
+            eprintln!(
+                "{}Numa{} — service management\n",
+                palette.brand_bold, palette.reset
+            );
             return match sub.as_str() {
                 "start" => start_service(skip_system_dns).map_err(|e| e.into()),
                 "stop" => stop_service().map_err(|e| e.into()),
@@ -52,6 +59,17 @@ fn main() -> numa::Result<()> {
                 "status" => service_status().map_err(|e| e.into()),
                 _ => {
                     eprintln!("Usage: numa service <start|stop|restart|status>");
+                    Ok(())
+                }
+            };
+        }
+        "config" => {
+            let sub = std::env::args().nth(2).unwrap_or_default();
+            return match sub.as_str() {
+                "path" => numa::config_cli::print_config_path().map_err(|e| e.into()),
+                "edit" => numa::config_cli::edit_config().map_err(|e| e.into()),
+                _ => {
+                    eprintln!("Usage: numa config <path|edit>");
                     Ok(())
                 }
             };
@@ -82,8 +100,8 @@ fn main() -> numa::Result<()> {
                 .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
             let addr = std::net::SocketAddr::new(bind, port);
             eprintln!(
-                "\x1b[1;38;2;192;98;58mNuma\x1b[0m — ODoH relay on {}\n",
-                addr
+                "{}Numa{} — ODoH relay on {}\n",
+                palette.brand_bold, palette.reset, addr
             );
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -134,6 +152,8 @@ fn main() -> numa::Result<()> {
             eprintln!("  service stop    Uninstall the system service");
             eprintln!("  service restart Restart the service with updated binary");
             eprintln!("  service status  Check if the service is running");
+            eprintln!("  config path     Show the effective config file");
+            eprintln!("  config edit     Open the effective config file in an editor");
             eprintln!("  lan on|off      Enable/disable LAN service discovery (mDNS)");
             eprintln!("  block on|off    Enable/disable ad-blocking");
             eprintln!("  dnssec on|off   Enable/disable DNSSEC validation");
@@ -153,10 +173,13 @@ fn main() -> numa::Result<()> {
                 && !arg1.ends_with(".toml")
             {
                 eprintln!(
-                    "\x1b[1;38;2;192;98;58mNuma\x1b[0m — unknown command: \x1b[1m{}\x1b[0m\n",
-                    arg1
+                    "{}Numa{} — unknown command: {}{}{}\n",
+                    palette.brand_bold, palette.reset, palette.bold, arg1, palette.reset
                 );
-                eprintln!("Run \x1b[1mnuma help\x1b[0m for a list of commands.");
+                eprintln!(
+                    "Run {}numa help{} for a list of commands.",
+                    palette.bold, palette.reset
+                );
                 std::process::exit(1);
             }
         }
@@ -250,10 +273,15 @@ fn update_config_content(contents: &str, section: &str, key: &str, value: bool) 
 
 fn print_toggle_status(feature: &str, enabled: bool, path: &str) {
     let label = if enabled { "enabled" } else { "disabled" };
-    let color = if enabled { "32" } else { "33" };
+    let palette = numa::palette::get();
+    let color = if enabled {
+        palette.green
+    } else {
+        palette.warning
+    };
     eprintln!(
-        "\x1b[1;38;2;192;98;58mNuma\x1b[0m — {} \x1b[{}m{}\x1b[0m",
-        feature, color, label
+        "{}Numa{} — {} {}{}{}",
+        palette.brand_bold, palette.reset, feature, color, label, palette.reset
     );
     eprintln!("  Wrote {}", path);
     if enabled {

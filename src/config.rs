@@ -110,6 +110,11 @@ pub struct ServerConfig {
     /// CIDR allowlist applied at every DNS surface. Empty = disabled.
     #[serde(default)]
     pub allow_from: Vec<String>,
+    /// Shared secret guarding the HTTP control plane (dashboard + REST API)
+    /// for non-loopback peers. Overridden by `NUMA_API_TOKEN`. Loopback is
+    /// always allowed. Empty = none (only valid for a loopback `api_bind_addr`).
+    #[serde(default)]
+    pub api_token: Option<String>,
     /// DNS rebinding protection (#240). When true, strip private/special-use
     /// addresses (loopback, RFC 1918, link-local, ULA, `0.0.0.0/8`) from
     /// answers resolved via the upstream/recursive/cache paths, so a public
@@ -137,6 +142,7 @@ impl Default for ServerConfig {
             filter_aaaa: false,
             proxy_protocol: ProxyProtocolConfig::default(),
             allow_from: Vec::new(),
+            api_token: None,
             rebind_protect: false,
             rebind_allowlist: Vec::new(),
             rebind_private_ranges: Vec::new(),
@@ -546,10 +552,28 @@ pub struct BlockingConfig {
     pub enabled: bool,
     #[serde(default = "default_blocklists")]
     pub lists: Vec<String>,
-    #[serde(default = "default_refresh_hours")]
+    #[serde(
+        default = "default_refresh_hours",
+        deserialize_with = "nonzero_refresh_hours"
+    )]
     pub refresh_hours: u64,
     #[serde(default)]
     pub allowlist: Vec<String>,
+}
+
+/// A zero would spin the refresh loop with a zero-second sleep, re-downloading
+/// every list back to back; the config is the one place that can refuse it.
+fn nonzero_refresh_hours<'de, D>(deserializer: D) -> std::result::Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let hours = u64::deserialize(deserializer)?;
+    if hours == 0 {
+        return Err(serde::de::Error::custom(
+            "blocking.refresh_hours must be at least 1",
+        ));
+    }
+    Ok(hours)
 }
 
 impl Default for BlockingConfig {
@@ -567,8 +591,17 @@ fn default_blocking_enabled() -> bool {
     true
 }
 
-fn default_blocklists() -> Vec<String> {
-    vec!["https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/hosts/pro.txt".to_string()]
+/// HaGeZi discontinued the `hosts/` and `domains/` formats on 2026-08-01; the
+/// wildcard list is the maintained equivalent. Bare domains there rely on
+/// `find_in_set`'s parent-suffix match to cover subdomains, which is what the
+/// hosts format was already getting anyway. The repo is past jsDelivr's 150 MB
+/// package cap — `hosts/` already 403s there — so raw GitHub is the path least
+/// likely to be withdrawn next.
+pub(crate) fn default_blocklists() -> Vec<String> {
+    vec![
+        "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/pro-onlydomains.txt"
+            .to_string(),
+    ]
 }
 
 fn default_refresh_hours() -> u64 {
@@ -1035,6 +1068,15 @@ key_path = "/etc/numa/proxy/key.pem"
     fn lan_enabled_parses() {
         let config: Config = toml::from_str("[lan]\nenabled = true").unwrap();
         assert!(config.lan.enabled);
+    }
+
+    /// `refresh_hours = 0` would spin the refresh loop with a zero sleep.
+    #[test]
+    fn blocking_refresh_hours_zero_is_rejected() {
+        let err = toml::from_str::<Config>("[blocking]\nrefresh_hours = 0\n")
+            .err()
+            .expect("zero must be rejected");
+        assert!(err.to_string().contains("refresh_hours must be at least 1"));
     }
 
     #[test]

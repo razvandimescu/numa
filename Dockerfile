@@ -1,4 +1,4 @@
-FROM rust:1.96-alpine AS builder
+FROM rust:1.97-alpine AS builder
 RUN apk add --no-cache musl-dev cmake make perl
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
@@ -12,7 +12,7 @@ COPY numa.toml com.numa.dns.plist numa.service ./
 RUN touch src/main.rs src/lib.rs
 RUN cargo build --release
 
-FROM alpine:3.23
+FROM alpine:3.24
 COPY --from=builder /app/target/release/numa /usr/local/bin/numa
 RUN mkdir -p /root/.config/numa && printf '[server]\napi_bind_addr = "0.0.0.0"\n\n[proxy]\nenabled = true\nbind_addr = "0.0.0.0"\n' > /root/.config/numa/numa.toml
 EXPOSE 53/udp 80/tcp 443/tcp 853/tcp 5380/tcp

@@ -60,7 +60,65 @@ hardened *public recursive* resolver isn't turnkey yet (still needs response-rat
 with TC-slip, RFC 8482 ANY-refusal, DNS Cookies, and `allow_recursion` split from
 `allow_query`), so keep the ACL scoped until then.
 
+## Protecting the control plane (dashboard + REST API)
+
+dnsdist fronts the *resolver* (`:53`/DoH/DoT), not Numa's HTTP control plane — the dashboard
+and REST API on `api_port` (default 5380), which can rewrite blocklists and overrides. Treat
+it as an admin panel; locking it down and exposing the resolver are independent decisions.
+
+`api_bind_addr` defaults to `127.0.0.1`, and loopback is always allowed without a credential.
+For a remote node, keep it there and reach it over a private network (Tailscale/WireGuard) or
+an SSH tunnel.
+
+Every non-loopback client needs a token, and one always exists: if you set neither
+`api_token` nor `NUMA_API_TOKEN`, Numa mints one on first start, logs it once, and stores it
+owner-only as `api_token` in `data_dir`. No deployment is unauthenticated, and none fails to
+start over it — a resolver that won't run costs the host its DNS. To read one back:
+
+```sh
+cat /var/lib/numa/api_token                        # or data_dir/api_token
+docker compose exec numa cat /var/lib/numa/api_token
+```
+
+Pin your own instead when you want it in config management:
+
+```toml
+[server]
+api_bind_addr = "0.0.0.0"
+api_token = "…"               # `openssl rand -hex 32`; or pass NUMA_API_TOKEN at runtime
+```
+
+Browsers get an HTTP Basic prompt (any username, token as the password); scripts send
+`Authorization: Bearer <token>`. The token is drive-by protection, not encryption — the API
+is plain HTTP. `/health` stays open for probes.
+
+**Loopback is exempt from the token**, which makes one TLS-termination pattern a trap: a
+same-host reverse proxy (nginx/caddy) pointed at `127.0.0.1:5380` connects *from* loopback,
+so every request it forwards is treated as local and skips the token entirely. Don't do that.
+For HTTPS with the token still enforced, bind the API to the node's own interface and point
+the front proxy at *that* address, not loopback:
+
+```toml
+[server]
+api_bind_addr = "10.0.0.6"     # the node's LAN/tailnet IP, not 127.0.0.1
+api_token = "…"
+```
+
+Now the proxy's forwarded connection arrives as a non-loopback peer, so Numa checks the token
+(pass the client's `Authorization` header straight through). Alternatively, let the front
+proxy do the auth itself and keep the API on loopback.
+
+The same trap has a second door: a front end on the *same host* reaching the dashboard through
+Numa's `.numa` proxy on `:443` also arrives from loopback, and with PROXY protocol off (or a
+`LOCAL` command) Numa has no truer address to attribute the request to. Run the front end on a
+different host, or enable `[server.proxy_protocol]` so the real client IP survives the hop.
+
 ## Numa config
+
+Unlike Unbound's dedicated `proxy-protocol-port`, Numa has **no separate proxy port**.
+PROXY v2 is a *mode* on the existing `:53` listener, switched on by a non-empty `from`
+allowlist — the listener keeps serving plain DNS, but now requires a PROXY header from
+the trusted front-end.
 
 ```toml
 [server.proxy_protocol]

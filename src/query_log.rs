@@ -8,6 +8,10 @@ use crate::question::QueryType;
 use crate::stats::{QueryPath, Transport};
 
 pub struct QueryLogEntry {
+    /// Monotonic insertion sequence, stamped by `QueryLog::push` (1-based).
+    /// Lets a polling consumer dedup exactly and detect gaps/restarts without a
+    /// `since` filter. Set to 0 at construction; `push` overwrites it.
+    pub seq: u64,
     pub timestamp: SystemTime,
     pub src_addr: SocketAddr,
     pub domain: String,
@@ -23,6 +27,7 @@ pub struct QueryLogEntry {
 pub struct QueryLog {
     entries: VecDeque<QueryLogEntry>,
     capacity: usize,
+    next_seq: u64,
 }
 
 impl QueryLog {
@@ -30,10 +35,13 @@ impl QueryLog {
         QueryLog {
             entries: VecDeque::with_capacity(capacity),
             capacity,
+            next_seq: 0,
         }
     }
 
-    pub fn push(&mut self, entry: QueryLogEntry) {
+    pub fn push(&mut self, mut entry: QueryLogEntry) {
+        self.next_seq += 1;
+        entry.seq = self.next_seq;
         if self.entries.len() >= self.capacity {
             self.entries.pop_front();
         }
@@ -75,11 +83,6 @@ impl QueryLog {
                         return false;
                     }
                 }
-                if let Some(since) = filter.since {
-                    if e.timestamp < since {
-                        return false;
-                    }
-                }
                 true
             })
             .take(filter.limit.unwrap_or(50))
@@ -91,7 +94,6 @@ pub struct QueryLogFilter {
     pub domain: Option<String>,
     pub query_type: Option<QueryType>,
     pub path: Option<QueryPath>,
-    pub since: Option<SystemTime>,
     pub limit: Option<usize>,
 }
 
@@ -103,10 +105,16 @@ mod tests {
     fn heap_bytes_grows_with_entries() {
         let mut log = QueryLog::new(100);
         let empty = log.heap_bytes();
-        log.push(QueryLogEntry {
+        log.push(entry("example.com"));
+        assert!(log.heap_bytes() > empty);
+    }
+
+    fn entry(domain: &str) -> QueryLogEntry {
+        QueryLogEntry {
+            seq: 0,
             timestamp: SystemTime::now(),
             src_addr: "127.0.0.1:1234".parse().unwrap(),
-            domain: "example.com".into(),
+            domain: domain.into(),
             query_type: QueryType::A,
             path: QueryPath::Forwarded,
             transport: Transport::Udp,
@@ -114,7 +122,25 @@ mod tests {
             latency_us: 500,
             dnssec: DnssecStatus::Indeterminate,
             rebind_stripped: false,
-        });
-        assert!(log.heap_bytes() > empty);
+        }
+    }
+
+    #[test]
+    fn push_stamps_monotonic_seq() {
+        let mut log = QueryLog::new(2);
+        for d in ["a", "b", "c"] {
+            log.push(entry(d));
+        }
+        // Capacity 2: "a" was evicted, "b" and "c" remain with their stamped
+        // seqs (2, 3) intact — seq is stamped at push, never derived from
+        // position, so eviction does not renumber survivors.
+        let filter = QueryLogFilter {
+            domain: None,
+            query_type: None,
+            path: None,
+            limit: Some(10),
+        };
+        let seqs: Vec<u64> = log.query(&filter).into_iter().map(|e| e.seq).collect();
+        assert_eq!(seqs, vec![3, 2]); // query() returns newest-first
     }
 }

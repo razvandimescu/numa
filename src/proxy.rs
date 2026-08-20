@@ -8,6 +8,7 @@ use axum::response::IntoResponse;
 use axum::routing::{any, get};
 use axum::Router;
 use http_body_util::BodyExt;
+use hyper::header::HeaderValue;
 use hyper::StatusCode;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
@@ -180,6 +181,9 @@ async fn accept_loop_tls(
             let mut conn_doh_state = doh_state;
             conn_doh_state.remote_addr = Some(remote_addr);
 
+            // The TLS path serves via hyper directly, so `ConnectInfo` isn't
+            // populated as it is on the plain listener — inject the real peer
+            // (post-PROXY-protocol) so `proxy_handler` can stamp it.
             let app = Router::new()
                 .route(
                     "/dns-query",
@@ -188,7 +192,8 @@ async fn accept_loop_tls(
                         .with_state(conn_doh_state),
                 )
                 .fallback(any(proxy_handler))
-                .with_state(proxy_state);
+                .with_state(proxy_state)
+                .layer(axum::Extension(ConnectInfo(remote_addr)));
 
             let tls_stream = match acceptor.accept(stream).await {
                 Ok(s) => s,
@@ -335,7 +340,11 @@ pub fn extract_host(req: &Request) -> Option<String> {
         .map(|h| h.split(':').next().unwrap_or(h).to_lowercase())
 }
 
-async fn proxy_handler(State(state): State<ProxyState>, req: Request) -> axum::response::Response {
+async fn proxy_handler(
+    State(state): State<ProxyState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    mut req: Request,
+) -> axum::response::Response {
     let hostname = match extract_host(&req) {
         Some(h) => h,
         None => {
@@ -423,6 +432,15 @@ async fn proxy_handler(State(state): State<ProxyState>, req: Request) -> axum::r
     )
     .parse()
     .unwrap();
+
+    // Stamp the real client IP so the backend — and the API auth layer, which
+    // would otherwise see this loopback hop as exempt — sees the true peer.
+    // `insert` replaces any client-supplied value, so the header can't be smuggled.
+    req.headers_mut().insert(
+        crate::api_auth::CLIENT_IP_HEADER,
+        HeaderValue::from_str(&peer.ip().to_canonical().to_string())
+            .expect("an IP renders as a valid header value"),
+    );
 
     // Check for upgrade request (WebSocket, etc.)
     let is_upgrade = req.headers().get(hyper::header::UPGRADE).is_some();

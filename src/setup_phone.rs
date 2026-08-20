@@ -45,6 +45,7 @@ fn render_qr(url: &str) -> Result<String, String> {
 
 /// Run the `numa setup-phone` flow.
 pub async fn run() -> Result<(), String> {
+    let palette = crate::palette::get();
     let lan_ip = crate::lan::detect_lan_ip()
         .ok_or("could not detect LAN IP — are you connected to a network?")?;
 
@@ -60,8 +61,8 @@ pub async fn run() -> Result<(), String> {
     if !api_reachable {
         eprintln!();
         eprintln!(
-            "  \x1b[1;38;2;192;98;58mNuma\x1b[0m — mobile API is not reachable on port {}.",
-            SETUP_PORT
+            "  {}Numa{} — mobile API is not reachable on port {}.",
+            palette.brand_bold, palette.reset, SETUP_PORT
         );
         eprintln!();
         eprintln!("  The phone won't be able to download the profile until the mobile");
@@ -77,36 +78,45 @@ pub async fn run() -> Result<(), String> {
     let qr = render_qr(&url)?;
 
     eprintln!();
-    eprintln!("  \x1b[1;38;2;192;98;58mNuma Phone Setup\x1b[0m");
+    eprintln!("  {}Numa Phone Setup{}", palette.brand_bold, palette.reset);
     eprintln!();
-    eprintln!("  Profile URL: \x1b[36m{}\x1b[0m", url);
+    eprintln!("  Profile URL: {}{}{}", palette.cyan, url, palette.reset);
     eprintln!();
     for line in qr.lines() {
         eprintln!("  {}", line);
     }
     eprintln!();
-    eprintln!("  \x1b[1mOn your iPhone:\x1b[0m");
+    eprintln!("  {}On your iPhone:{}", palette.bold, palette.reset);
     eprintln!("    1. Open Camera, point at the QR code, tap the yellow banner");
     eprintln!("    2. Allow the download when Safari asks");
     eprintln!("    3. Open Settings — tap \"Profile Downloaded\" near the top");
     eprintln!("       (or: Settings → General → VPN & Device Management → Numa DNS)");
     eprintln!("    4. Tap Install (top right), enter passcode, Install again");
-    eprintln!("    5. \x1b[1mSettings → General → About → Certificate Trust Settings\x1b[0m");
+    eprintln!(
+        "    5. {}Settings → General → About → Certificate Trust Settings{}",
+        palette.bold, palette.reset
+    );
     eprintln!("       Toggle ON \"Numa Local CA\" — required for DoT to work");
     eprintln!();
     eprintln!(
-        "  \x1b[33mNote:\x1b[0m profile uses your laptop's current IP ({}). If your",
-        lan_ip
+        "  {}Note:{} profile uses your laptop's current IP ({}). If your",
+        palette.warning, palette.reset, lan_ip
     );
     eprintln!("  laptop changes networks, re-scan this QR — iOS will replace the");
     eprintln!("  existing profile automatically (fixed UUID).");
     eprintln!();
     eprintln!(
-        "  \x1b[90mThe profile is served by Numa's persistent mobile API on port {}.\x1b[0m",
-        SETUP_PORT
+        "  {}The profile is served by Numa's persistent mobile API on port {}.{}",
+        palette.dim, SETUP_PORT, palette.reset
     );
-    eprintln!("  \x1b[90mMake sure `numa` is running before scanning. If it's not,\x1b[0m");
-    eprintln!("  \x1b[90mstart it with `sudo numa install` or run it interactively.\x1b[0m");
+    eprintln!(
+        "  {}Make sure `numa` is running before scanning. If it's not,{}",
+        palette.dim, palette.reset
+    );
+    eprintln!(
+        "  {}start it with `sudo numa install` or run it interactively.{}",
+        palette.dim, palette.reset
+    );
     eprintln!();
 
     Ok(())

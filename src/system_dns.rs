@@ -111,8 +111,9 @@ pub fn try_port53_advisory(bind_addr: &str, err: &std::io::Error) -> Option<Stri
         ),
         _ => return None,
     };
-    let o = "\x1b[1;38;2;192;98;58m"; // bold orange
-    let r = "\x1b[0m";
+    let palette = crate::palette::get();
+    let o = palette.brand_bold;
+    let r = palette.reset;
     Some(format!(
         "
 {o}Numa{r} — cannot bind to {bind_addr}: {title}.
@@ -1349,6 +1350,10 @@ fn parse_launchctl_program(stdout: &[u8]) -> Result<String, String> {
 
 /// Show the service status.
 pub fn service_status() -> Result<(), String> {
+    match crate::config_cli::service_config_path() {
+        Ok(path) => eprintln!("  config: {path}"),
+        Err(error) => eprintln!("  config: <unavailable: {error}>"),
+    }
     #[cfg(target_os = "macos")]
     {
         service_status_macos()

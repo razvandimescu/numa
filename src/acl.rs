@@ -8,6 +8,27 @@ use std::net::IpAddr;
 use ipnet::IpNet;
 use log::warn;
 
+/// Private / special-use ranges that must never appear as a routable
+/// destination — the shared definition of "inside the perimeter", consumed by
+/// the rebind filter (stripped from answers) and the recursive resolver's bogon
+/// guard (refused as upstream nameserver addresses). Loopback is included: it's
+/// a prime rebind target (localhost dev servers, Docker/Electron dashboards) and
+/// a nameserver there points recursion back at our own host.
+pub(crate) const PRIVATE_RANGES: &[&str] = &[
+    "127.0.0.0/8",    // RFC 1122 loopback
+    "10.0.0.0/8",     // RFC 1918
+    "172.16.0.0/12",  // RFC 1918
+    "192.168.0.0/16", // RFC 1918
+    "169.254.0.0/16", // RFC 3927 link-local
+    "100.64.0.0/10",  // RFC 6598 CGNAT — also Tailscale's address space
+    "0.0.0.0/8",      // RFC 1122 "this host" — 0.0.0.0 routes to localhost on connect
+    "fc00::/7",       // RFC 4193 ULA
+    "64:ff9b::/96",   // RFC 6052 NAT64 — synthesized addrs route to embedded v4
+    "fe80::/10",      // RFC 4291 link-local
+    "::1/128",        // loopback
+    "::/128",         // unspecified
+];
+
 pub(crate) fn parse_cidr_list(entries: &[String], context: &str) -> Result<Vec<IpNet>, String> {
     let mut nets = Vec::with_capacity(entries.len());
     for entry in entries {

@@ -166,7 +166,10 @@ pub async fn resolve_query(
         stripped > 0
     };
 
-    shape_response_for_client(&mut response, &query, ctx.filter_aaaa);
+    let filter_aaaa = ctx
+        .client_policy
+        .effective_filter_aaaa(src_addr.ip(), ctx.filter_aaaa);
+    shape_response_for_client(&mut response, &query, filter_aaaa);
 
     let elapsed = start.elapsed();
 
@@ -187,7 +190,8 @@ pub async fn resolve_query(
         response.resources.len(),
     );
 
-    let resp_buffer = serialize_with_fallback(&mut response, &query, &qname, ctx.filter_aaaa)?;
+    let resp_buffer =
+        serialize_with_fallback(&mut response, &query, &qname, filter_aaaa, transport)?;
 
     // Record stats and query log
     {
@@ -199,6 +203,7 @@ pub async fn resolve_query(
     }
 
     ctx.query_log.lock().unwrap().push(QueryLogEntry {
+        seq: 0, // stamped by QueryLog::push
         timestamp: SystemTime::now(),
         src_addr,
         domain: qname,
@@ -214,27 +219,47 @@ pub async fn resolve_query(
     Ok((resp_buffer, path))
 }
 
-/// Buffer-full → TC bit, serializer-rejected → SERVFAIL (#142).
-/// TODO: TC is UDP-specific; once BytePacketBuffer supports >4096 bytes,
-/// skip truncation for TCP/TLS (which can carry up to 65535).
-fn serialize_with_fallback(
+/// RFC 6891 §6.2.3: a UDP reply must fit the requestor's advertised payload
+/// size, 512 when no OPT (RFC 1035 §4.2.1). Values below 512 are treated as 512.
+fn client_udp_budget(query: &DnsPacket, transport: Transport) -> usize {
+    const MIN: usize = 512;
+    match transport {
+        Transport::Udp => query
+            .edns
+            .as_ref()
+            .map_or(MIN, |e| usize::from(e.udp_payload_size).max(MIN)),
+        _ => usize::MAX,
+    }
+}
+
+/// Buffer-full or over the client's UDP budget → TC bit, serializer-rejected
+/// → SERVFAIL (#142). Public so the fuzz oracle (`serialize_budget`) drives it
+/// with adversarial responses.
+/// TODO: once BytePacketBuffer supports >4096 bytes, skip the overflow
+/// truncation for TCP/TLS (which can carry up to 65535).
+pub fn serialize_with_fallback(
     response: &mut DnsPacket,
     query: &DnsPacket,
     qname: &str,
     filter_aaaa: bool,
+    transport: Transport,
 ) -> crate::Result<BytePacketBuffer> {
+    let truncated = |rescode| -> crate::Result<BytePacketBuffer> {
+        debug!("response too large, setting TC bit for {}", qname);
+        let mut tc = DnsPacket::response_from(query, rescode);
+        tc.header.truncated_message = true;
+        shape_response_for_client(&mut tc, query, filter_aaaa);
+        let mut out = BytePacketBuffer::new();
+        tc.write(&mut out)?;
+        Ok(out)
+    };
     let mut buf = BytePacketBuffer::new();
     match response.write(&mut buf) {
-        Ok(()) => Ok(buf),
-        Err(_) if buf.overflowed() => {
-            debug!("response too large, setting TC bit for {}", qname);
-            let mut tc = DnsPacket::response_from(query, response.header.rescode);
-            tc.header.truncated_message = true;
-            shape_response_for_client(&mut tc, query, filter_aaaa);
-            let mut out = BytePacketBuffer::new();
-            tc.write(&mut out)?;
-            Ok(out)
+        Ok(()) if buf.pos() > client_udp_budget(query, transport) => {
+            truncated(response.header.rescode)
         }
+        Ok(()) => Ok(buf),
+        Err(_) if buf.overflowed() => truncated(response.header.rescode),
         Err(e) => {
             warn!("response serialize error for {}: {}", qname, e);
             // mirror to caller's rescode so the query log reflects SERVFAIL
@@ -263,8 +288,7 @@ async fn resolve_with_cname_chase(
     DnssecStatus,
     Option<crate::stats::UpstreamTransport>,
 ) {
-    let mut visited = HashSet::new();
-    visited.insert(qname.to_ascii_lowercase());
+    let mut visited = HashSet::from([qname.to_ascii_lowercase()]);
 
     let (mut resp, path, dnssec, mut ut) = match resolve_local(query, src_addr, qname, qtype, ctx) {
         Some((r, p, d)) => (r, p, d, None),
@@ -273,43 +297,46 @@ async fn resolve_with_cname_chase(
     let mut current_qname = qname.to_string();
 
     loop {
-        if resp.answers.iter().any(|r| r.query_type() == qtype)
-            || resp.header.rescode != ResultCode::NOERROR
-        {
+        if resp.has_answer_of_type(qtype) || resp.header.rescode != ResultCode::NOERROR {
             return (resp, path, dnssec, ut);
         }
-        let Some(target) = crate::recursive::extract_cname_target(&resp, &current_qname) else {
-            return (resp, path, dnssec, ut);
-        };
-        if visited.len() > crate::recursive::MAX_CNAME_DEPTH as usize
-            || !visited.insert(target.to_ascii_lowercase())
-        {
-            return (
-                DnsPacket::response_from(query, ResultCode::SERVFAIL),
-                path,
-                dnssec,
-                ut,
-            );
+        match crate::recursive::follow_cname_links(&resp, &current_qname, &mut visited) {
+            Err(()) => {
+                return (
+                    DnsPacket::response_from(query, ResultCode::SERVFAIL),
+                    path,
+                    dnssec,
+                    ut,
+                )
+            }
+            Ok(None) => return (resp, path, dnssec, ut),
+            Ok(Some(target)) => current_qname = target,
         }
 
-        let sub_query = DnsPacket::query(query.header.id, &target, qtype);
-        let mut sub_buf = BytePacketBuffer::new();
-        sub_query
-            .write(&mut sub_buf)
-            .expect("sub-query serialization");
+        let sub_query = DnsPacket::query(query.header.id, &current_qname, qtype);
         let (sub_resp, _, _, sub_ut) =
-            match resolve_local(&sub_query, src_addr, &target, qtype, ctx) {
+            match resolve_local(&sub_query, src_addr, &current_qname, qtype, ctx) {
                 Some((r, p, d)) => (r, p, d, None),
                 None => {
-                    resolve_remote(&sub_query, sub_buf.filled(), src_addr, &target, qtype, ctx)
-                        .await
+                    let mut sub_buf = BytePacketBuffer::new();
+                    sub_query
+                        .write(&mut sub_buf)
+                        .expect("sub-query serialization");
+                    resolve_remote(
+                        &sub_query,
+                        sub_buf.filled(),
+                        src_addr,
+                        &current_qname,
+                        qtype,
+                        ctx,
+                    )
+                    .await
                 }
             };
 
         resp.answers.extend(sub_resp.answers);
         resp.header.rescode = sub_resp.header.rescode;
         ut = ut.or(sub_ut);
-        current_qname = target;
     }
 }
 
@@ -323,6 +350,18 @@ fn resolve_local(
     qtype: QueryType,
     ctx: &ServerCtx,
 ) -> Option<(DnsPacket, QueryPath, DnssecStatus)> {
+    // RFC 8482: ANY is answered with a minimal HINFO, never resolved. Kills
+    // the amplification value of qtype 255 before any stage can act on it.
+    if qtype == QueryType::ANY {
+        let mut resp = DnsPacket::response_from(query, ResultCode::NOERROR);
+        resp.answers.push(DnsRecord::UNKNOWN {
+            domain: qname.to_string(),
+            qtype: 13, // HINFO
+            data: b"\x07RFC8482\x00".to_vec(),
+            ttl: 3600,
+        });
+        return Some((resp, QueryPath::Local, DnssecStatus::Indeterminate));
+    }
     if let Some(record) = ctx.overrides.read().unwrap().lookup(qname) {
         let mut resp = DnsPacket::response_from(query, ResultCode::NOERROR);
         resp.answers.push(record);
@@ -387,7 +426,11 @@ fn resolve_local(
         ));
         return Some((resp, QueryPath::Blocked, DnssecStatus::Indeterminate));
     }
-    if qtype == QueryType::AAAA && ctx.filter_aaaa {
+    if qtype == QueryType::AAAA
+        && ctx
+            .client_policy
+            .effective_filter_aaaa(src_addr.ip(), ctx.filter_aaaa)
+    {
         // RFC 2308 NODATA: NOERROR with empty answer section. Prevents
         // Happy Eyeballs clients from waiting on an AAAA they'll never use
         // on IPv4-only networks.
@@ -704,6 +747,13 @@ pub(crate) fn shape_response_for_client(
     let client_do = query.edns.as_ref().is_some_and(|e| e.do_bit);
 
     response.header.authoritative_answer = false;
+
+    // RFC 6840 §5.8: AD answers a question only DO or AD asks. Forward modes
+    // pass upstream's claim through and recursive sets its own, so without
+    // this both hand the verdict to clients that opted out of DNSSEC.
+    if !client_do && !query.header.authed_data {
+        response.header.authed_data = false;
+    }
 
     if !client_do {
         strip_dnssec_records(response);
@@ -1357,6 +1407,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn any_query_refused_with_rfc8482_hinfo() {
+        // Upstream would gladly answer ANY; numa must never ask it (RFC 8482).
+        let upstream_addr = crate::testutil::mock_upstream(crate::testutil::a_record_response(
+            "example.com",
+            Ipv4Addr::new(93, 184, 216, 34),
+            300,
+        ))
+        .await;
+
+        let ctx = crate::testutil::test_ctx().await;
+        *ctx.upstream_pool.lock().unwrap() =
+            UpstreamPool::new(vec![Upstream::Udp(upstream_addr)], vec![]);
+        let ctx = Arc::new(ctx);
+
+        let (resp, path) = resolve_in_test(&ctx, "example.com", QueryType::ANY).await;
+
+        assert_eq!(path, QueryPath::Local, "ANY must not reach an upstream");
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+        assert_eq!(resp.answers.len(), 1, "exactly one synthesized HINFO");
+        match &resp.answers[0] {
+            DnsRecord::UNKNOWN {
+                domain,
+                qtype: 13,
+                data,
+                ttl,
+            } => {
+                assert_eq!(domain, "example.com");
+                assert_eq!(
+                    data.as_slice(),
+                    b"\x07RFC8482\x00",
+                    "CPU=\"RFC8482\" OS=\"\""
+                );
+                assert!(*ttl >= 3600, "cacheable TTL so clients stop re-asking");
+            }
+            other => panic!("expected HINFO, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
     async fn forwarding_rule_overrides_special_use_domain() {
         let mut resp = DnsPacket::new();
         resp.header.response = true;
@@ -1503,7 +1592,7 @@ mod tests {
         );
         let mut domains = std::collections::HashSet::new();
         domains.insert("ads.tracker.test".to_string());
-        ctx.blocklist.write().unwrap().swap_domains(domains, vec![]);
+        ctx.blocklist.write().unwrap().swap_domains(domains);
         let ctx = Arc::new(ctx);
 
         let (resp, path) = resolve_in_test(&ctx, "ads.tracker.test", QueryType::A).await;
@@ -2005,7 +2094,7 @@ mod tests {
         let mut ctx = crate::testutil::test_ctx().await;
         let mut domains = std::collections::HashSet::new();
         domains.insert("ads.example.com".to_string());
-        ctx.blocklist.write().unwrap().swap_domains(domains, vec![]);
+        ctx.blocklist.write().unwrap().swap_domains(domains);
         ctx.client_policy = ctx_with_policy(&["192.168.1.50"], &[], &["ads.example.com"]);
         ctx.forwarding_rules = vec![ForwardingRule::new(
             "example.com".to_string(),
@@ -2034,7 +2123,7 @@ mod tests {
         let mut ctx = crate::testutil::test_ctx().await;
         let mut domains = std::collections::HashSet::new();
         domains.insert("ads.tracker.test".to_string());
-        ctx.blocklist.write().unwrap().swap_domains(domains, vec![]);
+        ctx.blocklist.write().unwrap().swap_domains(domains);
         ctx.client_policy = ctx_with_policy(&["127.0.0.0/8"], &["unrelated.test"], &[]);
         let ctx = Arc::new(ctx);
 
@@ -2042,12 +2131,87 @@ mod tests {
         assert_eq!(path, QueryPath::Blocked, "global blocklist still applies");
     }
 
+    fn ctx_with_aaaa_policy(
+        from: &[&str],
+        filter_aaaa: Option<bool>,
+    ) -> crate::client_policy::ClientPolicySet {
+        crate::client_policy::ClientPolicySet::from_configs(&[
+            crate::client_policy::ClientPolicyConfig {
+                from: from.iter().map(|s| s.to_string()).collect(),
+                filter_aaaa,
+                ..Default::default()
+            },
+        ])
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn pipeline_per_client_filter_aaaa_strips_for_matched_peer() {
+        // Global filter off, but the rule forces it on for this CIDR (#286).
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.filter_aaaa = false;
+        ctx.client_policy = ctx_with_aaaa_policy(&["10.210.0.0/16"], Some(true));
+        let ctx = Arc::new(ctx);
+
+        let src: SocketAddr = "10.210.0.5:5000".parse().unwrap();
+        let (resp, path) = resolve_from_src(&ctx, src, "example.com", QueryType::AAAA).await;
+        assert_eq!(path, QueryPath::Local);
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+        assert!(resp.answers.is_empty(), "matched peer AAAA must be NODATA");
+    }
+
+    /// AAAA answers a peer receives when an upstream returns one record, under
+    /// the given global flag and single `filter_aaaa` rule. 0 = stripped.
+    async fn aaaa_answers(global: bool, rule: &[&str], ovr: Option<bool>, peer: &str) -> usize {
+        let upstream_resp = crate::testutil::aaaa_record_response(
+            "example.com",
+            "2001:db8::1".parse().unwrap(),
+            300,
+        );
+        let upstream_addr = crate::testutil::mock_upstream(upstream_resp).await;
+
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.filter_aaaa = global;
+        ctx.client_policy = ctx_with_aaaa_policy(rule, ovr);
+        ctx.upstream_pool
+            .lock()
+            .unwrap()
+            .set_primary(vec![Upstream::Udp(upstream_addr)]);
+        let ctx = Arc::new(ctx);
+
+        let src: SocketAddr = peer.parse().unwrap();
+        resolve_from_src(&ctx, src, "example.com", QueryType::AAAA)
+            .await
+            .0
+            .answers
+            .len()
+    }
+
+    #[tokio::test]
+    async fn pipeline_per_client_filter_aaaa_spares_unmatched_peer() {
+        let n = aaaa_answers(false, &["10.210.0.0/16"], Some(true), "192.168.1.5:5000").await;
+        assert_eq!(n, 1, "unmatched peer keeps its AAAA");
+    }
+
+    #[tokio::test]
+    async fn pipeline_per_client_filter_aaaa_exempts_matched_peer_from_global() {
+        // Global filter on, rule carves out a v6-capable subnet (the inverse).
+        let n = aaaa_answers(
+            true,
+            &["2001:db8:cafe::/48"],
+            Some(false),
+            "[2001:db8:cafe::5]:5000",
+        )
+        .await;
+        assert_eq!(n, 1, "exempt peer keeps its AAAA");
+    }
+
     #[tokio::test]
     async fn pipeline_blocklist_sinkhole() {
         let ctx = crate::testutil::test_ctx().await;
         let mut domains = std::collections::HashSet::new();
         domains.insert("ads.tracker.test".to_string());
-        ctx.blocklist.write().unwrap().swap_domains(domains, vec![]);
+        ctx.blocklist.write().unwrap().swap_domains(domains);
         let ctx = Arc::new(ctx);
 
         let (resp, path) = resolve_in_test(&ctx, "ads.tracker.test", QueryType::A).await;
@@ -2084,7 +2248,7 @@ mod tests {
         let ctx = crate::testutil::test_ctx().await;
         let mut domains = std::collections::HashSet::new();
         domains.insert("ads.tracker.test".to_string());
-        ctx.blocklist.write().unwrap().swap_domains(domains, vec![]);
+        ctx.blocklist.write().unwrap().swap_domains(domains);
         let ctx = Arc::new(ctx);
 
         // Blocked A → 0.0.0.0 sinkhole.
@@ -2309,7 +2473,9 @@ mod tests {
             addr: Ipv4Addr::new(192, 0, 2, 1),
             ttl: 300,
         });
-        let buf = serialize_with_fallback(&mut response, &query, "example.com", false).unwrap();
+        let buf =
+            serialize_with_fallback(&mut response, &query, "example.com", false, Transport::Udp)
+                .unwrap();
         let parsed =
             DnsPacket::from_buffer(&mut BytePacketBuffer::from_bytes(buf.filled())).unwrap();
         assert_eq!(parsed.header.rescode, ResultCode::NOERROR);
@@ -2330,7 +2496,9 @@ mod tests {
                 ttl: 300,
             });
         }
-        let buf = serialize_with_fallback(&mut response, &query, "example.com", false).unwrap();
+        let buf =
+            serialize_with_fallback(&mut response, &query, "example.com", false, Transport::Udp)
+                .unwrap();
         let parsed =
             DnsPacket::from_buffer(&mut BytePacketBuffer::from_bytes(buf.filled())).unwrap();
         assert!(parsed.header.truncated_message, "TC bit must be set");
@@ -2348,7 +2516,9 @@ mod tests {
             addr: Ipv4Addr::new(192, 0, 2, 1),
             ttl: 300,
         });
-        let buf = serialize_with_fallback(&mut response, &query, "example.com", false).unwrap();
+        let buf =
+            serialize_with_fallback(&mut response, &query, "example.com", false, Transport::Udp)
+                .unwrap();
         let parsed =
             DnsPacket::from_buffer(&mut BytePacketBuffer::from_bytes(buf.filled())).unwrap();
         assert_eq!(parsed.header.rescode, ResultCode::SERVFAIL);
@@ -2361,6 +2531,77 @@ mod tests {
             ResultCode::SERVFAIL,
             "caller-visible rescode must reflect SERVFAIL for query logging"
         );
+    }
+
+    /// ~`bytes` of TXT-as-UNKNOWN answers (55 bytes each, uncompressed owner).
+    fn bulky_response(query: &DnsPacket, bytes: usize) -> DnsPacket {
+        let mut response = DnsPacket::response_from(query, ResultCode::NOERROR);
+        for _ in 0..bytes / 55 {
+            response.answers.push(DnsRecord::UNKNOWN {
+                domain: "example.com".into(),
+                qtype: QueryType::TXT.to_num(),
+                data: vec![0u8; 32],
+                ttl: 300,
+            });
+        }
+        response
+    }
+
+    fn serialize(query: &DnsPacket, bytes: usize, transport: Transport) -> DnsPacket {
+        let mut response = bulky_response(query, bytes);
+        let buf =
+            serialize_with_fallback(&mut response, query, "example.com", false, transport).unwrap();
+        assert!(buf.pos() <= client_udp_budget(query, transport));
+        DnsPacket::from_buffer(&mut BytePacketBuffer::from_bytes(buf.filled())).unwrap()
+    }
+
+    fn edns_query(payload: u16) -> DnsPacket {
+        let mut query = DnsPacket::query(0x1234, "example.com", QueryType::TXT);
+        query.edns = Some(crate::packet::EdnsOpt {
+            udp_payload_size: payload,
+            ..Default::default()
+        });
+        query
+    }
+
+    // #348: the reply path must honor the client's advertised UDP payload size.
+    #[test]
+    fn udp_reply_over_512_to_opt_less_client_is_truncated() {
+        let query = DnsPacket::query(0x1234, "example.com", QueryType::TXT);
+        let parsed = serialize(&query, 800, Transport::Udp);
+        assert!(parsed.header.truncated_message);
+        assert_eq!(parsed.header.rescode, ResultCode::NOERROR);
+        assert!(parsed.answers.is_empty());
+        assert!(parsed.edns.is_none(), "no OPT for an OPT-less client");
+    }
+
+    #[test]
+    fn udp_reply_within_advertised_payload_passes() {
+        let parsed = serialize(&edns_query(1232), 800, Transport::Udp);
+        assert!(!parsed.header.truncated_message);
+        assert_eq!(parsed.answers.len(), 800 / 55);
+    }
+
+    #[test]
+    fn udp_reply_over_advertised_payload_is_truncated_and_keeps_opt() {
+        let parsed = serialize(&edns_query(512), 800, Transport::Udp);
+        assert!(parsed.header.truncated_message);
+        assert!(parsed.answers.is_empty());
+        assert!(parsed.edns.is_some(), "EDNS client gets an OPT back");
+    }
+
+    #[test]
+    fn advertised_payload_below_512_is_treated_as_512() {
+        let parsed = serialize(&edns_query(100), 400, Transport::Udp);
+        assert!(!parsed.header.truncated_message);
+    }
+
+    #[test]
+    fn tcp_reply_ignores_udp_payload_budget() {
+        let query = DnsPacket::query(0x1234, "example.com", QueryType::TXT);
+        let parsed = serialize(&query, 3000, Transport::Tcp);
+        assert!(!parsed.header.truncated_message);
+        assert_eq!(parsed.answers.len(), 3000 / 55);
     }
 
     /// #188: cache entries synthesized internally (e.g. NS delegation snapshots)
@@ -2400,6 +2641,55 @@ mod tests {
         let mut v = vec![0, 15, 0, 2];
         v.extend_from_slice(&code.to_be_bytes());
         v
+    }
+
+    #[test]
+    fn shape_clears_ad_for_a_client_that_asked_for_neither_do_nor_ad() {
+        // RFC 6840 §5.8: AD belongs only in replies to requestors that set DO
+        // or AD. A client that opted out of DNSSEC has no way to act on it,
+        // and in forward mode the bit is upstream's claim rather than ours.
+        let query = DnsPacket::query(0x1, "example.com", QueryType::A);
+        let mut response = DnsPacket::response_from(&query, ResultCode::NOERROR);
+        response.header.authed_data = true;
+
+        shape_response_for_client(&mut response, &query, false);
+
+        assert!(
+            !response.header.authed_data,
+            "AD went to a client that asked for neither DO nor AD"
+        );
+    }
+
+    #[test]
+    fn shape_keeps_ad_for_a_client_that_set_only_the_ad_bit() {
+        // RFC 6840 §5.7, the query side of the rule: AD=1 with DO=0 is how a
+        // client asks for the verdict without wanting the RRSIGs that back it.
+        let mut query = DnsPacket::query(0x1, "example.com", QueryType::A);
+        query.header.authed_data = true;
+        let mut response = DnsPacket::response_from(&query, ResultCode::NOERROR);
+        response.header.authed_data = true;
+
+        shape_response_for_client(&mut response, &query, false);
+
+        assert!(
+            response.header.authed_data,
+            "a client that set AD asked for the verdict and must keep it"
+        );
+    }
+
+    #[test]
+    fn shape_keeps_ad_for_a_do_client() {
+        let mut query = DnsPacket::query(0x1, "example.com", QueryType::A);
+        query.edns = Some(crate::packet::EdnsOpt {
+            do_bit: true,
+            ..Default::default()
+        });
+        let mut response = DnsPacket::response_from(&query, ResultCode::NOERROR);
+        response.header.authed_data = true;
+
+        shape_response_for_client(&mut response, &query, false);
+
+        assert!(response.header.authed_data);
     }
 
     #[test]
@@ -2570,6 +2860,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pipeline_small_buffer_client_does_not_poison_the_cache() {
+        // Forwarding the client's 512-byte budget upstream while adding DO=1
+        // asks for DNSSEC records that cannot fit, so upstream answers TC=1
+        // with no records. Caching that wire hands the empty answer to every
+        // later client — TCP included, where truncation has no meaning and no
+        // retry escapes it — until the entry expires (issue #191).
+        let big = crate::testutil::noerror_response(vec![DnsRecord::UNKNOWN {
+            domain: "big.test".into(),
+            qtype: 99,
+            data: vec![0u8; 600], // over a 512-byte budget, under 4096
+            ttl: 300,
+        }]);
+        let (upstream_addr, _seen) = crate::testutil::recording_upstream(big).await;
+
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.forwarding_rules = vec![ForwardingRule::new(
+            "big.test".to_string(),
+            UpstreamPool::new(vec![Upstream::Udp(upstream_addr)], vec![]),
+        )];
+        let ctx = Arc::new(ctx);
+
+        let mut cramped = DnsPacket::query(0xBEEF, "big.test", QueryType::UNKNOWN(99));
+        cramped.edns = Some(crate::packet::EdnsOpt {
+            udp_payload_size: 512,
+            ..Default::default()
+        });
+        let _ = resolve_in_test_with_query(&ctx, cramped).await;
+
+        let mut roomy = DnsPacket::query(0xBEF0, "big.test", QueryType::UNKNOWN(99));
+        roomy.edns = Some(crate::packet::EdnsOpt::default());
+        let (resp, path) = resolve_in_test_with_query(&ctx, roomy).await;
+
+        assert!(
+            !resp.header.truncated_message,
+            "{path:?} client with a 1232-byte budget got a truncated answer it never asked for"
+        );
+        assert_eq!(
+            resp.answers.len(),
+            1,
+            "the full answer must survive a small-buffer client touching the same name"
+        );
+    }
+
+    #[tokio::test]
     async fn handle_query_reply_leaves_provided_socket() {
         let sock_a = Arc::new(UdpListener::bind("127.0.0.1:0").await.unwrap());
         let sock_b = Arc::new(UdpListener::bind("127.0.0.1:0").await.unwrap());
@@ -2719,6 +3053,115 @@ mod tests {
         );
         assert!(
             matches!(&resp.answers[1], DnsRecord::A { addr, .. } if *addr == Ipv4Addr::new(93, 184, 216, 34))
+        );
+    }
+
+    async fn ctx_with_upstream(upstream: SocketAddr) -> Arc<ServerCtx> {
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.upstream_pool = Mutex::new(crate::forward::UpstreamPool::new(
+            vec![crate::forward::Upstream::Udp(upstream)],
+            vec![],
+        ));
+        Arc::new(ctx)
+    }
+
+    /// Amazon-style NODATA behind a multi-link CNAME chain: the upstream
+    /// returns both links in one response, and the sub-query for the
+    /// intermediate name re-answers the second link. The chase must not
+    /// append it twice — Chrome rejects duplicate CNAMEs as malformed
+    /// (eu.primevideo.com regression).
+    #[tokio::test]
+    async fn cname_chase_multi_link_response_has_no_duplicate_links() {
+        let chain = crate::testutil::noerror_response(vec![
+            crate::testutil::cname_record("eu.video.test", "tp.video.test", 300),
+            crate::testutil::cname_record("tp.video.test", "cdn.example.net", 300),
+        ]);
+        let tail = crate::testutil::noerror_response(vec![crate::testutil::cname_record(
+            "tp.video.test",
+            "cdn.example.net",
+            300,
+        )]);
+        let nodata = crate::testutil::noerror_response(vec![]);
+
+        let upstream = crate::testutil::mock_upstream_by_qname(vec![
+            ("eu.video.test", chain),
+            ("tp.video.test", tail),
+            ("cdn.example.net", nodata),
+        ])
+        .await;
+        let ctx = ctx_with_upstream(upstream).await;
+
+        let (resp, _) = resolve_in_test(&ctx, "eu.video.test", QueryType::AAAA).await;
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+        assert_eq!(
+            resp.answers.len(),
+            2,
+            "chain must appear exactly once: {:?}",
+            resp.answers
+        );
+    }
+
+    /// HTTPS (type 65) answers parse as `DnsRecord::UNKNOWN`, so the chase's
+    /// termination check must compare wire type numbers — `UNKNOWN(65)` never
+    /// `==` `QueryType::HTTPS`, which kept the chase running past a complete
+    /// answer and re-appended the terminal record (eu.primevideo.com
+    /// regression, second half).
+    #[tokio::test]
+    async fn cname_chase_terminates_on_unknown_variant_record_type() {
+        let https_terminal = DnsRecord::UNKNOWN {
+            domain: "cdn.example.net".to_string(),
+            qtype: 65,
+            data: vec![0, 1, 0, 0],
+            ttl: 300,
+        };
+        let chain = crate::testutil::noerror_response(vec![
+            crate::testutil::cname_record("eu.video.test", "tp.video.test", 300),
+            crate::testutil::cname_record("tp.video.test", "cdn.example.net", 300),
+            https_terminal.clone(),
+        ]);
+        let tail = crate::testutil::noerror_response(vec![https_terminal]);
+
+        let upstream = crate::testutil::mock_upstream_by_qname(vec![
+            ("eu.video.test", chain),
+            ("cdn.example.net", tail),
+        ])
+        .await;
+        let ctx = ctx_with_upstream(upstream).await;
+
+        let (resp, _) = resolve_in_test(&ctx, "eu.video.test", QueryType::HTTPS).await;
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+        assert_eq!(
+            resp.answers.len(),
+            3,
+            "complete answer must not be chased: {:?}",
+            resp.answers
+        );
+    }
+
+    // ---- DO bit upstream (issue #191) ----
+
+    #[tokio::test]
+    async fn refresh_entry_sends_do_bit_upstream() {
+        let (addr, mut seen) = crate::testutil::recording_upstream(
+            crate::testutil::a_record_response("example.com", Ipv4Addr::new(93, 184, 216, 34), 300),
+        )
+        .await;
+        let ctx = crate::testutil::test_ctx().await;
+        *ctx.upstream_pool.lock().unwrap() =
+            crate::forward::UpstreamPool::new(vec![crate::forward::Upstream::Udp(addr)], vec![]);
+
+        refresh_entry(&ctx, "example.com", QueryType::A).await;
+
+        let sent = tokio::time::timeout(std::time::Duration::from_secs(1), seen.recv())
+            .await
+            .expect("stub upstream saw the refresh query within 1s")
+            .unwrap();
+        let mut buf = BytePacketBuffer::from_bytes(&sent);
+        let outbound = DnsPacket::from_buffer(&mut buf).unwrap();
+        assert!(
+            outbound.edns.is_some_and(|e| e.do_bit),
+            "cache refresh must query upstream with DO=1, or the first background \
+             refresh silently downgrades an RRSIG-populated entry (issue #191)"
         );
     }
 }

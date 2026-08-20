@@ -1,0 +1,60 @@
+[package]
+name = "numa-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.numa]
+path = ".."
+
+[[bin]]
+name = "packet_parse"
+path = "fuzz_targets/packet_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "packet_roundtrip"
+path = "fuzz_targets/packet_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "svcb_strip"
+path = "fuzz_targets/svcb_strip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dnssec_validate"
+path = "fuzz_targets/dnssec_validate.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wire_patch"
+path = "fuzz_targets/wire_patch.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "serialize_budget"
+path = "fuzz_targets/serialize_budget.rs"
+test = false
+doc = false
+bench = false
+
+# Keep fuzzers out of the workspace so they don't perturb the main build graph.
+[workspace]
+members = ["."]

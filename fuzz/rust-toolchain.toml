@@ -1,0 +1,6 @@
+# cargo-fuzz needs nightly; nightly-2025-12-01 is the last build known-good for
+# these targets. rustup only reads this when the working directory is fuzz/,
+# and cargo-fuzz runs from the repo root — use `make fuzz`, or invoke it as
+# `cargo +nightly-2025-12-01 fuzz run <target>`.
+[toolchain]
+channel = "nightly-2025-12-01"

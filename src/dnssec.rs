@@ -554,9 +554,17 @@ async fn fetch_dnskeys(
 
     trace!("dnssec: fetch_dnskeys('{}') cache miss — resolving", zone);
     stats.lock().unwrap().dnskey_fetches += 1;
-    if let Ok(pkt) =
-        crate::recursive::resolve_iterative(zone, QueryType::DNSKEY, cache, root_hints, srtt, 0, 0)
-            .await
+    if let Ok(pkt) = crate::recursive::resolve_iterative(
+        zone,
+        QueryType::DNSKEY,
+        cache,
+        root_hints,
+        srtt,
+        0,
+        0,
+        &std::sync::atomic::AtomicUsize::new(0),
+    )
+    .await
     {
         cache.write().unwrap().insert(zone, QueryType::DNSKEY, &pkt);
         return pkt.answers;
@@ -580,9 +588,17 @@ async fn fetch_ds(
     }
 
     stats.lock().unwrap().ds_fetches += 1;
-    if let Ok(pkt) =
-        crate::recursive::resolve_iterative(child, QueryType::DS, cache, root_hints, srtt, 0, 0)
-            .await
+    if let Ok(pkt) = crate::recursive::resolve_iterative(
+        child,
+        QueryType::DS,
+        cache,
+        root_hints,
+        srtt,
+        0,
+        0,
+        &std::sync::atomic::AtomicUsize::new(0),
+    )
+    .await
     {
         cache.write().unwrap().insert(child, QueryType::DS, &pkt);
         return pkt.answers;
@@ -796,19 +812,7 @@ pub fn name_to_wire(name: &str) -> Vec<u8> {
     buf.write_qname(name)
         .expect("name_to_wire: input must parse as a valid DNS name");
     let mut wire = buf.filled().to_vec();
-
-    let mut i = 0;
-    while i < wire.len() {
-        let label_len = wire[i] as usize;
-        if label_len == 0 {
-            break;
-        }
-        i += 1;
-        let end = i + label_len;
-        wire[i..end].make_ascii_lowercase();
-        i = end;
-    }
-
+    downcase_wire_name(&mut wire, 0);
     wire
 }
 
@@ -970,8 +974,45 @@ fn record_rdata_canonical(record: &DnsRecord) -> Vec<u8> {
             rdata.extend(&minimum.to_be_bytes());
             rdata
         }
-        DnsRecord::UNKNOWN { data, .. } => data.clone(),
+        DnsRecord::UNKNOWN { data, .. } => canonical_unknown_rdata(record.query_type(), data),
         DnsRecord::RRSIG { .. } => Vec::new(),
+    }
+}
+
+// RFC 4034 §6.2: SRV and NAPTR embed a domain name that is downcased in
+// canonical form; every other type carried as UNKNOWN (TXT, HTTPS, SVCB, LOC)
+// signs its rdata verbatim.
+fn canonical_unknown_rdata(qtype: QueryType, data: &[u8]) -> Vec<u8> {
+    let name_offset = match qtype {
+        QueryType::SRV => Some(6), // priority + weight + port
+        QueryType::NAPTR => naptr_replacement_offset(data),
+        _ => None,
+    };
+    let mut rdata = data.to_vec();
+    if let Some(off) = name_offset {
+        downcase_wire_name(&mut rdata, off);
+    }
+    rdata
+}
+
+// order + preference (4 bytes), then three character-strings (flags, services,
+// regexp), then the replacement name.
+fn naptr_replacement_offset(data: &[u8]) -> Option<usize> {
+    let mut off = 4usize;
+    for _ in 0..3 {
+        off += 1 + *data.get(off)? as usize;
+    }
+    Some(off)
+}
+
+fn downcase_wire_name(buf: &mut [u8], mut off: usize) {
+    while let Some(&len) = buf.get(off) {
+        if len == 0 || len > 63 {
+            return; // root, compression pointer, or malformed — stop
+        }
+        let end = (off + 1 + len as usize).min(buf.len());
+        buf[off + 1..end].make_ascii_lowercase();
+        off = end;
     }
 }
 
@@ -2128,5 +2169,120 @@ mod tests {
             DnssecStatus::Secure,
             "child set signed by a KSK the DS does not commit to must not validate"
         );
+    }
+
+    // Sign `record` in zone "test" (DNSKEY pre-seeded in cache), corrupt the
+    // signature, and validate the full response.
+    async fn tampered_rrset_status(record: DnsRecord) -> DnssecStatus {
+        let (cache, srtt, _stats) = empty_ctx();
+        let zsk = mk_signer(256);
+        cache.write().unwrap().insert(
+            "test",
+            QueryType::DNSKEY,
+            &mk_pkt(vec![mk_dnskey("test", &zsk)]),
+        );
+
+        let mut rrsig = mk_rrsig(&zsk, "test", record.query_type(), &[&record]);
+        if let DnsRecord::RRSIG { signature, .. } = &mut rrsig {
+            signature[0] ^= 0xFF;
+        }
+
+        let response = mk_pkt(vec![record, rrsig]);
+        validate_response(&response, &cache, &[], &srtt).await.0
+    }
+
+    // Issue #324: TXT has no DnsRecord variant, so group_rrsets keyed the rrset
+    // UNKNOWN(16) while matching_rrsigs_for compares against from_num(16) = TXT.
+    // No RRSIG ever matched, the rrset was skipped, and a tampered answer
+    // fell through to Secure.
+    #[tokio::test]
+    async fn issue_324_tampered_txt_must_not_report_secure() {
+        let txt = mk_unknown("www.test", QueryType::TXT, b"\x10v=spf1 -all TAMPERED");
+        assert_eq!(
+            tampered_rrset_status(txt).await,
+            DnssecStatus::Bogus,
+            "TXT rrset with an unverifiable signature must not report Secure"
+        );
+    }
+
+    // Control: the identical tamper on a type WITH a DnsRecord variant is caught.
+    #[tokio::test]
+    async fn issue_324_control_tampered_a_is_bogus() {
+        let a = DnsRecord::A {
+            domain: "www.test".into(),
+            addr: "6.6.6.6".parse().unwrap(),
+            ttl: 3600,
+        };
+        assert_eq!(tampered_rrset_status(a).await, DnssecStatus::Bogus);
+    }
+
+    fn mk_unknown(domain: &str, qtype: QueryType, data: &[u8]) -> DnsRecord {
+        DnsRecord::UNKNOWN {
+            domain: domain.into(),
+            qtype: qtype.to_num(),
+            data: data.to_vec(),
+            ttl: 3600,
+        }
+    }
+
+    #[test]
+    fn genuine_txt_and_https_signatures_verify() {
+        let zsk = mk_signer(256);
+        let dk = mk_dnskey("test", &zsk);
+
+        for (qtype, rdata) in [
+            (QueryType::TXT, &b"\x0bv=spf1 -all"[..]),
+            // HTTPS: priority=1, target=root, alpn="h2"
+            (QueryType::HTTPS, &b"\x00\x01\x00\x00\x01\x00\x03\x02h2"[..]),
+        ] {
+            let rr = mk_unknown("www.test", qtype, rdata);
+            let refs = [&rr];
+            let rrsig = mk_rrsig(&zsk, "test", qtype, &refs);
+            assert!(
+                rrsig_verified_by(&rrsig, &dk, &refs),
+                "genuine {qtype:?} signature must verify"
+            );
+
+            let tampered = mk_unknown("www.test", qtype, b"\x08TAMPERED");
+            assert!(
+                !rrsig_verified_by(&rrsig, &dk, &[&tampered]),
+                "tampered {qtype:?} rdata must not verify"
+            );
+        }
+    }
+
+    // RFC 4034 §6.2: the signer canonicalizes the SRV target to lowercase, so a
+    // response carrying the target with its original casing must still verify.
+    #[test]
+    fn srv_with_uppercase_target_verifies_against_canonical_signature() {
+        let zsk = mk_signer(256);
+        let dk = mk_dnskey("test", &zsk);
+
+        let srv_rdata = |target_case: &[u8]| {
+            let mut d = vec![0, 10, 0, 5, 0x13, 0xc4]; // prio=10 weight=5 port=5060
+            d.push(3);
+            d.extend(target_case);
+            d.extend(b"\x04test\x00");
+            d
+        };
+        let canonical = mk_unknown("_sip._udp.test", QueryType::SRV, &srv_rdata(b"sip"));
+        let as_served = mk_unknown("_sip._udp.test", QueryType::SRV, &srv_rdata(b"SIP"));
+
+        let rrsig = mk_rrsig(&zsk, "test", QueryType::SRV, &[&canonical]);
+        assert!(rrsig_verified_by(&rrsig, &dk, &[&as_served]));
+    }
+
+    #[test]
+    fn naptr_canonical_downcases_only_the_replacement_name() {
+        // order=100 pref=10, flags="S", services="SIP+D2U", regexp="", replacement=Sip.Test.
+        let mut rdata = vec![0, 100, 0, 10];
+        rdata.extend(b"\x01S\x07SIP+D2U\x00");
+        rdata.extend(b"\x03Sip\x04Test\x00");
+
+        let canon = canonical_unknown_rdata(QueryType::NAPTR, &rdata);
+        let mut want = vec![0, 100, 0, 10];
+        want.extend(b"\x01S\x07SIP+D2U\x00"); // character-strings untouched
+        want.extend(b"\x03sip\x04test\x00");
+        assert_eq!(canon, want);
     }
 }

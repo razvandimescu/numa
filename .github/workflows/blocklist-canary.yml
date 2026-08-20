@@ -1,0 +1,22 @@
+name: Blocklist canary
+
+# HaGeZi discontinued the hosts/ format on 2026-08-01 and the shipped default
+# 404'd for days without anyone noticing (issue #336). This fetches the URL
+# actually compiled into the binary and parses it with Numa's own parser, so a
+# discontinued format or a changed layout fails here instead of in the field.
+
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # No name filter: a filter that matches nothing exits 0, which would make
+      # this canary silently pass forever if the test were renamed.
+      - run: cargo test --lib -- --ignored --nocapture

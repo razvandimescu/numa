@@ -419,7 +419,7 @@ mod tests {
         // network round-trip succeeding.
         let cache = OdohConfigCache::new(
             "odoh-target.invalid".to_string(),
-            reqwest::Client::builder()
+            crate::forward::numa_tls_builder()
                 .timeout(Duration::from_millis(200))
                 .build()
                 .unwrap(),

@@ -1,0 +1,96 @@
+name: Fuzz
+
+# Time-bounded libFuzzer runs over the hand-rolled wire parser. PRs that touch
+# the parser get a short smoke run; a weekly cron does a deeper pass. Linux only
+# — cargo-fuzz deadlocks pre-main under ASan on recent macOS.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/packet.rs'
+      - 'src/header.rs'
+      - 'src/question.rs'
+      - 'src/record.rs'
+      - 'src/svcb.rs'
+      - 'src/wire.rs'
+      - 'src/buffer.rs'
+      - 'src/dnssec.rs'
+      - 'src/ctx.rs'
+      - 'fuzz/**'
+      - '.github/workflows/fuzz.yml'
+  schedule:
+    - cron: '0 6 * * 1'   # Mondays 06:00 UTC
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: 'Seconds to fuzz each target'
+        default: '120'
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    # Backstop: -max_total_time only applies between runs, so a single hanging
+    # input would otherwise sit until the 6-hour default.
+    timeout-minutes: 30
+    env:
+      FUZZ_SECONDS: ${{ inputs.seconds || (github.event_name == 'schedule' && '300' || '60') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [packet_parse, packet_roundtrip, svcb_strip, dnssec_validate, wire_patch, serialize_budget]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2025-12-01
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      # cargo-fuzz targets its *own* build triple by default. install-action has
+      # no cargo-fuzz recipe, so it falls back to cargo-binstall, which serves a
+      # musl binary — and the toolchain only carries gnu std, so every build died
+      # with E0463. Pin the target to the toolchain's host instead.
+      - name: Resolve host triple
+        run: |
+          echo "FUZZ_TRIPLE=$(rustc -vV | sed -n 's/^host: //p')" >> "$GITHUB_ENV"
+      # Split restore/save rather than actions/cache: its post-step only fires
+      # on success, and the run that crashes is the one whose corpus matters.
+      - name: Restore corpus
+        uses: actions/cache/restore@v6
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+      - name: Fuzz ${{ matrix.target }}
+        # fuzz/seeds is a committed, read-only corpus so a cold cache still
+        # starts from valid DNS messages; findings accumulate in fuzz/corpus.
+        run: |
+          mkdir -p fuzz/corpus/${{ matrix.target }}
+          cargo fuzz run --target "$FUZZ_TRIPLE" ${{ matrix.target }} \
+            fuzz/corpus/${{ matrix.target }} fuzz/seeds/${{ matrix.target }} \
+            -- -max_total_time=${FUZZ_SECONDS} -max_len=4096 -timeout=25
+      - name: Minimize corpus
+        # Only on the cron: cmin costs a full re-run of the corpus, and without
+        # it the cached corpus grows until it evicts every other cache entry.
+        if: github.event_name == 'schedule'
+        run: cargo fuzz cmin --target "$FUZZ_TRIPLE" ${{ matrix.target }} -- -timeout=25
+      - name: Save corpus
+        if: always()
+        uses: actions/cache/save@v6
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+      - name: Upload crash on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}
+          if-no-files-found: ignore

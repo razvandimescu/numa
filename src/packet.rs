@@ -3,9 +3,20 @@ use crate::header::DnsHeader;
 use crate::question::{DnsQuestion, QueryType};
 use crate::record::DnsRecord;
 use crate::Result;
+use rand_core::TryRngCore;
 
 /// Recommended EDNS0 UDP payload size (DNS Flag Day 2020) — avoids IP fragmentation.
 pub const DEFAULT_EDNS_PAYLOAD: u16 = 1232;
+
+/// A random transaction ID for an outbound query. Off-path spoofing (DNSpooq,
+/// SAD DNS) hinges on predicting it, so it must be unguessable — never a counter.
+pub(crate) fn random_id() -> u16 {
+    let mut buf = [0u8; 2];
+    rand_core::OsRng
+        .try_fill_bytes(&mut buf)
+        .expect("OS RNG unavailable");
+    u16::from_be_bytes(buf)
+}
 
 /// EDNS0 OPT pseudo-record (RFC 6891)
 #[derive(Clone, Debug)]
@@ -93,6 +104,14 @@ impl DnsPacket {
         self.resources.iter_mut().for_each(&mut f);
     }
 
+    /// Compares wire numbers: types without a DnsRecord variant (HTTPS,
+    /// TXT, …) parse as UNKNOWN(n), which never `==` a named QueryType.
+    pub fn has_answer_of_type(&self, qtype: crate::question::QueryType) -> bool {
+        self.answers
+            .iter()
+            .any(|r| r.query_type().to_num() == qtype.to_num())
+    }
+
     pub fn response_from(query: &DnsPacket, rescode: crate::header::ResultCode) -> DnsPacket {
         let mut resp = DnsPacket::new();
         resp.header.id = query.header.id;
@@ -123,24 +142,21 @@ impl DnsPacket {
             result.authorities.push(rec);
         }
         for _ in 0..result.header.resource_entries {
-            // Peek at type field to detect OPT pseudo-records.
-            // OPT name is always root (0x00), so name byte + type field starts at pos+1.
+            // Detect OPT pseudo-records. RFC 6891 §6.1.2 fixes the owner name at
+            // root, but not at a literal 0x00 — a peer can reach root through a
+            // compression pointer, so read the name rather than sniffing a byte.
+            // On a miss we rewind and take the generic path.
             let peek_pos = buffer.pos();
-            let name_byte = buffer.get(peek_pos)?;
-            let is_opt = if name_byte == 0 {
-                // Root name (single zero byte) — peek at type
-                let type_hi = buffer.get(peek_pos + 1)?;
-                let type_lo = buffer.get(peek_pos + 2)?;
-                u16::from_be_bytes([type_hi, type_lo]) == 41
-            } else {
-                false
-            };
+            let mut owner = String::new();
+            let is_opt = buffer.read_qname(&mut owner).is_ok()
+                && owner.is_empty()
+                && buffer
+                    .read_u16()
+                    .is_ok_and(|t| t == QueryType::OPT.to_num());
 
             if is_opt {
-                // Parse OPT manually to capture the class field (= UDP payload size)
-                buffer.step(1)?; // skip root name (0x00)
-                let _ = buffer.read_u16()?; // type (41)
-                let udp_payload_size = buffer.read_u16()?; // class = UDP payload size
+                // Positioned past name + type; the class field is the UDP payload size.
+                let udp_payload_size = buffer.read_u16()?;
                 let ttl_field = buffer.read_u32()?; // packed flags
                 let rdlength = buffer.read_u16()?;
                 let options = buffer.get_range(buffer.pos(), rdlength as usize)?.to_vec();
@@ -154,6 +170,7 @@ impl DnsPacket {
                     options,
                 });
             } else {
+                buffer.seek(peek_pos)?;
                 let rec = DnsRecord::read(buffer)?;
                 result.resources.push(rec);
             }
@@ -270,6 +287,39 @@ mod tests {
         let edns = parsed.edns.expect("EDNS should be present");
         assert_eq!(edns.udp_payload_size, DEFAULT_EDNS_PAYLOAD);
         assert!(!edns.do_bit);
+    }
+
+    #[test]
+    fn opt_owner_name_may_be_a_compression_pointer() {
+        // Found by fuzzing: sniffing for a literal 0x00 owner name missed an OPT
+        // reached through a pointer, so EDNS (payload size, DO bit) was silently
+        // dropped and the record fell through to the generic reader.
+        let mut src = BytePacketBuffer::new();
+        src.write_u16(0x1234).unwrap();
+        src.write_u16(0x0120).unwrap();
+        for count in [1u16, 0, 0, 1] {
+            src.write_u16(count).unwrap();
+        }
+        src.write_u8(1).unwrap();
+        src.write_u8(b'a').unwrap();
+        let root_at = src.pos(); // the question's terminating root label
+        src.write_u8(0).unwrap();
+        src.write_u16(QueryType::A.to_num()).unwrap();
+        src.write_u16(1).unwrap();
+
+        src.write_u16(0xC000 | root_at as u16).unwrap();
+        src.write_u16(QueryType::OPT.to_num()).unwrap();
+        src.write_u16(1232).unwrap(); // class = UDP payload size
+        src.write_u32(1 << 15).unwrap(); // DO bit
+        src.write_u16(0).unwrap(); // RDLENGTH
+
+        src.seek(0).unwrap();
+        let parsed = DnsPacket::from_buffer(&mut src).unwrap();
+
+        let edns = parsed.edns.expect("OPT behind a pointer is still EDNS");
+        assert_eq!(edns.udp_payload_size, 1232);
+        assert!(edns.do_bit);
+        assert!(parsed.resources.is_empty());
     }
 
     #[test]

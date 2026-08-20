@@ -5,30 +5,11 @@
 
 use std::net::IpAddr;
 
-use crate::acl::CidrMatcher;
+use crate::acl::{CidrMatcher, PRIVATE_RANGES};
 use crate::domain_list::PersistedDomainList;
 use crate::packet::DnsPacket;
 use crate::question::QueryType;
 use crate::record::DnsRecord;
-
-/// Built-in private/special-use ranges, used when `rebind_private_ranges` is
-/// empty. Loopback is included — it's a prime rebind target (localhost dev
-/// servers, Docker/Electron dashboards); DNSBL/RBL users that resolve
-/// `127.0.0.x` should allowlist those zones.
-const DEFAULT_RANGES: &[&str] = &[
-    "127.0.0.0/8",    // RFC 1122 loopback — the canonical rebind target
-    "10.0.0.0/8",     // RFC 1918
-    "172.16.0.0/12",  // RFC 1918
-    "192.168.0.0/16", // RFC 1918
-    "169.254.0.0/16", // RFC 3927 link-local
-    "100.64.0.0/10",  // RFC 6598 CGNAT — also Tailscale's address space
-    "0.0.0.0/8",      // RFC 1122 "this host" — 0.0.0.0 routes to localhost on connect
-    "fc00::/7",       // RFC 4193 ULA
-    "64:ff9b::/96",   // RFC 6052 NAT64 — synthesized addrs route to embedded v4
-    "fe80::/10",      // RFC 4291 link-local
-    "::1/128",        // loopback
-    "::/128",         // unspecified
-];
 
 pub struct RebindFilter {
     enabled: bool,
@@ -46,7 +27,7 @@ impl RebindFilter {
         custom_ranges: &[String],
     ) -> Result<Self, String> {
         let range_strings: Vec<String> = if custom_ranges.is_empty() {
-            DEFAULT_RANGES.iter().map(|s| s.to_string()).collect()
+            PRIVATE_RANGES.iter().map(|s| s.to_string()).collect()
         } else {
             custom_ranges.to_vec()
         };

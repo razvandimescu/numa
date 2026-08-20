@@ -217,7 +217,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_missing_content_type() {
         let (addr, state) = spawn_relay().await;
-        let client = reqwest::Client::new();
+        let client = crate::forward::default_client();
         let resp = client
             .post(format!(
                 "http://{}/relay?targethost=odoh.example.com&targetpath=/dns-query",
@@ -235,7 +235,7 @@ mod tests {
     async fn rejects_oversized_body() {
         let (addr, _state) = spawn_relay().await;
         let big = vec![0u8; MAX_BODY_BYTES + 1];
-        let client = reqwest::Client::new();
+        let client = crate::forward::default_client();
         let resp = client
             .post(format!(
                 "http://{}/relay?targethost=odoh.example.com&targetpath=/dns-query",
@@ -258,7 +258,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_targethost_without_dot() {
         let (addr, state) = spawn_relay().await;
-        let client = reqwest::Client::new();
+        let client = crate::forward::default_client();
         let resp = client
             .post(format!(
                 "http://{}/relay?targethost=localhost&targetpath=/dns-query",
@@ -276,7 +276,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_userinfo_ssrf_attempt() {
         let (addr, state) = spawn_relay().await;
-        let client = reqwest::Client::new();
+        let client = crate::forward::default_client();
         // The naive contains('.') check would let this through and reqwest
         // would route to `internal.host` using `evil.com` as userinfo.
         let resp = client
@@ -296,7 +296,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_targetpath_without_leading_slash() {
         let (addr, state) = spawn_relay().await;
-        let client = reqwest::Client::new();
+        let client = crate::forward::default_client();
         let resp = client
             .post(format!(
                 "http://{}/relay?targethost=odoh.example.com&targetpath=dns-query",
@@ -314,7 +314,7 @@ mod tests {
     #[tokio::test]
     async fn health_endpoint_reports_counters() {
         let (addr, _state) = spawn_relay().await;
-        let client = reqwest::Client::new();
+        let client = crate::forward::default_client();
         let resp = client
             .get(format!("http://{}/health", addr))
             .send()

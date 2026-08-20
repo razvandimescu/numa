@@ -1,10 +1,12 @@
+use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicU16, Ordering};
-use std::sync::RwLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{LazyLock, RwLock};
 use std::time::{Duration, Instant};
 
 use log::{debug, info};
 
+use crate::acl::CidrMatcher;
 use crate::cache::DnsCache;
 use crate::forward::forward_udp;
 use crate::header::ResultCode;
@@ -15,18 +17,23 @@ use crate::srtt::SrttCache;
 use crate::stats::UpstreamTransport;
 
 const MAX_REFERRAL_DEPTH: u8 = 10;
-pub(crate) const MAX_CNAME_DEPTH: u8 = 8;
+const MAX_CNAME_DEPTH: u8 = 8;
+// Depth bounds each branch; these bound the whole resolution against NXNS /
+// NRDelegation fan-out. 48 total upstream queries (~hickory 24, <BIND 100), and
+// MaxFetch(k) caps glue-less NS names chased per referral (only balloons on failure).
+const MAX_TOTAL_QUERIES: usize = 48;
+const MAX_NS_FETCH: usize = 10;
 const NS_QUERY_TIMEOUT: Duration = Duration::from_millis(400);
 const TCP_TIMEOUT: Duration = Duration::from_millis(400);
 const UDP_FAIL_THRESHOLD: u8 = 3;
 
-static QUERY_ID: AtomicU16 = AtomicU16::new(1);
 static UDP_FAILURES: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 pub(crate) static UDP_DISABLED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-fn next_id() -> u16 {
-    QUERY_ID.fetch_add(1, Ordering::Relaxed)
+// Shared by reference across the whole recursion, so every branch draws from one pool.
+fn claim_query_budget(spent: &AtomicUsize) -> bool {
+    spent.fetch_add(1, Ordering::Relaxed) < MAX_TOTAL_QUERIES
 }
 
 fn dns_addr(ip: impl Into<IpAddr>) -> SocketAddr {
@@ -34,11 +41,32 @@ fn dns_addr(ip: impl Into<IpAddr>) -> SocketAddr {
 }
 
 fn record_to_addr(rec: &DnsRecord) -> Option<SocketAddr> {
-    match rec {
-        DnsRecord::A { addr, .. } => Some(dns_addr(*addr)),
-        DnsRecord::AAAA { addr, .. } => Some(dns_addr(*addr)),
-        _ => None,
-    }
+    let addr = match rec {
+        DnsRecord::A { addr, .. } => dns_addr(*addr),
+        DnsRecord::AAAA { addr, .. } => dns_addr(*addr),
+        _ => return None,
+    };
+    (!is_bogon(addr.ip())).then_some(addr)
+}
+
+/// A public authoritative server is only ever reachable at a globally-routable
+/// address, so refuse glue/NS addresses that point inward before we query them.
+/// Without this a malicious server can glue an NS at `127.0.0.1` or an RFC1918
+/// host and turn recursion into an internal-network probe (bounded to :53 by
+/// `dns_addr`, but a probe all the same). Shares the rebind filter's
+/// private-range list; `CidrMatcher` unmaps v4-mapped v6 before matching. Root
+/// priming funnels through here too, but real root/TLD glue is public and passes.
+static BOGON_RANGES: LazyLock<CidrMatcher> = LazyLock::new(|| {
+    let ranges: Vec<String> = crate::acl::PRIVATE_RANGES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    CidrMatcher::from_entries(&ranges, &[], "bogon nameserver filter")
+        .expect("built-in private ranges are valid CIDRs")
+});
+
+fn is_bogon(ip: IpAddr) -> bool {
+    BOGON_RANGES.matches(ip)
 }
 
 pub fn reset_udp_state() {
@@ -55,7 +83,7 @@ pub async fn probe_udp(root_hints: &[SocketAddr]) {
         Some(h) => *h,
         None => return,
     };
-    let mut probe = DnsPacket::query(next_id(), ".", QueryType::NS);
+    let mut probe = DnsPacket::query(crate::packet::random_id(), ".", QueryType::NS);
     probe.header.recursion_desired = false;
     if forward_udp(&probe, hint, Duration::from_millis(1500))
         .await
@@ -69,7 +97,7 @@ pub async fn probe_udp(root_hints: &[SocketAddr]) {
 /// Probe whether recursive resolution works by querying root servers.
 /// Tries up to 3 hints before declaring failure.
 pub async fn probe_recursive(root_hints: &[SocketAddr]) -> bool {
-    let mut probe = DnsPacket::query(next_id(), ".", QueryType::NS);
+    let mut probe = DnsPacket::query(crate::packet::random_id(), ".", QueryType::NS);
     probe.header.recursion_desired = false;
     for hint in root_hints.iter().take(3) {
         if let Ok(resp) = forward_udp(&probe, *hint, Duration::from_secs(3)).await {
@@ -136,7 +164,7 @@ pub async fn prime_tld_cache(
             let mut cache_w = cache.write().unwrap();
             cache_w.insert(tld, QueryType::NS, &response);
             cache_glue(&mut cache_w, &response, &ns_names);
-            cache_ds_from_authority(&mut cache_w, &response);
+            cache_ds_from_authority(&mut cache_w, &response, ".");
         }
 
         // Fetch DNSKEY for this TLD (needed for DNSSEC chain validation)
@@ -169,9 +197,9 @@ pub async fn resolve_recursive(
     root_hints: &[SocketAddr],
     srtt: &RwLock<SrttCache>,
 ) -> crate::Result<DnsPacket> {
-    // No overall timeout — each hop is bounded by NS_QUERY_TIMEOUT (UDP + TCP fallback),
-    // and MAX_REFERRAL_DEPTH caps the chain length.
-    let mut resp = resolve_iterative(qname, qtype, cache, root_hints, srtt, 0, 0).await?;
+    // `budget` caps the total upstream queries this one client resolution may spend.
+    let budget = AtomicUsize::new(0);
+    let mut resp = resolve_iterative(qname, qtype, cache, root_hints, srtt, 0, 0, &budget).await?;
 
     resp.header.id = original_query.header.id;
     resp.header.recursion_available = true;
@@ -180,6 +208,7 @@ pub async fn resolve_recursive(
     Ok(resp)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_iterative<'a>(
     qname: &'a str,
     qtype: QueryType,
@@ -188,6 +217,7 @@ pub(crate) fn resolve_iterative<'a>(
     srtt: &'a RwLock<SrttCache>,
     referral_depth: u8,
     cname_depth: u8,
+    budget: &'a AtomicUsize,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = crate::Result<DnsPacket>> + Send + 'a>> {
     Box::pin(async move {
         if referral_depth > MAX_REFERRAL_DEPTH {
@@ -205,6 +235,10 @@ pub(crate) fn resolve_iterative<'a>(
         for _ in 0..MAX_REFERRAL_DEPTH {
             if ns_idx >= ns_addrs.len() {
                 return Err("no nameserver available".into());
+            }
+
+            if !claim_query_budget(budget) {
+                return Err(format!("query budget exhausted resolving {}", qname).into());
             }
 
             let (q_name, q_type) = minimize_query(qname, qtype, &current_zone);
@@ -225,20 +259,37 @@ pub(crate) fn resolve_iterative<'a>(
                 }
             };
 
+            // The zone we queried, captured before a referral moves current_zone
+            // to the child: glue/DS trust is judged against the server's zone,
+            // not the child's, so root-supplied gTLD glue stays valid.
+            let server_zone = current_zone.clone();
+
             if (q_type != qtype || !q_name.eq_ignore_ascii_case(qname))
                 && (!response.authorities.is_empty() || !response.answers.is_empty())
             {
-                if let Some(zone) = referral_zone(&response) {
-                    current_zone = zone;
-                    let mut cache_w = cache.write().unwrap();
-                    cache_ns_delegation(&mut cache_w, &current_zone, &response);
-                    drop(cache_w);
+                match referral_zone(&response) {
+                    Some(zone) if !zone_in_bailiwick(&zone, &current_zone) => {
+                        debug!(
+                            "recursive: rejecting out-of-bailiwick referral to {} from zone {}",
+                            zone, current_zone
+                        );
+                        ns_idx += 1;
+                        continue;
+                    }
+                    Some(zone) => {
+                        current_zone = zone;
+                        let mut cache_w = cache.write().unwrap();
+                        cache_ns_delegation(&mut cache_w, &current_zone, &response);
+                        drop(cache_w);
+                    }
+                    None => {}
                 }
                 let mut all_ns = extract_ns_from_records(&response.answers);
                 if all_ns.is_empty() {
                     all_ns = extract_ns_names(&response);
                 }
-                let mut new_addrs = resolve_ns_addrs_from_glue(&response, &all_ns, cache);
+                let mut new_addrs =
+                    resolve_ns_addrs_from_glue(&response, &all_ns, &server_zone, cache);
                 if !new_addrs.is_empty() {
                     srtt.read().unwrap().sort_by_udp_rtt(&mut new_addrs);
                     ns_addrs = new_addrs;
@@ -250,14 +301,15 @@ pub(crate) fn resolve_iterative<'a>(
             }
 
             if !response.answers.is_empty() {
-                let has_target = response.answers.iter().any(|r| r.query_type() == qtype);
-
-                if has_target || qtype == QueryType::CNAME {
+                if response.has_answer_of_type(qtype) || qtype == QueryType::CNAME {
                     cache.write().unwrap().insert(qname, qtype, &response);
                     return Ok(response);
                 }
 
-                if let Some(cname_target) = extract_cname_target(&response, qname) {
+                let mut visited = HashSet::from([qname.to_ascii_lowercase()]);
+                if let Some(cname_target) = follow_cname_links(&response, qname, &mut visited)
+                    .map_err(|()| "CNAME loop in response")?
+                {
                     if cname_depth >= MAX_CNAME_DEPTH {
                         return Err("max CNAME depth exceeded".into());
                     }
@@ -270,6 +322,7 @@ pub(crate) fn resolve_iterative<'a>(
                         srtt,
                         0,
                         cname_depth + 1,
+                        budget,
                     )
                     .await?;
 
@@ -292,6 +345,14 @@ pub(crate) fn resolve_iterative<'a>(
             }
 
             if let Some(zone) = referral_zone(&response) {
+                if !zone_in_bailiwick(&zone, &current_zone) {
+                    debug!(
+                        "recursive: rejecting out-of-bailiwick referral to {} from zone {}",
+                        zone, current_zone
+                    );
+                    ns_idx += 1;
+                    continue;
+                }
                 current_zone = zone;
             }
             let ns_names = extract_ns_names(&response);
@@ -302,12 +363,13 @@ pub(crate) fn resolve_iterative<'a>(
             {
                 let mut cache_w = cache.write().unwrap();
                 cache_ns_delegation(&mut cache_w, &current_zone, &response);
-                cache_ds_from_authority(&mut cache_w, &response);
+                cache_ds_from_authority(&mut cache_w, &response, &server_zone);
             }
-            let mut new_ns_addrs = resolve_ns_addrs_from_glue(&response, &ns_names, cache);
+            let mut new_ns_addrs =
+                resolve_ns_addrs_from_glue(&response, &ns_names, &server_zone, cache);
 
             if new_ns_addrs.is_empty() {
-                for ns_name in &ns_names {
+                for ns_name in ns_names.iter().take(MAX_NS_FETCH) {
                     if referral_depth < MAX_REFERRAL_DEPTH {
                         debug!("recursive: resolving glue-less NS {}", ns_name);
                         for qt in [QueryType::A, QueryType::AAAA] {
@@ -319,6 +381,7 @@ pub(crate) fn resolve_iterative<'a>(
                                 srtt,
                                 referral_depth + 1,
                                 cname_depth,
+                                budget,
                             )
                             .await
                             {
@@ -417,14 +480,23 @@ fn extract_ns_from_records(records: &[DnsRecord]) -> Vec<String> {
 fn resolve_ns_addrs_from_glue(
     response: &DnsPacket,
     ns_names: &[String],
+    server_zone: &str,
     cache: &RwLock<DnsCache>,
 ) -> Vec<SocketAddr> {
+    // RFC 1034/1035 bailiwick: drop glue whose owner is outside the sending
+    // server's zone (and never cache it); those names fall through to the
+    // caller's glue-less re-resolution, which fetches their real address.
+    let trusted: Vec<String> = ns_names
+        .iter()
+        .filter(|n| zone_in_bailiwick(n, server_zone))
+        .cloned()
+        .collect();
     let mut addrs = Vec::new();
     {
         let mut cache_w = cache.write().unwrap();
-        cache_glue(&mut cache_w, response, ns_names);
+        cache_glue(&mut cache_w, response, &trusted);
     }
-    for ns_name in ns_names {
+    for ns_name in &trusted {
         addrs.extend_from_slice(&glue_addrs_for(response, ns_name));
     }
     if addrs.is_empty() {
@@ -440,6 +512,19 @@ fn referral_zone(response: &DnsPacket) -> Option<String> {
         DnsRecord::NS { domain, .. } => Some(domain.clone()),
         _ => None,
     })
+}
+
+/// RFC 5452 §6: a referral may only introduce a zone at or below the zone of
+/// the server that sent it. Without this a nameserver reached while resolving
+/// one domain can hand back a delegation for an unrelated zone (say `google.com`
+/// while we walk under `attacker.com`) and poison its NS in cache. Names carry
+/// no trailing dot; the root (`.`) is above everything.
+fn zone_in_bailiwick(zone: &str, parent: &str) -> bool {
+    parent == "."
+        || zone.eq_ignore_ascii_case(parent)
+        || zone
+            .to_ascii_lowercase()
+            .ends_with(&format!(".{}", parent.to_ascii_lowercase()))
 }
 
 /// RFC 7816 query minimization (conservative): only minimize at root.
@@ -483,6 +568,9 @@ fn glue_addrs_for(response: &DnsPacket, ns_name: &str) -> Vec<SocketAddr> {
         .collect()
 }
 
+/// Caches whatever `ns_names` it is handed with no bailiwick check — callers
+/// must pre-filter to owners in-bailiwick of the sending server (see
+/// `resolve_ns_addrs_from_glue`). Prime is exempt: it sources glue from root.
 fn cache_glue(cache: &mut DnsCache, response: &DnsPacket, ns_names: &[String]) {
     for ns_name in ns_names {
         let mut a_pkt: Option<DnsPacket> = None;
@@ -523,13 +611,15 @@ fn cache_glue(cache: &mut DnsCache, response: &DnsPacket, ns_names: &[String]) {
     }
 }
 
-/// Cache DS + DS-covering RRSIG records from referral authority sections.
-fn cache_ds_from_authority(cache: &mut DnsCache, response: &DnsPacket) {
+/// Cache DS + DS-covering RRSIG from referral authority sections, keyed by
+/// owner. Owners outside `server_zone` are dropped: a poisoned DS makes the
+/// victim's real DNSKEY fail validation (DNSSEC downgrade/DoS).
+fn cache_ds_from_authority(cache: &mut DnsCache, response: &DnsPacket, server_zone: &str) {
     let mut ds_by_domain: Vec<(String, DnsPacket)> = Vec::new();
 
     for r in &response.authorities {
         match r {
-            DnsRecord::DS { domain, .. } => {
+            DnsRecord::DS { domain, .. } if zone_in_bailiwick(domain, server_zone) => {
                 let key = domain.to_lowercase();
                 let pkt = match ds_by_domain.iter_mut().find(|(d, _)| *d == key) {
                     Some((_, pkt)) => pkt,
@@ -544,7 +634,9 @@ fn cache_ds_from_authority(cache: &mut DnsCache, response: &DnsPacket) {
                 domain,
                 type_covered,
                 ..
-            } if QueryType::from_num(*type_covered) == QueryType::DS => {
+            } if QueryType::from_num(*type_covered) == QueryType::DS
+                && zone_in_bailiwick(domain, server_zone) =>
+            {
                 let key = domain.to_lowercase();
                 let pkt = match ds_by_domain.iter_mut().find(|(d, _)| *d == key) {
                     Some((_, pkt)) => pkt,
@@ -736,7 +828,7 @@ async fn send_query(
     server: SocketAddr,
     srtt: &RwLock<SrttCache>,
 ) -> crate::Result<DnsPacket> {
-    let mut query = DnsPacket::query(next_id(), qname, qtype);
+    let mut query = DnsPacket::query(crate::packet::random_id(), qname, qtype);
     query.header.recursion_desired = false;
     query.edns = Some(crate::packet::EdnsOpt {
         do_bit: true,
@@ -790,7 +882,26 @@ async fn send_query(
     }
 }
 
-pub(crate) fn extract_cname_target(response: &DnsPacket, qname: &str) -> Option<String> {
+/// Follow every CNAME link for `start` present in `response`, recording each
+/// hop in `visited`. Upstreams return multiple chain links per response;
+/// re-querying an intermediate name would append those links a second time
+/// (Chrome rejects responses with duplicate CNAMEs as malformed).
+pub(crate) fn follow_cname_links(
+    response: &DnsPacket,
+    start: &str,
+    visited: &mut HashSet<String>,
+) -> Result<Option<String>, ()> {
+    let mut current = None;
+    while let Some(next) = extract_cname_target(response, current.as_deref().unwrap_or(start)) {
+        if visited.len() > MAX_CNAME_DEPTH as usize || !visited.insert(next.to_ascii_lowercase()) {
+            return Err(());
+        }
+        current = Some(next);
+    }
+    Ok(current)
+}
+
+fn extract_cname_target(response: &DnsPacket, qname: &str) -> Option<String> {
     response.answers.iter().find_map(|r| match r {
         DnsRecord::CNAME { domain, host, .. } if domain.eq_ignore_ascii_case(qname) => {
             Some(host.clone())
@@ -885,6 +996,58 @@ mod tests {
     }
 
     #[test]
+    fn bogon_filter_rejects_internal_addrs() {
+        for ip in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.0.1",
+            "192.168.1.1",
+            "169.254.0.1",
+            "100.64.0.1",
+            "0.0.0.0",
+        ] {
+            assert!(is_bogon(ip.parse().unwrap()), "{ip} should be a bogon");
+        }
+        for ip in [
+            "::1",
+            "fc00::1",
+            "fe80::1",
+            "::ffff:127.0.0.1",
+            "64:ff9b::7f00:1",
+        ] {
+            assert!(is_bogon(ip.parse().unwrap()), "{ip} should be a bogon");
+        }
+    }
+
+    #[test]
+    fn bogon_filter_accepts_public_addrs() {
+        for ip in ["8.8.8.8", "1.1.1.1", "2001:4860:4860::8888"] {
+            assert!(!is_bogon(ip.parse().unwrap()), "{ip} should be routable");
+        }
+    }
+
+    #[test]
+    fn glue_bogon_dropped_from_addrs() {
+        let mut pkt = DnsPacket::new();
+        pkt.resources.push(DnsRecord::A {
+            domain: "ns1.attacker.com".into(),
+            addr: Ipv4Addr::new(127, 0, 0, 1),
+            ttl: 3600,
+        });
+        assert!(glue_addrs_for(&pkt, "ns1.attacker.com").is_empty());
+    }
+
+    #[test]
+    fn query_budget_permits_exactly_max_then_denies() {
+        let spent = AtomicUsize::new(0);
+        for i in 0..MAX_TOTAL_QUERIES {
+            assert!(claim_query_budget(&spent), "query {i} within budget");
+        }
+        assert!(!claim_query_budget(&spent), "one past the budget is denied");
+        assert!(!claim_query_budget(&spent), "stays denied");
+    }
+
+    #[test]
     fn cname_extraction() {
         let mut pkt = DnsPacket::new();
         pkt.answers.push(DnsRecord::CNAME {
@@ -916,6 +1079,171 @@ mod tests {
         ];
         let addrs = parse_root_hints(&hints);
         assert_eq!(addrs.len(), 2);
+    }
+
+    #[test]
+    fn bailiwick_accepts_normal_descent() {
+        // Every hop of a real recursive walk toward the query name: current_zone
+        // and the referral zone are both suffixes of the qname, referral deeper.
+        assert!(zone_in_bailiwick("com", "."));
+        assert!(zone_in_bailiwick("amazon.com", "com"));
+        assert!(zone_in_bailiwick("eu.amazon.com", "amazon.com"));
+        assert!(zone_in_bailiwick(
+            "s3.eu-west-1.amazonaws.com",
+            "amazonaws.com"
+        ));
+        assert!(zone_in_bailiwick("amazon.com", "amazon.com")); // NODATA re-lists own NS
+        assert!(zone_in_bailiwick("Amazon.COM", "com")); // case-insensitive
+    }
+
+    #[test]
+    fn bailiwick_rejects_cross_zone_referral() {
+        // The PoC: a server we reached under attacker.com refers us to an
+        // unrelated zone. Also reject referrals up (sibling/parent/root).
+        assert!(!zone_in_bailiwick("google.com", "attacker.com"));
+        assert!(!zone_in_bailiwick("attacker.net", "com")); // different TLD
+        assert!(!zone_in_bailiwick("com", "amazon.com")); // refer up
+        assert!(!zone_in_bailiwick("evil.com", "com.evil.com")); // suffix-substring, not label boundary
+        assert!(!zone_in_bailiwick("notamazon.com", "amazon.com")); // shares suffix, wrong label
+    }
+
+    #[test]
+    fn glue_bailiwick_drops_out_of_zone_glue() {
+        // attacker.com names a victim as its NS and glues it — the glue owner
+        // is outside the server's zone, so it must not be used or cached.
+        let cache = RwLock::new(DnsCache::new(100, 60, 86400));
+        let mut resp = DnsPacket::new();
+        resp.header.response = true;
+        resp.authorities.push(DnsRecord::NS {
+            domain: "sub.attacker.com".into(),
+            host: "www.google.com".into(),
+            ttl: 3600,
+        });
+        resp.resources.push(DnsRecord::A {
+            domain: "www.google.com".into(),
+            addr: Ipv4Addr::new(6, 6, 6, 6),
+            ttl: 3600,
+        });
+
+        let addrs = resolve_ns_addrs_from_glue(
+            &resp,
+            &["www.google.com".to_string()],
+            "attacker.com",
+            &cache,
+        );
+        assert!(addrs.is_empty(), "out-of-bailiwick glue must not be used");
+        assert!(
+            cache
+                .read()
+                .unwrap()
+                .lookup("www.google.com", QueryType::A)
+                .is_none(),
+            "out-of-bailiwick glue must not be cached"
+        );
+    }
+
+    #[test]
+    fn glue_bailiwick_trusts_in_zone_glue() {
+        let cache = RwLock::new(DnsCache::new(100, 60, 86400));
+        let mut resp = DnsPacket::new();
+        resp.header.response = true;
+        resp.authorities.push(DnsRecord::NS {
+            domain: "example.com".into(),
+            host: "ns1.example.com".into(),
+            ttl: 3600,
+        });
+        resp.resources.push(DnsRecord::A {
+            domain: "ns1.example.com".into(),
+            addr: Ipv4Addr::new(192, 0, 2, 1),
+            ttl: 3600,
+        });
+
+        let addrs =
+            resolve_ns_addrs_from_glue(&resp, &["ns1.example.com".to_string()], "com", &cache);
+        assert_eq!(addrs, vec![dns_addr(Ipv4Addr::new(192, 0, 2, 1))]);
+    }
+
+    #[test]
+    fn ds_bailiwick_drops_out_of_zone_ds() {
+        // A server for attacker.com injects a DS for a victim zone. Caching it
+        // would make the victim's real DNSKEY fail validation (downgrade/DoS).
+        let cache = RwLock::new(DnsCache::new(100, 60, 86400));
+        let mut resp = DnsPacket::new();
+        resp.header.response = true;
+        resp.authorities.push(DnsRecord::DS {
+            domain: "google.com".into(),
+            key_tag: 1234,
+            algorithm: 8,
+            digest_type: 2,
+            digest: vec![0xab; 32],
+            ttl: 3600,
+        });
+
+        {
+            let mut c = cache.write().unwrap();
+            cache_ds_from_authority(&mut c, &resp, "attacker.com");
+        }
+        assert!(
+            cache
+                .read()
+                .unwrap()
+                .lookup("google.com", QueryType::DS)
+                .is_none(),
+            "out-of-bailiwick DS must not be cached"
+        );
+    }
+
+    #[test]
+    fn ds_bailiwick_keeps_in_zone_ds() {
+        // A com server delegating example.com legitimately carries its DS.
+        let cache = RwLock::new(DnsCache::new(100, 60, 86400));
+        let mut resp = DnsPacket::new();
+        resp.header.response = true;
+        resp.authorities.push(DnsRecord::DS {
+            domain: "example.com".into(),
+            key_tag: 1234,
+            algorithm: 8,
+            digest_type: 2,
+            digest: vec![0xcd; 32],
+            ttl: 3600,
+        });
+
+        {
+            let mut c = cache.write().unwrap();
+            cache_ds_from_authority(&mut c, &resp, "com");
+        }
+        assert!(
+            cache
+                .read()
+                .unwrap()
+                .lookup("example.com", QueryType::DS)
+                .is_some(),
+            "in-bailiwick DS must be cached"
+        );
+    }
+
+    #[test]
+    fn glue_bailiwick_trusts_tld_glue_from_root() {
+        // Regression guard: root delegates `com` with glue for gtld-servers.net,
+        // which is out-of-bailiwick of `com` but in-bailiwick of the root that
+        // sent it. Checking against the server zone (".") keeps it trusted.
+        let cache = RwLock::new(DnsCache::new(100, 60, 86400));
+        let mut resp = DnsPacket::new();
+        resp.header.response = true;
+        resp.authorities.push(DnsRecord::NS {
+            domain: "com".into(),
+            host: "a.gtld-servers.net".into(),
+            ttl: 172800,
+        });
+        resp.resources.push(DnsRecord::A {
+            domain: "a.gtld-servers.net".into(),
+            addr: Ipv4Addr::new(192, 5, 6, 30),
+            ttl: 172800,
+        });
+
+        let addrs =
+            resolve_ns_addrs_from_glue(&resp, &["a.gtld-servers.net".to_string()], ".", &cache);
+        assert_eq!(addrs, vec![dns_addr(Ipv4Addr::new(192, 5, 6, 30))]);
     }
 
     #[test]
@@ -1162,6 +1490,7 @@ mod tests {
             &srtt,
             0,
             0,
+            &AtomicUsize::new(0),
         )
         .await;
 

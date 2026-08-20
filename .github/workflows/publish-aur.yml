@@ -35,6 +35,12 @@ on:
 permissions:
   contents: read
 
+# Releases push main twice within minutes (PR merge + version bump); parallel
+# runs race on the AUR git remote and the loser's push is rejected.
+concurrency:
+  group: publish-aur
+  cancel-in-progress: false
+
 jobs:
   # The 'validate' job ensures that the PKGBUILD is correct and the software builds/tests
   # successfully on Arch Linux before we attempt to publish it.
@@ -47,7 +53,7 @@ jobs:
         arch: [x86_64]
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Build and Test Package
         timeout-minutes: 60
@@ -99,7 +105,7 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Securely configure SSH for AUR access.
       - name: Configure SSH

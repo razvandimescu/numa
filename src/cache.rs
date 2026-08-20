@@ -113,6 +113,10 @@ impl DnsCache {
         wire: &[u8],
         dnssec_status: DnssecStatus,
     ) {
+        if crate::wire::is_truncated(wire) {
+            return; // "ask again over TCP" is advice to one client, not an answer
+        }
+
         let meta = match crate::wire::scan_ttl_offsets(wire) {
             Ok(m) => m,
             Err(_) => return, // malformed wire, skip
@@ -323,6 +327,31 @@ mod tests {
     use super::*;
     use crate::packet::DnsPacket;
     use crate::record::DnsRecord;
+
+    #[test]
+    fn insert_wire_refuses_a_truncated_answer() {
+        // TC=1 carries no records and means "retry over TCP". Cached, it
+        // answers every later client until it expires — and a client already
+        // on TCP has no retry left (issue #191).
+        let mut cache = DnsCache::new(100, 60, 3600);
+        let query = DnsPacket::query(0x1234, "example.com", QueryType::A);
+        let mut tc = DnsPacket::response_from(&query, crate::header::ResultCode::NOERROR);
+        tc.header.truncated_message = true;
+        let mut buf = crate::buffer::BytePacketBuffer::new();
+        tc.write(&mut buf).unwrap();
+
+        cache.insert_wire(
+            "example.com",
+            QueryType::A,
+            buf.filled(),
+            DnssecStatus::Indeterminate,
+        );
+
+        assert!(
+            cache.lookup("example.com", QueryType::A).is_none(),
+            "a truncated answer must not become the cached one"
+        );
+    }
 
     #[test]
     fn heap_bytes_grows_with_entries() {

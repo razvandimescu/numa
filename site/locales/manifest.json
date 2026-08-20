@@ -1,0 +1,5 @@
+[
+  { "code": "en", "native_name": "English" },
+  { "code": "de", "native_name": "Deutsch", "reviewed": false },
+  { "code": "zh-cn", "native_name": "简体中文", "reviewed": false, "credit": "maxsusu", "credit_url": "https://github.com/maxsusu/numa_Windows-x86_64_zh_CN" }
+]
