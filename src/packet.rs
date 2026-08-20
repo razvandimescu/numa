@@ -3,9 +3,20 @@ use crate::header::DnsHeader;
 use crate::question::{DnsQuestion, QueryType};
 use crate::record::DnsRecord;
 use crate::Result;
+use rand_core::TryRngCore;
 
 /// Recommended EDNS0 UDP payload size (DNS Flag Day 2020) — avoids IP fragmentation.
 pub const DEFAULT_EDNS_PAYLOAD: u16 = 1232;
+
+/// A random transaction ID for an outbound query. Off-path spoofing (DNSpooq,
+/// SAD DNS) hinges on predicting it, so it must be unguessable — never a counter.
+pub(crate) fn random_id() -> u16 {
+    let mut buf = [0u8; 2];
+    rand_core::OsRng
+        .try_fill_bytes(&mut buf)
+        .expect("OS RNG unavailable");
+    u16::from_be_bytes(buf)
+}
 
 /// EDNS0 OPT pseudo-record (RFC 6891)
 #[derive(Clone, Debug)]

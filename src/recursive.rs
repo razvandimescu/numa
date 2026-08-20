@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{LazyLock, RwLock};
 use std::time::{Duration, Instant};
 
@@ -27,14 +27,9 @@ const NS_QUERY_TIMEOUT: Duration = Duration::from_millis(400);
 const TCP_TIMEOUT: Duration = Duration::from_millis(400);
 const UDP_FAIL_THRESHOLD: u8 = 3;
 
-static QUERY_ID: AtomicU16 = AtomicU16::new(1);
 static UDP_FAILURES: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 pub(crate) static UDP_DISABLED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
-
-fn next_id() -> u16 {
-    QUERY_ID.fetch_add(1, Ordering::Relaxed)
-}
 
 // Shared by reference across the whole recursion, so every branch draws from one pool.
 fn claim_query_budget(spent: &AtomicUsize) -> bool {
@@ -88,7 +83,7 @@ pub async fn probe_udp(root_hints: &[SocketAddr]) {
         Some(h) => *h,
         None => return,
     };
-    let mut probe = DnsPacket::query(next_id(), ".", QueryType::NS);
+    let mut probe = DnsPacket::query(crate::packet::random_id(), ".", QueryType::NS);
     probe.header.recursion_desired = false;
     if forward_udp(&probe, hint, Duration::from_millis(1500))
         .await
@@ -102,7 +97,7 @@ pub async fn probe_udp(root_hints: &[SocketAddr]) {
 /// Probe whether recursive resolution works by querying root servers.
 /// Tries up to 3 hints before declaring failure.
 pub async fn probe_recursive(root_hints: &[SocketAddr]) -> bool {
-    let mut probe = DnsPacket::query(next_id(), ".", QueryType::NS);
+    let mut probe = DnsPacket::query(crate::packet::random_id(), ".", QueryType::NS);
     probe.header.recursion_desired = false;
     for hint in root_hints.iter().take(3) {
         if let Ok(resp) = forward_udp(&probe, *hint, Duration::from_secs(3)).await {
@@ -833,7 +828,7 @@ async fn send_query(
     server: SocketAddr,
     srtt: &RwLock<SrttCache>,
 ) -> crate::Result<DnsPacket> {
-    let mut query = DnsPacket::query(next_id(), qname, qtype);
+    let mut query = DnsPacket::query(crate::packet::random_id(), qname, qtype);
     query.header.recursion_desired = false;
     query.edns = Some(crate::packet::EdnsOpt {
         do_bit: true,

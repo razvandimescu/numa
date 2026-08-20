@@ -123,8 +123,8 @@ async fn resolve_via_bootstrap(
 ) -> Result<Vec<SocketAddr>, Box<dyn std::error::Error + Send + Sync>> {
     let mut last_err: Option<String> = None;
     for &server in bootstrap {
-        let q_a = DnsPacket::query(0xBEEF, hostname, QueryType::A);
-        let q_aaaa = DnsPacket::query(0xBEF0, hostname, QueryType::AAAA);
+        let q_a = DnsPacket::query(crate::packet::random_id(), hostname, QueryType::A);
+        let q_aaaa = DnsPacket::query(crate::packet::random_id(), hostname, QueryType::AAAA);
         let (a_res, aaaa_res) = tokio::join!(
             query_with_tcp_fallback(&q_a, server),
             query_with_tcp_fallback(&q_aaaa, server),
