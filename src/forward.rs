@@ -351,22 +351,24 @@ pub(crate) async fn forward_udp(
     let mut send_buffer = BytePacketBuffer::new();
     query.write(&mut send_buffer)?;
 
-    let socket = UdpSocket::bind("0.0.0.0:0").await?;
-    // Connected, so the kernel drops datagrams from anyone but the upstream.
-    socket.connect(upstream).await?;
+    let socket = connected_udp(upstream).await?;
     socket.send(send_buffer.filled()).await?;
 
     // Loop until a datagram answers the exact question we asked, or the deadline
     // lapses. A spoof that raced the real reply onto our ephemeral port (SAD DNS
     // infers it) fails the match and must not end the wait — a single recv would
-    // let the first forged packet win. One byte of headroom over the cap: a
-    // datagram the kernel cut to fit is indistinguishable from a full one, so
-    // discard it (§ RFC 5452 acceptance check).
+    // let the first forged packet win (§ RFC 5452 acceptance check). The txid is
+    // the first two wire bytes, so reject the flood cheaply before a full parse.
+    let want_id = query.header.id.to_be_bytes();
     let deadline = tokio::time::Instant::now() + timeout_duration;
     let mut recv_buf = vec![0u8; crate::wire::MAX_UPSTREAM_PAYLOAD as usize + 1];
     loop {
         let size = timeout_at(deadline, socket.recv(&mut recv_buf)).await??;
-        if size > crate::wire::MAX_UPSTREAM_PAYLOAD as usize {
+        // Over the cap: the kernel cut an oversized datagram to fit, and a cut
+        // wire is indistinguishable from a full one. Under 12: no DNS header.
+        if !(12..=crate::wire::MAX_UPSTREAM_PAYLOAD as usize).contains(&size)
+            || recv_buf[..2] != want_id
+        {
             continue;
         }
         let mut recv_buffer = BytePacketBuffer::from_bytes(&recv_buf[..size]);
@@ -378,19 +380,31 @@ pub(crate) async fn forward_udp(
     }
 }
 
+/// A connected UDP socket to `upstream`: the kernel then drops datagrams from
+/// anyone but it, leaving source-spoofed off-path injection as the only path in.
+async fn connected_udp(upstream: SocketAddr) -> Result<UdpSocket> {
+    let socket = UdpSocket::bind("0.0.0.0:0").await?;
+    socket.connect(upstream).await?;
+    Ok(socket)
+}
+
 /// A UDP reply we'll act on: QR=1, our transaction ID, and the same question we
 /// asked (case-insensitive name, same type). The connected socket already drops
 /// off-source datagrams; this rejects a source-spoofing off-path injection that
 /// forged the upstream's address to race the real answer.
 fn response_matches(query: &DnsPacket, resp: &DnsPacket) -> bool {
-    resp.header.response
-        && resp.header.id == query.header.id
-        && match (query.questions.first(), resp.questions.first()) {
-            (Some(asked), Some(got)) => {
-                asked.qtype == got.qtype && asked.name.eq_ignore_ascii_case(&got.name)
-            }
-            _ => false,
-        }
+    if !resp.header.response || resp.header.id != query.header.id {
+        return false;
+    }
+    match resp.questions.first() {
+        Some(got) => query.questions.first().is_some_and(|asked| {
+            asked.qtype == got.qtype && asked.name.eq_ignore_ascii_case(&got.name)
+        }),
+        // Some servers drop the question on errors (FORMERR/REFUSED). Accept
+        // one only when it carries nothing to cache — a bare failure — so a
+        // forged answer can't ride in without naming the question it answers.
+        None => resp.answers.is_empty() && resp.authorities.is_empty(),
+    }
 }
 
 /// DNS over TCP (RFC 1035 §4.2.2): 2-byte length prefix, then the DNS message.
@@ -681,9 +695,7 @@ async fn forward_udp_raw(
     upstream: SocketAddr,
     timeout_duration: Duration,
 ) -> Result<Vec<u8>> {
-    let socket = UdpSocket::bind("0.0.0.0:0").await?;
-    // Connected, so the kernel drops datagrams from anyone but the upstream.
-    socket.connect(upstream).await?;
+    let socket = connected_udp(upstream).await?;
     socket.send(wire).await?;
 
     // One byte of headroom: a datagram sized exactly to the buffer cannot be
@@ -1232,6 +1244,30 @@ mod tests {
         let mut not_a_response = make_response(&query);
         not_a_response.header.response = false;
         assert!(!response_matches(&query, &not_a_response), "QR must be set");
+    }
+
+    #[test]
+    fn response_matches_handles_a_question_less_reply_by_cacheability() {
+        let query = make_query();
+
+        // A bare error that omitted the question is accepted so the caller can
+        // fail fast instead of blocking to the deadline.
+        let mut bare_error = make_response(&query);
+        bare_error.questions.clear();
+        bare_error.answers.clear();
+        bare_error.header.rescode = ResultCode::SERVFAIL;
+        assert!(
+            response_matches(&query, &bare_error),
+            "bare error is a match"
+        );
+
+        // The same reply carrying an answer must not ride in unnamed.
+        let mut smuggled_answer = make_response(&query);
+        smuggled_answer.questions.clear();
+        assert!(
+            !response_matches(&query, &smuggled_answer),
+            "a question-less reply may not carry records"
+        );
     }
 
     #[test]
