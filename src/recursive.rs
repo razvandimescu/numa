@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
 use std::sync::{LazyLock, RwLock};
 use std::time::{Duration, Instant};
 
@@ -18,6 +18,13 @@ use crate::stats::UpstreamTransport;
 
 const MAX_REFERRAL_DEPTH: u8 = 10;
 const MAX_CNAME_DEPTH: u8 = 8;
+/// Total upstream queries one client resolution may spend across *every* branch
+/// (referral chain, glue-less NS fan-out, CNAME re-chase). Depth caps bound each
+/// branch in isolation; only this bounds the sum, so a crafted referral tree
+/// can't turn one client query into unbounded work (NXNS / NRDelegation class).
+/// Above hickory's 24, well under BIND's `max-recursion-queries` 100 — generous
+/// enough that legit deep names survive, tight enough to kill the amplification.
+const MAX_TOTAL_QUERIES: usize = 48;
 const NS_QUERY_TIMEOUT: Duration = Duration::from_millis(400);
 const TCP_TIMEOUT: Duration = Duration::from_millis(400);
 const UDP_FAIL_THRESHOLD: u8 = 3;
@@ -29,6 +36,14 @@ pub(crate) static UDP_DISABLED: std::sync::atomic::AtomicBool =
 
 fn next_id() -> u16 {
     QUERY_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Claim one unit of the per-resolution query budget. Returns false once
+/// `MAX_TOTAL_QUERIES` have been spent. One logical upstream query (a single
+/// `send_query_hedged`, hedging included) = one unit; the counter is shared by
+/// reference across the whole recursion, so branches draw from one pool.
+fn claim_query_budget(spent: &AtomicUsize) -> bool {
+    spent.fetch_add(1, Ordering::Relaxed) < MAX_TOTAL_QUERIES
 }
 
 fn dns_addr(ip: impl Into<IpAddr>) -> SocketAddr {
@@ -192,9 +207,11 @@ pub async fn resolve_recursive(
     root_hints: &[SocketAddr],
     srtt: &RwLock<SrttCache>,
 ) -> crate::Result<DnsPacket> {
-    // No overall timeout — each hop is bounded by NS_QUERY_TIMEOUT (UDP + TCP fallback),
-    // and MAX_REFERRAL_DEPTH caps the chain length.
-    let mut resp = resolve_iterative(qname, qtype, cache, root_hints, srtt, 0, 0).await?;
+    // Each hop is bounded by NS_QUERY_TIMEOUT (UDP + TCP fallback), MAX_REFERRAL_DEPTH
+    // caps the chain length, and `budget` caps the total upstream queries this one
+    // client resolution may spend across all branches.
+    let budget = AtomicUsize::new(0);
+    let mut resp = resolve_iterative(qname, qtype, cache, root_hints, srtt, 0, 0, &budget).await?;
 
     resp.header.id = original_query.header.id;
     resp.header.recursion_available = true;
@@ -203,6 +220,7 @@ pub async fn resolve_recursive(
     Ok(resp)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_iterative<'a>(
     qname: &'a str,
     qtype: QueryType,
@@ -211,6 +229,7 @@ pub(crate) fn resolve_iterative<'a>(
     srtt: &'a RwLock<SrttCache>,
     referral_depth: u8,
     cname_depth: u8,
+    budget: &'a AtomicUsize,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = crate::Result<DnsPacket>> + Send + 'a>> {
     Box::pin(async move {
         if referral_depth > MAX_REFERRAL_DEPTH {
@@ -228,6 +247,10 @@ pub(crate) fn resolve_iterative<'a>(
         for _ in 0..MAX_REFERRAL_DEPTH {
             if ns_idx >= ns_addrs.len() {
                 return Err("no nameserver available".into());
+            }
+
+            if !claim_query_budget(budget) {
+                return Err(format!("query budget exhausted resolving {}", qname).into());
             }
 
             let (q_name, q_type) = minimize_query(qname, qtype, &current_zone);
@@ -311,6 +334,7 @@ pub(crate) fn resolve_iterative<'a>(
                         srtt,
                         0,
                         cname_depth + 1,
+                        budget,
                     )
                     .await?;
 
@@ -369,6 +393,7 @@ pub(crate) fn resolve_iterative<'a>(
                                 srtt,
                                 referral_depth + 1,
                                 cname_depth,
+                                budget,
                             )
                             .await
                             {
@@ -1025,6 +1050,16 @@ mod tests {
     }
 
     #[test]
+    fn query_budget_permits_exactly_max_then_denies() {
+        let spent = AtomicUsize::new(0);
+        for i in 0..MAX_TOTAL_QUERIES {
+            assert!(claim_query_budget(&spent), "query {i} within budget");
+        }
+        assert!(!claim_query_budget(&spent), "one past the budget is denied");
+        assert!(!claim_query_budget(&spent), "stays denied");
+    }
+
+    #[test]
     fn cname_extraction() {
         let mut pkt = DnsPacket::new();
         pkt.answers.push(DnsRecord::CNAME {
@@ -1467,6 +1502,7 @@ mod tests {
             &srtt,
             0,
             0,
+            &AtomicUsize::new(0),
         )
         .await;
 

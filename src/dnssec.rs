@@ -554,9 +554,17 @@ async fn fetch_dnskeys(
 
     trace!("dnssec: fetch_dnskeys('{}') cache miss — resolving", zone);
     stats.lock().unwrap().dnskey_fetches += 1;
-    if let Ok(pkt) =
-        crate::recursive::resolve_iterative(zone, QueryType::DNSKEY, cache, root_hints, srtt, 0, 0)
-            .await
+    if let Ok(pkt) = crate::recursive::resolve_iterative(
+        zone,
+        QueryType::DNSKEY,
+        cache,
+        root_hints,
+        srtt,
+        0,
+        0,
+        &std::sync::atomic::AtomicUsize::new(0),
+    )
+    .await
     {
         cache.write().unwrap().insert(zone, QueryType::DNSKEY, &pkt);
         return pkt.answers;
@@ -580,9 +588,17 @@ async fn fetch_ds(
     }
 
     stats.lock().unwrap().ds_fetches += 1;
-    if let Ok(pkt) =
-        crate::recursive::resolve_iterative(child, QueryType::DS, cache, root_hints, srtt, 0, 0)
-            .await
+    if let Ok(pkt) = crate::recursive::resolve_iterative(
+        child,
+        QueryType::DS,
+        cache,
+        root_hints,
+        srtt,
+        0,
+        0,
+        &std::sync::atomic::AtomicUsize::new(0),
+    )
+    .await
     {
         cache.write().unwrap().insert(child, QueryType::DS, &pkt);
         return pkt.answers;
