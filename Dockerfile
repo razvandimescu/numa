@@ -1,7 +1,7 @@
 FROM rust:1.97-alpine AS builder
 RUN apk add --no-cache musl-dev cmake make perl
 WORKDIR /app
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml Cargo.lock build.rs ./
 RUN mkdir src && echo 'fn main() {}' > src/main.rs && echo '' > src/lib.rs
 RUN cargo build --release 2>/dev/null || true
 RUN rm -rf src
