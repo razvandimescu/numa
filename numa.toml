@@ -34,8 +34,9 @@ api_port = 5380
 # Cached, local and coalesced answers are never charged, so this bounds
 # only the work a flood of novel names can conjure. Over the ceiling,
 # UDP is dropped silently (a reply is free reflection) and stream
-# transports get SERVFAIL. Watch `queries.refused` and `resolutions.peak`
-# in /stats before changing it. 0 disables the ceiling.
+# transports get SERVFAIL. Watch `queries.refused` and `resolutions` in
+# /stats before changing it; raise it to opt out, since 0 refuses every
+# cache miss.
 #
 # max_concurrent_resolutions = 512   # default
 

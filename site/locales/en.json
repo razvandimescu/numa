@@ -46,7 +46,7 @@
   "paths.override": "Override",
   "paths.blocked": "Blocked",
   "paths.errors": "Errors",
-  "paths.refused": "refused",
+  "paths.refused": "Refused",
 
   "log.filter_domain": "filter domain...",
   "log.all_paths": "all paths",

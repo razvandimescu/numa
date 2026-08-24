@@ -114,7 +114,7 @@ pub struct ServerConfig {
     /// transport. Local, cached and coalesced answers are never charged, so
     /// this bounds only the work an attacker can conjure with novel names.
     /// Over the ceiling UDP is dropped silently and stream transports get
-    /// SERVFAIL. 0 disables the ceiling.
+    /// SERVFAIL. Raise it to opt out; 0 refuses every cache miss.
     #[serde(default = "default_max_concurrent_resolutions")]
     pub max_concurrent_resolutions: usize,
     /// Shared secret guarding the HTTP control plane (dashboard + REST API)
@@ -865,9 +865,6 @@ mod tests {
 
         let set: Config = toml::from_str("[server]\nmax_concurrent_resolutions = 64").unwrap();
         assert_eq!(set.server.max_concurrent_resolutions, 64);
-
-        let off: Config = toml::from_str("[server]\nmax_concurrent_resolutions = 0").unwrap();
-        assert_eq!(off.server.max_concurrent_resolutions, 0, "0 disables it");
     }
 
     #[test]

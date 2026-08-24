@@ -212,8 +212,6 @@ struct StatsResponse {
 #[derive(Serialize)]
 struct ResolutionStats {
     active: usize,
-    peak: usize,
-    /// 0 = no ceiling configured.
     limit: usize,
 }
 
@@ -657,7 +655,6 @@ async fn stats(State(ctx): State<Arc<ServerCtx>>) -> Json<StatsResponse> {
         },
         resolutions: ResolutionStats {
             active: ctx.admission.active(),
-            peak: ctx.admission.peak(),
             limit: ctx.admission.limit(),
         },
         proxy_protocol: ProxyProtocolStats {

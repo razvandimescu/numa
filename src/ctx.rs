@@ -119,13 +119,10 @@ pub async fn resolve_query(
     // DNSSEC validation (recursive/forwarded responses only). Charged too:
     // it fetches DS and DNSKEY through its own recursive walks, so leaving it
     // outside the ceiling would make the pipeline bounded-walk then unbounded-
-    // validation. Refused validation stays Indeterminate and never Secure.
+    // validation.
     let validates = ctx.dnssec_enabled && path == QueryPath::Recursive;
     let validation_permit = validates.then(|| ctx.admission.try_admit()).flatten();
-    if validates && validation_permit.is_none() {
-        debug!("DNSSEC | {} | skipped, at resolution capacity", qname);
-    }
-    if validation_permit.is_some() {
+    if let Some(_permit) = validation_permit {
         let (status, vstats) =
             crate::dnssec::validate_response(&response, &ctx.cache, &ctx.root_hints, &ctx.srtt)
                 .await;
@@ -155,6 +152,9 @@ pub async fn resolve_query(
             .write()
             .unwrap()
             .insert_with_status(&qname, qtype, &response, status);
+    } else if validates {
+        debug!("DNSSEC | {} | skipped, at resolution capacity", qname);
+        discard_unvalidated(ctx, &query, &qname, &mut response);
     }
 
     // Runs after DNSSEC validation + the unfiltered cache insert above (so the
@@ -620,6 +620,18 @@ async fn resolve_remote(
     (resp, path, DnssecStatus::Indeterminate, upstream_transport)
 }
 
+/// A recursive answer the walk already cached but validation never checked.
+/// Left in place it turns one refused validation into a TTL-long downgrade
+/// that later cache hits never revisit, so drop it and let the next query
+/// re-resolve with a permit in hand. Strict mode also fails closed: being
+/// busy is not a reason to serve what it asked us to prove.
+fn discard_unvalidated(ctx: &ServerCtx, query: &DnsPacket, qname: &str, response: &mut DnsPacket) {
+    ctx.cache.write().unwrap().remove(qname);
+    if ctx.dnssec_strict {
+        *response = DnsPacket::response_from(query, ResultCode::SERVFAIL);
+    }
+}
+
 fn cache_and_parse(
     ctx: &ServerCtx,
     qname: &str,
@@ -1050,7 +1062,7 @@ mod tests {
     fn unlimited_admission() -> &'static crate::admission::ResolutionAdmission {
         static A: std::sync::OnceLock<crate::admission::ResolutionAdmission> =
             std::sync::OnceLock::new();
-        A.get_or_init(|| crate::admission::ResolutionAdmission::new(0))
+        A.get_or_init(|| crate::admission::ResolutionAdmission::new(usize::MAX))
     }
 
     // ---- InflightGuard unit tests ----
@@ -3250,6 +3262,47 @@ mod tests {
     }
 
     // ---- Aggregate resolution admission (P0-1, issue #230) ----
+
+    /// Refusing a validation must not leave the walk's unvalidated answer in
+    /// the cache: later hits are served as `Cached`, which never revalidates,
+    /// so a moment at capacity would otherwise buy a TTL-long downgrade.
+    #[tokio::test]
+    async fn skipped_validation_discards_the_unvalidated_answer() {
+        for strict in [false, true] {
+            let mut ctx = crate::testutil::test_ctx().await;
+            ctx.dnssec_strict = strict;
+            let query = DnsPacket::query(1, "skipped.test", QueryType::A);
+            let mut response = crate::testutil::a_record_response(
+                "skipped.test",
+                std::net::Ipv4Addr::new(1, 2, 3, 4),
+                300,
+            );
+            ctx.cache
+                .write()
+                .unwrap()
+                .insert("skipped.test", QueryType::A, &response);
+
+            discard_unvalidated(&ctx, &query, "skipped.test", &mut response);
+
+            assert!(
+                ctx.cache
+                    .read()
+                    .unwrap()
+                    .lookup("skipped.test", QueryType::A)
+                    .is_none(),
+                "strict={strict}: an unvalidated answer must not outlive its query"
+            );
+            if strict {
+                assert_eq!(
+                    response.header.rescode,
+                    ResultCode::SERVFAIL,
+                    "strict mode fails closed rather than serving what it asked us to prove"
+                );
+            } else {
+                assert_eq!(response.answers.len(), 1, "non-strict still answers");
+            }
+        }
+    }
 
     struct FloodResult {
         /// Concurrent resolutions admitted, from the in-flight map.

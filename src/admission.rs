@@ -8,30 +8,19 @@
 //! This is the one ceiling every transport shares: UDP, TCP, DoT and DoH all
 //! reach remote resolution through `ctx::resolve_remote`, which admits here.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-
 use tokio::sync::{Semaphore, SemaphorePermit};
 
 pub struct ResolutionAdmission {
     permits: Semaphore,
     limit: usize,
-    peak: AtomicUsize,
 }
 
 impl ResolutionAdmission {
     pub fn new(limit: usize) -> Self {
+        let limit = limit.min(Semaphore::MAX_PERMITS);
         Self {
-            permits: Semaphore::new(Self::capacity(limit)),
+            permits: Semaphore::new(limit),
             limit,
-            peak: AtomicUsize::new(0),
-        }
-    }
-
-    fn capacity(limit: usize) -> usize {
-        if limit == 0 {
-            Semaphore::MAX_PERMITS
-        } else {
-            limit
         }
     }
 
@@ -39,17 +28,11 @@ impl ResolutionAdmission {
     /// queues: a waiter list is itself memory an attacker gets to grow, and
     /// a query held behind one is a query whose client has already retried.
     pub fn try_admit(&self) -> Option<SemaphorePermit<'_>> {
-        let permit = self.permits.try_acquire().ok()?;
-        self.peak.fetch_max(self.active(), Ordering::Relaxed);
-        Some(permit)
+        self.permits.try_acquire().ok()
     }
 
     pub fn active(&self) -> usize {
-        Self::capacity(self.limit) - self.permits.available_permits()
-    }
-
-    pub fn peak(&self) -> usize {
-        self.peak.load(Ordering::Relaxed)
+        self.limit - self.permits.available_permits()
     }
 
     pub fn limit(&self) -> usize {
@@ -79,21 +62,10 @@ mod tests {
     }
 
     #[test]
-    fn peak_records_the_high_water_mark() {
-        let admission = ResolutionAdmission::new(4);
-        let held: Vec<_> = (0..3).filter_map(|_| admission.try_admit()).collect();
-        assert_eq!(admission.peak(), 3);
-        drop(held);
-        assert_eq!(admission.active(), 0);
-        assert_eq!(admission.peak(), 3, "peak survives the permits it recorded");
-    }
-
-    #[test]
-    fn zero_disables_the_ceiling() {
-        let admission = ResolutionAdmission::new(0);
-        let held: Vec<_> = (0..1000).filter_map(|_| admission.try_admit()).collect();
-        assert_eq!(held.len(), 1000);
-        assert_eq!(admission.active(), 1000);
-        assert_eq!(admission.limit(), 0);
+    fn an_oversized_limit_clamps_instead_of_panicking() {
+        let admission = ResolutionAdmission::new(usize::MAX);
+        assert_eq!(admission.limit(), Semaphore::MAX_PERMITS);
+        let _held = admission.try_admit().expect("admits");
+        assert_eq!(admission.active(), 1);
     }
 }
