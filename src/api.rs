@@ -204,6 +204,17 @@ struct StatsResponse {
     mobile: MobileStatsResponse,
     proxy_protocol: ProxyProtocolStats,
     memory: MemoryStats,
+    resolutions: ResolutionStats,
+}
+
+/// Aggregate admission control (issue #230). `refused` lives under `queries`
+/// with the other per-path counters.
+#[derive(Serialize)]
+struct ResolutionStats {
+    active: usize,
+    peak: usize,
+    /// 0 = no ceiling configured.
+    limit: usize,
 }
 
 #[derive(Serialize)]
@@ -257,6 +268,7 @@ struct QueriesStats {
     blocked: u64,
     errors: u64,
     rebind_stripped: u64,
+    refused: u64,
 }
 
 #[derive(Serialize)]
@@ -607,6 +619,7 @@ async fn stats(State(ctx): State<Arc<ServerCtx>>) -> Json<StatsResponse> {
             blocked: snap.blocked,
             errors: snap.errors,
             rebind_stripped: snap.rebind_stripped,
+            refused: snap.refused,
         },
         transport: TransportStats {
             udp: snap.transport_udp,
@@ -641,6 +654,11 @@ async fn stats(State(ctx): State<Arc<ServerCtx>>) -> Json<StatsResponse> {
         mobile: MobileStatsResponse {
             enabled: ctx.mobile_enabled,
             port: ctx.mobile_port,
+        },
+        resolutions: ResolutionStats {
+            active: ctx.admission.active(),
+            peak: ctx.admission.peak(),
+            limit: ctx.admission.limit(),
         },
         proxy_protocol: ProxyProtocolStats {
             accepted: snap.proxy_v2_accepted,

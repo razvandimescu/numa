@@ -110,6 +110,13 @@ pub struct ServerConfig {
     /// CIDR allowlist applied at every DNS surface. Empty = disabled.
     #[serde(default)]
     pub allow_from: Vec<String>,
+    /// Ceiling on cache-miss resolutions running at once, shared by every
+    /// transport. Local, cached and coalesced answers are never charged, so
+    /// this bounds only the work an attacker can conjure with novel names.
+    /// Over the ceiling UDP is dropped silently and stream transports get
+    /// SERVFAIL. 0 disables the ceiling.
+    #[serde(default = "default_max_concurrent_resolutions")]
+    pub max_concurrent_resolutions: usize,
     /// Shared secret guarding the HTTP control plane (dashboard + REST API)
     /// for non-loopback peers. Overridden by `NUMA_API_TOKEN`. Loopback is
     /// always allowed. Empty = none (only valid for a loopback `api_bind_addr`).
@@ -142,6 +149,7 @@ impl Default for ServerConfig {
             filter_aaaa: false,
             proxy_protocol: ProxyProtocolConfig::default(),
             allow_from: Vec::new(),
+            max_concurrent_resolutions: DEFAULT_MAX_CONCURRENT_RESOLUTIONS,
             api_token: None,
             rebind_protect: false,
             rebind_allowlist: Vec::new(),
@@ -170,6 +178,14 @@ pub const DEFAULT_API_PORT: u16 = 5380;
 
 fn default_api_port() -> u16 {
     DEFAULT_API_PORT
+}
+
+/// Conservative enough for a Pi Zero, well above any plausible legitimate
+/// burst on a home or small-office resolver. Mirrors the TCP connection cap.
+pub const DEFAULT_MAX_CONCURRENT_RESOLUTIONS: usize = 512;
+
+fn default_max_concurrent_resolutions() -> usize {
+    DEFAULT_MAX_CONCURRENT_RESOLUTIONS
 }
 
 #[derive(Deserialize, Default, PartialEq, Eq, Clone, Copy)]
@@ -838,6 +854,21 @@ fn default_mobile_bind_addr() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolution_ceiling_defaults_and_parses() {
+        let default: Config = toml::from_str("").unwrap();
+        assert_eq!(
+            default.server.max_concurrent_resolutions,
+            DEFAULT_MAX_CONCURRENT_RESOLUTIONS
+        );
+
+        let set: Config = toml::from_str("[server]\nmax_concurrent_resolutions = 64").unwrap();
+        assert_eq!(set.server.max_concurrent_resolutions, 64);
+
+        let off: Config = toml::from_str("[server]\nmax_concurrent_resolutions = 0").unwrap();
+        assert_eq!(off.server.max_concurrent_resolutions, 0, "0 disables it");
+    }
 
     #[test]
     fn lan_disabled_by_default() {

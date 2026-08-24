@@ -29,6 +29,16 @@ api_port = 5380
 #
 # allow_from = ["10.0.0.0/8", "192.168.0.0/16", "fd00::/8"]
 
+# ── Resolution ceiling ─────────────────────────────────────────────
+# Cache misses running at once, across UDP, TCP, DoT and DoH together.
+# Cached, local and coalesced answers are never charged, so this bounds
+# only the work a flood of novel names can conjure. Over the ceiling,
+# UDP is dropped silently (a reply is free reflection) and stream
+# transports get SERVFAIL. Watch `queries.refused` and `resolutions.peak`
+# in /stats before changing it. 0 disables the ceiling.
+#
+# max_concurrent_resolutions = 512   # default
+
 # [upstream]
 # mode = "forward"                              # "forward" (default) — relay to upstream
 #                                               # "recursive" — resolve from root hints (no address needed)

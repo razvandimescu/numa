@@ -1,4 +1,5 @@
 pub mod acl;
+pub mod admission;
 pub mod api;
 pub mod api_auth;
 pub mod blocklist;
