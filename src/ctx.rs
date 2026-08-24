@@ -3254,28 +3254,21 @@ mod tests {
     struct FloodResult {
         /// Concurrent resolutions admitted, from the in-flight map.
         inflight: usize,
-        /// Upstream queries those resolutions opened. One per admitted
-        /// resolution in forward mode; a whole walk each in recursive mode.
+        /// Upstream queries those resolutions opened, one per admitted
+        /// resolution.
         upstream_queries: usize,
         refused: u64,
     }
 
     /// Drive `count` concurrent cache-miss resolutions against a blackhole
     /// upstream under a ceiling of `limit`, naming each with `name_for`.
-    async fn flood(
-        count: usize,
-        name_for: fn(usize) -> String,
-        mode: UpstreamMode,
-        limit: usize,
-    ) -> FloodResult {
+    async fn flood(count: usize, name_for: fn(usize) -> String, limit: usize) -> FloodResult {
         let (upstream, seen) = crate::testutil::counting_blackhole_upstream().await;
 
         let mut ctx = crate::testutil::test_ctx().await;
         // Long enough that every admitted resolution is still in flight when
         // sampled, so nothing frees a permit and understates the peak.
         ctx.timeout = Duration::from_secs(30);
-        ctx.upstream_mode = mode;
-        ctx.root_hints = vec![upstream];
         ctx.admission = crate::admission::ResolutionAdmission::new(limit);
         let ctx = Arc::new(ctx);
         *ctx.upstream_pool.lock().unwrap() =
@@ -3327,7 +3320,7 @@ mod tests {
     /// name, scaling 1:1 with attacker input.
     #[tokio::test]
     async fn distinct_name_flood_is_capped_by_admission() {
-        let r = flood(FLOOD, distinct_name, UpstreamMode::Forward, LIMIT).await;
+        let r = flood(FLOOD, distinct_name, LIMIT).await;
         assert_eq!(
             r.inflight, LIMIT,
             "admission must hold concurrent resolutions at the ceiling"
@@ -3348,14 +3341,29 @@ mod tests {
     /// upstream query; a recursive miss funds a whole delegation walk (up to
     /// `MAX_TOTAL_QUERIES`) plus DNSSEC validation, so this is where the
     /// missing bound converted one client packet into the most egress.
+    ///
+    /// Saturated up front rather than by flooding: how long a walk against a
+    /// blackhole stays pinned is platform-dependent, so a flood would be
+    /// racing the retry schedule rather than testing the ceiling.
     #[tokio::test]
-    async fn distinct_name_flood_is_capped_in_recursive_mode() {
-        let r = flood(FLOOD, distinct_name, UpstreamMode::Recursive, LIMIT).await;
+    async fn recursive_walks_are_charged_to_admission() {
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.upstream_mode = UpstreamMode::Recursive;
+        ctx.root_hints = vec![crate::testutil::blackhole_upstream()];
+        ctx.admission = crate::admission::ResolutionAdmission::new(1);
+        let ctx = Arc::new(ctx);
+
+        let held = ctx.admission.try_admit().expect("the only permit");
+
+        let (resp, path) = resolve_in_test(&ctx, "walk.example", QueryType::A).await;
         assert_eq!(
-            r.inflight, LIMIT,
-            "concurrent recursive walks must stop at the ceiling"
+            path,
+            QueryPath::Refused,
+            "a delegation walk is remote work and must be charged"
         );
-        assert_eq!(r.refused, (FLOOD - LIMIT) as u64);
+        assert_eq!(resp.header.rescode, ResultCode::SERVFAIL);
+        assert_eq!(ctx.stats.lock().unwrap().snapshot().refused, 1);
+        drop(held);
     }
 
     /// The bound the resolver already had, and the reason the tests above are
@@ -3364,13 +3372,7 @@ mod tests {
     /// keep working, and must not spend a permit per follower.
     #[tokio::test]
     async fn identical_name_flood_collapses_to_one_upstream_query() {
-        let r = flood(
-            FLOOD,
-            |_| "same.flood.example".to_string(),
-            UpstreamMode::Forward,
-            LIMIT,
-        )
-        .await;
+        let r = flood(FLOOD, |_| "same.flood.example".to_string(), LIMIT).await;
         assert_eq!(r.inflight, 1, "one key, one in-flight entry");
         assert_eq!(
             r.upstream_queries, 1,

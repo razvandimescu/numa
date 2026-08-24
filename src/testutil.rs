@@ -326,19 +326,26 @@ pub async fn doh_upstream_raw(
     (format!("http://{}/dns-query", addr), rx)
 }
 
-/// Wait until `sample` stops changing. Settling works for both a bounded and
-/// an unbounded resolver, where waiting for an expected total would stall on
-/// whichever case is wrong.
+/// Wait until `sample` stops changing, having first seen it rise above zero.
+/// Settling works for both a bounded and an unbounded resolver, where waiting
+/// for an expected total would stall on whichever case is wrong. Zero is
+/// treated as "not started yet", not as a settled value: a slow runner that
+/// has not scheduled the work would otherwise report a ceiling that was never
+/// exercised. Returns 0 if nothing happens within `cap`.
 pub async fn wait_until_settled(mut sample: impl FnMut() -> usize, cap: Duration) -> usize {
     const STABLE_TICKS: usize = 40;
     const TICK: Duration = Duration::from_millis(5);
 
     let deadline = std::time::Instant::now() + cap;
-    let (mut last, mut stable) = (sample(), 0);
+    let (mut last, mut stable) = (0, 0);
     while stable < STABLE_TICKS && std::time::Instant::now() < deadline {
         tokio::time::sleep(TICK).await;
         let now = sample();
-        stable = if now == last { stable + 1 } else { 0 };
+        stable = if now == last && now > 0 {
+            stable + 1
+        } else {
+            0
+        };
         last = now;
     }
     last
