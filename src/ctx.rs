@@ -325,7 +325,7 @@ async fn resolve_with_cname_chase(
         }
 
         let sub_query = DnsPacket::query(query.header.id, &current_qname, qtype);
-        let (sub_resp, _, _, sub_ut) =
+        let (sub_resp, sub_path, _, sub_ut) =
             match resolve_local(&sub_query, src_addr, &current_qname, qtype, ctx) {
                 Some((r, p, d)) => (r, p, d, None),
                 None => {
@@ -344,6 +344,18 @@ async fn resolve_with_cname_chase(
                     .await
                 }
             };
+
+        // A refusal mid-chain is a refusal for the whole query: merged under
+        // the first hop's path it would answer a UDP query the ceiling means
+        // to drop, and book the refusal as a cache hit.
+        if sub_path == QueryPath::Refused {
+            return (
+                DnsPacket::response_from(query, ResultCode::SERVFAIL),
+                QueryPath::Refused,
+                DnssecStatus::Indeterminate,
+                ut,
+            );
+        }
 
         resp.answers.extend(sub_resp.answers);
         resp.header.rescode = sub_resp.header.rescode;
@@ -3467,6 +3479,42 @@ mod tests {
             resp.header.id, 0xBEEF,
             "the client must be able to match it"
         );
+        drop(held);
+    }
+
+    /// A CNAME chase that runs out of admission mid-chain is refused whole.
+    /// The first hop can be free (cache, zone) while the target still costs a
+    /// resolution, and keeping the first hop's path would answer a UDP query
+    /// the ceiling means to drop and book the refusal as a cache hit.
+    #[tokio::test]
+    async fn a_refused_cname_target_refuses_the_chain() {
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.admission = crate::admission::ResolutionAdmission::new(1);
+        ctx.cache.write().unwrap().insert(
+            "alias.example",
+            QueryType::A,
+            &crate::testutil::noerror_response(vec![DnsRecord::CNAME {
+                domain: "alias.example".into(),
+                host: "target.example".into(),
+                ttl: 300,
+            }]),
+        );
+        let ctx = Arc::new(ctx);
+
+        let held = ctx.admission.try_admit().expect("the only permit");
+
+        let (resp, path) = resolve_in_test(&ctx, "alias.example", QueryType::A).await;
+        assert_eq!(
+            path,
+            QueryPath::Refused,
+            "the target lookup was turned away, so the chain was too"
+        );
+        assert_eq!(resp.header.rescode, ResultCode::SERVFAIL);
+        assert!(
+            resp.answers.is_empty(),
+            "a refusal carries no partial chain"
+        );
+        assert_eq!(ctx.stats.lock().unwrap().snapshot().refused, 1);
         drop(held);
     }
 
