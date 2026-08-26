@@ -37,6 +37,7 @@ pub mod relay;
 pub mod serve;
 pub mod service_store;
 pub mod setup_phone;
+pub mod shutdown;
 pub mod srtt;
 pub mod stats;
 pub mod svcb;

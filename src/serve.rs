@@ -257,8 +257,13 @@ pub async fn run(config_path: String) -> crate::Result<()> {
             udp_serve_loop(&ctx, socket, pp.as_ref()).await
         }));
     }
-    let (first, _, _) = futures::future::select_all(handles).await;
-    first?
+    tokio::select! {
+        (first, _, _) = futures::future::select_all(handles) => first?,
+        () = crate::shutdown::signal() => {
+            info!("shutting down");
+            Ok(())
+        }
+    }
 }
 
 /// First port-53 bind failure routes through `try_port53_advisory` so the

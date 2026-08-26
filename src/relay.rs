@@ -80,7 +80,10 @@ pub async fn run(addr: SocketAddr) -> Result<()> {
     let app = build_app(RelayState::new());
     let listener = TcpListener::bind(addr).await?;
     info!("ODoH relay listening on {}", addr);
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(crate::shutdown::signal())
+        .await?;
+    info!("relay stopped");
     Ok(())
 }
 

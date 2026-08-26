@@ -187,6 +187,23 @@ CONF
         "0" \
         "$ERRORS"
 
+    echo ""
+    echo "=== Shutdown ==="
+
+    # SIGTERM must be handled, not merely the default disposition: as PID 1 in
+    # a container the kernel drops signals with a default handler (issue #367).
+    kill -TERM "$NUMA_PID" 2>/dev/null || true
+    SHUTDOWN_RC=""
+    for _ in 1 2 3 4 5; do
+        if ! kill -0 "$NUMA_PID" 2>/dev/null; then
+            SHUTDOWN_RC=0
+            wait "$NUMA_PID" 2>/dev/null || SHUTDOWN_RC=$?
+            break
+        fi
+        sleep 1
+    done
+    check "Exits cleanly on SIGTERM" "^0$" "${SHUTDOWN_RC:-timeout}"
+
     kill "$NUMA_PID" 2>/dev/null || true
     wait "$NUMA_PID" 2>/dev/null || true
     sleep 1
