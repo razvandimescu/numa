@@ -212,8 +212,8 @@ fn parse_odoh_config(body: &[u8], ttl: Duration) -> Result<OdohTargetConfig> {
 /// plaintext DNS wire response.
 ///
 /// Flow: fetch the target's HPKE config (cached), seal the query, POST to the
-/// relay with `Targethost`/`Targetpath` headers, then unseal the response.
-/// On seal/unseal failure we invalidate the cache and retry once — this
+/// relay with the target routing in the query string, then unseal the
+/// response. On seal/unseal failure we invalidate the cache and retry once — this
 /// handles the benign race where the target rotated its key between our
 /// cached config and the POST.
 pub async fn query_through_relay(
@@ -293,7 +293,7 @@ async fn attempt_query(req: &OdohRequest<'_>) -> std::result::Result<Vec<u8>, At
     // HTTP headers, to carry the target routing. `Targethost`/`Targetpath`
     // headers cause relays to treat the request as an unspecified-target and
     // reject it.
-    let (status, resp_body) = timeout_at(req.deadline.into(), async {
+    let (status, forwarded, url, resp_body) = timeout_at(req.deadline.into(), async {
         let resp = req
             .client
             .post(req.relay_url)
@@ -308,8 +308,10 @@ async fn attempt_query(req: &OdohRequest<'_>) -> std::result::Result<Vec<u8>, At
             .send()
             .await?;
         let status = resp.status();
+        let forwarded = content_type_matches(resp.headers(), ODOH_CONTENT_TYPE);
+        let url = resp.url().to_string();
         let body = resp.bytes().await?;
-        Ok::<_, reqwest::Error>((status, body))
+        Ok::<_, reqwest::Error>((status, forwarded, url, body))
     })
     .await
     .map_err(|_| AttemptError::Other("ODoH relay request timed out".into()))?
@@ -322,7 +324,7 @@ async fn attempt_query(req: &OdohRequest<'_>) -> std::result::Result<Vec<u8>, At
     if !status.is_success() {
         let preview_len = resp_body.len().min(ERROR_BODY_PREVIEW_BYTES);
         let body_preview = String::from_utf8_lossy(&resp_body[..preview_len]);
-        let msg = format!("ODoH relay returned {status}: {}", body_preview.trim());
+        let msg = describe_failure(status, forwarded, &url, req, body_preview.trim());
         return Err(if status.as_u16() == 401 {
             AttemptError::KeyRotation(msg)
         } else {
@@ -338,6 +340,46 @@ async fn attempt_query(req: &OdohRequest<'_>) -> std::result::Result<Vec<u8>, At
             .map_err(|e| AttemptError::KeyRotation(format!("ODoH decrypt failed: {e}")))?;
 
     Ok(plaintext_response.into_msg().to_vec())
+}
+
+/// Attribute a non-success status to the hop that produced it. A relay that
+/// forwarded returns the target's response under the ODoH media type (RFC
+/// 9230 §4.3); a relay rejecting the request itself — or a front-end proxy
+/// 404ing a mistyped relay path before the relay ever sees it — does not.
+/// Without this split every failure reads as the relay's fault, including
+/// the target's own (issue #365).
+fn describe_failure(
+    status: reqwest::StatusCode,
+    forwarded: bool,
+    url: &str,
+    req: &OdohRequest<'_>,
+    preview: &str,
+) -> String {
+    let hop = if forwarded {
+        format!(
+            "ODoH target https://{}{} returned {status}",
+            req.cache.target_host(),
+            req.target_path
+        )
+    } else if status == reqwest::StatusCode::NOT_FOUND {
+        format!("ODoH relay {url} returned {status} without reaching the target — check the path in upstream.relay")
+    } else {
+        format!("ODoH relay {url} returned {status} without reaching the target")
+    };
+    if preview.is_empty() {
+        hop
+    } else {
+        format!("{hop}: {preview}")
+    }
+}
+
+/// Media-type compare that tolerates parameters (`; charset=…`).
+pub(crate) fn content_type_matches(headers: &HeaderMap, expected: &str) -> bool {
+    headers
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|ct| ct.split(';').next().unwrap_or("").trim() == expected)
+        .unwrap_or(false)
 }
 
 fn cache_control_ttl(headers: &HeaderMap) -> Option<Duration> {
@@ -407,6 +449,83 @@ mod tests {
         let remaining = cfg.expires_at.saturating_duration_since(Instant::now());
         assert!(remaining <= MAX_CONFIG_TTL);
         assert!(remaining >= MAX_CONFIG_TTL - Duration::from_secs(1));
+    }
+
+    fn with_req(f: impl FnOnce(&OdohRequest<'_>)) {
+        let client = crate::forward::build_https_client();
+        let cache = OdohConfigCache::new("odoh.example.com".to_string(), client.clone());
+        f(&OdohRequest {
+            wire: &[],
+            relay_url: "https://relay.example/relay",
+            target_path: "/dns-query",
+            client: &client,
+            cache: &cache,
+            timeout: Duration::from_secs(1),
+        });
+    }
+
+    #[test]
+    fn forwarded_status_names_the_target() {
+        with_req(|req| {
+            let msg = describe_failure(
+                reqwest::StatusCode::NOT_FOUND,
+                true,
+                "https://relay.example/relay?targethost=odoh.example.com",
+                req,
+                "",
+            );
+            assert_eq!(
+                msg,
+                "ODoH target https://odoh.example.com/dns-query returned 404 Not Found"
+            );
+        });
+    }
+
+    #[test]
+    fn unforwarded_404_names_the_relay_url_and_the_setting_to_fix() {
+        with_req(|req| {
+            let msg = describe_failure(
+                reqwest::StatusCode::NOT_FOUND,
+                false,
+                "https://relay.example/relay/",
+                req,
+                "",
+            );
+            assert!(msg.contains("https://relay.example/relay/"), "{msg}");
+            assert!(msg.contains("upstream.relay"), "{msg}");
+            assert!(!msg.contains("odoh.example.com"), "{msg}");
+        });
+    }
+
+    #[test]
+    fn relay_rejection_carries_the_body_without_the_path_hint() {
+        with_req(|req| {
+            let msg = describe_failure(
+                reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                false,
+                "https://relay.example/relay",
+                req,
+                "expected application/oblivious-dns-message",
+            );
+            assert!(
+                msg.ends_with(": expected application/oblivious-dns-message"),
+                "{msg}"
+            );
+            assert!(!msg.contains("upstream.relay"), "{msg}");
+        });
+    }
+
+    #[test]
+    fn content_type_matches_ignores_parameters() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            "content-type",
+            "application/oblivious-dns-message; charset=utf-8"
+                .parse()
+                .unwrap(),
+        );
+        assert!(content_type_matches(&h, ODOH_CONTENT_TYPE));
+        assert!(!content_type_matches(&HeaderMap::new(), ODOH_CONTENT_TYPE));
     }
 
     #[test]
