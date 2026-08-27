@@ -460,7 +460,7 @@ mod tests {
             target_path: "/dns-query",
             client: &client,
             cache: &cache,
-            timeout: Duration::from_secs(1),
+            deadline: Instant::now() + Duration::from_secs(1),
         });
     }
 
