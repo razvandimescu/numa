@@ -19,8 +19,8 @@ use log::{error, info};
 use serde::Deserialize;
 use tokio::net::TcpListener;
 
-use crate::forward::build_https_client_with_pool;
-use crate::odoh::ODOH_CONTENT_TYPE;
+use crate::forward::build_relay_client;
+use crate::odoh::{content_type_matches, ODOH_CONTENT_TYPE};
 use crate::Result;
 
 /// Cap on the opaque body we accept from a client. ODoH envelopes are
@@ -57,7 +57,7 @@ struct RelayState {
 impl RelayState {
     fn new() -> Arc<Self> {
         Arc::new(RelayState {
-            client: build_https_client_with_pool(RELAY_POOL_PER_HOST),
+            client: build_relay_client(RELAY_POOL_PER_HOST),
             total_requests: AtomicU64::new(0),
             forwarded_ok: AtomicU64::new(0),
             forwarded_err: AtomicU64::new(0),
@@ -68,12 +68,28 @@ impl RelayState {
 
 /// `DefaultBodyLimit` overrides axum's 2 MiB default so hostile clients
 /// can't force the relay to buffer multi-MB bodies before our own cap.
+///
+/// `/relay/` is routed alongside `/relay` because axum does not redirect
+/// trailing slashes: a client whose configured URL carries one otherwise
+/// gets a bare 404 that names no cause (issue #365).
 fn build_app(state: Arc<RelayState>) -> Router {
     Router::new()
         .route("/relay", post(handle_relay))
+        .route("/relay/", post(handle_relay))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .route("/health", get(handle_health))
+        .fallback(handle_unknown)
         .with_state(state)
+}
+
+/// An empty 404 leaves an operator nothing to debug with, and the relay
+/// keeps no request logs to consult instead.
+async fn handle_unknown() -> impl IntoResponse {
+    (
+        StatusCode::NOT_FOUND,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        "numa ODoH relay: POST /relay?targethost=<host>&targetpath=</path>\n",
+    )
 }
 
 pub async fn run(addr: SocketAddr) -> Result<()> {
@@ -175,14 +191,6 @@ async fn forward_to_target(
         return Err("target response exceeds cap".into());
     }
     Ok(response)
-}
-
-fn content_type_matches(headers: &axum::http::HeaderMap, expected: &str) -> bool {
-    headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .map(|ct| ct.split(';').next().unwrap_or("").trim() == expected)
-        .unwrap_or(false)
 }
 
 /// Strict DNS-hostname validator, aimed at closing the SSRF surface a naive

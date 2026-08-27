@@ -193,12 +193,16 @@ pub fn build_https_client() -> reqwest::Client {
     build_https_client_with_resolver(1, None)
 }
 
-/// Same shape as [`build_https_client`], but caller picks
-/// `pool_max_idle_per_host`. Relay workloads hit many distinct target hosts
-/// and benefit from a larger pool so warm connections survive concurrent
-/// fan-out.
-pub fn build_https_client_with_pool(pool_max_idle_per_host: usize) -> reqwest::Client {
-    build_https_client_with_resolver(pool_max_idle_per_host, None)
+/// Client for the ODoH relay's forward leg. Relay workloads hit many distinct
+/// target hosts, so the caller picks a larger `pool_max_idle_per_host` to keep
+/// warm connections through concurrent fan-out. Redirects are refused: the
+/// relay must reach the host the client named and no other, or a target could
+/// bounce it at addresses that never passed `is_valid_hostname`.
+pub fn build_relay_client(pool_max_idle_per_host: usize) -> reqwest::Client {
+    https_client_builder(pool_max_idle_per_host)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap_or_default()
 }
 
 /// [`build_https_client`] with an optional custom DNS resolver. Numa wires
