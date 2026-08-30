@@ -8,4 +8,8 @@ Scenario-driven configs for common Numa deployments. Each recipe is self-contain
 - [dnsdist in front of Numa](dnsdist-front.md) — terminate public TLS externally, keep Numa on loopback.
 - [ODoH upstream with bootstrap pinning](odoh-upstream.md) — oblivious DNS client mode without leaking the relay/target hostnames.
 
+## Local network
+
+- [Local DNS records and split DNS](local-dns-records.md) — name your LAN hosts on any domain, answer reverse lookups, hand an internal zone to another resolver.
+
 Missing a scenario? Open an issue or PR — these are plain Markdown with no build step.
