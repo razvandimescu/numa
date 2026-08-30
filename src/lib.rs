@@ -166,7 +166,7 @@ pub fn cli_config_path() -> String {
     }
     #[cfg(not(windows))]
     {
-        "numa.toml".to_string()
+        data_dir().join("numa.toml").to_string_lossy().into_owned()
     }
 }
 
