@@ -509,9 +509,12 @@ mod tests {
                     let query =
                         DnsPacket::query(0xBEEF, &format!("r{i}.flood.example"), QueryType::A);
                     send_query(&mut stream, &query).await;
-                    // Admitted queries hang on the blackhole; refusals answer
-                    // at once. Hold the stream open either way.
-                    let reply = read_reply(&mut stream, Duration::from_millis(500)).await;
+                    // Admitted queries hang on the blackhole for `ctx.timeout`;
+                    // refusals answer at once. The window only has to beat a
+                    // contended runner, not the blackhole, so it is generous:
+                    // a refusal read late counts as admitted and understates
+                    // the refusal total. Hold the stream open either way.
+                    let reply = read_reply(&mut stream, Duration::from_secs(5)).await;
                     (stream, reply)
                 })
             })

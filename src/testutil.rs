@@ -331,14 +331,23 @@ pub async fn doh_upstream_raw(
 /// for an expected total would stall on whichever case is wrong. Zero is
 /// treated as "not started yet", not as a settled value: a slow runner that
 /// has not scheduled the work would otherwise report a ceiling that was never
-/// exercised. Returns 0 if nothing happens within `cap`.
+/// exercised.
+///
+/// The stable window is wide enough to outlast a scheduling gap partway
+/// through a ramp-up, which would otherwise settle on a value the run never
+/// reached. Panics rather than returning on timeout: a bare count that never
+/// settled fails the caller's `assert_eq!` with no way to tell the two apart.
 pub async fn wait_until_settled(mut sample: impl FnMut() -> usize, cap: Duration) -> usize {
-    const STABLE_TICKS: usize = 40;
+    const STABLE: Duration = Duration::from_secs(1);
     const TICK: Duration = Duration::from_millis(5);
+    let stable_ticks = (STABLE.as_millis() / TICK.as_millis()) as usize;
 
     let deadline = std::time::Instant::now() + cap;
     let (mut last, mut stable) = (0, 0);
-    while stable < STABLE_TICKS && std::time::Instant::now() < deadline {
+    while stable < stable_ticks {
+        if std::time::Instant::now() >= deadline {
+            panic!("sample never held steady for {STABLE:?} within {cap:?} (last = {last})");
+        }
         tokio::time::sleep(TICK).await;
         let now = sample();
         stable = if now == last && now > 0 {

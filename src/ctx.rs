@@ -7,12 +7,13 @@ use std::time::{Duration, Instant, SystemTime};
 use arc_swap::ArcSwap;
 use log::{debug, error, info, warn};
 use rustls::ServerConfig;
-use tokio::sync::{broadcast, SemaphorePermit};
+use tokio::sync::broadcast;
 
 use crate::udp_listener::UdpListener;
 
 type InflightMap = HashMap<(String, QueryType), broadcast::Sender<Option<DnsPacket>>>;
 
+use crate::admission::{QueryAdmission, ResolutionAdmission, RESOLUTION_DEADLINE};
 use crate::blocklist::BlocklistStore;
 use crate::buffer::BytePacketBuffer;
 use crate::cache::{DnsCache, DnssecStatus};
@@ -110,19 +111,22 @@ pub async fn resolve_query(
         None => return Err("empty question section".into()),
     };
 
+    // One charge for the whole query: the first cache miss takes a permit and
+    // every later step of the same query — CNAME targets, DNSSEC validation —
+    // rides it. Held until this function returns.
+    let mut charge = QueryAdmission::default();
+
     // Pipeline: overrides -> .localhost -> local zones -> special-use (unless forwarded)
     //        -> .tld proxy -> blocklist -> cache -> forwarding -> recursive/upstream
     // Each lock is scoped to avoid holding MutexGuard across await points.
     let (mut response, path, mut dnssec, upstream_transport) =
-        resolve_with_cname_chase(&query, raw_wire, src_addr, &qname, qtype, ctx).await;
+        resolve_with_cname_chase(&query, raw_wire, src_addr, &qname, qtype, ctx, &mut charge).await;
 
-    // DNSSEC validation (recursive/forwarded responses only). Charged too:
-    // it fetches DS and DNSKEY through its own recursive walks, so leaving it
-    // outside the ceiling would make the pipeline bounded-walk then unbounded-
-    // validation.
-    let validates = ctx.dnssec_enabled && path == QueryPath::Recursive;
-    let validation_permit = validates.then(|| ctx.admission.try_admit()).flatten();
-    if let Some(_permit) = validation_permit {
+    // DNSSEC validation (recursive responses only). Its DS and DNSKEY walks
+    // are the tail of a resolution already admitted: refusing them here would
+    // discard the walk that just paid for them and make the next query redo
+    // it, which is the amplification the ceiling exists to prevent.
+    if ctx.dnssec_enabled && path == QueryPath::Recursive {
         let (status, vstats) =
             crate::dnssec::validate_response(&response, &ctx.cache, &ctx.root_hints, &ctx.srtt)
                 .await;
@@ -152,9 +156,6 @@ pub async fn resolve_query(
             .write()
             .unwrap()
             .insert_with_status(&qname, qtype, &response, status);
-    } else if validates {
-        debug!("DNSSEC | {} | skipped, at resolution capacity", qname);
-        discard_unvalidated(ctx, &query, &qname, &mut response);
     }
 
     // Runs after DNSSEC validation + the unfiltered cache insert above (so the
@@ -293,6 +294,7 @@ async fn resolve_with_cname_chase(
     qname: &str,
     qtype: QueryType,
     ctx: &Arc<ServerCtx>,
+    charge: &mut QueryAdmission,
 ) -> (
     DnsPacket,
     QueryPath,
@@ -303,7 +305,7 @@ async fn resolve_with_cname_chase(
 
     let (mut resp, path, dnssec, mut ut) = match resolve_local(query, src_addr, qname, qtype, ctx) {
         Some((r, p, d)) => (r, p, d, None),
-        None => resolve_remote(query, raw_wire, src_addr, qname, qtype, ctx).await,
+        None => resolve_remote(query, raw_wire, src_addr, qname, qtype, ctx, charge).await,
     };
     let mut current_qname = qname.to_string();
 
@@ -340,6 +342,7 @@ async fn resolve_with_cname_chase(
                         &current_qname,
                         qtype,
                         ctx,
+                        charge,
                     )
                     .await
                 }
@@ -347,13 +350,16 @@ async fn resolve_with_cname_chase(
 
         // A refusal mid-chain is a refusal for the whole query: merged under
         // the first hop's path it would answer a UDP query the ceiling means
-        // to drop, and book the refusal as a cache hit.
+        // to drop, and book the refusal as a cache hit. Only a chain whose
+        // earlier hops were all local or coalesced can land here — anything
+        // remote would have taken the charge this hop then rides — so the
+        // refusal carries no upstream transport to book against `/stats`.
         if sub_path == QueryPath::Refused {
             return (
                 DnsPacket::response_from(query, ResultCode::SERVFAIL),
                 QueryPath::Refused,
                 DnssecStatus::Indeterminate,
-                ut,
+                None,
             );
         }
 
@@ -520,6 +526,7 @@ async fn resolve_remote(
     qname: &str,
     qtype: QueryType,
     ctx: &Arc<ServerCtx>,
+    charge: &mut QueryAdmission,
 ) -> (
     DnsPacket,
     QueryPath,
@@ -557,6 +564,7 @@ async fn resolve_remote(
         let (resp, path, err) = resolve_coalesced(
             &ctx.inflight,
             &ctx.admission,
+            charge,
             key,
             query,
             QueryPath::Forwarded,
@@ -588,6 +596,7 @@ async fn resolve_remote(
         let (resp, path, err) = resolve_coalesced(
             &ctx.inflight,
             &ctx.admission,
+            charge,
             key,
             query,
             QueryPath::Recursive,
@@ -614,6 +623,7 @@ async fn resolve_remote(
     let (resp, path, err) = resolve_coalesced(
         &ctx.inflight,
         &ctx.admission,
+        charge,
         key,
         query,
         QueryPath::Upstream,
@@ -630,18 +640,6 @@ async fn resolve_remote(
         .then(|| pool.preferred().map(|u| u.transport()))
         .flatten();
     (resp, path, DnssecStatus::Indeterminate, upstream_transport)
-}
-
-/// A recursive answer the walk already cached but validation never checked.
-/// Left in place it turns one refused validation into a TTL-long downgrade
-/// that later cache hits never revisit, so drop it and let the next query
-/// re-resolve with a permit in hand. Strict mode also fails closed: being
-/// busy is not a reason to serve what it asked us to prove.
-fn discard_unvalidated(ctx: &ServerCtx, query: &DnsPacket, qname: &str, response: &mut DnsPacket) {
-    ctx.cache.write().unwrap().remove(qname);
-    if ctx.dnssec_strict {
-        *response = DnsPacket::response_from(query, ResultCode::SERVFAIL);
-    }
 }
 
 fn cache_and_parse(
@@ -663,13 +661,14 @@ fn cache_and_parse(
 pub async fn refresh_entry(ctx: &ServerCtx, qname: &str, qtype: QueryType) {
     // Opportunistic work: under pressure the still-cached entry is served as
     // is, rather than competing with client queries for the same ceiling.
-    let Some(_permit) = ctx.admission.try_admit() else {
+    let mut charge = QueryAdmission::default();
+    if !charge.admit(&ctx.admission) {
         debug!(
             "REFRESH | {:?} {} | skipped, at resolution capacity",
             qtype, qname
         );
         return;
-    };
+    }
     let query = DnsPacket::query(0, qname, qtype);
 
     // Forwarding rules must win here, mirroring `resolve_query` — otherwise
@@ -896,8 +895,8 @@ fn answer_record(
     }
 }
 
-enum Disposition<'a> {
-    Leader(broadcast::Sender<Option<DnsPacket>>, SemaphorePermit<'a>),
+enum Disposition {
+    Leader(broadcast::Sender<Option<DnsPacket>>),
     Follower(broadcast::Receiver<Option<DnsPacket>>),
     Refused,
 }
@@ -905,23 +904,25 @@ enum Disposition<'a> {
 /// Leader election and admission decided together under the map lock: a
 /// leader that cannot be admitted must never become visible, or the followers
 /// that attach to it inherit a refusal they were never charged for.
-fn acquire_inflight<'a>(
+fn acquire_inflight(
     inflight: &Mutex<InflightMap>,
-    admission: &'a crate::admission::ResolutionAdmission,
+    admission: &ResolutionAdmission,
+    charge: &mut QueryAdmission,
     key: (String, QueryType),
-) -> Disposition<'a> {
+) -> Disposition {
     let mut map = inflight.lock().unwrap();
     if let Some(tx) = map.get(&key) {
         return Disposition::Follower(tx.subscribe());
     }
     // Charge the work, not the request: only the leader spends a socket and
-    // a walk, and followers ride its answer for free.
-    let Some(permit) = admission.try_admit() else {
+    // a walk, and followers ride its answer for free. A query that already
+    // holds a charge leads for free too — it is still the one resolution.
+    if !charge.admit(admission) {
         return Disposition::Refused;
-    };
+    }
     let (tx, _) = broadcast::channel::<Option<DnsPacket>>(1);
     map.insert(key, tx.clone());
-    Disposition::Leader(tx, permit)
+    Disposition::Leader(tx)
 }
 
 /// Run a resolve function with in-flight coalescing. Multiple concurrent calls
@@ -932,7 +933,8 @@ fn acquire_inflight<'a>(
 /// own observability without duplicating the inflight map.
 async fn resolve_coalesced<F, Fut>(
     inflight: &Mutex<InflightMap>,
-    admission: &crate::admission::ResolutionAdmission,
+    admission: &ResolutionAdmission,
+    charge: &mut QueryAdmission,
     key: (String, QueryType),
     query: &DnsPacket,
     leader_path: QueryPath,
@@ -942,7 +944,7 @@ where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = crate::Result<DnsPacket>>,
 {
-    let disposition = acquire_inflight(inflight, admission, key.clone());
+    let disposition = acquire_inflight(inflight, admission, charge, key.clone());
 
     match disposition {
         Disposition::Follower(mut rx) => match rx.recv().await {
@@ -961,9 +963,19 @@ where
             QueryPath::Refused,
             None,
         ),
-        Disposition::Leader(tx, _permit) => {
+        Disposition::Leader(tx) => {
             let guard = InflightGuard { inflight, key };
-            let result = resolve_fn().await;
+            // A permit is only a ceiling if it comes back. Nameservers that
+            // answer slowly but do answer stay inside the per-walk query
+            // budget while holding one for tens of seconds.
+            let result = match tokio::time::timeout(RESOLUTION_DEADLINE, resolve_fn()).await {
+                Ok(result) => result,
+                Err(_) => Err(format!(
+                    "resolution deadline of {}s exceeded",
+                    RESOLUTION_DEADLINE.as_secs()
+                )
+                .into()),
+            };
             drop(guard);
 
             match result {
@@ -1145,7 +1157,12 @@ mod tests {
         let map: Mutex<InflightMap> = Mutex::new(HashMap::new());
         let key = ("test.com".to_string(), QueryType::A);
 
-        let d = acquire_inflight(&map, unlimited_admission(), key.clone());
+        let d = acquire_inflight(
+            &map,
+            unlimited_admission(),
+            &mut QueryAdmission::default(),
+            key.clone(),
+        );
         assert!(matches!(d, Disposition::Leader(..)));
         assert_eq!(map.lock().unwrap().len(), 1);
     }
@@ -1155,8 +1172,18 @@ mod tests {
         let map: Mutex<InflightMap> = Mutex::new(HashMap::new());
         let key = ("test.com".to_string(), QueryType::A);
 
-        let _leader = acquire_inflight(&map, unlimited_admission(), key.clone());
-        let follower = acquire_inflight(&map, unlimited_admission(), key);
+        let _leader = acquire_inflight(
+            &map,
+            unlimited_admission(),
+            &mut QueryAdmission::default(),
+            key.clone(),
+        );
+        let follower = acquire_inflight(
+            &map,
+            unlimited_admission(),
+            &mut QueryAdmission::default(),
+            key,
+        );
         assert!(matches!(follower, Disposition::Follower(_)));
         // Map still has exactly 1 entry — follower subscribes, doesn't insert
         assert_eq!(map.lock().unwrap().len(), 1);
@@ -1167,11 +1194,21 @@ mod tests {
         let map: Mutex<InflightMap> = Mutex::new(HashMap::new());
         let key = ("test.com".to_string(), QueryType::A);
 
-        let leader = acquire_inflight(&map, unlimited_admission(), key.clone());
-        let follower = acquire_inflight(&map, unlimited_admission(), key);
+        let leader = acquire_inflight(
+            &map,
+            unlimited_admission(),
+            &mut QueryAdmission::default(),
+            key.clone(),
+        );
+        let follower = acquire_inflight(
+            &map,
+            unlimited_admission(),
+            &mut QueryAdmission::default(),
+            key,
+        );
 
         let tx = match leader {
-            Disposition::Leader(tx, _) => tx,
+            Disposition::Leader(tx) => tx,
             _ => panic!("expected leader"),
         };
         let mut rx = match follower {
@@ -1198,11 +1235,21 @@ mod tests {
         let map: Mutex<InflightMap> = Mutex::new(HashMap::new());
         let key = ("test.com".to_string(), QueryType::A);
 
-        let leader = acquire_inflight(&map, unlimited_admission(), key.clone());
-        let follower = acquire_inflight(&map, unlimited_admission(), key);
+        let leader = acquire_inflight(
+            &map,
+            unlimited_admission(),
+            &mut QueryAdmission::default(),
+            key.clone(),
+        );
+        let follower = acquire_inflight(
+            &map,
+            unlimited_admission(),
+            &mut QueryAdmission::default(),
+            key,
+        );
 
         let tx = match leader {
-            Disposition::Leader(tx, _) => tx,
+            Disposition::Leader(tx) => tx,
             _ => panic!("expected leader"),
         };
         let mut rx = match follower {
@@ -1219,13 +1266,33 @@ mod tests {
         let map: Mutex<InflightMap> = Mutex::new(HashMap::new());
         let key = ("multi.com".to_string(), QueryType::A);
 
-        let leader = acquire_inflight(&map, unlimited_admission(), key.clone());
-        let f1 = acquire_inflight(&map, unlimited_admission(), key.clone());
-        let f2 = acquire_inflight(&map, unlimited_admission(), key.clone());
-        let f3 = acquire_inflight(&map, unlimited_admission(), key);
+        let leader = acquire_inflight(
+            &map,
+            unlimited_admission(),
+            &mut QueryAdmission::default(),
+            key.clone(),
+        );
+        let f1 = acquire_inflight(
+            &map,
+            unlimited_admission(),
+            &mut QueryAdmission::default(),
+            key.clone(),
+        );
+        let f2 = acquire_inflight(
+            &map,
+            unlimited_admission(),
+            &mut QueryAdmission::default(),
+            key.clone(),
+        );
+        let f3 = acquire_inflight(
+            &map,
+            unlimited_admission(),
+            &mut QueryAdmission::default(),
+            key,
+        );
 
         let tx = match leader {
-            Disposition::Leader(tx, _) => tx,
+            Disposition::Leader(tx) => tx,
             _ => panic!("expected leader"),
         };
 
@@ -1276,6 +1343,7 @@ mod tests {
                 resolve_coalesced(
                     &inf,
                     unlimited_admission(),
+                    &mut QueryAdmission::default(),
                     key,
                     &query,
                     QueryPath::Recursive,
@@ -1323,6 +1391,7 @@ mod tests {
             resolve_coalesced(
                 &inf1,
                 unlimited_admission(),
+                &mut QueryAdmission::default(),
                 ("same.domain".to_string(), QueryType::A),
                 &query_a,
                 QueryPath::Recursive,
@@ -1338,6 +1407,7 @@ mod tests {
             resolve_coalesced(
                 &inf2,
                 unlimited_admission(),
+                &mut QueryAdmission::default(),
                 ("same.domain".to_string(), QueryType::AAAA),
                 &query_aaaa,
                 QueryPath::Recursive,
@@ -1369,6 +1439,7 @@ mod tests {
         let (_, path, _) = resolve_coalesced(
             &inflight,
             unlimited_admission(),
+            &mut QueryAdmission::default(),
             ("will-fail.test".to_string(), QueryType::A),
             &query,
             QueryPath::Recursive,
@@ -1392,6 +1463,7 @@ mod tests {
                 resolve_coalesced(
                     &inf,
                     unlimited_admission(),
+                    &mut QueryAdmission::default(),
                     ("fail.test".to_string(), QueryType::A),
                     &query,
                     QueryPath::Recursive,
@@ -1434,6 +1506,7 @@ mod tests {
         let (resp, _, _) = resolve_coalesced(
             &inflight,
             unlimited_admission(),
+            &mut QueryAdmission::default(),
             ("question.test".to_string(), QueryType::A),
             &query,
             QueryPath::Recursive,
@@ -1460,6 +1533,7 @@ mod tests {
         let (_, path, err) = resolve_coalesced(
             &inflight,
             unlimited_admission(),
+            &mut QueryAdmission::default(),
             ("err-msg.test".to_string(), QueryType::A),
             &query,
             QueryPath::Recursive,
@@ -3275,45 +3349,74 @@ mod tests {
 
     // ---- Aggregate resolution admission (P0-1, issue #230) ----
 
-    /// Refusing a validation must not leave the walk's unvalidated answer in
-    /// the cache: later hits are served as `Cached`, which never revalidates,
-    /// so a moment at capacity would otherwise buy a TTL-long downgrade.
-    #[tokio::test]
-    async fn skipped_validation_discards_the_unvalidated_answer() {
-        for strict in [false, true] {
-            let mut ctx = crate::testutil::test_ctx().await;
-            ctx.dnssec_strict = strict;
-            let query = DnsPacket::query(1, "skipped.test", QueryType::A);
-            let mut response = crate::testutil::a_record_response(
-                "skipped.test",
-                std::net::Ipv4Addr::new(1, 2, 3, 4),
-                300,
-            );
-            ctx.cache
-                .write()
-                .unwrap()
-                .insert("skipped.test", QueryType::A, &response);
+    /// The steps after the first cache miss — the CNAME target, then DNSSEC
+    /// validation — are the same resolution, and charging them again would
+    /// make a saturated resolver discard walks it had already paid for and
+    /// refuse long chains ahead of short ones.
+    #[test]
+    fn later_steps_of_a_charged_query_lead_at_capacity() {
+        let admission = ResolutionAdmission::new(1);
+        let map: Mutex<InflightMap> = Mutex::new(HashMap::new());
+        let mut charge = QueryAdmission::default();
 
-            discard_unvalidated(&ctx, &query, "skipped.test", &mut response);
+        let first = acquire_inflight(
+            &map,
+            &admission,
+            &mut charge,
+            ("chain.test".to_string(), QueryType::A),
+        );
+        assert!(matches!(first, Disposition::Leader(_)));
 
-            assert!(
-                ctx.cache
-                    .read()
-                    .unwrap()
-                    .lookup("skipped.test", QueryType::A)
-                    .is_none(),
-                "strict={strict}: an unvalidated answer must not outlive its query"
-            );
-            if strict {
-                assert_eq!(
-                    response.header.rescode,
-                    ResultCode::SERVFAIL,
-                    "strict mode fails closed rather than serving what it asked us to prove"
-                );
-            } else {
-                assert_eq!(response.answers.len(), 1, "non-strict still answers");
-            }
-        }
+        let target = acquire_inflight(
+            &map,
+            &admission,
+            &mut charge,
+            ("target.test".to_string(), QueryType::A),
+        );
+        assert!(
+            matches!(target, Disposition::Leader(_)),
+            "the CNAME target rides the charge the first hop took"
+        );
+
+        let other = acquire_inflight(
+            &map,
+            &admission,
+            &mut QueryAdmission::default(),
+            ("other.test".to_string(), QueryType::A),
+        );
+        assert!(
+            matches!(other, Disposition::Refused),
+            "a different query is still bound by the ceiling"
+        );
+    }
+
+    /// A nameserver that answers slowly but does answer stays inside the
+    /// per-walk query budget while holding a permit, so without a wall-clock
+    /// deadline a few hundred such names pin the ceiling indefinitely.
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_resolution_gives_its_permit_back() {
+        let admission = ResolutionAdmission::new(1);
+        let map: Mutex<InflightMap> = Mutex::new(HashMap::new());
+        let mut charge = QueryAdmission::default();
+        let query = DnsPacket::query(1, "stalled.test", QueryType::A);
+
+        let (resp, path, err) = resolve_coalesced(
+            &map,
+            &admission,
+            &mut charge,
+            ("stalled.test".to_string(), QueryType::A),
+            &query,
+            QueryPath::Recursive,
+            std::future::pending::<crate::Result<DnsPacket>>,
+        )
+        .await;
+
+        assert_eq!(path, QueryPath::UpstreamError);
+        assert_eq!(resp.header.rescode, ResultCode::SERVFAIL);
+        assert!(err.is_some_and(|e| e.contains("deadline")));
+
+        drop(charge);
+        assert_eq!(admission.active(), 0);
     }
 
     struct FloodResult {
@@ -3418,7 +3521,8 @@ mod tests {
         ctx.admission = crate::admission::ResolutionAdmission::new(1);
         let ctx = Arc::new(ctx);
 
-        let held = ctx.admission.try_admit().expect("the only permit");
+        let mut held = QueryAdmission::default();
+        assert!(held.admit(&ctx.admission), "the only permit");
 
         let (resp, path) = resolve_in_test(&ctx, "walk.example", QueryType::A).await;
         assert_eq!(
@@ -3465,7 +3569,8 @@ mod tests {
         );
         let ctx = Arc::new(ctx);
 
-        let held = ctx.admission.try_admit().expect("the only permit");
+        let mut held = QueryAdmission::default();
+        assert!(held.admit(&ctx.admission), "the only permit");
 
         let (_, path) = resolve_in_test(&ctx, "local.example", QueryType::A).await;
         assert_eq!(path, QueryPath::Local);
@@ -3501,7 +3606,8 @@ mod tests {
         );
         let ctx = Arc::new(ctx);
 
-        let held = ctx.admission.try_admit().expect("the only permit");
+        let mut held = QueryAdmission::default();
+        assert!(held.admit(&ctx.admission), "the only permit");
 
         let (resp, path) = resolve_in_test(&ctx, "alias.example", QueryType::A).await;
         assert_eq!(
@@ -3530,7 +3636,8 @@ mod tests {
         let mut ctx = crate::testutil::test_ctx().await;
         ctx.admission = crate::admission::ResolutionAdmission::new(1);
         let ctx = Arc::new(ctx);
-        let held = ctx.admission.try_admit().expect("the only permit");
+        let mut held = QueryAdmission::default();
+        assert!(held.admit(&ctx.admission), "the only permit");
 
         let query = DnsPacket::query(0xBEEF, "refused.example", QueryType::A);
         let mut tmp = BytePacketBuffer::new();
