@@ -300,6 +300,10 @@ mod tests {
 
     async fn doh_get_response(query: &str) -> Response {
         let ctx = std::sync::Arc::new(crate::testutil::test_ctx().await);
+        doh_get_response_with(query, ctx).await
+    }
+
+    async fn doh_get_response_with(query: &str, ctx: std::sync::Arc<ServerCtx>) -> Response {
         let state = crate::proxy::DohState {
             ctx,
             remote_addr: Some("127.0.0.1:1234".parse().unwrap()),
@@ -349,5 +353,69 @@ mod tests {
         let mut parse = BytePacketBuffer::from_bytes(&body);
         let parsed = DnsPacket::from_buffer(&mut parse).unwrap();
         assert_eq!(parsed.header.rescode, ResultCode::SERVFAIL);
+    }
+
+    /// The byte a browser using Numa-as-DoH actually consumes: an HTTPS RR
+    /// carrying an `ech` SvcParam must leave the DoH endpoint byte-identical,
+    /// including when `filter_aaaa` rewrites the record's ipv6hint.
+    #[tokio::test]
+    async fn doh_serves_https_rr_with_ech_intact() {
+        use crate::question::QueryType;
+        use crate::svcb::{alpn_h3, build_rdata, ech_config_list, ipv6hint_single, ECH_KEY};
+
+        let params = [alpn_h3(), (ECH_KEY, ech_config_list()), ipv6hint_single()];
+        let rdata = build_rdata(1, &["ech", "test"], &params);
+        let filtered = build_rdata(1, &["ech", "test"], &params[..2]);
+
+        let mut cached = DnsPacket::query(0, "ech.test", QueryType::HTTPS);
+        cached.header.response = true;
+        cached.header.rescode = ResultCode::NOERROR;
+        cached.answers.push(DnsRecord::UNKNOWN {
+            domain: "ech.test".to_string(),
+            qtype: QueryType::HTTPS.to_num(),
+            data: rdata.clone(),
+            ttl: 300,
+        });
+
+        let mut buf = BytePacketBuffer::new();
+        DnsPacket::query(0x2222, "ech.test", QueryType::HTTPS)
+            .write(&mut buf)
+            .unwrap();
+        let param = URL_SAFE_NO_PAD.encode(buf.filled());
+
+        for filter_aaaa in [false, true] {
+            let mut ctx = crate::testutil::test_ctx().await;
+            ctx.filter_aaaa = filter_aaaa;
+            ctx.cache
+                .write()
+                .unwrap()
+                .insert("ech.test", QueryType::HTTPS, &cached);
+
+            let resp =
+                doh_get_response_with(&format!("dns={param}"), std::sync::Arc::new(ctx)).await;
+            assert_eq!(resp.status(), StatusCode::OK, "filter_aaaa={filter_aaaa}");
+
+            let body = axum::body::to_bytes(resp.into_body(), MAX_DNS_MSG)
+                .await
+                .unwrap();
+            let mut parse = BytePacketBuffer::from_bytes(&body);
+            let parsed = DnsPacket::from_buffer(&mut parse).unwrap();
+
+            assert_eq!(parsed.answers.len(), 1, "filter_aaaa={filter_aaaa}");
+            match &parsed.answers[0] {
+                DnsRecord::UNKNOWN { qtype, data, .. } => {
+                    assert_eq!(
+                        *qtype,
+                        QueryType::HTTPS.to_num(),
+                        "type 65 must not be downgraded"
+                    );
+                    // Whole-RDATA equality: proves the ech bytes are intact
+                    // *and* that filter_aaaa removed exactly the ipv6hint.
+                    let want = if filter_aaaa { &filtered } else { &rdata };
+                    assert_eq!(data, want, "filter_aaaa={filter_aaaa}");
+                }
+                other => panic!("expected UNKNOWN HTTPS record, got {other:?}"),
+            }
+        }
     }
 }
