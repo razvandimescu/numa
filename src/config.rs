@@ -111,11 +111,16 @@ pub struct ServerConfig {
     #[serde(default)]
     pub allow_from: Vec<String>,
     /// Ceiling on cache-miss resolutions running at once, shared by every
-    /// transport. Local, cached and coalesced answers are never charged, so
-    /// this bounds only the work an attacker can conjure with novel names.
+    /// transport. One charge per query, however many CNAME hops and DNSSEC
+    /// walks it takes; local, cached and coalesced answers are never charged,
+    /// so this bounds only the work an attacker can conjure with novel names.
     /// Over the ceiling UDP is dropped silently and stream transports get
-    /// SERVFAIL. Raise it to opt out; 0 refuses every cache miss.
-    #[serde(default = "default_max_concurrent_resolutions")]
+    /// SERVFAIL. Raise it to loosen; 0 is rejected rather than read as
+    /// "unlimited", since it would refuse every cache miss.
+    #[serde(
+        default = "default_max_concurrent_resolutions",
+        deserialize_with = "resolution_ceiling"
+    )]
     pub max_concurrent_resolutions: usize,
     /// Shared secret guarding the HTTP control plane (dashboard + REST API)
     /// for non-loopback peers. Overridden by `NUMA_API_TOKEN`. Loopback is
@@ -186,6 +191,22 @@ pub const DEFAULT_MAX_CONCURRENT_RESOLUTIONS: usize = 512;
 
 fn default_max_concurrent_resolutions() -> usize {
     DEFAULT_MAX_CONCURRENT_RESOLUTIONS
+}
+
+/// Every comparable knob (unbound, dnsdist, nginx) reads 0 as "no limit".
+/// Here it would refuse every cache miss, and over UDP that is a silent drop
+/// with nothing in the log to explain it — so it fails at load instead.
+fn resolution_ceiling<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<usize, D::Error> {
+    let limit = usize::deserialize(d)?;
+    if limit == 0 {
+        return Err(serde::de::Error::custom(
+            "server.max_concurrent_resolutions must be at least 1 (0 would refuse every cache miss, \
+             it does not mean unlimited)",
+        ));
+    }
+    Ok(limit)
 }
 
 #[derive(Deserialize, Default, PartialEq, Eq, Clone, Copy)]
@@ -865,6 +886,13 @@ mod tests {
 
         let set: Config = toml::from_str("[server]\nmax_concurrent_resolutions = 64").unwrap();
         assert_eq!(set.server.max_concurrent_resolutions, 64);
+
+        // 0 reads as "unlimited" in every comparable resolver and means the
+        // opposite here, so it must fail loudly at load rather than at 3am.
+        let Err(zero) = toml::from_str::<Config>("[server]\nmax_concurrent_resolutions = 0") else {
+            panic!("0 must not parse");
+        };
+        assert!(zero.to_string().contains("at least 1"), "{zero}");
     }
 
     #[test]
