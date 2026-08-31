@@ -75,6 +75,16 @@ pub(crate) fn service_config_path() -> Result<String, String> {
     effective_config_path().map(|resolved| resolved.display())
 }
 
+/// The config file a CLI write should land in: what the running daemon
+/// loaded, else the first candidate that exists, else where one would be
+/// created. The bare path, not the `display()` string carrying the note.
+pub fn config_write_target() -> Result<String, String> {
+    let resolved =
+        effective_config_path().map_err(|error| format!("cannot resolve config path: {error}"))?;
+    ensure_writable(Path::new(&resolved.path))?;
+    Ok(resolved.path)
+}
+
 fn effective_config_path() -> Result<EffectiveConfigPath, String> {
     let local = crate::config::load_config(&crate::cli_config_path());
     resolve_effective_config_path(local, query_daemon_config_path)
@@ -316,6 +326,20 @@ mod tests {
             "/local/numa.toml (daemon not reachable at 127.0.0.1:5380; resolved locally; \
              file does not exist yet, defaults apply)"
         );
+    }
+
+    #[test]
+    fn write_target_is_the_bare_path_not_the_note() {
+        let resolved =
+            resolve_effective_config_path(local_config("/local/numa.toml", 5380, false), |_| {
+                Err("daemon not reachable at 127.0.0.1:5380".to_string())
+            })
+            .unwrap();
+
+        // `display()` is for humans; writing to it would create a file
+        // literally named "... (file does not exist yet, defaults apply)".
+        assert_eq!(resolved.path, "/local/numa.toml");
+        assert_ne!(resolved.path, resolved.display());
     }
 
     #[test]

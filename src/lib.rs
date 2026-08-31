@@ -155,10 +155,10 @@ fn config_dir_unix() -> std::path::PathBuf {
     daemon_data_dir()
 }
 
-/// Default config path for CLI toggles (`numa lan on`, etc.) and the
-/// Windows service entry. On Windows this matches the SCM's data dir
-/// so toggles update the file the service reads (issue #202). Unix
-/// callers still use the CWD-relative literal `"numa.toml"`.
+/// Seed path for `load_config`, and the Windows service entry, which reads
+/// the data dir the SCM writes (issue #202). The Unix arm must stay
+/// CWD-relative: `load_config` only widens its candidate list for a
+/// relative path. CLI writes go through `config_cli::config_write_target()`.
 pub fn cli_config_path() -> String {
     #[cfg(windows)]
     {
@@ -166,7 +166,7 @@ pub fn cli_config_path() -> String {
     }
     #[cfg(not(windows))]
     {
-        data_dir().join("numa.toml").to_string_lossy().into_owned()
+        "numa.toml".to_string()
     }
 }
 

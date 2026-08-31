@@ -110,9 +110,6 @@ fn main() -> numa::Result<()> {
         }
         "lan" | "block" | "dnssec" => {
             let sub = std::env::args().nth(2).unwrap_or_default();
-            let config_path = std::env::args()
-                .nth(3)
-                .unwrap_or_else(numa::cli_config_path);
             let enabled = match sub.as_str() {
                 "on" => true,
                 "off" => false,
@@ -120,6 +117,12 @@ fn main() -> numa::Result<()> {
                     eprintln!("Usage: numa {} <on|off> [config-path]", arg1);
                     return Ok(());
                 }
+            };
+            // The daemon knows which file it loaded; a cwd-relative guess
+            // writes a config nothing reads under systemd or launchd (#371).
+            let config_path = match std::env::args().nth(3) {
+                Some(explicit) => explicit,
+                None => numa::config_cli::config_write_target()?,
             };
             let (section, feature_name) = match arg1.as_str() {
                 "lan" => ("lan", "LAN discovery"),
