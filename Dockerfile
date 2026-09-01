@@ -1,4 +1,4 @@
-FROM rust:1.97-alpine AS builder
+FROM rust:1.98-alpine AS builder
 RUN apk add --no-cache musl-dev cmake make perl
 WORKDIR /app
 COPY Cargo.toml Cargo.lock build.rs ./
