@@ -20,7 +20,7 @@ use odoh_rs::{
 use rand_core::{OsRng, TryRngCore};
 use reqwest::header::HeaderMap;
 use tokio::sync::Mutex;
-use tokio::time::timeout;
+use tokio::time::timeout_at;
 
 use crate::Result;
 
@@ -46,6 +46,11 @@ const MAX_CONFIG_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// receive one request per query. Queries that arrive during the backoff
 /// return the cached error immediately.
 const REFRESH_BACKOFF: Duration = Duration::from_secs(60);
+
+/// Reported when the query budget runs out waiting for a refresh, whether the
+/// wait was on the lock or on the target itself — both mean the same thing to
+/// the caller.
+const BUDGET_EXHAUSTED: &str = "ran out of query budget";
 
 /// Parsed ODoH target config plus the freshness metadata needed to age it out.
 #[derive(Debug)]
@@ -101,7 +106,12 @@ impl OdohConfigCache {
     /// Return a valid config, refetching when the cache is cold or expired.
     /// Within [`REFRESH_BACKOFF`] of a failed refresh, returns the cached
     /// error without issuing another fetch.
-    pub async fn get(&self) -> Result<Arc<OdohTargetConfig>> {
+    ///
+    /// `deadline` bounds both the wait for an in-flight refresh and the fetch
+    /// itself. It is the caller's whole query budget: a refetch lands on a
+    /// user query, and the shared reqwest client sets no request timeout, so
+    /// without this a stalled target hangs every query queued on the lock.
+    pub async fn get(&self, deadline: Instant) -> Result<Arc<OdohTargetConfig>> {
         if let Some(cfg) = self.current.load_full() {
             if !cfg.is_expired() {
                 return Ok(cfg);
@@ -112,7 +122,9 @@ impl OdohConfigCache {
             return Err(err);
         }
 
-        let _guard = self.refresh_lock.lock().await;
+        let _guard = timeout_at(deadline.into(), self.refresh_lock.lock())
+            .await
+            .map_err(|_| BUDGET_EXHAUSTED)?;
 
         // Another task may have refreshed or failed while we waited.
         if let Some(cfg) = self.current.load_full() {
@@ -124,7 +136,13 @@ impl OdohConfigCache {
             return Err(err);
         }
 
-        match fetch_odoh_config(&self.client, &self.configs_url).await {
+        match timeout_at(
+            deadline.into(),
+            fetch_odoh_config(&self.client, &self.configs_url),
+        )
+        .await
+        .unwrap_or_else(|_| Err(BUDGET_EXHAUSTED.into()))
+        {
             Ok(fresh) => {
                 let fresh = Arc::new(fresh);
                 self.current.store(Some(fresh.clone()));
@@ -213,7 +231,7 @@ pub async fn query_through_relay(
         target_path,
         client,
         cache,
-        timeout: timeout_duration,
+        deadline: Instant::now() + timeout_duration,
     };
     match attempt_query(&req).await {
         Ok(v) => Ok(v),
@@ -231,7 +249,9 @@ struct OdohRequest<'a> {
     target_path: &'a str,
     client: &'a reqwest::Client,
     cache: &'a OdohConfigCache,
-    timeout: Duration,
+    /// Covers the whole exchange, retry included, so a key-rotation retry
+    /// shares the caller's budget instead of starting a fresh one.
+    deadline: Instant,
 }
 
 /// Classification used only by the retry path in [`query_through_relay`].
@@ -253,7 +273,11 @@ impl AttemptError {
 }
 
 async fn attempt_query(req: &OdohRequest<'_>) -> std::result::Result<Vec<u8>, AttemptError> {
-    let cfg = req.cache.get().await.map_err(AttemptError::Other)?;
+    let cfg = req
+        .cache
+        .get(req.deadline)
+        .await
+        .map_err(AttemptError::Other)?;
 
     let plaintext = ObliviousDoHMessagePlaintext::new(req.wire, 0);
     // rand_core 0.9's OsRng is fallible-only; wrap for the infallible bound.
@@ -270,7 +294,7 @@ async fn attempt_query(req: &OdohRequest<'_>) -> std::result::Result<Vec<u8>, At
     // HTTP headers, to carry the target routing. `Targethost`/`Targetpath`
     // headers cause relays to treat the request as an unspecified-target and
     // reject it.
-    let (status, resp_body) = timeout(req.timeout, async {
+    let (status, resp_body) = timeout_at(req.deadline.into(), async {
         let resp = req
             .client
             .post(req.relay_url)
@@ -425,11 +449,12 @@ mod tests {
                 .unwrap(),
         );
 
-        let first = cache.get().await;
+        let deadline = || Instant::now() + Duration::from_secs(5);
+        let first = cache.get(deadline()).await;
         assert!(first.is_err(), "first fetch must fail against invalid host");
 
         // Within the backoff window, the cached error is returned immediately.
-        let second = cache.get().await.unwrap_err().to_string();
+        let second = cache.get(deadline()).await.unwrap_err().to_string();
         assert!(
             second.contains("backoff active"),
             "expected backoff hint, got: {second}"
@@ -441,7 +466,7 @@ mod tests {
             at: Instant::now() - (REFRESH_BACKOFF + Duration::from_secs(1)),
             err: "prior".to_string(),
         })));
-        let third = cache.get().await.unwrap_err().to_string();
+        let third = cache.get(deadline()).await.unwrap_err().to_string();
         assert!(
             !third.contains("backoff active"),
             "expected fresh fetch attempt, got: {third}"
