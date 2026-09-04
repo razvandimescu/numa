@@ -64,7 +64,11 @@ async fn stalled_config_fetch_respects_query_timeout() {
         outcome.unwrap().is_err(),
         "a stalled target must not yield a config"
     );
-    println!("returned in {:?}", start.elapsed());
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < QUERY_TIMEOUT * 2,
+        "returned in {elapsed:?}, well past the {QUERY_TIMEOUT:?} budget"
+    );
 }
 
 /// `OdohConfigCache::get` holds `refresh_lock` across the fetch, so an
@@ -101,4 +105,34 @@ async fn stalled_config_fetch_does_not_block_later_queries() {
         done.is_ok(),
         "queries still blocked on the refresh lock after {CEILING:?}"
     );
+}
+
+/// A key-rotation retry re-enters `get()` carrying the original deadline, so a
+/// caller can queue behind a fresher query holding the lock on a longer budget.
+/// The lock wait must honour the waiter's own deadline, not the holder's.
+#[tokio::test]
+async fn short_deadline_does_not_wait_out_a_longer_lock_holder() {
+    let cache = stalled_cache(stalling_tls_endpoint().await);
+
+    let holder = tokio::spawn({
+        let cache = cache.clone();
+        async move {
+            cache
+                .get(Instant::now() + Duration::from_secs(5))
+                .await
+                .map(|_| ())
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let start = Instant::now();
+    let late = cache.get(Instant::now() + Duration::from_millis(300)).await;
+    let waited = start.elapsed();
+
+    assert!(late.is_err(), "a stalled target must not yield a config");
+    assert!(
+        waited < Duration::from_secs(1),
+        "waited {waited:?} for a 300ms budget: the lock wait ignored our deadline"
+    );
+    holder.abort();
 }
