@@ -342,4 +342,40 @@ mod tests {
         assert!(!is_valid_hostname("evil.com/../admin"));
         assert!(!is_valid_hostname(&"a".repeat(254)));
     }
+
+    /// The only test that completes a forward: every other relay test asserts
+    /// a rejection, and `forwarded_ok` is checked only as zero. Sealing the
+    /// query needs numa's own HPKE code, so this cannot be a shell probe like
+    /// the other live-network checks.
+    #[tokio::test]
+    #[ignore = "network"]
+    async fn seals_forwards_and_unseals_against_a_real_target() {
+        let (addr, state) = spawn_relay().await;
+        let client = crate::forward::build_https_client();
+        let cache = crate::odoh::OdohConfigCache::new("odoh.crypto.sx".to_string(), client.clone());
+
+        let mut buf = crate::buffer::BytePacketBuffer::new();
+        crate::packet::DnsPacket::query(0xABCD, "example.com", crate::question::QueryType::A)
+            .write(&mut buf)
+            .unwrap();
+
+        let wire = crate::odoh::query_through_relay(
+            buf.filled(),
+            &format!("http://{}/relay", addr),
+            "/dns-query",
+            &client,
+            &cache,
+            Duration::from_secs(20),
+        )
+        .await
+        .expect("ODoH query through the local relay");
+
+        let mut parse = crate::buffer::BytePacketBuffer::from_bytes(&wire);
+        let resp = crate::packet::DnsPacket::from_buffer(&mut parse).unwrap();
+        assert!(
+            !resp.answers.is_empty(),
+            "expected an answer for example.com"
+        );
+        assert_eq!(state.forwarded_ok.load(Ordering::Relaxed), 1);
+    }
 }
