@@ -359,6 +359,9 @@ fn cache_control_ttl(headers: &HeaderMap) -> Option<Duration> {
 mod tests {
     use super::*;
     use odoh_rs::{ObliviousDoHConfig, ObliviousDoHKeyPair};
+    use tokio::net::TcpListener;
+
+    use crate::forward::build_https_client;
 
     // RFC 9180 HPKE IDs for the sole ODoH mandatory suite:
     // KEM = X25519, KDF = HKDF-SHA256, AEAD = AES-128-GCM.
@@ -509,5 +512,150 @@ mod tests {
         let response_back =
             odoh_rs::decrypt_response(&query_pt, &response_enc, client_secret).unwrap();
         assert_eq!(response_back.into_msg().as_ref(), response_wire);
+    }
+
+    // --- query-budget coverage ---
+
+    const QUERY_TIMEOUT: Duration = Duration::from_secs(2);
+
+    /// Outer bound, deliberately looser than the budget under test.
+    const CEILING: Duration = Duration::from_secs(6);
+
+    const QUERY_WIRE: &[u8] =
+        b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01";
+
+    /// Accept connections and never send a byte, so a TLS client blocks forever
+    /// waiting for ServerHello.
+    async fn stalling_tls_endpoint() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                held.push(sock);
+            }
+        });
+        addr.to_string()
+    }
+
+    fn stalled_cache(target: String) -> Arc<OdohConfigCache> {
+        Arc::new(OdohConfigCache::new(target, build_https_client()))
+    }
+
+    #[tokio::test]
+    async fn stalled_config_fetch_respects_query_timeout() {
+        let cache = stalled_cache(stalling_tls_endpoint().await);
+        let client = build_https_client();
+
+        let start = Instant::now();
+        let outcome = tokio::time::timeout(
+            CEILING,
+            query_through_relay(
+                QUERY_WIRE,
+                "https://relay.invalid/relay",
+                "/dns-query",
+                &client,
+                &cache,
+                QUERY_TIMEOUT,
+            ),
+        )
+        .await;
+
+        assert!(
+            outcome.is_ok(),
+            "query still hung after {CEILING:?} against a {QUERY_TIMEOUT:?} budget"
+        );
+        assert!(
+            outcome.unwrap().is_err(),
+            "a stalled target must not yield a config"
+        );
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < QUERY_TIMEOUT * 2,
+            "returned in {elapsed:?}, well past the {QUERY_TIMEOUT:?} budget"
+        );
+    }
+
+    /// `get` holds `refresh_lock` across the fetch, so an unbounded one stalls
+    /// every query in the cold window, not just the one that triggered it.
+    #[tokio::test]
+    async fn stalled_config_fetch_does_not_block_later_queries() {
+        let cache = stalled_cache(stalling_tls_endpoint().await);
+
+        let leader = tokio::spawn({
+            let cache = cache.clone();
+            async move { cache.get(Instant::now() + QUERY_TIMEOUT).await.map(|_| ()) }
+        });
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let followers: Vec<_> = (0..4)
+            .map(|_| {
+                let cache = cache.clone();
+                tokio::spawn(
+                    async move { cache.get(Instant::now() + QUERY_TIMEOUT).await.map(|_| ()) },
+                )
+            })
+            .collect();
+
+        let done = tokio::time::timeout(CEILING, async {
+            for handle in followers.into_iter().chain([leader]) {
+                assert!(
+                    handle.await.unwrap().is_err(),
+                    "a stalled target must not yield a config"
+                );
+            }
+        })
+        .await;
+
+        assert!(
+            done.is_ok(),
+            "queries still blocked on the refresh lock after {CEILING:?}"
+        );
+    }
+
+    /// A key-rotation retry re-enters `get` on the original deadline, so it can
+    /// queue behind a fresher query holding the lock on a longer budget.
+    #[tokio::test]
+    async fn short_deadline_does_not_wait_out_a_longer_lock_holder() {
+        let cache = stalled_cache(stalling_tls_endpoint().await);
+
+        let holder = tokio::spawn({
+            let cache = cache.clone();
+            async move {
+                cache
+                    .get(Instant::now() + Duration::from_secs(5))
+                    .await
+                    .map(|_| ())
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let start = Instant::now();
+        let late = cache.get(Instant::now() + Duration::from_millis(300)).await;
+        let waited = start.elapsed();
+
+        assert!(late.is_err(), "a stalled target must not yield a config");
+        assert!(
+            waited < Duration::from_secs(2),
+            "waited {waited:?} for a 300ms budget: the lock wait ignored our deadline"
+        );
+        holder.abort();
+    }
+
+    /// Otherwise one impatient query blackholes a healthy target for 60s.
+    #[tokio::test]
+    async fn budget_exhaustion_does_not_arm_the_backoff() {
+        let cache = stalled_cache(stalling_tls_endpoint().await);
+
+        let impatient = cache.get(Instant::now() + Duration::from_millis(200)).await;
+        assert!(
+            impatient.is_err(),
+            "a stalled target must not yield a config"
+        );
+
+        assert!(
+            cache.last_failure.load_full().is_none(),
+            "our own timeout armed the backoff"
+        );
     }
 }
