@@ -47,9 +47,6 @@ const MAX_CONFIG_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// return the cached error immediately.
 const REFRESH_BACKOFF: Duration = Duration::from_secs(60);
 
-/// Reported when the query budget runs out waiting for a refresh, whether the
-/// wait was on the lock or on the target itself — both mean the same thing to
-/// the caller.
 const BUDGET_EXHAUSTED: &str = "ran out of query budget";
 
 /// Parsed ODoH target config plus the freshness metadata needed to age it out.
@@ -107,10 +104,9 @@ impl OdohConfigCache {
     /// Within [`REFRESH_BACKOFF`] of a failed refresh, returns the cached
     /// error without issuing another fetch.
     ///
-    /// `deadline` bounds both the wait for an in-flight refresh and the fetch
-    /// itself. It is the caller's whole query budget: a refetch lands on a
-    /// user query, and the shared reqwest client sets no request timeout, so
-    /// without this a stalled target hangs every query queued on the lock.
+    /// A refetch lands on a user query and the shared client sets no request
+    /// timeout, so `deadline` is what stops a stalled target hanging every
+    /// query queued on the lock.
     pub async fn get(&self, deadline: Instant) -> Result<Arc<OdohTargetConfig>> {
         if let Some(cfg) = self.current.load_full() {
             if !cfg.is_expired() {
@@ -136,9 +132,8 @@ impl OdohConfigCache {
             return Err(err);
         }
 
-        // Only the target's own failures arm REFRESH_BACKOFF. Running out of
-        // budget says nothing about its health, and recording it would let one
-        // impatient query blackhole a healthy target for everyone.
+        // Only the target's own failures arm REFRESH_BACKOFF: our budget
+        // running out says nothing about its health.
         let fetched = timeout_at(
             deadline.into(),
             fetch_odoh_config(&self.client, &self.configs_url),

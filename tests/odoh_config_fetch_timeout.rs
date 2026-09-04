@@ -1,7 +1,5 @@
-//! The ODoH query budget must cover the whole exchange, including the target
-//! config fetch. `attempt_query` wraps only the relay POST, and the production
-//! client sets no `.timeout()` / `.connect_timeout()`, so a target whose TLS
-//! handshake stalls hangs the query indefinitely.
+//! The ODoH query budget must cover the whole exchange, not just the relay
+//! POST. The shared client sets no request timeout of its own.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -12,8 +10,7 @@ use tokio::net::TcpListener;
 
 const QUERY_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Generous ceiling: whatever the fix bounds the fetch to, a stalled target
-/// must not cost more than a couple of query budgets end to end.
+/// Outer bound, deliberately looser than the budget under test.
 const CEILING: Duration = Duration::from_secs(6);
 
 const QUERY_WIRE: &[u8] =
@@ -71,9 +68,8 @@ async fn stalled_config_fetch_respects_query_timeout() {
     );
 }
 
-/// `OdohConfigCache::get` holds `refresh_lock` across the fetch, so an
-/// unbounded fetch stalls every query arriving in the cold/expired window,
-/// not just the one that triggered it.
+/// `get` holds `refresh_lock` across the fetch, so an unbounded one stalls
+/// every query in the cold window, not just the one that triggered it.
 #[tokio::test]
 async fn stalled_config_fetch_does_not_block_later_queries() {
     let cache = stalled_cache(stalling_tls_endpoint().await);
@@ -107,9 +103,8 @@ async fn stalled_config_fetch_does_not_block_later_queries() {
     );
 }
 
-/// A key-rotation retry re-enters `get()` carrying the original deadline, so a
-/// caller can queue behind a fresher query holding the lock on a longer budget.
-/// The lock wait must honour the waiter's own deadline, not the holder's.
+/// A key-rotation retry re-enters `get` on the original deadline, so it can
+/// queue behind a fresher query holding the lock on a longer budget.
 #[tokio::test]
 async fn short_deadline_does_not_wait_out_a_longer_lock_holder() {
     let cache = stalled_cache(stalling_tls_endpoint().await);
@@ -137,10 +132,7 @@ async fn short_deadline_does_not_wait_out_a_longer_lock_holder() {
     holder.abort();
 }
 
-/// Running out of budget says nothing about the target's health, so it must not
-/// arm REFRESH_BACKOFF. Otherwise one impatient query (a key-rotation retry
-/// re-entering with a near-spent deadline) blackholes a healthy target for the
-/// next 60s of queries.
+/// Otherwise one impatient query blackholes a healthy target for 60s.
 #[tokio::test]
 async fn budget_exhaustion_does_not_arm_the_backoff() {
     let cache = stalled_cache(stalling_tls_endpoint().await);
