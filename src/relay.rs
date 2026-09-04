@@ -87,7 +87,6 @@ fn build_app(state: Arc<RelayState>) -> Router {
 async fn handle_unknown() -> impl IntoResponse {
     (
         StatusCode::NOT_FOUND,
-        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
         "numa ODoH relay: POST /relay?targethost=<host>&targetpath=</path>\n",
     )
 }
@@ -264,6 +263,45 @@ mod tests {
             resp.status(),
             reqwest::StatusCode::PAYLOAD_TOO_LARGE | reqwest::StatusCode::BAD_REQUEST
         ));
+    }
+
+    #[tokio::test]
+    async fn trailing_slash_reaches_the_relay() {
+        let (addr, state) = spawn_relay().await;
+        let client = crate::forward::default_client();
+        let resp = client
+            .post(format!(
+                "http://{}/relay/?targethost=localhost&targetpath=/dns-query",
+                addr
+            ))
+            .header(header::CONTENT_TYPE, ODOH_CONTENT_TYPE)
+            .body("body")
+            .send()
+            .await
+            .unwrap();
+        // The counter only moves inside `handle_relay`, so it proves the
+        // trailing slash routed all the way in rather than hitting the
+        // fallback or an extractor rejection.
+        assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+        assert_eq!(state.rejected_bad_request.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn unknown_path_names_the_endpoint() {
+        let (addr, _state) = spawn_relay().await;
+        let client = crate::forward::default_client();
+        let resp = client
+            .post(format!("http://{}/nope", addr))
+            .body("body")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+        assert!(resp
+            .text()
+            .await
+            .unwrap()
+            .contains("numa ODoH relay: POST /relay"));
     }
 
     #[tokio::test]
