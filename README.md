@@ -1,7 +1,4 @@
 # Numa
-<p align="center">
-  <b>English</b> | <a href="./README_zh.md">中文</a>
-</p>
 
 [![CI](https://github.com/razvandimescu/numa/actions/workflows/ci.yml/badge.svg)](https://github.com/razvandimescu/numa/actions)
 [![crates.io](https://img.shields.io/crates/v/numa.svg)](https://crates.io/crates/numa)
@@ -46,11 +43,11 @@ Open the dashboard: **http://numa.numa** (or `http://localhost:5380`)
 
 Set as system DNS:
 
-| Platform | Install                         | Uninstall                         |
-| -------- | ------------------------------- | --------------------------------- |
-| macOS    | `sudo numa install`             | `sudo numa uninstall`             |
-| Linux    | `sudo numa install`             | `sudo numa uninstall`             |
-| Windows  | `numa install` (admin) + reboot | `numa uninstall` (admin) + reboot |
+| Platform | Install | Uninstall |
+|----------|---------|-----------|
+| macOS | `sudo numa install` | `sudo numa uninstall` |
+| Linux | `sudo numa install` | `sudo numa uninstall` |
+| Windows | `numa install` (admin) + reboot | `numa uninstall` (admin) + reboot |
 
 On macOS and Linux, numa runs as a system service (launchd/systemd). On Windows, numa auto-starts on login via registry. Windows also binds `127.0.0.2:53` (the built-in Dnscache owns `127.0.0.1:53`) and installs an NRPT rule to route queries to it — so edit `bind_addr`/`api_bind_addr` against `127.0.0.2`, not `127.0.0.1`.
 
