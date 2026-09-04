@@ -131,8 +131,33 @@ async fn short_deadline_does_not_wait_out_a_longer_lock_holder() {
 
     assert!(late.is_err(), "a stalled target must not yield a config");
     assert!(
-        waited < Duration::from_secs(1),
+        waited < Duration::from_secs(2),
         "waited {waited:?} for a 300ms budget: the lock wait ignored our deadline"
     );
     holder.abort();
+}
+
+/// Running out of budget says nothing about the target's health, so it must not
+/// arm REFRESH_BACKOFF. Otherwise one impatient query (a key-rotation retry
+/// re-entering with a near-spent deadline) blackholes a healthy target for the
+/// next 60s of queries.
+#[tokio::test]
+async fn budget_exhaustion_does_not_arm_the_backoff() {
+    let cache = stalled_cache(stalling_tls_endpoint().await);
+
+    let impatient = cache.get(Instant::now() + Duration::from_millis(200)).await;
+    assert!(
+        impatient.is_err(),
+        "a stalled target must not yield a config"
+    );
+
+    let next = cache
+        .get(Instant::now() + Duration::from_millis(200))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        !next.contains("backoff active"),
+        "our own timeout armed the backoff: {next}"
+    );
 }

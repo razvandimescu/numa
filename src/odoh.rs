@@ -136,13 +136,17 @@ impl OdohConfigCache {
             return Err(err);
         }
 
-        match timeout_at(
+        // Only the target's own failures arm REFRESH_BACKOFF. Running out of
+        // budget says nothing about its health, and recording it would let one
+        // impatient query blackhole a healthy target for everyone.
+        let fetched = timeout_at(
             deadline.into(),
             fetch_odoh_config(&self.client, &self.configs_url),
         )
         .await
-        .unwrap_or_else(|_| Err(BUDGET_EXHAUSTED.into()))
-        {
+        .map_err(|_| BUDGET_EXHAUSTED)?;
+
+        match fetched {
             Ok(fresh) => {
                 let fresh = Arc::new(fresh);
                 self.current.store(Some(fresh.clone()));
