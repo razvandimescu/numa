@@ -414,6 +414,7 @@ mod tests {
     use odoh_rs::{ObliviousDoHConfig, ObliviousDoHKeyPair};
     use tokio::net::TcpListener;
 
+    use crate::buffer::BytePacketBuffer;
     use crate::forward::build_https_client;
 
     // RFC 9180 HPKE IDs for the sole ODoH mandatory suite:
@@ -490,7 +491,7 @@ mod tests {
         );
         assert!(msg.contains("https://relay.example/relay/"), "{msg}");
         assert!(msg.contains("upstream.relay"), "{msg}");
-        assert!(!msg.contains("odoh.example.com"), "{msg}");
+        assert!(!msg.contains("ODoH target"), "{msg}");
     }
 
     #[test]
@@ -771,5 +772,67 @@ mod tests {
             cache.last_failure.load_full().is_none(),
             "our own timeout armed the backoff"
         );
+    }
+
+    fn example_com_query() -> BytePacketBuffer {
+        let mut buf = BytePacketBuffer::new();
+        crate::packet::DnsPacket::query(0xABCD, "example.com", crate::question::QueryType::A)
+            .write(&mut buf)
+            .unwrap();
+        buf
+    }
+
+    /// The tests above hand `describe_failure` a `forwarded` flag. These two
+    /// derive it from a real response, which is the assumption the feature
+    /// rests on: only a relay that forwarded answers under the ODoH media
+    /// type. `/nope` stays a media-type-less 404 whether the relay's front
+    /// proxy answers it or the relay's own fallback does.
+    #[tokio::test]
+    #[ignore = "network"]
+    async fn a_target_error_names_the_target() {
+        let client = crate::forward::build_https_client();
+        let cache = OdohConfigCache::new("odoh.crypto.sx".to_string(), client.clone());
+        let buf = example_com_query();
+
+        let err = query_through_relay(
+            buf.filled(),
+            "https://odoh-relay.numa.rs/relay",
+            "/dns-query/",
+            &client,
+            &cache,
+            Duration::from_secs(20),
+        )
+        .await
+        .expect_err("a trailing slash on the target path must fail");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ODoH target https://odoh.crypto.sx/dns-query/"),
+            "{msg}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "network"]
+    async fn a_relay_error_names_the_relay_and_the_setting() {
+        let client = crate::forward::build_https_client();
+        let cache = OdohConfigCache::new("odoh.crypto.sx".to_string(), client.clone());
+        let buf = example_com_query();
+
+        let err = query_through_relay(
+            buf.filled(),
+            "https://odoh-relay.numa.rs/nope",
+            "/dns-query",
+            &client,
+            &cache,
+            Duration::from_secs(20),
+        )
+        .await
+        .expect_err("a bad relay path must fail");
+
+        let msg = err.to_string();
+        assert!(msg.contains("https://odoh-relay.numa.rs/nope"), "{msg}");
+        assert!(msg.contains("upstream.relay"), "{msg}");
+        assert!(!msg.contains("ODoH target"), "{msg}");
     }
 }
