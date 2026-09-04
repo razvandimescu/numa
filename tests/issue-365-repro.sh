@@ -114,16 +114,3 @@ echo "── D. target path typo, cloudflare — 404 with an HTML body ───
 echo "   ${DIM}cloudflare 301s a bad path; a relay that follows redirects launders${RESET}"
 echo "   ${DIM}that into a 404 from a host the client never named${RESET}"
 run_case "$RELAY" "https://odoh.cloudflare-dns.com/dns-query/"
-
-# Which hop answered is visible in the response headers, but numa discards
-# them: Caddy's own 404 carries `server: Caddy`, anything proxied from the
-# numa binary behind it carries `via: 1.1 Caddy` instead.
-echo "── header provenance of the two 404s ───────────────────────────────"
-for path in "/relay?targethost=odoh.crypto.sx&targetpath=/dns-query" "/relay/"; do
-    printf '  %-52s ' "POST ${path}"
-    curl -s -D- -o /dev/null --max-time 8 -X POST \
-        -H 'content-type: application/oblivious-dns-message' \
-        --data-binary 'probe' "${RELAY%/relay}${path}" |
-        tr -d '\r' | grep -Ei '^(HTTP|via|server):?' | tr '\n' ' '
-    echo
-done
