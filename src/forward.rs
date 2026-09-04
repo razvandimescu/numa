@@ -184,7 +184,7 @@ pub fn parse_upstream(
 /// HTTP/2 client tuned for DoH/ODoH: small windows for low latency, long-lived
 /// keep-alive. Pool defaults to one idle conn per host — good for resolvers
 /// that talk to a single upstream; relays that fan out to many targets
-/// should use [`build_https_client_with_pool`].
+/// should use [`build_relay_client`].
 ///
 /// Uses the system resolver. Callers running inside `serve::run` pass the
 /// shared [`crate::bootstrap_resolver::NumaResolver`] via

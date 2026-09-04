@@ -2,9 +2,7 @@ odoh-relay.example.com {
     # Unknown and trailing-slash paths reach the relay too, so its 404 can
     # name the endpoint. Caddy's own 404 has an empty body, a dead end for
     # anyone debugging a client config (issue #365).
-    handle {
-        reverse_proxy numa-relay:8443
-    }
+    reverse_proxy numa-relay:8443
 
     # Per-request access logs defeat the point of an oblivious relay.
     # Aggregate counters are exposed at /health on the relay itself.
