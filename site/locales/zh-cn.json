@@ -26,6 +26,7 @@
   "stat.enc_suffix": "· {pct}% 加密",
   "stat.cache_entries": "{n} / {max} 条",
   "panel.resolution_paths": "解析路径",
+  "panel.query_latency": "查询延迟",
   "panel.inbound_wire": "入站流量",
   "panel.inbound_wire_sub": "应用 → numa",
   "panel.outbound_wire": "出站流量",
