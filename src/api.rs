@@ -205,6 +205,14 @@ struct StatsResponse {
     mobile: MobileStatsResponse,
     proxy_protocol: ProxyProtocolStats,
     memory: MemoryStats,
+    resolutions: ResolutionStats,
+}
+
+/// `refused` lives under `queries` with the other per-path counters.
+#[derive(Serialize)]
+struct ResolutionStats {
+    active: usize,
+    limit: usize,
 }
 
 #[derive(Serialize)]
@@ -258,6 +266,7 @@ struct QueriesStats {
     blocked: u64,
     errors: u64,
     rebind_stripped: u64,
+    refused: u64,
 }
 
 #[derive(Serialize)]
@@ -615,6 +624,7 @@ async fn stats(State(ctx): State<Arc<ServerCtx>>) -> Json<StatsResponse> {
             blocked: snap.blocked,
             errors: snap.errors,
             rebind_stripped: snap.rebind_stripped,
+            refused: snap.refused,
         },
         latency: snap
             .latency
@@ -659,6 +669,10 @@ async fn stats(State(ctx): State<Arc<ServerCtx>>) -> Json<StatsResponse> {
         mobile: MobileStatsResponse {
             enabled: ctx.mobile_enabled,
             port: ctx.mobile_port,
+        },
+        resolutions: ResolutionStats {
+            active: ctx.admission.active(),
+            limit: ctx.admission.limit(),
         },
         proxy_protocol: ProxyProtocolStats {
             accepted: snap.proxy_v2_accepted,

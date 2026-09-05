@@ -239,6 +239,7 @@ pub struct ServerStats {
     pub(crate) proxy_v2_timeout: u64,
     rebind_stripped: u64,
     latency: LatencyBuckets,
+    queries_refused: u64,
     started_at: SystemTime,
 }
 
@@ -301,6 +302,8 @@ pub enum QueryPath {
     Blocked,
     Overridden,
     UpstreamError,
+    /// Turned away by aggregate admission control before any remote work.
+    Refused,
 }
 
 impl QueryPath {
@@ -315,6 +318,7 @@ impl QueryPath {
             QueryPath::Blocked => "BLOCKED",
             QueryPath::Overridden => "OVERRIDE",
             QueryPath::UpstreamError => "SERVFAIL",
+            QueryPath::Refused => "REFUSED",
         }
     }
 
@@ -329,7 +333,8 @@ impl QueryPath {
             | QueryPath::Upstream
             | QueryPath::Recursive
             | QueryPath::Coalesced
-            | QueryPath::UpstreamError => false,
+            | QueryPath::UpstreamError
+            | QueryPath::Refused => false,
         }
     }
 
@@ -352,6 +357,8 @@ impl QueryPath {
             Some(QueryPath::Overridden)
         } else if s.eq_ignore_ascii_case("SERVFAIL") {
             Some(QueryPath::UpstreamError)
+        } else if s.eq_ignore_ascii_case("REFUSED") {
+            Some(QueryPath::Refused)
         } else {
             None
         }
@@ -393,6 +400,7 @@ impl ServerStats {
             proxy_v2_timeout: 0,
             rebind_stripped: 0,
             latency: LatencyBuckets::default(),
+            queries_refused: 0,
             started_at: SystemTime::now(),
         }
     }
@@ -422,6 +430,7 @@ impl ServerStats {
             QueryPath::Blocked => self.queries_blocked += 1,
             QueryPath::Overridden => self.queries_overridden += 1,
             QueryPath::UpstreamError => self.upstream_errors += 1,
+            QueryPath::Refused => self.queries_refused += 1,
         }
         match transport {
             Transport::Udp => self.transport_udp += 1,
@@ -478,6 +487,7 @@ impl ServerStats {
             proxy_v2_timeout: self.proxy_v2_timeout,
             rebind_stripped: self.rebind_stripped,
             latency: self.latency.clone(),
+            refused: self.queries_refused,
         }
     }
 
@@ -539,6 +549,7 @@ pub struct StatsSnapshot {
     pub proxy_v2_timeout: u64,
     pub rebind_stripped: u64,
     pub latency: LatencyBuckets,
+    pub refused: u64,
 }
 
 #[cfg(test)]

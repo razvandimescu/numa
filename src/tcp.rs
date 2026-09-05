@@ -259,25 +259,33 @@ mod tests {
         addr
     }
 
-    async fn tcp_exchange(stream: &mut TcpStream, query: &DnsPacket) -> DnsPacket {
+    async fn send_query(stream: &mut TcpStream, query: &DnsPacket) {
         let mut buf = BytePacketBuffer::new();
         query.write(&mut buf).unwrap();
         let msg = buf.filled();
-
         let mut out = Vec::with_capacity(2 + msg.len());
         out.extend_from_slice(&(msg.len() as u16).to_be_bytes());
         out.extend_from_slice(msg);
         stream.write_all(&out).await.unwrap();
+    }
 
+    /// The reply, or `None` if the resolver is still working on it.
+    async fn read_reply(stream: &mut TcpStream, within: Duration) -> Option<DnsPacket> {
         let mut len_buf = [0u8; 2];
-        stream.read_exact(&mut len_buf).await.unwrap();
-        let resp_len = u16::from_be_bytes(len_buf) as usize;
+        tokio::time::timeout(within, stream.read_exact(&mut len_buf))
+            .await
+            .ok()?
+            .ok()?;
+        let mut data = vec![0u8; u16::from_be_bytes(len_buf) as usize];
+        stream.read_exact(&mut data).await.ok()?;
+        DnsPacket::from_buffer(&mut BytePacketBuffer::from_bytes(&data)).ok()
+    }
 
-        let mut data = vec![0u8; resp_len];
-        stream.read_exact(&mut data).await.unwrap();
-
-        let mut resp_buf = BytePacketBuffer::from_bytes(&data);
-        DnsPacket::from_buffer(&mut resp_buf).unwrap()
+    async fn tcp_exchange(stream: &mut TcpStream, query: &DnsPacket) -> DnsPacket {
+        send_query(stream, query).await;
+        read_reply(stream, Duration::from_secs(5))
+            .await
+            .expect("reply within 5s")
     }
 
     #[tokio::test]
@@ -453,5 +461,85 @@ mod tests {
         let resp = tcp_exchange(&mut stream, &query).await;
         assert_eq!(resp.header.rescode, ResultCode::NOERROR);
         assert_eq!(resp.answers.len(), 1);
+    }
+
+    // ---- Aggregate resolution admission (issue #230) ----
+
+    /// A resolver whose upstream never answers, so every admitted query stays
+    /// in flight, plus the ctx to sample it through.
+    async fn spawn_tcp_server_for_flood(limit: usize) -> (SocketAddr, Arc<ServerCtx>) {
+        let mut ctx = crate::testutil::test_ctx().await;
+        // Long enough that every admitted resolution is still in flight when
+        // sampled, so nothing frees a permit and understates the peak.
+        ctx.timeout = Duration::from_secs(30);
+        ctx.admission = crate::admission::ResolutionAdmission::new(limit);
+        ctx.upstream_pool = Mutex::new(crate::forward::UpstreamPool::new(
+            vec![crate::forward::Upstream::Udp(
+                crate::testutil::blackhole_upstream(),
+            )],
+            vec![],
+        ));
+        let ctx = Arc::new(ctx);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(accept_loop(listener, None, Arc::clone(&ctx)));
+        (addr, ctx)
+    }
+
+    /// The ceiling is shared across transports and `MAX_CONNECTIONS` is not
+    /// it: below the connection cap every connection used to buy an unmetered
+    /// resolution. A refused stream query gets SERVFAIL, not UDP's silent drop.
+    #[tokio::test]
+    async fn tcp_connections_are_capped_by_admission() {
+        const CONNS: usize = 8;
+        const LIMIT: usize = 2;
+        const _: () = assert!(CONNS < MAX_CONNECTIONS);
+
+        let (addr, ctx) = spawn_tcp_server_for_flood(LIMIT).await;
+
+        let readers: Vec<_> = (0..CONNS)
+            .map(|i| {
+                tokio::spawn(async move {
+                    let mut stream = TcpStream::connect(addr).await.unwrap();
+                    let query =
+                        DnsPacket::query(0xBEEF, &format!("r{i}.flood.example"), QueryType::A);
+                    send_query(&mut stream, &query).await;
+                    // Admitted queries hang on the blackhole for `ctx.timeout`;
+                    // refusals answer at once. A refusal read late counts as
+                    // admitted and understates the refusal total.
+                    let reply = read_reply(&mut stream, Duration::from_secs(5)).await;
+                    (stream, reply)
+                })
+            })
+            .collect();
+
+        let sample_ctx = Arc::clone(&ctx);
+        let inflight = crate::testutil::wait_until_settled(
+            move || sample_ctx.inflight.lock().unwrap().len(),
+            Duration::from_secs(10),
+        )
+        .await;
+        assert_eq!(
+            inflight, LIMIT,
+            "{CONNS} TCP connections must not open more than {LIMIT} resolutions"
+        );
+
+        let mut refused = 0;
+        let mut conns = Vec::with_capacity(CONNS);
+        for r in readers {
+            let (stream, reply) = r.await.unwrap();
+            if let Some(resp) = reply {
+                assert_eq!(
+                    resp.header.rescode,
+                    ResultCode::SERVFAIL,
+                    "a refused stream query answers, it does not hang"
+                );
+                refused += 1;
+            }
+            conns.push(stream);
+        }
+        assert_eq!(refused, CONNS - LIMIT);
+        drop(conns);
     }
 }

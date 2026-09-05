@@ -110,6 +110,14 @@ pub struct ServerConfig {
     /// CIDR allowlist applied at every DNS surface. Empty = disabled.
     #[serde(default)]
     pub allow_from: Vec<String>,
+    /// Ceiling on cache-miss resolutions running at once, shared by every
+    /// transport. One charge per query; local, cached and coalesced answers
+    /// are never charged. See `numa.toml` for the operator-facing detail.
+    #[serde(
+        default = "default_max_concurrent_resolutions",
+        deserialize_with = "resolution_ceiling"
+    )]
+    pub max_concurrent_resolutions: usize,
     /// Shared secret guarding the HTTP control plane (dashboard + REST API)
     /// for non-loopback peers. Overridden by `NUMA_API_TOKEN`. Loopback is
     /// always allowed. Empty = none (only valid for a loopback `api_bind_addr`).
@@ -142,6 +150,7 @@ impl Default for ServerConfig {
             filter_aaaa: false,
             proxy_protocol: ProxyProtocolConfig::default(),
             allow_from: Vec::new(),
+            max_concurrent_resolutions: DEFAULT_MAX_CONCURRENT_RESOLUTIONS,
             api_token: None,
             rebind_protect: false,
             rebind_allowlist: Vec::new(),
@@ -170,6 +179,29 @@ pub const DEFAULT_API_PORT: u16 = 5380;
 
 fn default_api_port() -> u16 {
     DEFAULT_API_PORT
+}
+
+/// Conservative enough for a Pi Zero, well above any plausible legitimate
+/// burst on a home or small-office resolver. Mirrors the TCP connection cap.
+pub const DEFAULT_MAX_CONCURRENT_RESOLUTIONS: usize = 512;
+
+fn default_max_concurrent_resolutions() -> usize {
+    DEFAULT_MAX_CONCURRENT_RESOLUTIONS
+}
+
+/// Every comparable knob (unbound, dnsdist, nginx) reads 0 as "no limit".
+/// Here it would refuse every cache miss, so it fails at load instead.
+fn resolution_ceiling<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<usize, D::Error> {
+    let limit = usize::deserialize(d)?;
+    if limit == 0 {
+        return Err(serde::de::Error::custom(
+            "server.max_concurrent_resolutions must be at least 1 (0 would refuse every cache miss, \
+             it does not mean unlimited)",
+        ));
+    }
+    Ok(limit)
 }
 
 #[derive(Deserialize, Default, PartialEq, Eq, Clone, Copy)]
@@ -838,6 +870,25 @@ fn default_mobile_bind_addr() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolution_ceiling_defaults_and_parses() {
+        let default: Config = toml::from_str("").unwrap();
+        assert_eq!(
+            default.server.max_concurrent_resolutions,
+            DEFAULT_MAX_CONCURRENT_RESOLUTIONS
+        );
+
+        let set: Config = toml::from_str("[server]\nmax_concurrent_resolutions = 64").unwrap();
+        assert_eq!(set.server.max_concurrent_resolutions, 64);
+
+        // 0 reads as "unlimited" in every comparable resolver and means the
+        // opposite here, so it must fail loudly at load rather than at 3am.
+        let Err(zero) = toml::from_str::<Config>("[server]\nmax_concurrent_resolutions = 0") else {
+            panic!("0 must not parse");
+        };
+        assert!(zero.to_string().contains("at least 1"), "{zero}");
+    }
 
     #[test]
     fn lan_disabled_by_default() {

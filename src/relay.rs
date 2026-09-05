@@ -19,8 +19,8 @@ use log::{error, info};
 use serde::Deserialize;
 use tokio::net::TcpListener;
 
-use crate::forward::build_https_client_with_pool;
-use crate::odoh::ODOH_CONTENT_TYPE;
+use crate::forward::build_relay_client;
+use crate::odoh::{content_type_matches, ODOH_CONTENT_TYPE};
 use crate::Result;
 
 /// Cap on the opaque body we accept from a client. ODoH envelopes are
@@ -57,7 +57,7 @@ struct RelayState {
 impl RelayState {
     fn new() -> Arc<Self> {
         Arc::new(RelayState {
-            client: build_https_client_with_pool(RELAY_POOL_PER_HOST),
+            client: build_relay_client(RELAY_POOL_PER_HOST),
             total_requests: AtomicU64::new(0),
             forwarded_ok: AtomicU64::new(0),
             forwarded_err: AtomicU64::new(0),
@@ -68,12 +68,27 @@ impl RelayState {
 
 /// `DefaultBodyLimit` overrides axum's 2 MiB default so hostile clients
 /// can't force the relay to buffer multi-MB bodies before our own cap.
+///
+/// `/relay/` is routed alongside `/relay` because axum does not redirect
+/// trailing slashes: a client whose configured URL carries one otherwise
+/// gets a bare 404 that names no cause (issue #365).
 fn build_app(state: Arc<RelayState>) -> Router {
     Router::new()
         .route("/relay", post(handle_relay))
+        .route("/relay/", post(handle_relay))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .route("/health", get(handle_health))
+        .fallback(handle_unknown)
         .with_state(state)
+}
+
+/// An empty 404 leaves an operator nothing to debug with, and the relay
+/// keeps no request logs to consult instead.
+async fn handle_unknown() -> impl IntoResponse {
+    (
+        StatusCode::NOT_FOUND,
+        "numa ODoH relay: POST /relay?targethost=<host>&targetpath=</path>\n",
+    )
 }
 
 pub async fn run(addr: SocketAddr) -> Result<()> {
@@ -177,14 +192,6 @@ async fn forward_to_target(
     Ok(response)
 }
 
-fn content_type_matches(headers: &axum::http::HeaderMap, expected: &str) -> bool {
-    headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .map(|ct| ct.split(';').next().unwrap_or("").trim() == expected)
-        .unwrap_or(false)
-}
-
 /// Strict DNS-hostname validator, aimed at closing the SSRF surface a naive
 /// `contains('.')` check leaves open (e.g. `example.com@internal.host`,
 /// `evil.com/../admin`). Requires ASCII letters/digits/dot/dash, at least
@@ -256,6 +263,45 @@ mod tests {
             resp.status(),
             reqwest::StatusCode::PAYLOAD_TOO_LARGE | reqwest::StatusCode::BAD_REQUEST
         ));
+    }
+
+    #[tokio::test]
+    async fn trailing_slash_reaches_the_relay() {
+        let (addr, state) = spawn_relay().await;
+        let client = crate::forward::default_client();
+        let resp = client
+            .post(format!(
+                "http://{}/relay/?targethost=localhost&targetpath=/dns-query",
+                addr
+            ))
+            .header(header::CONTENT_TYPE, ODOH_CONTENT_TYPE)
+            .body("body")
+            .send()
+            .await
+            .unwrap();
+        // The counter only moves inside `handle_relay`, so it proves the
+        // trailing slash routed all the way in rather than hitting the
+        // fallback or an extractor rejection.
+        assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+        assert_eq!(state.rejected_bad_request.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn unknown_path_names_the_endpoint() {
+        let (addr, _state) = spawn_relay().await;
+        let client = crate::forward::default_client();
+        let resp = client
+            .post(format!("http://{}/nope", addr))
+            .body("body")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+        assert!(resp
+            .text()
+            .await
+            .unwrap()
+            .contains("numa ODoH relay: POST /relay"));
     }
 
     #[tokio::test]
@@ -341,5 +387,41 @@ mod tests {
         assert!(!is_valid_hostname("evil.com@internal.host"));
         assert!(!is_valid_hostname("evil.com/../admin"));
         assert!(!is_valid_hostname(&"a".repeat(254)));
+    }
+
+    /// The only test that completes a forward: every other relay test asserts
+    /// a rejection, and `forwarded_ok` is checked only as zero. Sealing the
+    /// query needs numa's own HPKE code, so this cannot be a shell probe like
+    /// the other live-network checks.
+    #[tokio::test]
+    #[ignore = "network"]
+    async fn seals_forwards_and_unseals_against_a_real_target() {
+        let (addr, state) = spawn_relay().await;
+        let client = crate::forward::build_https_client();
+        let cache = crate::odoh::OdohConfigCache::new("odoh.crypto.sx".to_string(), client.clone());
+
+        let mut buf = crate::buffer::BytePacketBuffer::new();
+        crate::packet::DnsPacket::query(0xABCD, "example.com", crate::question::QueryType::A)
+            .write(&mut buf)
+            .unwrap();
+
+        let wire = crate::odoh::query_through_relay(
+            buf.filled(),
+            &format!("http://{}/relay", addr),
+            "/dns-query",
+            &client,
+            &cache,
+            Duration::from_secs(20),
+        )
+        .await
+        .expect("ODoH query through the local relay");
+
+        let mut parse = crate::buffer::BytePacketBuffer::from_bytes(&wire);
+        let resp = crate::packet::DnsPacket::from_buffer(&mut parse).unwrap();
+        assert!(
+            !resp.answers.is_empty(),
+            "expected an answer for example.com"
+        );
+        assert_eq!(state.forwarded_ok.load(Ordering::Relaxed), 1);
     }
 }

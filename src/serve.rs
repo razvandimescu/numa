@@ -209,6 +209,9 @@ pub async fn run(config_path: String) -> crate::Result<()> {
         root_hints,
         srtt: std::sync::RwLock::new(crate::srtt::SrttCache::new(config.upstream.srtt)),
         inflight: std::sync::Mutex::new(std::collections::HashMap::new()),
+        admission: crate::admission::ResolutionAdmission::new(
+            config.server.max_concurrent_resolutions,
+        ),
         dnssec_enabled: config.dnssec.enabled,
         dnssec_strict: config.dnssec.strict,
         health_meta,

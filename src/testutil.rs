@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use tokio::net::UdpSocket;
@@ -61,6 +61,9 @@ pub async fn test_ctx() -> ServerCtx {
         root_hints: Vec::new(),
         srtt: RwLock::new(SrttCache::new(true)),
         inflight: Mutex::new(HashMap::new()),
+        admission: crate::admission::ResolutionAdmission::new(
+            crate::config::DEFAULT_MAX_CONCURRENT_RESOLUTIONS,
+        ),
         dnssec_enabled: false,
         dnssec_strict: false,
         health_meta: HealthMeta::test_fixture(),
@@ -321,6 +324,49 @@ pub async fn doh_upstream_raw(
     let addr = listener.local_addr().unwrap();
     tokio::spawn(axum::serve(listener, app).into_future());
     (format!("http://{}/dns-query", addr), rx)
+}
+
+/// Wait until `sample` stops changing, having first seen it rise above zero.
+/// Waiting for an expected total instead would stall on whichever of bounded
+/// or unbounded is the broken case. Zero counts as "not started yet", and the
+/// stable window outlasts a scheduling gap partway through a ramp-up.
+pub async fn wait_until_settled(mut sample: impl FnMut() -> usize, cap: Duration) -> usize {
+    const STABLE: Duration = Duration::from_secs(1);
+    const TICK: Duration = Duration::from_millis(5);
+    let stable_ticks = (STABLE.as_millis() / TICK.as_millis()) as usize;
+
+    let deadline = std::time::Instant::now() + cap;
+    let (mut last, mut stable) = (0, 0);
+    while stable < stable_ticks {
+        if std::time::Instant::now() >= deadline {
+            panic!("sample never held steady for {STABLE:?} within {cap:?} (last = {last})");
+        }
+        tokio::time::sleep(TICK).await;
+        let now = sample();
+        stable = if now == last && now > 0 {
+            stable + 1
+        } else {
+            0
+        };
+        last = now;
+    }
+    last
+}
+
+/// Blackhole upstream that counts the queries it swallows: each datagram is
+/// one resolution pinned open until the client-side timeout.
+pub async fn counting_blackhole_upstream() -> (SocketAddr, Arc<std::sync::atomic::AtomicUsize>) {
+    let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addr = sock.local_addr().unwrap();
+    let counter = Arc::clone(&seen);
+    tokio::spawn(async move {
+        let mut buf = [0u8; 4096];
+        while sock.recv_from(&mut buf).await.is_ok() {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+    (addr, seen)
 }
 
 /// UDP socket that accepts connections but never replies.

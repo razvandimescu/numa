@@ -278,6 +278,7 @@ body {
 .path-bar-fill.local { background: var(--violet); }
 .path-bar-fill.override { background: var(--emerald); }
 .path-bar-fill.error { background: var(--rose); }
+.path-bar-fill.refused { background: var(--rose); opacity: 0.65; }
 .path-bar-fill.blocked { background: var(--text-dim); }
 .path-bar-fill.udp { background: var(--text-dim); }
 .path-bar-fill.tcp { background: var(--violet); }
@@ -356,6 +357,7 @@ body {
 .path-tag.OVERRIDE  { background: rgba(82, 122, 82, 0.12);  color: var(--emerald); }
 .path-tag.SERVFAIL  { background: rgba(181, 68, 58, 0.12);  color: var(--rose); }
 .path-tag.BLOCKED   { background: rgba(163, 152, 136, 0.15); color: var(--text-dim); }
+.path-tag.REFUSED   { background: rgba(181, 68, 58, 0.22);  color: var(--rose); }
 .path-tag.COALESCED { background: rgba(138, 104, 158, 0.12); color: var(--violet-dim); }
 .path-tag.UDP       { background: rgba(163, 152, 136, 0.15); color: var(--text-dim); }
 .path-tag.TCP       { background: rgba(100, 116, 139, 0.12); color: var(--violet-dim); }
@@ -754,6 +756,7 @@ body {
             <option value="OVERRIDE" data-i18n="log.path_override">override</option>
             <option value="LOCAL" data-i18n="log.path_local">local</option>
             <option value="SERVFAIL" data-i18n="log.path_error">error</option>
+            <option value="REFUSED" data-i18n="log.path_refused">refused</option>
             <option value="STRIPPED" data-i18n="log.path_stripped">stripped</option>
           </select>
           <select id="logFilterTransport" onchange="applyLogFilter()"
@@ -1136,6 +1139,7 @@ const PATH_DEFS = [
   { key: 'overridden', label: 'paths.override', cls: 'override' },
   { key: 'blocked',   label: 'paths.blocked', cls: 'blocked' },
   { key: 'errors',    label: 'paths.errors',  cls: 'error' },
+  { key: 'refused',   label: 'paths.refused', cls: 'refused' },
 ];
 
 function renderPaths(queries) {

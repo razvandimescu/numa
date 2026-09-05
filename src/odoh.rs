@@ -20,7 +20,7 @@ use odoh_rs::{
 use rand_core::{OsRng, TryRngCore};
 use reqwest::header::HeaderMap;
 use tokio::sync::Mutex;
-use tokio::time::timeout;
+use tokio::time::timeout_at;
 
 use crate::Result;
 
@@ -46,6 +46,8 @@ const MAX_CONFIG_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// receive one request per query. Queries that arrive during the backoff
 /// return the cached error immediately.
 const REFRESH_BACKOFF: Duration = Duration::from_secs(60);
+
+const BUDGET_EXHAUSTED: &str = "ran out of query budget";
 
 /// Parsed ODoH target config plus the freshness metadata needed to age it out.
 #[derive(Debug)]
@@ -101,7 +103,11 @@ impl OdohConfigCache {
     /// Return a valid config, refetching when the cache is cold or expired.
     /// Within [`REFRESH_BACKOFF`] of a failed refresh, returns the cached
     /// error without issuing another fetch.
-    pub async fn get(&self) -> Result<Arc<OdohTargetConfig>> {
+    ///
+    /// A refetch lands on a user query and the shared client sets no request
+    /// timeout, so `deadline` is what stops a stalled target hanging every
+    /// query queued on the lock.
+    pub async fn get(&self, deadline: Instant) -> Result<Arc<OdohTargetConfig>> {
         if let Some(cfg) = self.current.load_full() {
             if !cfg.is_expired() {
                 return Ok(cfg);
@@ -112,7 +118,9 @@ impl OdohConfigCache {
             return Err(err);
         }
 
-        let _guard = self.refresh_lock.lock().await;
+        let _guard = timeout_at(deadline.into(), self.refresh_lock.lock())
+            .await
+            .map_err(|_| BUDGET_EXHAUSTED)?;
 
         // Another task may have refreshed or failed while we waited.
         if let Some(cfg) = self.current.load_full() {
@@ -124,7 +132,16 @@ impl OdohConfigCache {
             return Err(err);
         }
 
-        match fetch_odoh_config(&self.client, &self.configs_url).await {
+        // Only the target's own failures arm REFRESH_BACKOFF: our budget
+        // running out says nothing about its health.
+        let fetched = timeout_at(
+            deadline.into(),
+            fetch_odoh_config(&self.client, &self.configs_url),
+        )
+        .await
+        .map_err(|_| BUDGET_EXHAUSTED)?;
+
+        match fetched {
             Ok(fresh) => {
                 let fresh = Arc::new(fresh);
                 self.current.store(Some(fresh.clone()));
@@ -195,8 +212,8 @@ fn parse_odoh_config(body: &[u8], ttl: Duration) -> Result<OdohTargetConfig> {
 /// plaintext DNS wire response.
 ///
 /// Flow: fetch the target's HPKE config (cached), seal the query, POST to the
-/// relay with `Targethost`/`Targetpath` headers, then unseal the response.
-/// On seal/unseal failure we invalidate the cache and retry once — this
+/// relay with the target routing in the query string, then unseal the
+/// response. On seal/unseal failure we invalidate the cache and retry once — this
 /// handles the benign race where the target rotated its key between our
 /// cached config and the POST.
 pub async fn query_through_relay(
@@ -213,7 +230,7 @@ pub async fn query_through_relay(
         target_path,
         client,
         cache,
-        timeout: timeout_duration,
+        deadline: Instant::now() + timeout_duration,
     };
     match attempt_query(&req).await {
         Ok(v) => Ok(v),
@@ -231,7 +248,9 @@ struct OdohRequest<'a> {
     target_path: &'a str,
     client: &'a reqwest::Client,
     cache: &'a OdohConfigCache,
-    timeout: Duration,
+    /// Covers the whole exchange, retry included, so a key-rotation retry
+    /// shares the caller's budget instead of starting a fresh one.
+    deadline: Instant,
 }
 
 /// Classification used only by the retry path in [`query_through_relay`].
@@ -253,7 +272,11 @@ impl AttemptError {
 }
 
 async fn attempt_query(req: &OdohRequest<'_>) -> std::result::Result<Vec<u8>, AttemptError> {
-    let cfg = req.cache.get().await.map_err(AttemptError::Other)?;
+    let cfg = req
+        .cache
+        .get(req.deadline)
+        .await
+        .map_err(AttemptError::Other)?;
 
     let plaintext = ObliviousDoHMessagePlaintext::new(req.wire, 0);
     // rand_core 0.9's OsRng is fallible-only; wrap for the infallible bound.
@@ -270,7 +293,7 @@ async fn attempt_query(req: &OdohRequest<'_>) -> std::result::Result<Vec<u8>, At
     // HTTP headers, to carry the target routing. `Targethost`/`Targetpath`
     // headers cause relays to treat the request as an unspecified-target and
     // reject it.
-    let (status, resp_body) = timeout(req.timeout, async {
+    let (status, failure, resp_body) = timeout_at(req.deadline.into(), async {
         let resp = req
             .client
             .post(req.relay_url)
@@ -285,8 +308,16 @@ async fn attempt_query(req: &OdohRequest<'_>) -> std::result::Result<Vec<u8>, At
             .send()
             .await?;
         let status = resp.status();
+        // `bytes()` consumes the response, so the attribution inputs have to
+        // be read here — but only when there is a failure to attribute.
+        let failure = (!status.is_success()).then(|| {
+            (
+                content_type_matches(resp.headers(), ODOH_CONTENT_TYPE),
+                resp.url().to_string(),
+            )
+        });
         let body = resp.bytes().await?;
-        Ok::<_, reqwest::Error>((status, body))
+        Ok::<_, reqwest::Error>((status, failure, body))
     })
     .await
     .map_err(|_| AttemptError::Other("ODoH relay request timed out".into()))?
@@ -296,10 +327,17 @@ async fn attempt_query(req: &OdohRequest<'_>) -> std::result::Result<Vec<u8>, At
     // error in a sealed 200 response; a 401 from the relay/target is the
     // practical signal that our cached HPKE key is stale. Treat 400 as a
     // client-side bug (malformed ODoH envelope) — retrying would loop-fail.
-    if !status.is_success() {
+    if let Some((forwarded, url)) = failure {
         let preview_len = resp_body.len().min(ERROR_BODY_PREVIEW_BYTES);
         let body_preview = String::from_utf8_lossy(&resp_body[..preview_len]);
-        let msg = format!("ODoH relay returned {status}: {}", body_preview.trim());
+        let msg = describe_failure(
+            status,
+            forwarded,
+            &url,
+            req.cache.target_host(),
+            req.target_path,
+            body_preview.trim(),
+        );
         return Err(if status.as_u16() == 401 {
             AttemptError::KeyRotation(msg)
         } else {
@@ -315,6 +353,44 @@ async fn attempt_query(req: &OdohRequest<'_>) -> std::result::Result<Vec<u8>, At
             .map_err(|e| AttemptError::KeyRotation(format!("ODoH decrypt failed: {e}")))?;
 
     Ok(plaintext_response.into_msg().to_vec())
+}
+
+/// Attribute a non-success status to the hop that produced it: only a relay
+/// that forwarded returns the target's answer under the ODoH media type (RFC
+/// 9230 §4.3). An inference, not proof — a third-party relay may pass a
+/// target error through verbatim.
+fn describe_failure(
+    status: reqwest::StatusCode,
+    forwarded: bool,
+    url: &str,
+    target_host: &str,
+    target_path: &str,
+    preview: &str,
+) -> String {
+    let hop = if forwarded {
+        format!("ODoH target https://{target_host}{target_path} returned {status}")
+    } else {
+        let hint = if status == reqwest::StatusCode::NOT_FOUND {
+            " — check the path in upstream.relay"
+        } else {
+            ""
+        };
+        format!("ODoH relay {url} returned {status}, no ODoH response{hint}")
+    };
+    if preview.is_empty() {
+        hop
+    } else {
+        format!("{hop}: {preview}")
+    }
+}
+
+/// Media-type compare that tolerates parameters (`; charset=…`).
+pub(crate) fn content_type_matches(headers: &HeaderMap, expected: &str) -> bool {
+    headers
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|ct| ct.split(';').next().unwrap_or("").trim() == expected)
+        .unwrap_or(false)
 }
 
 fn cache_control_ttl(headers: &HeaderMap) -> Option<Duration> {
@@ -336,6 +412,10 @@ fn cache_control_ttl(headers: &HeaderMap) -> Option<Duration> {
 mod tests {
     use super::*;
     use odoh_rs::{ObliviousDoHConfig, ObliviousDoHKeyPair};
+    use tokio::net::TcpListener;
+
+    use crate::buffer::BytePacketBuffer;
+    use crate::forward::build_https_client;
 
     // RFC 9180 HPKE IDs for the sole ODoH mandatory suite:
     // KEM = X25519, KDF = HKDF-SHA256, AEAD = AES-128-GCM.
@@ -384,6 +464,67 @@ mod tests {
     }
 
     #[test]
+    fn forwarded_status_names_the_target() {
+        let msg = describe_failure(
+            reqwest::StatusCode::NOT_FOUND,
+            true,
+            "https://relay.example/relay?targethost=odoh.example.com",
+            "odoh.example.com",
+            "/dns-query",
+            "",
+        );
+        assert_eq!(
+            msg,
+            "ODoH target https://odoh.example.com/dns-query returned 404 Not Found"
+        );
+    }
+
+    #[test]
+    fn unforwarded_404_names_the_relay_url_and_the_setting_to_fix() {
+        let msg = describe_failure(
+            reqwest::StatusCode::NOT_FOUND,
+            false,
+            "https://relay.example/relay/",
+            "odoh.example.com",
+            "/dns-query",
+            "",
+        );
+        assert!(msg.contains("https://relay.example/relay/"), "{msg}");
+        assert!(msg.contains("upstream.relay"), "{msg}");
+        assert!(!msg.contains("ODoH target"), "{msg}");
+    }
+
+    #[test]
+    fn relay_rejection_carries_the_body_without_the_path_hint() {
+        let msg = describe_failure(
+            reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            false,
+            "https://relay.example/relay",
+            "odoh.example.com",
+            "/dns-query",
+            "expected application/oblivious-dns-message",
+        );
+        assert!(
+            msg.ends_with(": expected application/oblivious-dns-message"),
+            "{msg}"
+        );
+        assert!(!msg.contains("upstream.relay"), "{msg}");
+    }
+
+    #[test]
+    fn content_type_matches_ignores_parameters() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            "content-type",
+            "application/oblivious-dns-message; charset=utf-8"
+                .parse()
+                .unwrap(),
+        );
+        assert!(content_type_matches(&h, ODOH_CONTENT_TYPE));
+        assert!(!content_type_matches(&HeaderMap::new(), ODOH_CONTENT_TYPE));
+    }
+
+    #[test]
     fn cache_control_parses_max_age() {
         let mut h = HeaderMap::new();
         h.insert("cache-control", "public, max-age=86400".parse().unwrap());
@@ -425,11 +566,12 @@ mod tests {
                 .unwrap(),
         );
 
-        let first = cache.get().await;
+        let deadline = || Instant::now() + Duration::from_secs(5);
+        let first = cache.get(deadline()).await;
         assert!(first.is_err(), "first fetch must fail against invalid host");
 
         // Within the backoff window, the cached error is returned immediately.
-        let second = cache.get().await.unwrap_err().to_string();
+        let second = cache.get(deadline()).await.unwrap_err().to_string();
         assert!(
             second.contains("backoff active"),
             "expected backoff hint, got: {second}"
@@ -441,7 +583,7 @@ mod tests {
             at: Instant::now() - (REFRESH_BACKOFF + Duration::from_secs(1)),
             err: "prior".to_string(),
         })));
-        let third = cache.get().await.unwrap_err().to_string();
+        let third = cache.get(deadline()).await.unwrap_err().to_string();
         assert!(
             !third.contains("backoff active"),
             "expected fresh fetch attempt, got: {third}"
@@ -485,5 +627,212 @@ mod tests {
         let response_back =
             odoh_rs::decrypt_response(&query_pt, &response_enc, client_secret).unwrap();
         assert_eq!(response_back.into_msg().as_ref(), response_wire);
+    }
+
+    // --- query-budget coverage ---
+
+    const QUERY_TIMEOUT: Duration = Duration::from_secs(2);
+
+    /// Outer bound, deliberately looser than the budget under test.
+    const CEILING: Duration = Duration::from_secs(6);
+
+    const QUERY_WIRE: &[u8] =
+        b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01";
+
+    /// Accept connections and never send a byte, so a TLS client blocks forever
+    /// waiting for ServerHello.
+    async fn stalling_tls_endpoint() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                held.push(sock);
+            }
+        });
+        addr.to_string()
+    }
+
+    fn stalled_cache(target: String) -> Arc<OdohConfigCache> {
+        Arc::new(OdohConfigCache::new(target, build_https_client()))
+    }
+
+    #[tokio::test]
+    async fn stalled_config_fetch_respects_query_timeout() {
+        let cache = stalled_cache(stalling_tls_endpoint().await);
+        let client = build_https_client();
+
+        let start = Instant::now();
+        let outcome = tokio::time::timeout(
+            CEILING,
+            query_through_relay(
+                QUERY_WIRE,
+                "https://relay.invalid/relay",
+                "/dns-query",
+                &client,
+                &cache,
+                QUERY_TIMEOUT,
+            ),
+        )
+        .await;
+
+        assert!(
+            outcome.is_ok(),
+            "query still hung after {CEILING:?} against a {QUERY_TIMEOUT:?} budget"
+        );
+        assert!(
+            outcome.unwrap().is_err(),
+            "a stalled target must not yield a config"
+        );
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < QUERY_TIMEOUT * 2,
+            "returned in {elapsed:?}, well past the {QUERY_TIMEOUT:?} budget"
+        );
+    }
+
+    /// `get` holds `refresh_lock` across the fetch, so an unbounded one stalls
+    /// every query in the cold window, not just the one that triggered it.
+    #[tokio::test]
+    async fn stalled_config_fetch_does_not_block_later_queries() {
+        let cache = stalled_cache(stalling_tls_endpoint().await);
+
+        let leader = tokio::spawn({
+            let cache = cache.clone();
+            async move { cache.get(Instant::now() + QUERY_TIMEOUT).await.map(|_| ()) }
+        });
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let followers: Vec<_> = (0..4)
+            .map(|_| {
+                let cache = cache.clone();
+                tokio::spawn(
+                    async move { cache.get(Instant::now() + QUERY_TIMEOUT).await.map(|_| ()) },
+                )
+            })
+            .collect();
+
+        let done = tokio::time::timeout(CEILING, async {
+            for handle in followers.into_iter().chain([leader]) {
+                assert!(
+                    handle.await.unwrap().is_err(),
+                    "a stalled target must not yield a config"
+                );
+            }
+        })
+        .await;
+
+        assert!(
+            done.is_ok(),
+            "queries still blocked on the refresh lock after {CEILING:?}"
+        );
+    }
+
+    /// A key-rotation retry re-enters `get` on the original deadline, so it can
+    /// queue behind a fresher query holding the lock on a longer budget.
+    #[tokio::test]
+    async fn short_deadline_does_not_wait_out_a_longer_lock_holder() {
+        let cache = stalled_cache(stalling_tls_endpoint().await);
+
+        let holder = tokio::spawn({
+            let cache = cache.clone();
+            async move {
+                cache
+                    .get(Instant::now() + Duration::from_secs(5))
+                    .await
+                    .map(|_| ())
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let start = Instant::now();
+        let late = cache.get(Instant::now() + Duration::from_millis(300)).await;
+        let waited = start.elapsed();
+
+        assert!(late.is_err(), "a stalled target must not yield a config");
+        assert!(
+            waited < Duration::from_secs(2),
+            "waited {waited:?} for a 300ms budget: the lock wait ignored our deadline"
+        );
+        holder.abort();
+    }
+
+    /// Otherwise one impatient query blackholes a healthy target for 60s.
+    #[tokio::test]
+    async fn budget_exhaustion_does_not_arm_the_backoff() {
+        let cache = stalled_cache(stalling_tls_endpoint().await);
+
+        let impatient = cache.get(Instant::now() + Duration::from_millis(200)).await;
+        assert!(
+            impatient.is_err(),
+            "a stalled target must not yield a config"
+        );
+
+        assert!(
+            cache.last_failure.load_full().is_none(),
+            "our own timeout armed the backoff"
+        );
+    }
+
+    fn example_com_query() -> BytePacketBuffer {
+        let mut buf = BytePacketBuffer::new();
+        crate::packet::DnsPacket::query(0xABCD, "example.com", crate::question::QueryType::A)
+            .write(&mut buf)
+            .unwrap();
+        buf
+    }
+
+    /// The tests above hand `describe_failure` a `forwarded` flag. These two
+    /// derive it from a real response, which is the assumption the feature
+    /// rests on: only a relay that forwarded answers under the ODoH media
+    /// type. `/nope` stays a media-type-less 404 whether the relay's front
+    /// proxy answers it or the relay's own fallback does.
+    #[tokio::test]
+    #[ignore = "network"]
+    async fn a_target_error_names_the_target() {
+        let client = crate::forward::build_https_client();
+        let cache = OdohConfigCache::new("odoh.crypto.sx".to_string(), client.clone());
+        let buf = example_com_query();
+
+        let err = query_through_relay(
+            buf.filled(),
+            "https://odoh-relay.numa.rs/relay",
+            "/dns-query/",
+            &client,
+            &cache,
+            Duration::from_secs(20),
+        )
+        .await
+        .expect_err("a trailing slash on the target path must fail");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ODoH target https://odoh.crypto.sx/dns-query/"),
+            "{msg}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "network"]
+    async fn a_relay_error_names_the_relay_and_the_setting() {
+        let client = crate::forward::build_https_client();
+        let cache = OdohConfigCache::new("odoh.crypto.sx".to_string(), client.clone());
+        let buf = example_com_query();
+
+        let err = query_through_relay(
+            buf.filled(),
+            "https://odoh-relay.numa.rs/nope",
+            "/dns-query",
+            &client,
+            &cache,
+            Duration::from_secs(20),
+        )
+        .await
+        .expect_err("a bad relay path must fail");
+
+        let msg = err.to_string();
+        assert!(msg.contains("https://odoh-relay.numa.rs/nope"), "{msg}");
+        assert!(msg.contains("upstream.relay"), "{msg}");
+        assert!(!msg.contains("ODoH target"), "{msg}");
     }
 }
