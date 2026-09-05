@@ -195,6 +195,7 @@ struct StatsResponse {
     srtt: bool,
     rebind: bool,
     queries: QueriesStats,
+    latency: Vec<LatencyBucketStat>,
     transport: TransportStats,
     upstream_transport: UpstreamTransportStats,
     cache: CacheStats,
@@ -257,6 +258,13 @@ struct QueriesStats {
     blocked: u64,
     errors: u64,
     rebind_stripped: u64,
+}
+
+#[derive(Serialize)]
+struct LatencyBucketStat {
+    le_ms: Option<u64>,
+    count: u64,
+    label: String,
 }
 
 #[derive(Serialize)]
@@ -608,6 +616,16 @@ async fn stats(State(ctx): State<Arc<ServerCtx>>) -> Json<StatsResponse> {
             errors: snap.errors,
             rebind_stripped: snap.rebind_stripped,
         },
+        latency: snap
+            .latency
+            .buckets()
+            .into_iter()
+            .map(|b| LatencyBucketStat {
+                le_ms: b.le_ms,
+                count: b.count,
+                label: b.label(),
+            })
+            .collect(),
         transport: TransportStats {
             udp: snap.transport_udp,
             tcp: snap.transport_tcp,
@@ -1275,6 +1293,9 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(json["uptime_secs"].is_number());
         assert!(json["queries"]["total"].is_number());
+        assert!(json["latency"].is_array());
+        assert!(json["latency"][0]["count"].is_number());
+        assert!(json["latency"][0]["label"].is_string());
     }
 
     #[tokio::test]

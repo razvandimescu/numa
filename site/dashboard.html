@@ -284,6 +284,7 @@ body {
 .path-bar-fill.dot { background: var(--emerald); }
 .path-bar-fill.doh { background: var(--teal); }
 .path-bar-fill.odoh { background: var(--violet-dim); }
+.path-bar-fill.latency { background: var(--violet-dim); }
 .path-pct {
   font-family: var(--font-mono);
   font-size: 0.75rem;
@@ -698,6 +699,16 @@ body {
       <span class="panel-title" data-i18n="panel.resolution_paths">Resolution Paths</span>
     </div>
     <div class="panel-body" id="pathBars">
+      <!-- Populated by JS -->
+    </div>
+  </div>
+
+  <!-- Query latency -->
+  <div class="panel">
+    <div class="panel-header">
+      <span class="panel-title" data-i18n="panel.query_latency">Query Latency</span>
+    </div>
+    <div class="panel-body" id="latencyBars">
       <!-- Populated by JS -->
     </div>
   </div>
@@ -1131,6 +1142,22 @@ function renderPaths(queries) {
   renderBarChart('pathBars', PATH_DEFS, queries, queries.total);
 }
 
+function renderLatency(buckets) {
+  const list = Array.isArray(buckets) ? buckets : [];
+  const data = {};
+  const defs = list.map((b, i) => {
+    const key = String(i);
+    data[key] = b.count || 0;
+    return {
+      key,
+      label: b.label || '',
+      cls: 'latency',
+    };
+  });
+  const total = list.reduce((s, b) => s + (b.count || 0), 0);
+  renderBarChart('latencyBars', defs, data, total || 1);
+}
+
 const TRANSPORT_DEFS = [
   { key: 'udp', label: 'UDP',  cls: 'udp' },
   { key: 'tcp', label: 'TCP',  cls: 'tcp' },
@@ -1426,6 +1453,7 @@ async function refresh() {
 
     // Panels
     renderPaths(q);
+    renderLatency(stats.latency);
     renderTransport(stats.transport);
     renderUpstreamWire(stats.upstream_transport || { udp: 0, doh: 0, dot: 0, odoh: 0 });
     renderQueryLog(logs);

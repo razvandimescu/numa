@@ -196,7 +196,7 @@ pub async fn resolve_query(
     // Record stats and query log
     {
         let mut s = ctx.stats.lock().unwrap();
-        let total = s.record(path, transport, upstream_transport);
+        let total = s.record(path, transport, upstream_transport, elapsed);
         if total.is_multiple_of(1000) {
             s.log_summary();
         }

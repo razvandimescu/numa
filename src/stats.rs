@@ -1,4 +1,107 @@
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
+
+/// Exclusive upper bounds in milliseconds for end-to-end query latency
+/// (client request received → response serialized).
+///
+/// Each completed query lands in exactly one bucket: `< bounds[0]`,
+/// `< bounds[1]`, …, and `≥ bounds[last]`.
+///
+/// This is the only list to edit when changing the histogram — counters,
+/// logs, `/stats`, and the dashboard all derive from it.
+pub const LATENCY_BOUNDS_MS: &[u64] = &[1, 5, 10, 25, 50, 100, 250, 500, 1000];
+
+fn format_latency_bound(ms: u64) -> String {
+    if ms >= 1_000 && ms.is_multiple_of(1_000) {
+        format!("{}s", ms / 1_000)
+    } else {
+        format!("{ms}ms")
+    }
+}
+
+fn latency_bucket_label(le_ms: Option<u64>) -> String {
+    match le_ms {
+        Some(ms) => format!("<{}", format_latency_bound(ms)),
+        None => format!(
+            "≥{}",
+            format_latency_bound(*LATENCY_BOUNDS_MS.last().unwrap_or(&0))
+        ),
+    }
+}
+
+/// One histogram bucket. `le_ms = None` is the overflow (`≥` last bound).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LatencyBucket {
+    pub le_ms: Option<u64>,
+    pub count: u64,
+}
+
+impl LatencyBucket {
+    pub fn label(&self) -> String {
+        latency_bucket_label(self.le_ms)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LatencyBuckets {
+    counts: Vec<u64>,
+}
+
+impl Default for LatencyBuckets {
+    fn default() -> Self {
+        Self {
+            counts: vec![0; LATENCY_BOUNDS_MS.len() + 1],
+        }
+    }
+}
+
+impl LatencyBuckets {
+    pub fn record(&mut self, latency: Duration) {
+        let us = latency.as_micros();
+        let idx = LATENCY_BOUNDS_MS
+            .iter()
+            .position(|&ms| us < ms as u128 * 1_000)
+            .unwrap_or(LATENCY_BOUNDS_MS.len());
+        if let Some(slot) = self.counts.get_mut(idx) {
+            *slot += 1;
+        }
+    }
+
+    pub fn total(&self) -> u64 {
+        self.counts.iter().sum()
+    }
+
+    pub fn buckets(&self) -> Vec<LatencyBucket> {
+        let mut out: Vec<LatencyBucket> = LATENCY_BOUNDS_MS
+            .iter()
+            .enumerate()
+            .map(|(i, &ms)| LatencyBucket {
+                le_ms: Some(ms),
+                count: self.counts.get(i).copied().unwrap_or(0),
+            })
+            .collect();
+        out.push(LatencyBucket {
+            le_ms: None,
+            count: self.counts.last().copied().unwrap_or(0),
+        });
+        out
+    }
+
+    pub fn summary(&self) -> String {
+        self.buckets()
+            .into_iter()
+            .map(|b| format!("{} {}", b.label(), b.count))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    pub fn count_le_ms(&self, le_ms: Option<u64>) -> u64 {
+        self.buckets()
+            .into_iter()
+            .find(|b| b.le_ms == le_ms)
+            .map(|b| b.count)
+            .unwrap_or(0)
+    }
+}
 
 /// Returns the process memory footprint in bytes, or 0 if unavailable.
 /// macOS: phys_footprint (matches Activity Monitor). Linux: RSS from /proc/self/statm.
@@ -135,6 +238,7 @@ pub struct ServerStats {
     pub(crate) proxy_v2_local_command: u64,
     pub(crate) proxy_v2_timeout: u64,
     rebind_stripped: u64,
+    latency: LatencyBuckets,
     started_at: SystemTime,
 }
 
@@ -288,6 +392,7 @@ impl ServerStats {
             proxy_v2_local_command: 0,
             proxy_v2_timeout: 0,
             rebind_stripped: 0,
+            latency: LatencyBuckets::default(),
             started_at: SystemTime::now(),
         }
     }
@@ -303,8 +408,10 @@ impl ServerStats {
         path: QueryPath,
         transport: Transport,
         upstream_transport: Option<UpstreamTransport>,
+        latency: Duration,
     ) -> u64 {
         self.queries_total += 1;
+        self.latency.record(latency);
         match path {
             QueryPath::Local => self.queries_local += 1,
             QueryPath::Cached => self.queries_cached += 1,
@@ -370,6 +477,7 @@ impl ServerStats {
             proxy_v2_local_command: self.proxy_v2_local_command,
             proxy_v2_timeout: self.proxy_v2_timeout,
             rebind_stripped: self.rebind_stripped,
+            latency: self.latency.clone(),
         }
     }
 
@@ -380,7 +488,7 @@ impl ServerStats {
         let secs = uptime.as_secs() % 60;
 
         log::info!(
-            "STATS | uptime {}h{}m{}s | total {} | fwd {} | upstream {} | recursive {} | coalesced {} | cached {} | local {} | override {} | blocked {} | errors {} | up-udp {} | up-tcp {} | up-doh {} | up-dot {} | up-odoh {} | rebind {}",
+            "STATS | uptime {}h{}m{}s | total {} | fwd {} | upstream {} | recursive {} | coalesced {} | cached {} | local {} | override {} | blocked {} | errors {} | up-udp {} | up-tcp {} | up-doh {} | up-dot {} | up-odoh {} | rebind {} | latency {}",
             hours, mins, secs,
             self.queries_total,
             self.queries_forwarded,
@@ -398,6 +506,7 @@ impl ServerStats {
             self.upstream_transport_dot,
             self.upstream_transport_odoh,
             self.rebind_stripped,
+            self.latency.summary(),
         );
     }
 }
@@ -429,4 +538,62 @@ pub struct StatsSnapshot {
     pub proxy_v2_local_command: u64,
     pub proxy_v2_timeout: u64,
     pub rebind_stripped: u64,
+    pub latency: LatencyBuckets,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn latency_buckets_are_exclusive() {
+        let mut b = LatencyBuckets::default();
+        b.record(Duration::from_micros(999));
+        b.record(Duration::from_millis(1));
+        b.record(Duration::from_millis(4));
+        b.record(Duration::from_millis(9));
+        b.record(Duration::from_millis(24));
+        b.record(Duration::from_millis(49));
+        b.record(Duration::from_millis(99));
+        b.record(Duration::from_millis(249));
+        b.record(Duration::from_millis(499));
+        b.record(Duration::from_millis(999));
+        b.record(Duration::from_secs(1));
+        assert_eq!(b.count_le_ms(Some(1)), 1);
+        assert_eq!(b.count_le_ms(Some(5)), 2);
+        assert_eq!(b.count_le_ms(Some(10)), 1);
+        assert_eq!(b.count_le_ms(Some(25)), 1);
+        assert_eq!(b.count_le_ms(Some(50)), 1);
+        assert_eq!(b.count_le_ms(Some(100)), 1);
+        assert_eq!(b.count_le_ms(Some(250)), 1);
+        assert_eq!(b.count_le_ms(Some(500)), 1);
+        assert_eq!(b.count_le_ms(Some(1000)), 1);
+        assert_eq!(b.count_le_ms(None), 1);
+        assert_eq!(b.total(), 11);
+        assert_eq!(b.buckets().len(), LATENCY_BOUNDS_MS.len() + 1);
+    }
+
+    #[test]
+    fn record_increments_matching_latency_bucket() {
+        let mut stats = ServerStats::new();
+        stats.record(
+            QueryPath::Cached,
+            Transport::Udp,
+            None,
+            Duration::from_micros(120),
+        );
+        stats.record(
+            QueryPath::Upstream,
+            Transport::Udp,
+            Some(UpstreamTransport::Udp),
+            Duration::from_millis(42),
+        );
+        let snap = stats.snapshot();
+        assert_eq!(snap.total, 2);
+        assert_eq!(snap.cached, 1);
+        assert_eq!(snap.upstream, 1);
+        assert_eq!(snap.latency.count_le_ms(Some(1)), 1);
+        assert_eq!(snap.latency.count_le_ms(Some(50)), 1);
+        assert_eq!(snap.latency.total(), 2);
+    }
 }
