@@ -11,6 +11,9 @@
 #      the CA fingerprint — users' browser-installed CA trust survives.
 #   C. Install from a 0700 source directory stages the binary under
 #      /usr/local/bin/numa and the service starts from there.
+#   D. With dnsmasq holding :53, install aborts before writing the unit or
+#      rewriting resolv.conf, names the holder, and works once it is freed
+#      (issue #299).
 #
 # First run is slow (~5-10 min): image pull + apt + cold cargo build.
 # Subsequent runs reuse cached docker volumes for cargo + target (~30s).
@@ -211,6 +214,61 @@ if [ "${NUMA_INSIDE:-}" = "1" ]; then
     assert_nonroot
     assert_dns_works
 
+    # ---- Scenario D ----
+    # Issue #299: dnsmasq owns :53, so the install can only ever crashloop.
+    # It must abort before touching anything rather than print "Numa is live".
+    printf "\n=== Scenario D: install aborts when another resolver holds port 53 ===\n"
+    reset_state
+    resolv_before=$(cat /etc/resolv.conf)
+    systemctl start dnsmasq.service
+    sleep 1
+    if ! ss -lnup 'sport = :53' | grep -q dnsmasq; then
+        fail "setup: dnsmasq did not take port 53"
+    fi
+
+    "$NUMA" install >/tmp/installD.log 2>&1
+    rc=$?
+
+    if [ "$rc" -ne 0 ]; then
+        pass "install exits nonzero (rc=$rc)"
+    else
+        fail "install reported success while dnsmasq holds :53"
+    fi
+    if grep -q "held by dnsmasq" /tmp/installD.log; then
+        pass "abort names the holder"
+    else
+        fail "abort does not name the holder" "$(tail -5 /tmp/installD.log)"
+    fi
+    if grep -q "Numa is live" /tmp/installD.log; then
+        fail "abort still printed the success banner"
+    else
+        pass "no success banner"
+    fi
+    if [ "$(cat /etc/resolv.conf)" = "$resolv_before" ]; then
+        pass "/etc/resolv.conf untouched"
+    else
+        fail "/etc/resolv.conf was rewritten by an install that could not work"
+    fi
+    if [ -f /etc/systemd/system/numa.service ]; then
+        fail "unit file written despite abort"
+    else
+        pass "no unit file written"
+    fi
+    if grep -q "dnsmasq.service" /tmp/installD.log; then
+        pass "abort suggests disabling the holder's own unit"
+    else
+        fail "abort does not name the unit to disable"
+    fi
+
+    # Freeing the port makes the same command work.
+    systemctl stop dnsmasq.service
+    "$NUMA" install >/tmp/installD2.log 2>&1 || { fail "install failed after freeing :53"; tail -20 /tmp/installD2.log; }
+    wait_active || true
+    assert_dns_works
+
+    reset_state
+    systemctl stop dnsmasq.service 2>/dev/null || true
+
     reset_state
     rm -rf /home/builder
     echo
@@ -241,12 +299,13 @@ RUN apt-get update -qq && apt-get install -y -qq \
       systemd systemd-sysv systemd-resolved \
       ca-certificates curl build-essential \
       pkg-config libssl-dev cmake make perl \
-      dnsutils iproute2 openssl \
+      dnsutils iproute2 openssl dnsmasq \
     && rm -rf /var/lib/apt/lists/* \
     && for u in dev-hugepages.mount sys-fs-fuse-connections.mount \
                 systemd-logind.service getty.target console-getty.service; do \
          systemctl mask $u; \
-       done
+       done \
+    && systemctl disable dnsmasq.service
 STOPSIGNAL SIGRTMIN+3
 CMD ["/lib/systemd/systemd"]
 DOCKERFILE
