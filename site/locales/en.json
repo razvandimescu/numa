@@ -5,14 +5,17 @@
   "theme.auto": "Auto",
   "theme.light": "Light",
   "theme.dark": "Dark",
+
   "header.phone_setup": "Phone Setup",
   "header.phone_setup_title": "Set up phone",
   "phone.steps": "1. Scan QR → allow download<br>2. Settings → Profile Downloaded → Install<br>3. Settings → General → About →<br>&nbsp;&nbsp;&nbsp;Certificate Trust Settings → toggle ON",
   "phone.install_profile": "Install Profile",
   "phone.qr_failed": "Could not load QR",
+
   "status.connecting": "connecting...",
   "status.connected": "connected",
   "status.disconnected": "disconnected",
+
   "stat.total_queries": "Total Queries",
   "stat.cache_hit_rate": "Cache Hit Rate",
   "stat.blocked": "Blocked",
@@ -23,6 +26,7 @@
   "stat.qps": "~{qps}/s",
   "stat.enc_suffix": " · {pct}% enc",
   "stat.cache_entries": "{n} / {max} entries",
+
   "panel.resolution_paths": "Resolution Paths",
   "panel.query_latency": "Query Latency",
   "panel.inbound_wire": "Inbound Wire",
@@ -34,6 +38,7 @@
   "panel.recent_queries": "Recent Queries",
   "panel.memory": "Memory",
   "panel.cached_domains": "Cached Domains",
+
   "paths.forward": "Forward",
   "paths.upstream": "Upstream",
   "paths.recursive": "Recursive",
@@ -43,6 +48,7 @@
   "paths.blocked": "Blocked",
   "paths.errors": "Errors",
   "paths.refused": "Refused",
+
   "log.filter_domain": "filter domain...",
   "log.all_paths": "all paths",
   "log.path_recursive": "recursive",
@@ -79,6 +85,7 @@
   "log.dnssec_title": "DNSSEC verified",
   "log.source_title": "Source: {src}",
   "log.src_unknown": "unknown",
+
   "panel.local_services": "Local Services",
   "services.desc": "Give localhost apps clean URLs. Persistent, with HTTP proxy.",
   "services.name_ph": "service name",
@@ -104,6 +111,7 @@
   "services.lan_on": "LAN on · {n} peers",
   "services.lan_on_one": "LAN on · {n} peer",
   "services.lan_active_title": "mDNS discovery active (_numa._tcp.local)",
+
   "panel.active_overrides": "Active Overrides",
   "overrides.desc": "Redirect any domain to any IP. Temporary, DNS-only.",
   "overrides.domain_ph": "domain (e.g. api.stripe.com)",
@@ -119,6 +127,7 @@
   "overrides.left_s": "{s}s left",
   "overrides.left_ms": "{m}m {s}s left",
   "overrides.left_hm": "{h}h {m}m left",
+
   "panel.blocking": "Blocking",
   "blocking.check_ph": "Is this domain blocked?",
   "blocking.check": "Check",
@@ -158,6 +167,7 @@
   "blocking.src_never": "never loaded",
   "blocking.src_failed": "failed",
   "blocking.src_note": "{err} · {when}",
+
   "memory.cache": "Cache",
   "memory.blocklist": "Blocklist",
   "memory.query_log": "Query Log",
@@ -166,9 +176,11 @@
   "memory.entries": "{n} entries",
   "memory.process_footprint": "Process Footprint",
   "memory.empty": "No memory data",
+
   "cache.entries": "{n} entries",
   "cache.empty": "Cache empty",
   "cache.ttl": "{type} {ttl}s",
+
   "footer.config": "Config:",
   "footer.data": "Data:",
   "footer.logs": "Logs:",
