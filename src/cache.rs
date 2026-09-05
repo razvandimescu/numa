@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use crate::buffer::BytePacketBuffer;
 use crate::packet::DnsPacket;
 use crate::question::QueryType;
+use crate::record::DnsRecord;
 use crate::wire::WireMeta;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,10 +56,25 @@ const STALE_WINDOW: Duration = Duration::from_secs(3600);
 /// RFC 9520 §3.2 bands a cached resolution failure at 1s..5min.
 const FAILURE_TTL: u32 = 5;
 
+/// RFC 2308 §5: one to three hours works well, beyond a day is problematic.
+const NEGATIVE_MAX_TTL: u32 = 3600;
+
 /// NXDOMAIN is an answer ("this name does not exist"); every other rcode
 /// outside NOERROR is a resolution failure and gets its own short TTL.
 fn is_failure(wire: &[u8]) -> bool {
     !matches!(crate::wire::rcode(wire), 0 | 3)
+}
+
+fn soa_negative_ttl(wire: &[u8]) -> Option<u32> {
+    // NSCOUNT: only a reply with an authority section pays for the parse.
+    if matches!(wire.get(8..10), None | Some([0, 0])) {
+        return None;
+    }
+    let pkt = DnsPacket::from_buffer(&mut BytePacketBuffer::from_bytes(wire)).ok()?;
+    pkt.authorities.iter().find_map(|r| match r {
+        DnsRecord::SOA { ttl, minimum, .. } => Some((*ttl).min(*minimum)),
+        _ => None,
+    })
 }
 
 /// DNS cache with serve-stale (RFC 8767). Stores raw wire bytes.
@@ -102,7 +118,10 @@ impl DnsCache {
                 Freshness::Fresh
             };
             (secs.max(1), f)
-        } else if elapsed < entry.ttl + STALE_WINDOW && !is_failure(&entry.wire) {
+        } else if elapsed < entry.ttl + STALE_WINDOW
+            && !entry.ttl.is_zero()
+            && !is_failure(&entry.wire)
+        {
             (1, Freshness::Stale)
         } else {
             return None;
@@ -142,6 +161,8 @@ impl DnsCache {
         // raising min_ttl to hold answers longer must not hold failures longer.
         let ttl = if is_failure(wire) {
             FAILURE_TTL
+        } else if let Some(negative) = self.negative_ttl(wire, &meta) {
+            negative
         } else {
             crate::wire::min_ttl_from_wire(wire, &meta)
                 .unwrap_or(self.min_ttl)
@@ -168,6 +189,16 @@ impl DnsCache {
                 dnssec_status,
             },
         );
+    }
+
+    /// RFC 2308 §5. An NXDOMAIN without an SOA gets 0: it evicts the entry it
+    /// replaces but is never served, not even stale.
+    fn negative_ttl(&self, wire: &[u8], meta: &WireMeta) -> Option<u32> {
+        let Some(soa_ttl) = soa_negative_ttl(wire) else {
+            return (crate::wire::rcode(wire) == 3).then_some(0);
+        };
+        let ttl = crate::wire::min_ttl_from_wire(wire, meta).map_or(soa_ttl, |a| a.min(soa_ttl));
+        Some(ttl.min(self.max_ttl).min(NEGATIVE_MAX_TTL))
     }
 
     /// Read-only lookup — expired entries are left in place (cleaned up on insert).
@@ -519,11 +550,111 @@ mod tests {
         // "this name does not exist" is an answer: it keeps the normal TTL
         // path and stays eligible for serve-stale.
         let mut cache = DnsCache::new(100, 60, 3600);
-        insert_failure(&mut cache, crate::header::ResultCode::NXDOMAIN);
+        let resp = negative_response(crate::header::ResultCode::NXDOMAIN, 900, 900);
+        cache.insert("nope.claude.ai", QueryType::A, &resp);
 
         let (_, total) = cache
-            .ttl_remaining("claude.ai", QueryType::A)
+            .ttl_remaining("nope.claude.ai", QueryType::A)
             .expect("NXDOMAIN is cached");
-        assert_eq!(total, 60, "NXDOMAIN must not take the failure TTL");
+        assert_eq!(total, 900, "NXDOMAIN must not take the failure TTL");
+    }
+
+    fn negative_response(
+        rcode: crate::header::ResultCode,
+        soa_ttl: u32,
+        minimum: u32,
+    ) -> DnsPacket {
+        let query = DnsPacket::query(0x1234, "nope.claude.ai", QueryType::A);
+        let mut resp = DnsPacket::response_from(&query, rcode);
+        resp.authorities.push(DnsRecord::SOA {
+            domain: "claude.ai".into(),
+            mname: "ns1.claude.ai".into(),
+            rname: "hostmaster.claude.ai".into(),
+            serial: 1,
+            refresh: 7200,
+            retry: 3600,
+            expire: 1209600,
+            minimum,
+            ttl: soa_ttl,
+        });
+        resp
+    }
+
+    #[test]
+    fn nxdomain_ttl_comes_from_the_authority_soa() {
+        for (soa_ttl, minimum, want) in [(900, 60, 60), (86400, 86400, NEGATIVE_MAX_TTL)] {
+            let mut cache = DnsCache::new(100, 1800, 86400);
+            let resp = negative_response(crate::header::ResultCode::NXDOMAIN, soa_ttl, minimum);
+            cache.insert("nope.claude.ai", QueryType::A, &resp);
+
+            let (_, total) = cache
+                .ttl_remaining("nope.claude.ai", QueryType::A)
+                .expect("NXDOMAIN is cached");
+            assert_eq!(total, want, "SOA TTL {soa_ttl}, MINIMUM {minimum}");
+        }
+    }
+
+    #[test]
+    fn a_referral_without_an_soa_keeps_the_min_ttl_fallback() {
+        // The shape `prime_tld_cache` stores: NOERROR, no answers, NS in authority.
+        let mut cache = DnsCache::new(100, 60, 3600);
+        let query = DnsPacket::query(0x1234, "www.claude.ai", QueryType::A);
+        let mut resp = DnsPacket::response_from(&query, crate::header::ResultCode::NOERROR);
+        resp.authorities.push(DnsRecord::NS {
+            domain: "claude.ai".into(),
+            host: "ns1.claude.ai".into(),
+            ttl: 172800,
+        });
+        cache.insert("www.claude.ai", QueryType::A, &resp);
+
+        let (_, total) = cache
+            .ttl_remaining("www.claude.ai", QueryType::A)
+            .expect("still cached");
+        assert_eq!(total, 60, "an NS record is not a negative TTL");
+    }
+
+    #[test]
+    fn a_negative_answer_that_may_not_be_cached_is_never_served() {
+        // Skipping the insert would leave the expired answer for serve-stale.
+        let nxdomain = crate::header::ResultCode::NXDOMAIN;
+        let mut no_soa = negative_response(nxdomain, 900, 900);
+        no_soa.authorities.clear();
+        for resp in [negative_response(nxdomain, 900, 0), no_soa] {
+            let mut cache = DnsCache::new(100, 60, 3600);
+            let mut pkt = DnsPacket::new();
+            pkt.answers.push(DnsRecord::A {
+                domain: "nope.claude.ai".into(),
+                addr: "1.2.3.4".parse().unwrap(),
+                ttl: 300,
+            });
+            cache.insert("nope.claude.ai", QueryType::A, &pkt);
+            cache.age_entry("nope.claude.ai", QueryType::A, Duration::from_secs(301));
+            cache.insert("nope.claude.ai", QueryType::A, &resp);
+
+            assert!(cache.lookup("nope.claude.ai", QueryType::A).is_none());
+        }
+    }
+
+    #[test]
+    fn a_cname_chain_expires_with_the_negative_answer_behind_it() {
+        // RFC 2308 §2.1/§2.2: NOERROR+CNAME+SOA is NODATA.
+        for (rcode, cname_ttl, minimum, want) in [
+            (crate::header::ResultCode::NXDOMAIN, 30, 900, 30),
+            (crate::header::ResultCode::NOERROR, 900, 20, 20),
+        ] {
+            let mut cache = DnsCache::new(100, 3600, 86400);
+            let mut resp = negative_response(rcode, 900, minimum);
+            resp.answers.push(DnsRecord::CNAME {
+                domain: "nope.claude.ai".into(),
+                host: "gone.claude.ai".into(),
+                ttl: cname_ttl,
+            });
+            cache.insert("nope.claude.ai", QueryType::A, &resp);
+
+            let (_, total) = cache
+                .ttl_remaining("nope.claude.ai", QueryType::A)
+                .expect("cached");
+            assert_eq!(total, want, "{rcode:?}");
+        }
     }
 }
