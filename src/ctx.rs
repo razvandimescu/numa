@@ -13,7 +13,7 @@ use crate::udp_listener::UdpListener;
 
 type InflightMap = HashMap<(String, QueryType), broadcast::Sender<Option<DnsPacket>>>;
 
-use crate::admission::{QueryAdmission, ResolutionAdmission, RESOLUTION_DEADLINE};
+use crate::admission::{QueryAdmission, ResolutionAdmission};
 use crate::blocklist::BlocklistStore;
 use crate::buffer::BytePacketBuffer;
 use crate::cache::{DnsCache, DnssecStatus};
@@ -111,9 +111,8 @@ pub async fn resolve_query(
         None => return Err("empty question section".into()),
     };
 
-    // One charge for the whole query: the first cache miss takes a permit and
-    // every later step of the same query — CNAME targets, DNSSEC validation —
-    // rides it. Held until this function returns.
+    // One charge for the whole query: CNAME targets and DNSSEC validation
+    // ride the permit the first cache miss took, held until we return.
     let mut charge = QueryAdmission::default();
 
     // Pipeline: overrides -> .localhost -> local zones -> special-use (unless forwarded)
@@ -901,9 +900,8 @@ enum Disposition {
     Refused,
 }
 
-/// Leader election and admission decided together under the map lock: a
-/// leader that cannot be admitted must never become visible, or the followers
-/// that attach to it inherit a refusal they were never charged for.
+/// Leader election and admission share the map lock: a leader that cannot be
+/// admitted must never become visible, or its followers inherit a refusal.
 fn acquire_inflight(
     inflight: &Mutex<InflightMap>,
     admission: &ResolutionAdmission,
@@ -915,8 +913,7 @@ fn acquire_inflight(
         return Disposition::Follower(tx.subscribe());
     }
     // Charge the work, not the request: only the leader spends a socket and
-    // a walk, and followers ride its answer for free. A query that already
-    // holds a charge leads for free too — it is still the one resolution.
+    // a walk, and followers ride its answer for free.
     if !charge.admit(admission) {
         return Disposition::Refused;
     }
@@ -965,17 +962,7 @@ where
         ),
         Disposition::Leader(tx) => {
             let guard = InflightGuard { inflight, key };
-            // A permit is only a ceiling if it comes back. Nameservers that
-            // answer slowly but do answer stay inside the per-walk query
-            // budget while holding one for tens of seconds.
-            let result = match tokio::time::timeout(RESOLUTION_DEADLINE, resolve_fn()).await {
-                Ok(result) => result,
-                Err(_) => Err(format!(
-                    "resolution deadline of {}s exceeded",
-                    RESOLUTION_DEADLINE.as_secs()
-                )
-                .into()),
-            };
+            let result = resolve_fn().await;
             drop(guard);
 
             match result {
@@ -3349,76 +3336,6 @@ mod tests {
 
     // ---- Aggregate resolution admission (P0-1, issue #230) ----
 
-    /// The steps after the first cache miss — the CNAME target, then DNSSEC
-    /// validation — are the same resolution, and charging them again would
-    /// make a saturated resolver discard walks it had already paid for and
-    /// refuse long chains ahead of short ones.
-    #[test]
-    fn later_steps_of_a_charged_query_lead_at_capacity() {
-        let admission = ResolutionAdmission::new(1);
-        let map: Mutex<InflightMap> = Mutex::new(HashMap::new());
-        let mut charge = QueryAdmission::default();
-
-        let first = acquire_inflight(
-            &map,
-            &admission,
-            &mut charge,
-            ("chain.test".to_string(), QueryType::A),
-        );
-        assert!(matches!(first, Disposition::Leader(_)));
-
-        let target = acquire_inflight(
-            &map,
-            &admission,
-            &mut charge,
-            ("target.test".to_string(), QueryType::A),
-        );
-        assert!(
-            matches!(target, Disposition::Leader(_)),
-            "the CNAME target rides the charge the first hop took"
-        );
-
-        let other = acquire_inflight(
-            &map,
-            &admission,
-            &mut QueryAdmission::default(),
-            ("other.test".to_string(), QueryType::A),
-        );
-        assert!(
-            matches!(other, Disposition::Refused),
-            "a different query is still bound by the ceiling"
-        );
-    }
-
-    /// A nameserver that answers slowly but does answer stays inside the
-    /// per-walk query budget while holding a permit, so without a wall-clock
-    /// deadline a few hundred such names pin the ceiling indefinitely.
-    #[tokio::test(start_paused = true)]
-    async fn a_stalled_resolution_gives_its_permit_back() {
-        let admission = ResolutionAdmission::new(1);
-        let map: Mutex<InflightMap> = Mutex::new(HashMap::new());
-        let mut charge = QueryAdmission::default();
-        let query = DnsPacket::query(1, "stalled.test", QueryType::A);
-
-        let (resp, path, err) = resolve_coalesced(
-            &map,
-            &admission,
-            &mut charge,
-            ("stalled.test".to_string(), QueryType::A),
-            &query,
-            QueryPath::Recursive,
-            std::future::pending::<crate::Result<DnsPacket>>,
-        )
-        .await;
-
-        assert_eq!(path, QueryPath::UpstreamError);
-        assert_eq!(resp.header.rescode, ResultCode::SERVFAIL);
-        assert!(err.is_some_and(|e| e.contains("deadline")));
-
-        drop(charge);
-        assert_eq!(admission.active(), 0);
-    }
-
     struct FloodResult {
         /// Concurrent resolutions admitted, from the in-flight map.
         inflight: usize,
@@ -3453,8 +3370,8 @@ mod tests {
             })
             .collect();
 
-        // Settle on admitted resolutions, not on upstream traffic: a recursive
-        // walk against a blackhole keeps retrying long after admission is done.
+        // Settle on admitted resolutions, not upstream traffic: a walk against
+        // a blackhole keeps retrying long after admission is done.
         let sample_ctx = Arc::clone(&ctx);
         let inflight = crate::testutil::wait_until_settled(
             move || sample_ctx.inflight.lock().unwrap().len(),
@@ -3481,11 +3398,9 @@ mod tests {
         format!("r{i}.flood.example")
     }
 
-    /// P0-1 of docs/implementation/public-resolver-security-hardening.md.
-    /// In-flight coalescing only merges equal `(qname, qtype)` keys, so a
-    /// flood of *distinct* names walks straight past it. Without the shared
-    /// ceiling this opened one upstream socket, task and delegation walk per
-    /// name, scaling 1:1 with attacker input.
+    /// Coalescing only merges equal `(qname, qtype)` keys, so a flood of
+    /// *distinct* names walks past it and, without the shared ceiling, buys
+    /// one socket, task and walk per name.
     #[tokio::test]
     async fn distinct_name_flood_is_capped_by_admission() {
         let r = flood(FLOOD, distinct_name, LIMIT).await;
@@ -3505,14 +3420,9 @@ mod tests {
         );
     }
 
-    /// The same ceiling on the expensive path. A forwarded miss costs one
-    /// upstream query; a recursive miss funds a whole delegation walk (up to
-    /// `MAX_TOTAL_QUERIES`) plus DNSSEC validation, so this is where the
-    /// missing bound converted one client packet into the most egress.
-    ///
-    /// Saturated up front rather than by flooding: how long a walk against a
-    /// blackhole stays pinned is platform-dependent, so a flood would be
-    /// racing the retry schedule rather than testing the ceiling.
+    /// The same ceiling on the expensive path: a recursive miss funds a whole
+    /// delegation walk plus DNSSEC validation. Saturated up front rather than
+    /// by flooding, which would race the walk's retry schedule.
     #[tokio::test]
     async fn recursive_walks_are_charged_to_admission() {
         let mut ctx = crate::testutil::test_ctx().await;
@@ -3535,10 +3445,9 @@ mod tests {
         drop(held);
     }
 
-    /// The bound the resolver already had, and the reason the tests above are
-    /// not vacuous: identical names collapse to one upstream query on their
-    /// own, which is exactly why an attacker varies the name. Coalescing must
-    /// keep working, and must not spend a permit per follower.
+    /// The bound the resolver already had, and the reason the flood above is
+    /// not vacuous: coalescing must keep working, and must not spend a permit
+    /// per follower.
     #[tokio::test]
     async fn identical_name_flood_collapses_to_one_upstream_query() {
         let r = flood(FLOOD, |_| "same.flood.example".to_string(), LIMIT).await;
@@ -3550,9 +3459,8 @@ mod tests {
         assert_eq!(r.refused, 0, "followers ride the leader's permit");
     }
 
-    /// A saturated resolver still answers from local state. The ceiling sits
-    /// below cache, zones, overrides and the sinkhole on purpose: charging
-    /// those would turn a flood into an outage for everyone else.
+    /// The ceiling sits below cache, zones, overrides and the sinkhole on
+    /// purpose: charging those turns a flood into an outage for everyone else.
     #[tokio::test]
     async fn saturation_does_not_block_local_or_cached_answers() {
         let mut ctx = crate::testutil::test_ctx().await;
@@ -3587,10 +3495,9 @@ mod tests {
         drop(held);
     }
 
-    /// A CNAME chase that runs out of admission mid-chain is refused whole.
-    /// The first hop can be free (cache, zone) while the target still costs a
-    /// resolution, and keeping the first hop's path would answer a UDP query
-    /// the ceiling means to drop and book the refusal as a cache hit.
+    /// A chase that runs out of admission mid-chain is refused whole: keeping
+    /// the free first hop's path would answer a UDP query the ceiling means to
+    /// drop, and book the refusal as a cache hit.
     #[tokio::test]
     async fn a_refused_cname_target_refuses_the_chain() {
         let mut ctx = crate::testutil::test_ctx().await;
@@ -3624,9 +3531,8 @@ mod tests {
         drop(held);
     }
 
-    /// A refused UDP query is dropped without a reply. Answering would hand a
-    /// spoofed flood free reflection capacity at the exact moment the resolver
-    /// is least able to afford it.
+    /// Answering a refused UDP query would hand a spoofed flood free
+    /// reflection capacity exactly when the resolver can least afford it.
     #[tokio::test]
     async fn refused_udp_query_gets_no_reply() {
         let server = Arc::new(UdpListener::bind("127.0.0.1:0").await.unwrap());

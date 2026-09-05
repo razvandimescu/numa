@@ -327,16 +327,9 @@ pub async fn doh_upstream_raw(
 }
 
 /// Wait until `sample` stops changing, having first seen it rise above zero.
-/// Settling works for both a bounded and an unbounded resolver, where waiting
-/// for an expected total would stall on whichever case is wrong. Zero is
-/// treated as "not started yet", not as a settled value: a slow runner that
-/// has not scheduled the work would otherwise report a ceiling that was never
-/// exercised.
-///
-/// The stable window is wide enough to outlast a scheduling gap partway
-/// through a ramp-up, which would otherwise settle on a value the run never
-/// reached. Panics rather than returning on timeout: a bare count that never
-/// settled fails the caller's `assert_eq!` with no way to tell the two apart.
+/// Waiting for an expected total instead would stall on whichever of bounded
+/// or unbounded is the broken case. Zero counts as "not started yet", and the
+/// stable window outlasts a scheduling gap partway through a ramp-up.
 pub async fn wait_until_settled(mut sample: impl FnMut() -> usize, cap: Duration) -> usize {
     const STABLE: Duration = Duration::from_secs(1);
     const TICK: Duration = Duration::from_millis(5);
@@ -360,9 +353,8 @@ pub async fn wait_until_settled(mut sample: impl FnMut() -> usize, cap: Duration
     last
 }
 
-/// Blackhole upstream that counts the queries it swallows. Each datagram
-/// stands for one resolution pinned open until the client-side timeout, so the
-/// count is the concurrent remote-work level the resolver allowed itself.
+/// Blackhole upstream that counts the queries it swallows: each datagram is
+/// one resolution pinned open until the client-side timeout.
 pub async fn counting_blackhole_upstream() -> (SocketAddr, Arc<std::sync::atomic::AtomicUsize>) {
     let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();

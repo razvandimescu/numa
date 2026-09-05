@@ -31,13 +31,10 @@ api_port = 5380
 
 # ── Resolution ceiling ─────────────────────────────────────────────
 # Cache misses running at once, across UDP, TCP, DoT and DoH together.
-# One charge per query, however many CNAME hops and DNSSEC walks it takes.
-# Cached, local and coalesced answers are never charged, so this bounds
-# only the work a flood of novel names can conjure. Over the ceiling,
-# UDP is dropped silently (a reply is free reflection) and stream
-# transports get SERVFAIL. Watch `queries.refused` and `resolutions` in
-# /stats before changing it. 0 is rejected at startup: it would refuse
-# every cache miss, not lift the ceiling.
+# One charge per query; cached, local and coalesced answers are free, so
+# this bounds only what a flood of novel names can conjure. Over the
+# ceiling UDP is dropped silently and stream transports get SERVFAIL.
+# Watch `queries.refused` and `resolutions` in /stats before changing it.
 #
 # max_concurrent_resolutions = 512   # default
 

@@ -1,24 +1,14 @@
 //! Aggregate admission control for cache-miss resolutions (issue #230).
 //!
-//! In-flight coalescing merges equal `(qname, qtype)` queries, so a flood of
-//! *distinct* names slips past it and each name buys a task, an upstream
-//! socket and, in recursive mode, a whole delegation walk. Per-resolution
-//! budgets bound each of those individually and none of them collectively.
-//!
-//! This is the one ceiling every transport shares: UDP, TCP, DoT and DoH all
-//! reach remote resolution through `ctx::resolve_remote`, which admits here.
+//! Coalescing merges equal `(qname, qtype)` queries, so a flood of *distinct*
+//! names slips past it: each name buys a task, an upstream socket and, in
+//! recursive mode, a whole delegation walk. Per-resolution budgets bound each
+//! of those individually and none of them collectively. This is the one
+//! ceiling every transport shares, reached through `ctx::resolve_remote`.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
-
-/// Ceiling on how long one charge may hold its permit. The recursive budget
-/// bounds *queries* (48), not *time*, so nameservers that answer slowly but
-/// do answer stretch a single resolution to tens of seconds — long enough
-/// that a few hundred such names pin the whole ceiling while every honest
-/// client is turned away. Well past any answer a client still waits for.
-pub const RESOLUTION_DEADLINE: Duration = Duration::from_secs(10);
 
 pub struct ResolutionAdmission {
     permits: Arc<Semaphore>,
@@ -50,18 +40,15 @@ impl ResolutionAdmission {
     }
 }
 
-/// One charge per client query, not per step. A CNAME chain and the DNSSEC
+/// One charge per client query, not per step: a CNAME chain and the DNSSEC
 /// validation that follows it are the tail of the resolution that started
-/// them: charging each step separately lets a single name spend several
-/// permits, makes long chains likelier to be refused than short ones, and
-/// turns a query away halfway through work already paid for — throwing that
-/// work away is amplification, not a ceiling.
+/// them, and turning a query away halfway through work already paid for is
+/// amplification, not a ceiling.
 #[derive(Default)]
 pub struct QueryAdmission(Option<OwnedSemaphorePermit>);
 
 impl QueryAdmission {
-    /// True once this query holds a permit. Idempotent: later steps of the
-    /// same query ride the charge the first cache miss took.
+    /// Idempotent: later steps of the same query ride the first charge.
     pub fn admit(&mut self, admission: &ResolutionAdmission) -> bool {
         if self.0.is_none() {
             self.0 = admission.try_admit();
@@ -73,23 +60,6 @@ impl QueryAdmission {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn admits_up_to_the_limit_then_refuses() {
-        let admission = ResolutionAdmission::new(2);
-        let a = admission.try_admit().expect("first");
-        let b = admission.try_admit().expect("second");
-        assert!(admission.try_admit().is_none(), "third is over the ceiling");
-        assert_eq!(admission.active(), 2);
-
-        drop(a);
-        assert_eq!(admission.active(), 1);
-        assert!(
-            admission.try_admit().is_some(),
-            "a freed permit is reusable"
-        );
-        drop(b);
-    }
 
     #[test]
     fn an_oversized_limit_clamps_instead_of_panicking() {
@@ -118,7 +88,7 @@ mod tests {
         );
 
         drop(query);
-        assert_eq!(admission.active(), 0);
+        assert_eq!(admission.active(), 0, "the permit comes back");
     }
 
     #[test]

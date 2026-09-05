@@ -111,12 +111,8 @@ pub struct ServerConfig {
     #[serde(default)]
     pub allow_from: Vec<String>,
     /// Ceiling on cache-miss resolutions running at once, shared by every
-    /// transport. One charge per query, however many CNAME hops and DNSSEC
-    /// walks it takes; local, cached and coalesced answers are never charged,
-    /// so this bounds only the work an attacker can conjure with novel names.
-    /// Over the ceiling UDP is dropped silently and stream transports get
-    /// SERVFAIL. Raise it to loosen; 0 is rejected rather than read as
-    /// "unlimited", since it would refuse every cache miss.
+    /// transport. One charge per query; local, cached and coalesced answers
+    /// are never charged. See `numa.toml` for the operator-facing detail.
     #[serde(
         default = "default_max_concurrent_resolutions",
         deserialize_with = "resolution_ceiling"
@@ -194,8 +190,7 @@ fn default_max_concurrent_resolutions() -> usize {
 }
 
 /// Every comparable knob (unbound, dnsdist, nginx) reads 0 as "no limit".
-/// Here it would refuse every cache miss, and over UDP that is a silent drop
-/// with nothing in the log to explain it — so it fails at load instead.
+/// Here it would refuse every cache miss, so it fails at load instead.
 fn resolution_ceiling<'de, D: serde::Deserializer<'de>>(
     d: D,
 ) -> std::result::Result<usize, D::Error> {

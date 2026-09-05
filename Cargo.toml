@@ -52,8 +52,6 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
-# `start_paused` tests: a wall-clock deadline should not cost the suite wall clock.
-tokio = { version = "1", features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
 http = "1"
 hickory-resolver = { version = "0.26", features = ["https-ring", "webpki-roots"] }

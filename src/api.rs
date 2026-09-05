@@ -207,8 +207,7 @@ struct StatsResponse {
     resolutions: ResolutionStats,
 }
 
-/// Aggregate admission control (issue #230). `refused` lives under `queries`
-/// with the other per-path counters.
+/// `refused` lives under `queries` with the other per-path counters.
 #[derive(Serialize)]
 struct ResolutionStats {
     active: usize,

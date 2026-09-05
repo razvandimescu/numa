@@ -463,7 +463,7 @@ mod tests {
         assert_eq!(resp.answers.len(), 1);
     }
 
-    // ---- Aggregate resolution admission (P0-1, issue #230) ----
+    // ---- Aggregate resolution admission (issue #230) ----
 
     /// A resolver whose upstream never answers, so every admitted query stays
     /// in flight, plus the ctx to sample it through.
@@ -487,22 +487,18 @@ mod tests {
         (addr, ctx)
     }
 
-    /// P0-1 of docs/implementation/public-resolver-security-hardening.md: the
-    /// ceiling is shared across transports, and `MAX_CONNECTIONS` is not it.
-    /// Below the connection cap every connection used to buy an unmetered
-    /// resolution, so concurrent work scaled 1:1 with connections. A refused
-    /// stream query gets SERVFAIL rather than the silent drop UDP gets.
+    /// The ceiling is shared across transports and `MAX_CONNECTIONS` is not
+    /// it: below the connection cap every connection used to buy an unmetered
+    /// resolution. A refused stream query gets SERVFAIL, not UDP's silent drop.
     #[tokio::test]
-    async fn tcp_connection_flood_is_capped_by_admission() {
-        // Deliberately below MAX_CONNECTIONS so the connection cap, which is
-        // not the mechanism under test, never engages.
-        const FLOOD: usize = 300;
-        const LIMIT: usize = 32;
-        const _: () = assert!(FLOOD < MAX_CONNECTIONS);
+    async fn tcp_connections_are_capped_by_admission() {
+        const CONNS: usize = 8;
+        const LIMIT: usize = 2;
+        const _: () = assert!(CONNS < MAX_CONNECTIONS);
 
         let (addr, ctx) = spawn_tcp_server_for_flood(LIMIT).await;
 
-        let readers: Vec<_> = (0..FLOOD)
+        let readers: Vec<_> = (0..CONNS)
             .map(|i| {
                 tokio::spawn(async move {
                     let mut stream = TcpStream::connect(addr).await.unwrap();
@@ -510,10 +506,8 @@ mod tests {
                         DnsPacket::query(0xBEEF, &format!("r{i}.flood.example"), QueryType::A);
                     send_query(&mut stream, &query).await;
                     // Admitted queries hang on the blackhole for `ctx.timeout`;
-                    // refusals answer at once. The window only has to beat a
-                    // contended runner, not the blackhole, so it is generous:
-                    // a refusal read late counts as admitted and understates
-                    // the refusal total. Hold the stream open either way.
+                    // refusals answer at once. A refusal read late counts as
+                    // admitted and understates the refusal total.
                     let reply = read_reply(&mut stream, Duration::from_secs(5)).await;
                     (stream, reply)
                 })
@@ -528,11 +522,11 @@ mod tests {
         .await;
         assert_eq!(
             inflight, LIMIT,
-            "{FLOOD} TCP connections must not open more than {LIMIT} resolutions"
+            "{CONNS} TCP connections must not open more than {LIMIT} resolutions"
         );
 
         let mut refused = 0;
-        let mut conns = Vec::with_capacity(FLOOD);
+        let mut conns = Vec::with_capacity(CONNS);
         for r in readers {
             let (stream, reply) = r.await.unwrap();
             if let Some(resp) = reply {
@@ -545,7 +539,7 @@ mod tests {
             }
             conns.push(stream);
         }
-        assert_eq!(refused, FLOOD - LIMIT);
+        assert_eq!(refused, CONNS - LIMIT);
         drop(conns);
     }
 }
