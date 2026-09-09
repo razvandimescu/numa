@@ -92,6 +92,7 @@ impl BytePacketBuffer {
 
     /// Read a qname, handling label compression (pointer jumps).
     /// Converts wire format like [3]www[6]google[3]com[0] into "www.google.com".
+    /// A name with no labels reads as ".". Callers match on that, not on "".
     ///
     /// Label bytes are escaped per RFC 1035 §5.1:
     /// - literal `.` within a label → `\.`
@@ -160,6 +161,9 @@ impl BytePacketBuffer {
 
         if !jumped {
             self.seek(pos)?;
+        }
+        if outstr.is_empty() {
+            outstr.push('.');
         }
 
         Ok(())

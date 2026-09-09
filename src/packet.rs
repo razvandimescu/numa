@@ -149,7 +149,7 @@ impl DnsPacket {
             let peek_pos = buffer.pos();
             let mut owner = String::new();
             let is_opt = buffer.read_qname(&mut owner).is_ok()
-                && owner.is_empty()
+                && owner == "."
                 && buffer
                     .read_u16()
                     .is_ok_and(|t| t == QueryType::OPT.to_num());

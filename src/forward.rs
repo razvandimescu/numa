@@ -1238,6 +1238,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn response_matches_a_root_reply_read_off_the_wire() {
+        // Priming and the UDP re-probe ask for "."; the parser once rendered the
+        // root as "" (#386: every root UDP query timed out, latching recursive
+        // mode into TCP-first for the life of the process).
+        let query = DnsPacket::query(7, ".", QueryType::NS);
+        let reply = to_wire(&DnsPacket::response_from(&query, ResultCode::NOERROR));
+        let parsed = DnsPacket::from_buffer(&mut BytePacketBuffer::from_bytes(&reply)).unwrap();
+
+        assert_eq!(parsed.questions[0].name, ".");
+        assert!(response_matches(&query, &parsed));
+    }
+
     #[tokio::test]
     async fn udp_ignores_a_reply_from_another_source() {
         // The stub reads the query on the addressed port but answers from a
