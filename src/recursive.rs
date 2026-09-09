@@ -1432,6 +1432,68 @@ mod tests {
         }
     }
 
+    /// Spawn a UDP-only DNS server on localhost, the shape of a root server or
+    /// rbldnsd. The handler receives each query and returns a response packet.
+    async fn spawn_udp_dns_server(
+        handler: impl Fn(&DnsPacket) -> DnsPacket + Send + Sync + 'static,
+    ) -> SocketAddr {
+        let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = sock.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 1232];
+            loop {
+                let Ok((n, src)) = sock.recv_from(&mut buf).await else {
+                    break;
+                };
+                let Ok(query) =
+                    DnsPacket::from_buffer(&mut BytePacketBuffer::from_bytes(&buf[..n]))
+                else {
+                    continue;
+                };
+                let mut out = BytePacketBuffer::new();
+                if handler(&query).write(&mut out).is_ok() {
+                    let _ = sock.send_to(out.filled(), src).await;
+                }
+            }
+        });
+        addr
+    }
+
+    /// #386: priming asks the roots for `.` over UDP. If those replies are
+    /// discarded, three deadline misses latch every upstream query onto
+    /// TCP-first for the life of the process, and UDP-only authoritatives
+    /// SERVFAIL from then on.
+    #[tokio::test]
+    async fn priming_over_udp_leaves_the_tcp_first_latch_off() {
+        let _guard = UDP_STATE_LOCK.lock().unwrap();
+        reset_udp_state();
+
+        // A root answers NS questions with a referral: NS in the authority section.
+        let root = spawn_udp_dns_server(|query| {
+            let mut resp = DnsPacket::response_from(query, ResultCode::NOERROR);
+            if let Some(q) = query.questions.first().filter(|q| q.qtype == QueryType::NS) {
+                resp.authorities.push(DnsRecord::NS {
+                    domain: q.name.clone(),
+                    host: "ns.test".into(),
+                    ttl: 300,
+                });
+            }
+            resp
+        })
+        .await;
+
+        let cache = RwLock::new(DnsCache::new(100, 60, 86400));
+        let srtt = RwLock::new(SrttCache::new(true));
+        prime_tld_cache(&cache, &[root, root, root], &["com".to_string()], &srtt).await;
+
+        assert!(
+            !UDP_DISABLED.load(Ordering::Acquire),
+            "priming must not latch TCP-first"
+        );
+        assert_eq!(UDP_FAILURES.load(Ordering::Relaxed), 0);
+        assert!(cache.read().unwrap().lookup("com", QueryType::NS).is_some());
+    }
+
     /// TCP round-trip through mock: query → authoritative answer via forward_tcp.
     /// Uses forward_tcp directly to avoid dependence on the global UDP_DISABLED flag
     /// which is shared across concurrent tests.
