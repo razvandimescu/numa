@@ -52,6 +52,15 @@ struct CacheEntry {
 
 const STALE_WINDOW: Duration = Duration::from_secs(3600);
 
+/// RFC 9520 §3.2 bands a cached resolution failure at 1s..5min.
+const FAILURE_TTL: u32 = 5;
+
+/// NXDOMAIN is an answer ("this name does not exist"); every other rcode
+/// outside NOERROR is a resolution failure and gets its own short TTL.
+fn is_failure(wire: &[u8]) -> bool {
+    !matches!(crate::wire::rcode(wire), 0 | 3)
+}
+
 /// DNS cache with serve-stale (RFC 8767). Stores raw wire bytes.
 pub struct DnsCache {
     entries: HashMap<String, HashMap<QueryType, CacheEntry>>,
@@ -93,7 +102,7 @@ impl DnsCache {
                 Freshness::Fresh
             };
             (secs.max(1), f)
-        } else if elapsed < entry.ttl + STALE_WINDOW {
+        } else if elapsed < entry.ttl + STALE_WINDOW && !is_failure(&entry.wire) {
             (1, Freshness::Stale)
         } else {
             return None;
@@ -129,9 +138,15 @@ impl DnsCache {
             }
         }
 
-        let min_ttl = crate::wire::min_ttl_from_wire(wire, &meta)
-            .unwrap_or(self.min_ttl)
-            .clamp(self.min_ttl, self.max_ttl);
+        // The failure TTL is deliberately outside the min_ttl/max_ttl clamp:
+        // raising min_ttl to hold answers longer must not hold failures longer.
+        let ttl = if is_failure(wire) {
+            FAILURE_TTL
+        } else {
+            crate::wire::min_ttl_from_wire(wire, &meta)
+                .unwrap_or(self.min_ttl)
+                .clamp(self.min_ttl, self.max_ttl)
+        };
 
         let type_map = if let Some(existing) = self.entries.get_mut(domain) {
             existing
@@ -149,7 +164,7 @@ impl DnsCache {
                 wire: wire.to_vec(),
                 meta,
                 inserted_at: Instant::now(),
-                ttl: Duration::from_secs(min_ttl as u64),
+                ttl: Duration::from_secs(ttl as u64),
                 dnssec_status,
             },
         );
@@ -314,6 +329,20 @@ impl DnsCache {
             }
         }
     }
+
+    /// Backdate an entry so expiry paths can be exercised without sleeping.
+    #[cfg(test)]
+    fn age_entry(&mut self, domain: &str, qtype: QueryType, by: Duration) {
+        let entry = self
+            .entries
+            .get_mut(domain)
+            .and_then(|m| m.get_mut(&qtype))
+            .expect("entry to age");
+        entry.inserted_at = entry
+            .inserted_at
+            .checked_sub(by)
+            .expect("monotonic clock older than the requested age");
+    }
 }
 
 pub struct CacheInfo {
@@ -427,5 +456,74 @@ mod tests {
         cache.insert("example.com", QueryType::A, &pkt);
         // AAAA missing → needs warm
         assert!(cache.needs_warm("example.com"));
+    }
+
+    fn failure_wire(rcode: crate::header::ResultCode) -> Vec<u8> {
+        let query = DnsPacket::query(0x1234, "claude.ai", QueryType::A);
+        let resp = DnsPacket::response_from(&query, rcode);
+        let mut buf = crate::buffer::BytePacketBuffer::new();
+        resp.write(&mut buf).unwrap();
+        buf.filled().to_vec()
+    }
+
+    fn insert_failure(cache: &mut DnsCache, rcode: crate::header::ResultCode) {
+        let wire = failure_wire(rcode);
+        cache.insert_wire(
+            "claude.ai",
+            QueryType::A,
+            &wire,
+            DnssecStatus::Indeterminate,
+        );
+    }
+
+    #[test]
+    fn a_failure_is_capped_at_the_rfc9520_ceiling() {
+        // RFC 9520 §3.2 bands a cached resolution failure at 1s..5min. A
+        // SERVFAIL carries no answers, so `min_ttl_from_wire` returns None and
+        // the entry inherits `[cache] min_ttl` — one upstream blip pins a
+        // healthy domain for an hour (issue #376).
+        for rcode in [
+            crate::header::ResultCode::SERVFAIL,
+            crate::header::ResultCode::REFUSED,
+        ] {
+            let mut cache = DnsCache::new(100, 3600, 86400);
+            insert_failure(&mut cache, rcode);
+
+            let (_, total) = cache
+                .ttl_remaining("claude.ai", QueryType::A)
+                .expect("a failure is still cached, briefly");
+            assert!(
+                (1..=300).contains(&total),
+                "a cached failure must live 1s..300s, got {total}s for {rcode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_expired_failure_is_not_served_stale() {
+        // Serve-stale (RFC 8767) exists to keep answering from an answer that
+        // was once valid. A failure has nothing to serve, and the stale window
+        // would extend it by another hour past its own TTL.
+        let mut cache = DnsCache::new(100, 60, 3600);
+        insert_failure(&mut cache, crate::header::ResultCode::SERVFAIL);
+        cache.age_entry("claude.ai", QueryType::A, Duration::from_secs(120));
+
+        assert!(
+            cache.lookup_wire("claude.ai", QueryType::A, 0).is_none(),
+            "an expired failure must not enter the serve-stale window"
+        );
+    }
+
+    #[test]
+    fn an_nxdomain_is_not_treated_as_a_failure() {
+        // "this name does not exist" is an answer: it keeps the normal TTL
+        // path and stays eligible for serve-stale.
+        let mut cache = DnsCache::new(100, 60, 3600);
+        insert_failure(&mut cache, crate::header::ResultCode::NXDOMAIN);
+
+        let (_, total) = cache
+            .ttl_remaining("claude.ai", QueryType::A)
+            .expect("NXDOMAIN is cached");
+        assert_eq!(total, 60, "NXDOMAIN must not take the failure TTL");
     }
 }

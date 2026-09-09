@@ -121,6 +121,13 @@ pub fn is_truncated(wire: &[u8]) -> bool {
     wire.get(2).is_some_and(|flags| flags & TC_FLAG != 0)
 }
 
+/// RCODE (RFC 1035 §4.1.1): the low nibble of header byte 3. EDNS extended
+/// rcodes (RFC 6891 §6.1.3) live in the OPT TTL and are not read here, so a
+/// code that is a multiple of 16 (BADVERS) reads as NOERROR.
+pub fn rcode(wire: &[u8]) -> u8 {
+    wire.get(3).map_or(0, |b| b & 0x0F)
+}
+
 /// QR=1 (RFC 1035 §4.1.1, header byte 2): the wire is a response.
 pub fn is_response(wire: &[u8]) -> bool {
     wire.get(2).is_some_and(|flags| flags & QR_FLAG != 0)
