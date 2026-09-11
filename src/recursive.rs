@@ -228,7 +228,7 @@ pub(crate) fn resolve_iterative<'a>(
             return Ok(cached);
         }
 
-        let (mut current_zone, mut ns_addrs) = find_closest_ns(qname, cache, root_hints);
+        let (mut current_zone, mut ns_addrs) = find_closest_ns(qname, qtype, cache, root_hints);
         srtt.read().unwrap().sort_by_udp_rtt(&mut ns_addrs);
         let mut ns_idx = 0;
 
@@ -417,12 +417,18 @@ pub(crate) fn resolve_iterative<'a>(
 /// Returns (zone_name, ns_addresses). Falls back to (".", root_hints).
 fn find_closest_ns(
     qname: &str,
+    qtype: QueryType,
     cache: &RwLock<DnsCache>,
     root_hints: &[SocketAddr],
 ) -> (String, Vec<SocketAddr>) {
     let guard = cache.read().unwrap();
 
-    let mut pos = 0;
+    // A DS RRset lives on the parent side of the zone cut (RFC 4035 §3.1.4.1);
+    // the child's own servers answer NODATA, so start the search above qname.
+    let mut pos = match qtype {
+        QueryType::DS => qname.find('.').map_or(qname.len(), |dot| dot + 1),
+        _ => 0,
+    };
     loop {
         let zone = &qname[pos..];
         if let Some(cached) = guard.lookup(zone, QueryType::NS) {
@@ -1253,7 +1259,7 @@ mod tests {
             dns_addr(Ipv4Addr::new(198, 41, 0, 4)),
             dns_addr(Ipv4Addr::new(199, 9, 14, 201)),
         ];
-        let (zone, addrs) = find_closest_ns("example.com", &cache, &hints);
+        let (zone, addrs) = find_closest_ns("example.com", QueryType::A, &cache, &hints);
         assert_eq!(zone, ".");
         assert_eq!(addrs, hints);
     }
@@ -1295,9 +1301,37 @@ mod tests {
         }
 
         // find_closest_ns should find "com" zone from authority NS records
-        let (zone, addrs) = find_closest_ns("www.example.com", &cache, &hints);
+        let (zone, addrs) = find_closest_ns("www.example.com", QueryType::A, &cache, &hints);
         assert_eq!(zone, "com");
         assert_eq!(addrs, vec![dns_addr(Ipv4Addr::new(192, 5, 6, 30))]);
+    }
+
+    #[test]
+    fn find_closest_ns_starts_ds_lookups_at_the_parent() {
+        let cache = RwLock::new(DnsCache::new(100, 60, 86400));
+        let hints = vec![dns_addr(Ipv4Addr::new(198, 41, 0, 4))];
+        {
+            let mut c = cache.write().unwrap();
+            let mut ns = DnsPacket::new();
+            ns.answers.push(DnsRecord::NS {
+                domain: "ai".into(),
+                host: "v0n0.nic.ai".into(),
+                ttl: 3600,
+            });
+            c.insert("ai", QueryType::NS, &ns);
+            let mut glue = DnsPacket::new();
+            glue.answers.push(DnsRecord::A {
+                domain: "v0n0.nic.ai".into(),
+                addr: Ipv4Addr::new(199, 115, 152, 1),
+                ttl: 3600,
+            });
+            c.insert("v0n0.nic.ai", QueryType::A, &glue);
+        }
+
+        let zone = |qname, qtype| find_closest_ns(qname, qtype, &cache, &hints).0;
+        assert_eq!(zone("ai", QueryType::DS), ".");
+        assert_eq!(zone("ai", QueryType::DNSKEY), "ai");
+        assert_eq!(zone("nic.ai", QueryType::DS), "ai");
     }
 
     #[test]
