@@ -631,9 +631,33 @@ pub fn compute_key_tag(flags: u16, protocol: u8, algorithm: u8, public_key: &[u8
 }
 
 pub fn verify_signature(algorithm: u8, public_key: &[u8], signed_data: &[u8], sig: &[u8]) -> bool {
+    // Most TLD ZSKs are 1024 or 1280 bits, which RFC 5702 permits. ring's
+    // default 2048-bit RSA floor would read their valid signatures as Bogus.
     match algorithm {
-        8 => verify_rsa_sha256(public_key, signed_data, sig),
-        13 => verify_ecdsa_p256(public_key, signed_data, sig),
+        8 => verify_rsa(
+            &signature::RSA_PKCS1_1024_8192_SHA256_FOR_LEGACY_USE_ONLY,
+            public_key,
+            signed_data,
+            sig,
+        ),
+        10 => verify_rsa(
+            &signature::RSA_PKCS1_1024_8192_SHA512_FOR_LEGACY_USE_ONLY,
+            public_key,
+            signed_data,
+            sig,
+        ),
+        13 => verify_ecdsa(
+            &signature::ECDSA_P256_SHA256_FIXED,
+            public_key,
+            signed_data,
+            sig,
+        ),
+        14 => verify_ecdsa(
+            &signature::ECDSA_P384_SHA384_FIXED,
+            public_key,
+            signed_data,
+            sig,
+        ),
         15 => verify_ed25519(public_key, signed_data, sig),
         _ => {
             debug!("dnssec: unsupported algorithm {}", algorithm);
@@ -642,25 +666,32 @@ pub fn verify_signature(algorithm: u8, public_key: &[u8], signed_data: &[u8], si
     }
 }
 
-fn verify_rsa_sha256(public_key: &[u8], signed_data: &[u8], sig: &[u8]) -> bool {
+fn verify_rsa(
+    alg: &'static signature::RsaParameters,
+    public_key: &[u8],
+    signed_data: &[u8],
+    sig: &[u8],
+) -> bool {
     let der = match rsa_dnskey_to_der(public_key) {
         Some(d) => d,
         None => return false,
     };
-    let key = signature::UnparsedPublicKey::new(&signature::RSA_PKCS1_2048_8192_SHA256, &der);
+    let key = signature::UnparsedPublicKey::new(alg, &der);
     key.verify(signed_data, sig).is_ok()
 }
 
-fn verify_ecdsa_p256(public_key: &[u8], signed_data: &[u8], sig: &[u8]) -> bool {
-    if public_key.len() != 64 || sig.len() != 64 {
-        return false;
-    }
-    // Ring expects uncompressed point: 0x04 + x(32) + y(32)
-    let mut uncompressed = Vec::with_capacity(65);
+/// DNSSEC carries ECDSA keys and signatures as raw x||y and r||s (RFC 6605).
+fn verify_ecdsa(
+    alg: &'static signature::EcdsaVerificationAlgorithm,
+    public_key: &[u8],
+    signed_data: &[u8],
+    sig: &[u8],
+) -> bool {
+    let mut uncompressed = Vec::with_capacity(1 + public_key.len());
     uncompressed.push(0x04);
     uncompressed.extend_from_slice(public_key);
 
-    let key = signature::UnparsedPublicKey::new(&signature::ECDSA_P256_SHA256_FIXED, &uncompressed);
+    let key = signature::UnparsedPublicKey::new(alg, &uncompressed);
     key.verify(signed_data, sig).is_ok()
 }
 
@@ -2214,6 +2245,102 @@ mod tests {
             ttl: 3600,
         };
         assert_eq!(tampered_rrset_status(a).await, DnssecStatus::Bogus);
+    }
+
+    fn b64(s: &str) -> Vec<u8> {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.decode(s).unwrap()
+    }
+
+    fn hex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    /// A DS RRset signed by a live TLD ZSK, captured 2026-09-11. Checked through
+    /// verify_signature so the RRSIG validity window never expires the test.
+    fn live_ds_signature_verifies(ds: DnsRecord, rrsig: DnsRecord, zsk: &str) -> bool {
+        let DnsRecord::RRSIG {
+            algorithm,
+            signature,
+            ..
+        } = &rrsig
+        else {
+            unreachable!()
+        };
+        let signed_data = build_signed_data(&rrsig, &[&ds]);
+        verify_signature(*algorithm, &b64(zsk), &signed_data, signature)
+    }
+
+    #[test]
+    fn rsasha256_1024_bit_zsk_verifies() {
+        let ds = DnsRecord::DS {
+            domain: "nic.ai".into(),
+            key_tag: 53391,
+            algorithm: 8,
+            digest_type: 2,
+            digest: hex("D880BB4B7B0AF74C6F169429C62E5AB7E3410657EA6D0669599FC5DBFE8EE4E6"),
+            ttl: 3600,
+        };
+        let rrsig = DnsRecord::RRSIG {
+            domain: "nic.ai".into(),
+            type_covered: QueryType::DS.to_num(),
+            algorithm: 8,
+            labels: 2,
+            original_ttl: 3600,
+            expiration: 1790782625,
+            inception: 1788964625,
+            key_tag: 6279,
+            signer_name: "ai".into(),
+            signature: b64("aP/1l5RRjPWnS/Fo9knABTQuM5umD/eoqGrb2aE8mzWHR8Cqp0POvd9NKV/GF3rRHXR7olJtW89HUEEospxO2QWUNJIHmbUSTHpL5JZ6I7SRr+umrT1zoel10darxRbIbHdnrc4Pzi5TpBFQUWf/nSoIZi3y6kpHza/MzvSQpew="),
+            ttl: 3600,
+        };
+        let ai_zsk = "AwEAAcGXGF627sAmlBH23MZ6x9tEv3YDch+dlYs0NrgvLZ7SfrK2BFfBs0AxA4sPCV+89VfKYLaWQwTzbNbfNeaycYLV8/xz9Iu6V4JkMJsMlMWHqjncrUDdOzr26ALzsDIhCInPmG6vVbctqcVZm7eiXAQ++5Cr6MTl1juJHzqM7phz";
+        assert!(live_ds_signature_verifies(ds, rrsig, ai_zsk));
+    }
+
+    #[test]
+    fn rsasha512_1280_bit_zsk_verifies() {
+        let ds = DnsRecord::DS {
+            domain: "gencat.cat".into(),
+            key_tag: 35027,
+            algorithm: 8,
+            digest_type: 2,
+            digest: hex("56A4B8DF62E9269FF770C0A9BF7D1EBC59C3191CCFC271FA78251986AC38B7BA"),
+            ttl: 3600,
+        };
+        let rrsig = DnsRecord::RRSIG {
+            domain: "gencat.cat".into(),
+            type_covered: QueryType::DS.to_num(),
+            algorithm: 10,
+            labels: 2,
+            original_ttl: 3600,
+            expiration: 1789854697,
+            inception: 1788645097,
+            key_tag: 9062,
+            signer_name: "cat".into(),
+            signature: b64("EK7feEBxfZkb3mcIeu+Z44yentwH04Ag38901PAKfmybWG/kRwQxCQFKHYhuUVfkn5Q8w1chw+L67VhwLZuuMPXO62VRZKkTfU0Nk7OGMOTrZOwECEmRuYB5Ow52lyu6RNXcJ7gcz7XSij6kNuEFIFrBPNNRxAywEZZ3waSeTazS5v0eZDQW9t0j+DjQ91Pg3xfnAUacXr97q+8wvb3orQ=="),
+            ttl: 3600,
+        };
+        let cat_zsk = "AwEAAYPc5dIszzH82GAg5rOm6ML7AKWqvAgY8WSfSH8x3mOXfhMeKJ0MWZbMi8CPJNaDMZgvmd4IKxBLtzGkJTN+br59Pu6nDujgBTXRC2oE4VYYVw2bpwIiWPitkmcbeqSR3W8XTV0mSYYGknoNEwmLppEk7ZMcs59culVqM99KLbTKkfcwsPVX8I3fA9efhXPchkuXkmj79gLZFduyPM0hU4k=";
+        assert!(live_ds_signature_verifies(ds, rrsig, cat_zsk));
+    }
+
+    #[test]
+    fn ecdsa_p384_signature_verifies() {
+        use ring::signature::ECDSA_P384_SHA384_FIXED_SIGNING;
+        let rng = SystemRandom::new();
+        let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P384_SHA384_FIXED_SIGNING, &rng).unwrap();
+        let key = EcdsaKeyPair::from_pkcs8(&ECDSA_P384_SHA384_FIXED_SIGNING, pkcs8.as_ref(), &rng)
+            .unwrap();
+        let dnskey = &key.public_key().as_ref()[1..];
+        let sig = key.sign(&rng, b"signed data").unwrap();
+
+        assert!(verify_signature(14, dnskey, b"signed data", sig.as_ref()));
+        assert!(!verify_signature(14, dnskey, b"tampered", sig.as_ref()));
+        assert!(!verify_signature(13, dnskey, b"signed data", sig.as_ref()));
     }
 
     fn mk_unknown(domain: &str, qtype: QueryType, data: &[u8]) -> DnsRecord {
