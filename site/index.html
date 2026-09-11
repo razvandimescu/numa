@@ -1639,7 +1639,7 @@ footer .closing {
         <dd>UDP:53 + TCP:53 (plain DNS), DoT:853 (RFC 7858 + ALPN), HTTP proxy :80 / HTTPS proxy :443, dashboard :5380</dd>
 
         <dt>DNSSEC</dt>
-        <dd>Chain-of-trust via ring &mdash; RSA/SHA-256, ECDSA P-256, Ed25519. NSEC/NSEC3 denial proofs. EDNS0 DO bit, 1232-byte payload (DNS Flag Day 2020).</dd>
+        <dd>Chain-of-trust via ring &mdash; RSA/SHA-256, RSA/SHA-512, ECDSA P-256, ECDSA P-384, Ed25519. NSEC/NSEC3 denial proofs. EDNS0 DO bit, 1232-byte payload (DNS Flag Day 2020).</dd>
 
         <dt>Dependencies</dt>
         <dd>A focused set &mdash; tokio, axum, hyper, ring (DNSSEC), reqwest (DoH), rcgen + rustls + tokio-rustls (TLS/DoT), socket2 (multicast), serde. No transitive DNS library.</dd>
