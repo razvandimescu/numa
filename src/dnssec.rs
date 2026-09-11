@@ -10,6 +10,7 @@ use crate::cache::{DnsCache, DnssecStatus};
 use crate::packet::DnsPacket;
 use crate::question::QueryType;
 use crate::record::DnsRecord;
+use crate::recursive::zone_in_bailiwick;
 use crate::srtt::SrttCache;
 
 #[derive(Debug, Default)]
@@ -100,19 +101,23 @@ struct ValidationCtx<'a> {
     stats: &'a Mutex<ValidationStats>,
 }
 
+#[derive(Debug, PartialEq)]
 enum RrsetVerdict {
     Verified,
+    Insecure,
     Bogus,
 }
 
 enum RrsigOutcome {
     Verified,
+    ChainInsecure,
     ChainBogus,
     NoMatchingKey,
 }
 
 enum KeyOutcome {
     Verified,
+    ChainInsecure,
     ChainBogus,
     Skip,
 }
@@ -152,16 +157,20 @@ pub async fn validate_response(
     prefetch_signer_dnskeys(&all_rrsigs, &ctx).await;
 
     let rrsets = group_rrsets(&response.answers);
+    let mut status = DnssecStatus::Secure;
 
     for (name, qtype, rrset) in &rrsets {
         let matching_rrsigs = matching_rrsigs_for(&all_rrsigs, name, *qtype);
         if matching_rrsigs.is_empty() {
             continue; // No RRSIG for this RRset — might be Insecure
         }
-        if let RrsetVerdict::Bogus = verify_rrset(name, *qtype, rrset, &matching_rrsigs, &ctx).await
-        {
-            debug!("dnssec: no valid signature for {} {:?}", name, qtype);
-            return finish(start, stats, DnssecStatus::Bogus);
+        match verify_rrset(name, *qtype, rrset, &matching_rrsigs, &ctx).await {
+            RrsetVerdict::Verified => {}
+            RrsetVerdict::Insecure => status = DnssecStatus::Insecure,
+            RrsetVerdict::Bogus => {
+                debug!("dnssec: no valid signature for {} {:?}", name, qtype);
+                return finish(start, stats, DnssecStatus::Bogus);
+            }
         }
     }
 
@@ -185,7 +194,7 @@ pub async fn validate_response(
         return finish(start, stats, denial);
     }
 
-    finish(start, stats, DnssecStatus::Secure)
+    finish(start, stats, status)
 }
 
 fn finish(
@@ -225,10 +234,13 @@ fn matching_rrsigs_for<'a>(
             if let DnsRecord::RRSIG {
                 domain,
                 type_covered,
+                signer_name,
                 ..
             } = r
             {
-                domain.eq_ignore_ascii_case(name) && QueryType::from_num(*type_covered) == qtype
+                domain.eq_ignore_ascii_case(name)
+                    && QueryType::from_num(*type_covered) == qtype
+                    && zone_in_bailiwick(name, signer_name)
             } else {
                 false
             }
@@ -246,11 +258,30 @@ async fn verify_rrset(
     for rrsig in matching_rrsigs {
         match try_verify_rrsig(rrsig, name, qtype, rrset, ctx).await {
             RrsigOutcome::Verified => return RrsetVerdict::Verified,
+            RrsigOutcome::ChainInsecure => return RrsetVerdict::Insecure,
             RrsigOutcome::ChainBogus => return RrsetVerdict::Bogus,
             RrsigOutcome::NoMatchingKey => continue,
         }
     }
-    RrsetVerdict::Bogus
+
+    // No signature verified (e.g. only algorithms we don't implement). They
+    // don't matter in a zone the chain proves Insecure (RFC 4035 §5.2).
+    let signer = matching_rrsigs
+        .iter()
+        .filter_map(|r| match r {
+            DnsRecord::RRSIG { signer_name, .. } => Some(signer_name.as_str()),
+            _ => None,
+        })
+        .max_by_key(|s| s.len());
+    let Some(signer) = signer else {
+        return RrsetVerdict::Bogus;
+    };
+    let dnskey_response =
+        fetch_dnskeys(signer, ctx.cache, ctx.root_hints, ctx.srtt, ctx.stats).await;
+    match signer_chain_status(signer, &dnskey_response, ctx).await {
+        DnssecStatus::Insecure => RrsetVerdict::Insecure,
+        _ => RrsetVerdict::Bogus,
+    }
 }
 
 async fn try_verify_rrsig(
@@ -294,11 +325,32 @@ async fn try_verify_rrsig(
     for dk in &dnskeys {
         match try_verify_with_key(dk, rrsig, rrset, signer_name, &dnskey_response, ctx).await {
             KeyOutcome::Verified => return RrsigOutcome::Verified,
+            KeyOutcome::ChainInsecure => return RrsigOutcome::ChainInsecure,
             KeyOutcome::ChainBogus => return RrsigOutcome::ChainBogus,
             KeyOutcome::Skip => continue,
         }
     }
     RrsigOutcome::NoMatchingKey
+}
+
+async fn signer_chain_status(
+    signer_name: &str,
+    dnskey_response: &[DnsRecord],
+    ctx: &ValidationCtx<'_>,
+) -> DnssecStatus {
+    let status = validate_chain(
+        signer_name,
+        dnskey_response,
+        ctx.cache,
+        ctx.root_hints,
+        ctx.srtt,
+        ctx.trust_anchors,
+        0,
+        ctx.stats,
+    )
+    .await;
+    trace!("dnssec:   chain_status for '{}': {:?}", signer_name, status);
+    status
 }
 
 async fn try_verify_with_key(
@@ -313,26 +365,11 @@ async fn try_verify_with_key(
         return KeyOutcome::Skip;
     }
 
-    let chain_status = validate_chain(
-        signer_name,
-        dnskey_response,
-        ctx.cache,
-        ctx.root_hints,
-        ctx.srtt,
-        ctx.trust_anchors,
-        0,
-        ctx.stats,
-    )
-    .await;
-    trace!(
-        "dnssec:   chain_status for '{}': {:?}",
-        signer_name,
-        chain_status
-    );
-    match chain_status {
+    match signer_chain_status(signer_name, dnskey_response, ctx).await {
         DnssecStatus::Secure => KeyOutcome::Verified,
+        DnssecStatus::Insecure => KeyOutcome::ChainInsecure,
         DnssecStatus::Bogus => KeyOutcome::ChainBogus,
-        _ => KeyOutcome::Skip,
+        DnssecStatus::Indeterminate => KeyOutcome::Skip,
     }
 }
 
@@ -400,28 +437,36 @@ fn validate_chain<'a>(
             .collect();
 
         if ds_records.is_empty() {
+            // Nothing here proves the delegation unsigned (no NSEC/NSEC3 check),
+            // so an absent DS must not count as Insecure.
             debug!("dnssec: no DS for zone '{}' at parent '{}'", zone, parent);
-            return DnssecStatus::Insecure;
+            return DnssecStatus::Indeterminate;
         }
 
-        // RFC 4035 §5.2: the RRset must be signed by the *same* KSK the DS
-        // commits to, so verify only against DS-matched keys (not any KSK).
-        let ds_authenticated_ksks: Vec<DnsRecord> = zone_dnskeys
-            .iter()
-            .copied()
-            .filter(|dk| ds_records.iter().any(|ds| verify_ds(ds, dk, zone)))
-            .cloned()
-            .collect();
-        if ds_authenticated_ksks.is_empty() {
-            debug!("dnssec: DS digest mismatch for zone '{}'", zone);
-            return DnssecStatus::Bogus;
-        }
-        if !verify_rrset_signed(zone_records, QueryType::DNSKEY, &ds_authenticated_ksks) {
-            debug!(
-                "dnssec: DNSKEY RRset not signed by a DS-matched KSK: '{}'",
-                zone
-            );
-            return DnssecStatus::Bogus;
+        // RFC 4035 §5.2: a DS RRset naming only algorithms or digests we can't
+        // verify leaves no authentication path, so the zone is Insecure. That
+        // verdict still waits for the parent to authenticate the DS RRset.
+        let has_usable_ds = ds_records.iter().any(|ds| is_usable_ds(ds));
+        if has_usable_ds {
+            // The RRset must be signed by the *same* KSK the DS commits to,
+            // so verify only against DS-matched keys (not any KSK).
+            let ds_authenticated_ksks: Vec<DnsRecord> = zone_dnskeys
+                .iter()
+                .copied()
+                .filter(|dk| ds_records.iter().any(|ds| verify_ds(ds, dk, zone)))
+                .cloned()
+                .collect();
+            if ds_authenticated_ksks.is_empty() {
+                debug!("dnssec: DS digest mismatch for zone '{}'", zone);
+                return DnssecStatus::Bogus;
+            }
+            if !verify_rrset_signed(zone_records, QueryType::DNSKEY, &ds_authenticated_ksks) {
+                debug!(
+                    "dnssec: DNSKEY RRset not signed by a DS-matched KSK: '{}'",
+                    zone
+                );
+                return DnssecStatus::Bogus;
+            }
         }
 
         // Walk up: validate the parent's DNSKEY
@@ -454,7 +499,15 @@ fn validate_chain<'a>(
             return DnssecStatus::Bogus;
         }
 
-        DnssecStatus::Secure
+        if has_usable_ds {
+            DnssecStatus::Secure
+        } else {
+            debug!(
+                "dnssec: no supported DS algorithm for '{}' — Insecure",
+                zone
+            );
+            DnssecStatus::Insecure
+        }
     })
 }
 
@@ -774,6 +827,19 @@ fn asn1_length(len: usize) -> Vec<u8> {
     } else {
         vec![0x82, (len >> 8) as u8, (len & 0xFF) as u8]
     }
+}
+
+/// A DS we can follow: `verify_signature` implements its algorithm and
+/// `verify_ds` its digest type.
+fn is_usable_ds(ds: &DnsRecord) -> bool {
+    matches!(
+        ds,
+        DnsRecord::DS {
+            algorithm: 8 | 10 | 13 | 14 | 15,
+            digest_type: 2 | 4,
+            ..
+        }
+    )
 }
 
 pub fn verify_ds(ds: &DnsRecord, dnskey: &DnsRecord, owner: &str) -> bool {
@@ -1327,20 +1393,10 @@ fn verify_authority_rrsigs(
     let denial_rrsets = group_rrsets(&denial_records);
 
     for (name, qtype, rrset) in &denial_rrsets {
-        let covering_rrsig = all_rrsigs.iter().find(|r| {
-            if let DnsRecord::RRSIG {
-                domain,
-                type_covered,
-                ..
-            } = r
-            {
-                domain.eq_ignore_ascii_case(name) && QueryType::from_num(*type_covered) == *qtype
-            } else {
-                false
-            }
-        });
-
-        let rrsig = match covering_rrsig {
+        let rrsig = match matching_rrsigs_for(all_rrsigs, name, *qtype)
+            .first()
+            .copied()
+        {
             Some(r) => r,
             None => return false,
         };
@@ -2199,6 +2255,200 @@ mod tests {
             DnssecStatus::Secure,
             "child set signed by a KSK the DS does not commit to must not validate"
         );
+    }
+
+    // Unsupported algorithms (RFC 4035 §5.2). Algorithm 18 is ML-DSA-44, which
+    // 1.1.1.1 validates and Numa does not.
+
+    fn seed_test_root(cache: &RwLock<DnsCache>) -> (TestSigner, Vec<DnsRecord>) {
+        let ksk = mk_signer(257);
+        let dk = mk_dnskey(".", &ksk);
+        let selfsig = mk_rrsig(&ksk, ".", QueryType::DNSKEY, &[&dk]);
+        cache
+            .write()
+            .unwrap()
+            .insert(".", QueryType::DNSKEY, &mk_pkt(vec![dk.clone(), selfsig]));
+        (ksk, vec![dk])
+    }
+
+    /// Cache `child`'s DS RRset for `ksks`, signed by the test root when given.
+    fn seed_ds(
+        cache: &RwLock<DnsCache>,
+        child: &str,
+        ksks: &[&DnsRecord],
+        root: Option<&TestSigner>,
+    ) {
+        let ds_set: Vec<DnsRecord> = ksks.iter().map(|k| mk_ds(child, k)).collect();
+        let mut answers = ds_set.clone();
+        if let Some(root) = root {
+            let refs: Vec<&DnsRecord> = ds_set.iter().collect();
+            answers.push(mk_rrsig(root, ".", QueryType::DS, &refs));
+        }
+        cache
+            .write()
+            .unwrap()
+            .insert(child, QueryType::DS, &mk_pkt(answers));
+    }
+
+    fn mldsa_dnskey(owner: &str) -> DnsRecord {
+        DnsRecord::DNSKEY {
+            domain: owner.into(),
+            flags: 257,
+            protocol: 3,
+            algorithm: 18,
+            public_key: vec![0xAB; 1312],
+            ttl: 3600,
+        }
+    }
+
+    #[tokio::test]
+    async fn ds_naming_only_unsupported_algorithms_is_insecure() {
+        let (cache, srtt, stats) = empty_ctx();
+        let (root, anchors) = seed_test_root(&cache);
+        let pq = mldsa_dnskey("test");
+        seed_ds(&cache, "test", &[&pq], Some(&root));
+
+        let status = validate_chain("test", &[pq], &cache, &[], &srtt, &anchors, 0, &stats).await;
+        assert_eq!(status, DnssecStatus::Insecure);
+    }
+
+    // The downgrade guard: Insecure is only earned by a DS RRset the parent signed.
+    #[tokio::test]
+    async fn unsigned_ds_naming_unsupported_algorithms_is_bogus() {
+        let (cache, srtt, stats) = empty_ctx();
+        let (_, anchors) = seed_test_root(&cache);
+        let pq = mldsa_dnskey("test");
+        seed_ds(&cache, "test", &[&pq], None);
+
+        let status = validate_chain("test", &[pq], &cache, &[], &srtt, &anchors, 0, &stats).await;
+        assert_eq!(status, DnssecStatus::Bogus);
+    }
+
+    // A usable DS beside the unsupported one keeps the zone on the usable path:
+    // stripping that path's signature must not fall back to Insecure.
+    #[tokio::test]
+    async fn unsupported_ds_beside_a_usable_one_still_requires_the_usable_path() {
+        let (cache, srtt, stats) = empty_ctx();
+        let (root, anchors) = seed_test_root(&cache);
+        let pq = mldsa_dnskey("test");
+        let ksk = mk_dnskey("test", &mk_signer(257));
+        seed_ds(&cache, "test", &[&pq, &ksk], Some(&root));
+
+        let unsigned_set = [pq, ksk];
+        let status = validate_chain(
+            "test",
+            &unsigned_set,
+            &cache,
+            &[],
+            &srtt,
+            &anchors,
+            0,
+            &stats,
+        )
+        .await;
+        assert_eq!(status, DnssecStatus::Bogus);
+    }
+
+    /// Verdict for an A record at `owner` carrying one algorithm-18 RRSIG
+    /// from "test", a zone the chain proves Insecure.
+    async fn verdict_for_test_signed_unsupported(owner: &str) -> RrsetVerdict {
+        let (cache, srtt, stats) = empty_ctx();
+        let (root, anchors) = seed_test_root(&cache);
+        let pq = mldsa_dnskey("test");
+        seed_ds(&cache, "test", &[&pq], Some(&root));
+        cache
+            .write()
+            .unwrap()
+            .insert("test", QueryType::DNSKEY, &mk_pkt(vec![pq.clone()]));
+
+        let a = DnsRecord::A {
+            domain: owner.into(),
+            addr: "192.0.2.1".parse().unwrap(),
+            ttl: 3600,
+        };
+        let mut rrsig = mk_rrsig(&mk_signer(256), "test", QueryType::A, &[&a]);
+        if let (
+            DnsRecord::RRSIG {
+                algorithm, key_tag, ..
+            },
+            DnsRecord::DNSKEY {
+                flags, public_key, ..
+            },
+        ) = (&mut rrsig, &pq)
+        {
+            *algorithm = 18;
+            *key_tag = compute_key_tag(*flags, 3, 18, public_key);
+        }
+
+        let ctx = ValidationCtx {
+            cache: &cache,
+            root_hints: &[],
+            srtt: &srtt,
+            trust_anchors: &anchors,
+            stats: &stats,
+        };
+        let rrsigs = matching_rrsigs_for(&[&rrsig], owner, QueryType::A);
+        verify_rrset(owner, QueryType::A, &[&a], &rrsigs, &ctx).await
+    }
+
+    #[tokio::test]
+    async fn answer_signed_only_with_an_unsupported_algorithm_is_insecure() {
+        assert_eq!(
+            verdict_for_test_signed_unsupported("www.test").await,
+            RrsetVerdict::Insecure
+        );
+    }
+
+    // A forged RRSIG naming an unrelated Insecure zone must not downgrade
+    // an answer from a zone it cannot sign.
+    #[tokio::test]
+    async fn rrsig_from_a_zone_outside_the_owner_is_ignored() {
+        assert_eq!(
+            verdict_for_test_signed_unsupported("www.bank.example").await,
+            RrsetVerdict::Bogus
+        );
+    }
+
+    // The .cat shape: the TLD is Insecure to us, so a properly signed zone
+    // below it is Insecure too, not Bogus.
+    #[tokio::test]
+    async fn signed_zone_below_an_insecure_parent_is_insecure() {
+        let (cache, srtt, stats) = empty_ctx();
+        let (root, anchors) = seed_test_root(&cache);
+        let pq = mldsa_dnskey("test");
+        seed_ds(&cache, "test", &[&pq], Some(&root));
+        cache
+            .write()
+            .unwrap()
+            .insert("test", QueryType::DNSKEY, &mk_pkt(vec![pq]));
+
+        // sub.test: a real KSK, self-signed. Its DS is signed with algorithm 18
+        // at the parent, which nothing here can check.
+        let sub = mk_signer(257);
+        let sub_dk = mk_dnskey("sub.test", &sub);
+        let selfsig = mk_rrsig(&sub, "sub.test", QueryType::DNSKEY, &[&sub_dk]);
+        let sub_records = vec![sub_dk.clone(), selfsig];
+        seed_ds(&cache, "sub.test", &[&sub_dk], None);
+        cache
+            .write()
+            .unwrap()
+            .insert("sub.test", QueryType::DNSKEY, &mk_pkt(sub_records));
+
+        let a = DnsRecord::A {
+            domain: "www.sub.test".into(),
+            addr: "192.0.2.1".parse().unwrap(),
+            ttl: 3600,
+        };
+        let rrsig = mk_rrsig(&sub, "sub.test", QueryType::A, &[&a]);
+        let ctx = ValidationCtx {
+            cache: &cache,
+            root_hints: &[],
+            srtt: &srtt,
+            trust_anchors: &anchors,
+            stats: &stats,
+        };
+        let verdict = verify_rrset("www.sub.test", QueryType::A, &[&a], &[&rrsig], &ctx).await;
+        assert_eq!(verdict, RrsetVerdict::Insecure);
     }
 
     // Sign `record` in zone "test" (DNSKEY pre-seeded in cache), corrupt the

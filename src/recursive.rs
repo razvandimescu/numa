@@ -524,9 +524,10 @@ fn referral_zone(response: &DnsPacket) -> Option<String> {
 /// the server that sent it. Without this a nameserver reached while resolving
 /// one domain can hand back a delegation for an unrelated zone (say `google.com`
 /// while we walk under `attacker.com`) and poison its NS in cache. Names carry
-/// no trailing dot; the root (`.`) is above everything.
-fn zone_in_bailiwick(zone: &str, parent: &str) -> bool {
+/// no trailing dot; the root (`.`, or `` off the wire) is above everything.
+pub(crate) fn zone_in_bailiwick(zone: &str, parent: &str) -> bool {
     parent == "."
+        || parent.is_empty()
         || zone.eq_ignore_ascii_case(parent)
         || zone
             .to_ascii_lowercase()
