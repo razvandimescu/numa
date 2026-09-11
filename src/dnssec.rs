@@ -841,22 +841,23 @@ pub fn build_signed_data(rrsig: &DnsRecord, rrset: &[&DnsRecord]) -> Vec<u8> {
         data.extend(&key_tag.to_be_bytes());
         data.extend(name_to_wire(signer_name));
 
-        // Sort RRset records by canonical wire form
-        let mut canonical_records: Vec<Vec<u8>> = rrset
+        // RFC 4034 §6.3 orders by RDATA alone. Sorting whole wire records
+        // orders by RDLENGTH first, which differs whenever RDATA lengths do.
+        let mut canonical: Vec<(Vec<u8>, &DnsRecord)> = rrset
             .iter()
-            .map(|r| record_to_canonical_wire(r, *original_ttl))
+            .map(|r| (record_rdata_canonical(r), *r))
             .collect();
-        canonical_records.sort();
+        canonical.sort_by(|a, b| a.0.cmp(&b.0));
 
-        for rec_wire in &canonical_records {
-            data.extend(rec_wire);
+        for (rdata, record) in &canonical {
+            data.extend(record_to_canonical_wire(record, *original_ttl, rdata));
         }
     }
 
     data
 }
 
-fn record_to_canonical_wire(record: &DnsRecord, original_ttl: u32) -> Vec<u8> {
+fn record_to_canonical_wire(record: &DnsRecord, original_ttl: u32, rdata: &[u8]) -> Vec<u8> {
     let mut wire = Vec::with_capacity(128);
 
     // Owner name (lowercased, uncompressed)
@@ -871,10 +872,8 @@ fn record_to_canonical_wire(record: &DnsRecord, original_ttl: u32) -> Vec<u8> {
     // Original TTL (from RRSIG, not the record's current TTL)
     wire.extend(&original_ttl.to_be_bytes());
 
-    // RDATA — write the record to a temporary buffer to get the canonical RDATA
-    let rdata = record_rdata_canonical(record);
     wire.extend(&(rdata.len() as u16).to_be_bytes());
-    wire.extend(&rdata);
+    wire.extend(rdata);
 
     wire
 }
@@ -2249,6 +2248,22 @@ mod tests {
                 "tampered {qtype:?} rdata must not verify"
             );
         }
+    }
+
+    // RFC 4034 §6.3 orders an RRset by RDATA alone. The shorter record here has
+    // the larger RDATA, so an RDLENGTH-first sort would put it first and rebuild
+    // bytes the signer never signed (ai.'s mixed 1024/2048-bit ZSKs hit this).
+    #[test]
+    fn canonical_rrset_order_ignores_rdata_length() {
+        let zsk = mk_signer(256);
+        let short_high = mk_unknown("www.test", QueryType::TXT, b"\x02zz");
+        let long_low = mk_unknown("www.test", QueryType::TXT, b"\x01a\x01a");
+        let rrset = [&short_high, &long_low];
+        let rrsig = mk_rrsig(&zsk, "test", QueryType::TXT, &rrset);
+
+        let data = build_signed_data(&rrsig, &rrset);
+        let pos = |rdata: &[u8]| data.windows(rdata.len()).position(|w| w == rdata);
+        assert!(pos(b"\x00\x04\x01a\x01a") < pos(b"\x00\x03\x02zz"));
     }
 
     // RFC 4034 §6.2: the signer canonicalizes the SRV target to lowercase, so a
