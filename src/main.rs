@@ -5,7 +5,16 @@ use numa::system_dns::{
 
 const NO_SYSTEM_DNS_FLAG: &str = "--no-system-dns";
 
+// libmimalloc-sys does not export this option; index 4 in both the v2 and v3 headers.
+#[cfg(target_env = "musl")]
+const MI_OPTION_ARENA_EAGER_COMMIT: libmimalloc_sys::mi_option_t = 4;
+
 fn main() -> numa::Result<()> {
+    // mimalloc eagerly commits arenas on overcommit OSes; that is 27 MB idle vs 11 MB without.
+    #[cfg(target_env = "musl")]
+    unsafe {
+        libmimalloc_sys::mi_option_set(MI_OPTION_ARENA_EAGER_COMMIT, 0);
+    }
     let palette = numa::palette::get();
     let (config_flag, args) = take_config_flag(std::env::args().skip(1).collect())?;
     let arg = |i: usize| args.get(i).cloned();

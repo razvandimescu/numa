@@ -80,6 +80,46 @@ fn bench_pipeline_throughput(c: &mut Criterion) {
     group.finish();
 }
 
+/// Same pipeline on N OS threads sharing one cache; exposes allocator lock contention.
+fn bench_pipeline_parallel(c: &mut Criterion) {
+    const ITERS_PER_THREAD: usize = 1_000;
+    let domains: Vec<String> = (0..100)
+        .map(|i| format!("domain-{i}.example.com"))
+        .collect();
+
+    let mut cache = numa::cache::DnsCache::new(10_000, 60, 86400);
+    for d in &domains {
+        cache.insert(d, QueryType::A, &make_response(d));
+    }
+    let query_wires: Vec<Vec<u8>> = domains.iter().map(|d| make_query_wire(d)).collect();
+
+    let mut group = c.benchmark_group("pipeline_parallel");
+    let max_threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    for threads in [1, 2, 4, 8].into_iter().filter(|&t| t <= max_threads) {
+        group.throughput(Throughput::Elements((threads * ITERS_PER_THREAD) as u64));
+        group.bench_with_input(
+            BenchmarkId::from_parameter(threads),
+            &threads,
+            |b, &threads| {
+                let (query_wires, cache) = (&query_wires, &cache);
+                b.iter(|| {
+                    std::thread::scope(|s| {
+                        for t in 0..threads {
+                            s.spawn(move || {
+                                for i in 0..ITERS_PER_THREAD {
+                                    let wire = &query_wires[(t + i) % query_wires.len()];
+                                    simulate_cached_pipeline(wire, cache);
+                                }
+                            });
+                        }
+                    });
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
 /// Measures the overhead of BytePacketBuffer allocation + zero-init
 fn bench_buffer_alloc(c: &mut Criterion) {
     c.bench_function("buffer_alloc", |b| {
@@ -90,5 +130,10 @@ fn bench_buffer_alloc(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_pipeline_throughput, bench_buffer_alloc,);
+criterion_group!(
+    benches,
+    bench_pipeline_throughput,
+    bench_pipeline_parallel,
+    bench_buffer_alloc,
+);
 criterion_main!(benches);
