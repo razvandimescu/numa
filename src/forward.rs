@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, RwLock};
@@ -492,16 +491,24 @@ async fn forward_dot_raw(
 /// timeout; a stream transport already asked for our full ceiling, so its TC
 /// means an answer past what we could parse — that, like a failed or unusable
 /// retry, counts as a failed upstream and the caller's failover moves on.
+///
+/// The client picked `wire`'s ID, so it is no secret: an off-path spoofer that
+/// learns our source port (SAD DNS, a local app probing `bind()`) would need
+/// no TXID guess. Upstream sees a fresh random ID; the client's is restored.
 pub async fn forward_query_raw(
     wire: &[u8],
     upstream: &Upstream,
     timeout_duration: Duration,
 ) -> Result<Vec<u8>> {
+    if wire.len() < 12 {
+        return Err("query shorter than a DNS header".into());
+    }
     let start = Instant::now();
-    let sent = match upstream {
-        Upstream::Udp(_) => Cow::Borrowed(wire),
-        _ => crate::wire::maximize_payload(wire),
+    let mut sent = match upstream {
+        Upstream::Udp(_) => wire.to_vec(),
+        _ => crate::wire::maximize_payload(wire).into_owned(),
     };
+    crate::wire::patch_id(&mut sent, crate::packet::random_id());
     let resp = match upstream {
         Upstream::Udp(addr) => forward_udp_raw(&sent, *addr, timeout_duration).await,
         Upstream::Tcp(addr) => forward_tcp_raw(&sent, *addr, timeout_duration).await,
@@ -531,24 +538,24 @@ pub async fn forward_query_raw(
         }
     }?;
 
-    let resp = usable_reply(wire, resp)?;
-    if matches!(upstream, Upstream::Udp(_)) && !udp_reply_answers_question(wire, &resp) {
+    let mut resp = usable_reply(&sent, resp)?;
+    if matches!(upstream, Upstream::Udp(_)) && !udp_reply_answers_question(&sent, &resp) {
         return Err("plain-UDP upstream answered a different question".into());
     }
-    if !crate::wire::is_truncated(&resp) {
-        return Ok(resp);
+    if crate::wire::is_truncated(&resp) {
+        let Upstream::Udp(addr) = upstream else {
+            return Err("upstream truncated a stream-transport reply".into());
+        };
+        let budget = timeout_duration.saturating_sub(start.elapsed());
+        let retry = crate::wire::maximize_payload(&sent);
+        let full = timeout(budget, forward_tcp_raw(&retry, *addr, budget)).await??;
+        resp = usable_reply(&sent, full)?;
+        if crate::wire::is_truncated(&resp) {
+            return Err("upstream truncated the TCP retry".into());
+        }
     }
-    let Upstream::Udp(addr) = upstream else {
-        return Err("upstream truncated a stream-transport reply".into());
-    };
-    let budget = timeout_duration.saturating_sub(start.elapsed());
-    let retry = crate::wire::maximize_payload(wire);
-    let full = timeout(budget, forward_tcp_raw(&retry, *addr, budget)).await??;
-    let full = usable_reply(wire, full)?;
-    if crate::wire::is_truncated(&full) {
-        return Err("upstream truncated the TCP retry".into());
-    }
-    Ok(full)
+    resp[..2].copy_from_slice(&wire[..2]);
+    Ok(resp)
 }
 
 /// Plain-UDP forwarding shares the recursive path's off-path exposure, so it
@@ -964,32 +971,10 @@ mod tests {
         // fallback present, the failover loop should skip the primary
         // entirely (no UDP timeout cost) and go straight to fallback.
         let query = make_query();
-        let response_bytes = to_wire(&make_response(&query));
-
-        let app = axum::Router::new().route(
-            "/dns-query",
-            axum::routing::post(move || {
-                let body = response_bytes.clone();
-                async move {
-                    (
-                        [(axum::http::header::CONTENT_TYPE, "application/dns-message")],
-                        body,
-                    )
-                }
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let doh_addr = listener.local_addr().unwrap();
-        tokio::spawn(axum::serve(listener, app).into_future());
+        let (doh, _rx) = doh_upstream(to_wire(&make_response(&query))).await;
 
         let bad_udp_addr: SocketAddr = "192.0.2.99:53".parse().unwrap();
-        let pool = UpstreamPool::new(
-            vec![Upstream::Udp(bad_udp_addr)],
-            vec![Upstream::Doh {
-                url: format!("http://{}/dns-query", doh_addr),
-                client: crate::forward::default_client(),
-            }],
-        );
+        let pool = UpstreamPool::new(vec![Upstream::Udp(bad_udp_addr)], vec![doh]);
 
         let srtt = RwLock::new(SrttCache::new(true));
         srtt.write()
@@ -1209,6 +1194,34 @@ mod tests {
         let edns = asked.edns.expect("OPT present");
         assert_eq!(edns.udp_payload_size, crate::wire::MAX_UPSTREAM_PAYLOAD);
         assert!(edns.do_bit, "DO survives the payload patch");
+    }
+
+    #[tokio::test]
+    async fn upstream_never_sees_the_client_txid() {
+        let query = make_query();
+        let (addr, mut rx) = crate::testutil::recording_upstream(make_response(&query)).await;
+        let upstream = Upstream::Udp(addr);
+
+        let mut upstream_ids = Vec::new();
+        for _ in 0..2 {
+            let resp = forward_query_raw(&to_wire(&query), &upstream, Duration::from_secs(2))
+                .await
+                .expect("forward should succeed");
+            assert_eq!(
+                resp[..2],
+                query.header.id.to_be_bytes(),
+                "client id restored"
+            );
+            let sent = rx.recv().await.expect("upstream recorded the query");
+            upstream_ids.push(u16::from_be_bytes([sent[0], sent[1]]));
+        }
+
+        // A fresh id per query: both matching the client's by chance is 2^-32.
+        assert!(
+            upstream_ids.iter().any(|&id| id != query.header.id),
+            "client txid {:#06x} went upstream: {upstream_ids:x?}",
+            query.header.id
+        );
     }
 
     #[tokio::test]
