@@ -37,7 +37,7 @@ fn main() -> numa::Result<()> {
     match arg1.as_str() {
         "install" => {
             eprintln!("{}Numa{} — installing\n", palette.brand_bold, palette.reset);
-            return install_service(skip_system_dns).map_err(|e| e.into());
+            return exit_on_err(install_service(skip_system_dns));
         }
         "uninstall" => {
             eprintln!(
@@ -53,7 +53,7 @@ fn main() -> numa::Result<()> {
                 palette.brand_bold, palette.reset
             );
             return match sub.as_str() {
-                "start" => start_service(skip_system_dns).map_err(|e| e.into()),
+                "start" => exit_on_err(start_service(skip_system_dns)),
                 "stop" => stop_service().map_err(|e| e.into()),
                 "restart" => restart_service().map_err(|e| e.into()),
                 "status" => service_status().map_err(|e| e.into()),
@@ -200,6 +200,15 @@ fn main() -> numa::Result<()> {
         .enable_all()
         .build()?;
     runtime.block_on(numa::serve::run(config_path))
+}
+
+/// `main`'s `Err` prints Debug, which escapes a multi-line advisory.
+fn exit_on_err(result: Result<(), String>) -> numa::Result<()> {
+    if let Err(e) = result {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 fn set_config_bool(
