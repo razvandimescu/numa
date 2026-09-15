@@ -92,22 +92,75 @@ pub fn discover_system_dns() -> SystemDnsInfo {
     }
 }
 
+const PORT53_RECIPE_URL: &str =
+    "https://github.com/razvandimescu/numa/blob/main/recipes/port-53.md";
+
+#[cfg(target_os = "linux")]
+const WHO_OWNS_53: &str = "sudo ss -lnup 'sport = :53'";
+#[cfg(windows)]
+const WHO_OWNS_53: &str = "netstat -ano -p UDP | findstr :53";
+#[cfg(not(any(target_os = "linux", windows)))]
+const WHO_OWNS_53: &str = "sudo lsof -nP -iUDP:53";
+
+#[cfg(windows)]
+const ELEVATE: &str = "  Port 53 is privileged. Run numa from an Administrator prompt.";
+#[cfg(not(windows))]
+const ELEVATE: &str = "  Port 53 is privileged. Run:\n\n    sudo numa";
+
+const SPARE_PORT: &str = "\n  Just testing? Run numa alongside it on a spare port:\n\n    \
+     numa config edit    # [server] bind_addr = \"127.0.0.1:5354\"\n    numa\n    \
+     dig @127.0.0.1 -p 5354 example.com\n";
+
+/// Process holding port 53, as far as procfs can tell.
+pub struct Port53Holder {
+    pub comm: String,
+    pub pid: u32,
+    /// systemd unit owning the process cgroup: either the holder's own unit
+    /// (`dnsmasq.service`) or a supervisor that spawned it
+    /// (`NetworkManager.service`), which is why `owned_unit` re-checks.
+    pub unit: Option<String>,
+}
+
+impl Port53Holder {
+    fn is_systemd_resolved(&self) -> bool {
+        // /proc/<pid>/comm truncates at 15 bytes: "systemd-resolve".
+        self.comm.starts_with("systemd-resolve")
+    }
+
+    /// The unit only when the holder *is* that unit. Telling someone to
+    /// disable the supervisor that spawned it is worse advice than none.
+    fn owned_unit(&self) -> Option<&str> {
+        let unit = self.unit.as_deref()?;
+        (unit.strip_suffix(".service")? == self.comm).then_some(unit)
+    }
+}
+
 /// Advisory for port-53 bind failures (EADDRINUSE or EACCES); `None`
 /// if not applicable so the caller can fall back to the raw error.
 pub fn try_port53_advisory(bind_addr: &str, err: &std::io::Error) -> Option<String> {
     if !is_port_53(bind_addr) {
         return None;
     }
-    let (title, cause) = match err.kind() {
-        std::io::ErrorKind::AddrInUse => (
-            "port 53 is already in use",
-            "Another process is already bound to port 53. On Linux this is\n  \
-             typically systemd-resolved; on Windows, the DNS Client service.",
-        ),
+    let holder = match err.kind() {
+        std::io::ErrorKind::AddrInUse => port53_holder(),
+        _ => None,
+    };
+    port53_advisory(bind_addr, err.kind(), holder.as_ref())
+}
+
+fn port53_advisory(
+    bind_addr: &str,
+    kind: std::io::ErrorKind,
+    holder: Option<&Port53Holder>,
+) -> Option<String> {
+    let (title, body) = match kind {
+        std::io::ErrorKind::AddrInUse => (in_use_title(holder), in_use_body(holder)),
         std::io::ErrorKind::PermissionDenied => (
-            "permission denied",
-            "Port 53 is privileged — binding it requires root on Linux/macOS\n  \
-             or Administrator on Windows.",
+            "permission denied".to_string(),
+            format!(
+                "{ELEVATE}\n\n  Or run unprivileged on a spare port:\n\n    \
+                 numa config edit    # [server] bind_addr = \"127.0.0.1:5354\"\n"
+            ),
         ),
         _ => return None,
     };
@@ -115,30 +168,141 @@ pub fn try_port53_advisory(bind_addr: &str, err: &std::io::Error) -> Option<Stri
     let o = palette.brand_bold;
     let r = palette.reset;
     Some(format!(
-        "
-{o}Numa{r} — cannot bind to {bind_addr}: {title}.
-
-  {cause}
-
-  Fix — pick one:
-
-    1. Install Numa as the system resolver (frees port 53):
-
-         sudo numa install       (on Windows, run as Administrator)
-
-    2. Run on a non-privileged port for testing.
-       Create {} with:
-
-         [server]
-         bind_addr = \"127.0.0.1:5354\"
-         api_port  = 5380
-
-       Then run:  numa
-       Test with: dig @127.0.0.1 -p 5354 example.com
-
-",
-        crate::suggested_config_path().display()
+        "\n{o}Numa{r} — cannot bind to {bind_addr}: {title}.\n\n{body}\n"
     ))
+}
+
+fn in_use_title(holder: Option<&Port53Holder>) -> String {
+    let Some(holder) = holder else {
+        return "port 53 is already in use".to_string();
+    };
+    let held = format!("port 53 is held by {} (pid {})", holder.comm, holder.pid);
+    match holder.unit.as_deref() {
+        Some(unit) if holder.owned_unit().is_none() => format!("{held},\nstarted by {unit}"),
+        _ => held,
+    }
+}
+
+fn in_use_body(holder: Option<&Port53Holder>) -> String {
+    let Some(holder) = holder else {
+        return format!(
+            "  Another resolver already owns it. Find out which:\n\n    {WHO_OWNS_53}\n\n  \
+             If it is systemd-resolved, sudo numa install frees it. Anything else\n  \
+             (dnsmasq, unbound, named, pihole-FTL) has to be stopped first. Numa\n  \
+             will not reconfigure it for you.\n\n    {PORT53_RECIPE_URL}\n"
+        );
+    };
+    if holder.is_systemd_resolved() {
+        // install writes DNSStubListener=no, so this is the one numa can free.
+        return "  Numa can free it. Install as the system resolver:\n\n    sudo numa install\n"
+            .to_string();
+    }
+    let remedy = match (holder.owned_unit(), holder.unit.as_deref()) {
+        (Some(unit), _) => format!(
+            "  Numa needs port 53 to be the system resolver, and will not stop or\n  \
+             reconfigure another resolver for you. Free the port first:\n\n    \
+             sudo systemctl disable --now {unit}\n    sudo numa install\n"
+        ),
+        (None, Some(unit)) => format!(
+            "  Killing {} will not free the port. {unit} restarts it. Stop that\n  \
+             service, or tell it not to run a DNS cache:\n\n    {PORT53_RECIPE_URL}\n",
+            holder.comm
+        ),
+        (None, None) => format!(
+            "  Numa needs port 53 to be the system resolver, and will not stop or\n  \
+             reconfigure another resolver for you. Stop {} first:\n\n    {PORT53_RECIPE_URL}\n",
+            holder.comm
+        ),
+    };
+    format!("{remedy}{SPARE_PORT}")
+}
+
+/// Identify the process on port 53. Reading other users' fds needs root, which
+/// holds on the paths that print advisories (`sudo numa`, `numa install`); the
+/// unprivileged daemon gets `None` and the generic text.
+#[cfg(target_os = "linux")]
+pub fn port53_holder() -> Option<Port53Holder> {
+    let mut inodes = std::collections::HashSet::new();
+    for path in ["/proc/net/udp", "/proc/net/udp6"] {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            inodes.extend(udp_port_inodes(&text, 53));
+        }
+    }
+    if inodes.is_empty() {
+        return None;
+    }
+    let pid = pid_owning_socket(&inodes)?;
+    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+    Some(Port53Holder {
+        comm: comm.trim().to_string(),
+        pid,
+        unit: std::fs::read_to_string(format!("/proc/{pid}/cgroup"))
+            .ok()
+            .and_then(|cgroup| systemd_unit_from_cgroup(&cgroup)),
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn port53_holder() -> Option<Port53Holder> {
+    None
+}
+
+/// Socket inodes bound to `port`, from `/proc/net/udp{,6}`: field 1 is
+/// `<hex addr>:<hex port>`, field 9 the inode.
+#[cfg(any(target_os = "linux", test))]
+fn udp_port_inodes(proc_net_udp: &str, port: u16) -> std::collections::HashSet<u64> {
+    proc_net_udp
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let local = fields.nth(1)?;
+            if u16::from_str_radix(local.rsplit(':').next()?, 16).ok()? != port {
+                return None;
+            }
+            fields.nth(7)?.parse().ok()
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn pid_owning_socket(inodes: &std::collections::HashSet<u64>) -> Option<u32> {
+    let targets: std::collections::HashSet<String> = inodes
+        .iter()
+        .map(|inode| format!("socket:[{inode}]"))
+        .collect();
+    for entry in std::fs::read_dir("/proc").ok()?.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let Ok(fds) = std::fs::read_dir(entry.path().join("fd")) else {
+            continue;
+        };
+        for fd in fds.flatten() {
+            if std::fs::read_link(fd.path())
+                .is_ok_and(|link| targets.contains(link.to_string_lossy().as_ref()))
+            {
+                return Some(pid);
+            }
+        }
+    }
+    None
+}
+
+/// Last `*.service` segment of a cgroup path: `0::/system.slice/dnsmasq.service`
+/// on v2, `1:name=systemd:/system.slice/dnsmasq.service` on v1.
+#[cfg(any(target_os = "linux", test))]
+fn systemd_unit_from_cgroup(cgroup: &str) -> Option<String> {
+    cgroup
+        .lines()
+        .filter_map(|line| line.rsplit(':').next())
+        .flat_map(|path| path.split('/'))
+        .rfind(|segment| segment.ends_with(".service"))
+        .map(str::to_string)
 }
 
 fn is_port_53(bind_addr: &str) -> bool {
@@ -2118,24 +2282,106 @@ mod tests {
         );
     }
 
+    fn holder(comm: &str, unit: Option<&str>) -> Port53Holder {
+        Port53Holder {
+            comm: comm.to_string(),
+            pid: 1234,
+            unit: unit.map(str::to_string),
+        }
+    }
+
+    fn in_use(holder: Option<&Port53Holder>) -> String {
+        port53_advisory("0.0.0.0:53", std::io::ErrorKind::AddrInUse, holder)
+            .expect("should advise on port 53")
+    }
+
     #[test]
     fn try_port53_advisory_addr_in_use() {
         let err = std::io::Error::from(std::io::ErrorKind::AddrInUse);
         let msg = try_port53_advisory("0.0.0.0:53", &err).expect("should advise on port 53");
         assert!(msg.contains("cannot bind to"));
+    }
+
+    #[test]
+    fn port53_advisory_unknown_holder_does_not_guess() {
+        let msg = in_use(None);
         assert!(msg.contains("already in use"));
-        assert!(msg.contains("numa install"));
-        assert!(msg.contains("bind_addr"));
+        assert!(msg.contains(WHO_OWNS_53));
+        assert!(msg.contains(PORT53_RECIPE_URL));
+        assert!(!msg.contains("typically systemd-resolved"));
+    }
+
+    #[test]
+    fn port53_advisory_names_holder_and_its_unit() {
+        let msg = in_use(Some(&holder("dnsmasq", Some("dnsmasq.service"))));
+        assert!(msg.contains("held by dnsmasq (pid 1234)"));
+        assert!(msg.contains("sudo systemctl disable --now dnsmasq.service"));
+        assert!(msg.contains("numa config edit"));
+    }
+
+    /// The #299 case: killing the holder is futile, and disabling the
+    /// supervisor is not advice numa should give.
+    #[test]
+    fn port53_advisory_defers_to_recipe_for_supervised_holder() {
+        let msg = in_use(Some(&holder("dnsmasq", Some("NetworkManager.service"))));
+        assert!(msg.contains("started by NetworkManager.service"));
+        assert!(msg.contains("NetworkManager.service restarts it"));
+        assert!(msg.contains(PORT53_RECIPE_URL));
+        assert!(!msg.contains("disable --now"));
+    }
+
+    #[test]
+    fn port53_advisory_unsupervised_holder_gets_no_systemctl_advice() {
+        let msg = in_use(Some(&holder("unbound", None)));
+        assert!(msg.contains("held by unbound (pid 1234)"));
+        assert!(msg.contains("Stop unbound first"));
+        assert!(!msg.contains("systemctl"));
+    }
+
+    /// comm is truncated to 15 bytes, so the match is on the prefix.
+    #[test]
+    fn port53_advisory_offers_install_only_for_systemd_resolved() {
+        let msg = in_use(Some(&holder(
+            "systemd-resolve",
+            Some("systemd-resolved.service"),
+        )));
+        assert!(msg.contains("Numa can free it"));
+        assert!(msg.contains("sudo numa install"));
+        assert!(!msg.contains("disable --now"));
     }
 
     #[test]
     fn try_port53_advisory_permission_denied() {
         let err = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
         let msg = try_port53_advisory("0.0.0.0:53", &err).expect("should advise on port 53");
-        assert!(msg.contains("cannot bind to"));
         assert!(msg.contains("permission denied"));
-        assert!(msg.contains("numa install"));
-        assert!(msg.contains("bind_addr"));
+        assert!(msg.contains(ELEVATE));
+        assert!(!msg.contains("numa install"));
+    }
+
+    #[test]
+    fn udp_port_inodes_matches_only_the_wanted_port() {
+        let proc_net_udp = "\
+  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+  982: 3500007F:0035 00000000:0000 07 00000000:00000000 00:00000000  00000000   101        0 27503
+  983: 00000000:0044 00000000:0000 07 00000000:00000000 00:00000000  00000000     0        0 19422
+";
+        let inodes = udp_port_inodes(proc_net_udp, 53);
+        assert_eq!(inodes, std::collections::HashSet::from([27503]));
+    }
+
+    #[test]
+    fn systemd_unit_from_cgroup_reads_both_hierarchies() {
+        assert_eq!(
+            systemd_unit_from_cgroup("0::/system.slice/dnsmasq.service\n").as_deref(),
+            Some("dnsmasq.service")
+        );
+        assert_eq!(
+            systemd_unit_from_cgroup("1:name=systemd:/system.slice/NetworkManager.service\n")
+                .as_deref(),
+            Some("NetworkManager.service")
+        );
+        assert!(systemd_unit_from_cgroup("0::/user.slice/session-3.scope\n").is_none());
     }
 
     #[test]
