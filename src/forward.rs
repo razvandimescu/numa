@@ -758,6 +758,16 @@ async fn forward_doh_raw(
     Ok(bytes.to_vec())
 }
 
+const ROOT_NS_QUERY: &[u8] = &[
+    0x00, 0x00, // ID
+    0x01, 0x00, // flags: RD=1
+    0x00, 0x01, // QDCOUNT=1
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // AN=0, NS=0, AR=0
+    0x00, // root name (.)
+    0x00, 0x02, // type NS
+    0x00, 0x01, // class IN
+];
+
 /// Send a lightweight keepalive query to a DoH upstream to prevent
 /// the HTTP/2 + TLS connection from going idle and being torn down.
 /// The first call doubles as a startup warm-up: bootstrap-resolver failures
@@ -765,20 +775,46 @@ async fn forward_doh_raw(
 /// surface here rather than on the first client query.
 pub async fn keepalive_doh(upstream: &Upstream) {
     if let Upstream::Doh { url, client } = upstream {
-        // Query for . NS — minimal, always succeeds, response is small
-        let wire: &[u8] = &[
-            0x00, 0x00, // ID
-            0x01, 0x00, // flags: RD=1
-            0x00, 0x01, // QDCOUNT=1
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // AN=0, NS=0, AR=0
-            0x00, // root name (.)
-            0x00, 0x02, // type NS
-            0x00, 0x01, // class IN
-        ];
-        if let Err(e) = forward_doh_raw(wire, url, client, Duration::from_secs(5)).await {
+        if let Err(e) = forward_doh_raw(ROOT_NS_QUERY, url, client, Duration::from_secs(5)).await {
             log::warn!("DoH keepalive to {} failed: {}", url, e);
         }
     }
+}
+
+/// Measure every primary so the SRTT sort ranks by RTT rather than config
+/// order: a standby is otherwise only sampled after the primary fails (#289).
+/// Skipped unless it can change the ranking: fallback is never sorted, and an
+/// unkeyed (DoH/ODoH) primary sorts first whatever the others measure.
+pub async fn probe_upstreams(
+    pool: &UpstreamPool,
+    srtt: &RwLock<SrttCache>,
+    timeout_duration: Duration,
+) {
+    let Some(keyed) = pool
+        .primary
+        .iter()
+        .map(|u| u.tracked_key().map(|key| (u, key)))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return;
+    };
+    if keyed.len() < 2 {
+        return;
+    }
+    let probes = keyed.into_iter().map(|(upstream, (ip, t))| async move {
+        let start = Instant::now();
+        match forward_query_raw(ROOT_NS_QUERY, upstream, timeout_duration).await {
+            Ok(_) => {
+                let rtt_ms = start.elapsed().as_millis() as u64;
+                srtt.write().unwrap().record_rtt(ip, t, rtt_ms);
+            }
+            Err(e) => {
+                log::debug!("upstream probe to {} failed: {}", upstream, e);
+                srtt.write().unwrap().record_failure(ip, t);
+            }
+        }
+    });
+    futures::future::join_all(probes).await;
 }
 
 #[cfg(test)]
@@ -1055,6 +1091,100 @@ mod tests {
         let result = DnsPacket::from_buffer(&mut buf).unwrap();
         assert_eq!(result.header.id, 0xABCD);
         assert_eq!(result.answers.len(), 1);
+    }
+
+    fn root_ns_response() -> DnsPacket {
+        let query =
+            DnsPacket::from_buffer(&mut BytePacketBuffer::from_bytes(ROOT_NS_QUERY)).unwrap();
+        DnsPacket::response_from(&query, ResultCode::NOERROR)
+    }
+
+    #[tokio::test]
+    async fn probe_skips_a_lone_udp_upstream_and_its_tcp_sibling() {
+        let addr = crate::testutil::blackhole_upstream();
+        let pool = UpstreamPool::new(vec![Upstream::Udp(addr)], vec![Upstream::Tcp(addr)]);
+        let srtt = RwLock::new(SrttCache::new(true));
+
+        probe_upstreams(&pool, &srtt, Duration::from_millis(50)).await;
+
+        let srtt = srtt.read().unwrap();
+        assert!(!srtt.is_known(addr.ip(), UpstreamTransport::Udp));
+        assert!(!srtt.is_known(addr.ip(), UpstreamTransport::Tcp));
+    }
+
+    #[tokio::test]
+    async fn probe_skips_a_pool_with_an_unkeyed_primary() {
+        let addr = crate::testutil::blackhole_upstream();
+        let (doh, _rx) = doh_upstream(to_wire(&root_ns_response())).await;
+        let pool = UpstreamPool::new(vec![doh, Upstream::Udp(addr), Upstream::Tcp(addr)], vec![]);
+        let srtt = RwLock::new(SrttCache::new(true));
+
+        probe_upstreams(&pool, &srtt, Duration::from_millis(50)).await;
+
+        let srtt = srtt.read().unwrap();
+        assert!(!srtt.is_known(addr.ip(), UpstreamTransport::Udp));
+        assert!(!srtt.is_known(addr.ip(), UpstreamTransport::Tcp));
+    }
+
+    #[tokio::test]
+    async fn probe_ranks_an_unsampled_standby_ahead_of_a_slower_first_entry() {
+        // UDP was sampled at 150ms by live traffic; the TCP standby has never
+        // been queried, so it sits at the 200ms default and loses on config
+        // order alone until something measures it.
+        let (addr, mut udp_rx) = crate::testutil::recording_upstream(root_ns_response()).await;
+        crate::testutil::tcp_upstream_raw_on(addr, to_wire(&root_ns_response())).await;
+        let pool = UpstreamPool::new(vec![Upstream::Udp(addr), Upstream::Tcp(addr)], vec![]);
+        let srtt = RwLock::new(SrttCache::new(true));
+        srtt.write()
+            .unwrap()
+            .record_rtt(addr.ip(), UpstreamTransport::Udp, 150);
+
+        probe_upstreams(&pool, &srtt, Duration::from_millis(500)).await;
+        tokio::time::timeout(Duration::from_millis(500), udp_rx.recv())
+            .await
+            .expect("the probe reaches the UDP entry too");
+
+        forward_with_failover_raw(
+            ROOT_NS_QUERY,
+            &pool,
+            &srtt,
+            Duration::from_millis(500),
+            Duration::ZERO,
+        )
+        .await
+        .expect("the TCP standby answers");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), udp_rx.recv())
+                .await
+                .is_err(),
+            "the live query went to the slower UDP entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_demotes_a_fast_upstream_that_stopped_answering() {
+        let dead = crate::testutil::blackhole_upstream();
+        let alive = crate::testutil::mock_upstream(root_ns_response()).await;
+        crate::testutil::tcp_upstream_raw_on(alive, to_wire(&root_ns_response())).await;
+        let pool = UpstreamPool::new(vec![Upstream::Udp(dead), Upstream::Tcp(alive)], vec![]);
+        let srtt = RwLock::new(SrttCache::new(true));
+        srtt.write()
+            .unwrap()
+            .record_rtt(dead.ip(), UpstreamTransport::Udp, 5);
+
+        let start = Instant::now();
+        probe_upstreams(&pool, &srtt, Duration::from_millis(100)).await;
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "the probe outlived its timeout: {:?}",
+            start.elapsed()
+        );
+
+        let srtt = srtt.read().unwrap();
+        assert!(
+            srtt.get(alive.ip(), UpstreamTransport::Tcp)
+                < srtt.get(dead.ip(), UpstreamTransport::Udp)
+        );
     }
 
     /// A TC=1 reply with no records — the shape of a signed response that

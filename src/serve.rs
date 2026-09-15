@@ -353,6 +353,13 @@ fn spawn_background_services(
         });
     }
 
+    if ctx.upstream_mode == crate::config::UpstreamMode::Forward && config.upstream.srtt {
+        let probe_ctx = Arc::clone(ctx);
+        tokio::spawn(async move {
+            probe_upstreams_loop(probe_ctx).await;
+        });
+    }
+
     let api_ctx = Arc::clone(ctx);
     let api_addr: SocketAddr = format!("{}:{}", config.server.api_bind_addr, api_port).parse()?;
     let (api_auth, minted) =
@@ -949,6 +956,15 @@ async fn doh_keepalive_loop(ctx: Arc<ServerCtx>) {
         if let Some(upstream) = pool.preferred() {
             crate::forward::keepalive_doh(upstream).await;
         }
+    }
+}
+
+async fn probe_upstreams_loop(ctx: Arc<ServerCtx>) {
+    let mut interval = tokio::time::interval(Duration::from_secs(25));
+    loop {
+        interval.tick().await;
+        let pool = ctx.upstream_pool.lock().unwrap().clone();
+        crate::forward::probe_upstreams(&pool, &ctx.srtt, ctx.timeout).await;
     }
 }
 
