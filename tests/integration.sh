@@ -253,6 +253,11 @@ check "AD bit set (cloudflare.com)" \
     " ad" \
     "$($DIG cloudflare.com A +dnssec 2>&1 | grep flags:)"
 
+# .ai is unprimed and mixes 1024/2048-bit ZSKs.
+check "AD bit set, unprimed TLD (nic.ai)" \
+    " ad" \
+    "$($DIG nic.ai A +dnssec 2>&1 | grep flags:)"
+
 check "EDNS DO bit echoed" \
     "flags: do" \
     "$($DIG cloudflare.com A +dnssec 2>&1 | grep 'EDNS:')"
