@@ -1203,25 +1203,19 @@ fn nsec_covers_name(owner: &str, next: &str, qname: &str) -> bool {
     }
 }
 
-/// RFC 4035 §5.4: compute the closest encloser, then derive the wildcard name.
-fn closest_encloser(qname: &str, zone_nsecs: &[&DnsRecord]) -> Option<String> {
-    let labels: Vec<&str> = qname.split('.').filter(|l| !l.is_empty()).collect();
-    // Walk from longest candidate down: qname itself, then parent, then grandparent...
-    for i in 0..labels.len() {
-        let candidate: String = labels[i..].join(".");
-        // Closest encloser must match an NSEC owner exactly
-        let is_owner = zone_nsecs.iter().any(|r| {
-            if let DnsRecord::NSEC { domain, .. } = r {
-                domain.eq_ignore_ascii_case(&candidate)
-            } else {
-                false
-            }
-        });
-        if is_owner {
-            return Some(candidate);
-        }
-    }
-    None
+/// The closest encloser is the deepest ancestor `qname` shares with the
+/// owner or next name of the NSEC covering it (RFC 4035 §5.4).
+fn closest_encloser(qname: &str, owner: &str, next: &str) -> String {
+    let shared = |other: &str| {
+        qname
+            .rsplit('.')
+            .zip(other.rsplit('.'))
+            .take_while(|(a, b)| a.eq_ignore_ascii_case(b))
+            .count()
+    };
+    let depth = shared(owner).max(shared(next));
+    let labels: Vec<&str> = qname.split('.').collect();
+    labels[labels.len() - depth..].join(".")
 }
 
 fn nsec_proves_nodata(owner: &str, qname: &str, bitmap: &[u8], qtype: u16) -> bool {
@@ -1420,42 +1414,26 @@ fn validate_denial(
         if is_nxdomain {
             // RFC 4035 §5.4: need (1) NSEC covering the name gap AND (2) NSEC proving
             // no wildcard at *.closest_encloser
-            let name_covered = nsecs.iter().any(|r| {
-                if let DnsRecord::NSEC {
+            let proven = nsecs.iter().any(|cover| {
+                let DnsRecord::NSEC {
                     domain,
                     next_domain,
                     ..
-                } = r
-                {
-                    nsec_covers_name(domain, next_domain, qname)
-                } else {
-                    false
+                } = cover
+                else {
+                    return false;
+                };
+                if !nsec_covers_name(domain, next_domain, qname) {
+                    return false;
                 }
-            });
-
-            let wildcard_denied = if let Some(ce) = closest_encloser(qname, &nsecs) {
+                let ce = closest_encloser(qname, domain, next_domain);
                 let wildcard = format!("*.{}", ce);
-                // Wildcard must either be covered by a gap or matched with the type absent
                 nsecs.iter().any(|r| {
-                    if let DnsRecord::NSEC {
-                        domain,
-                        next_domain,
-                        ..
-                    } = r
-                    {
-                        nsec_covers_name(domain, next_domain, &wildcard)
-                            || domain.eq_ignore_ascii_case(&wildcard)
-                    } else {
-                        false
-                    }
+                    matches!(r, DnsRecord::NSEC { domain, next_domain, .. }
+                        if nsec_covers_name(domain, next_domain, &wildcard))
                 })
-            } else {
-                // No closest encloser found — can't prove wildcard absence,
-                // but some zones don't use wildcards; accept name coverage alone
-                true
-            };
-
-            if name_covered && wildcard_denied {
+            });
+            if proven {
                 debug!("dnssec: NSEC proves NXDOMAIN for '{}'", qname);
                 return DnssecStatus::Secure;
             }
@@ -1803,25 +1781,15 @@ mod tests {
 
     #[test]
     fn closest_encloser_finds_parent() {
-        let nsec1 = DnsRecord::NSEC {
-            domain: "example.com".into(),
-            next_domain: "z.example.com".into(),
-            type_bitmap: vec![],
-            ttl: 300,
-        };
-        let nsecs: Vec<&DnsRecord> = vec![&nsec1];
-        // foo.example.com doesn't exist; closest encloser is example.com (the NSEC owner)
         assert_eq!(
-            closest_encloser("foo.example.com", &nsecs),
-            Some("example.com".into())
+            closest_encloser("foo.example.com", "example.com", "z.example.com"),
+            "example.com"
         );
-        // example.com is itself an NSEC owner, so it IS a closest encloser
         assert_eq!(
-            closest_encloser("example.com", &nsecs),
-            Some("example.com".into())
+            closest_encloser("x.foo.b.example.com", "a.b.example.com", "c.b.example.com"),
+            "b.example.com"
         );
-        // nothing.org has no matching owner
-        assert_eq!(closest_encloser("nothing.org", &nsecs), None);
+        assert_eq!(closest_encloser("nothing.org", "a.com", "b.com"), "");
     }
 
     #[test]
@@ -2673,5 +2641,41 @@ mod tests {
         };
         let verdict = verify_denial_rrsets(&[nsec], &[&sig], &ctx).await;
         assert_eq!(verdict, RrsetVerdict::Verified);
+    }
+    fn nsec(owner: &str, next: &str) -> DnsRecord {
+        DnsRecord::NSEC {
+            domain: owner.into(),
+            next_domain: next.into(),
+            type_bitmap: vec![],
+            ttl: 3600,
+        }
+    }
+
+    #[test]
+    fn nxdomain_needs_the_wildcard_at_the_closest_encloser_denied() {
+        let covering = nsec("a.example.com", "g.example.com");
+        assert_eq!(
+            validate_denial(&[covering.clone()], "foo.example.com", 1, true),
+            DnssecStatus::Bogus
+        );
+        let apex = nsec("example.com", "a.example.com");
+        assert_eq!(
+            validate_denial(&[covering, apex], "foo.example.com", 1, true),
+            DnssecStatus::Secure
+        );
+    }
+
+    // *.b.example.com exists, so a.b.example.com is synthesized from it; the
+    // apex NSEC denies only *.example.com, the wrong wildcard.
+    #[test]
+    fn nxdomain_is_not_proven_under_an_existing_wildcard() {
+        let proof = [
+            nsec("*.b.example.com", "c.b.example.com"),
+            nsec("example.com", "b.example.com"),
+        ];
+        assert_eq!(
+            validate_denial(&proof, "a.b.example.com", 1, true),
+            DnssecStatus::Bogus
+        );
     }
 }
