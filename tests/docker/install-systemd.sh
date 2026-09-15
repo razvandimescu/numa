@@ -266,8 +266,20 @@ if [ "${NUMA_INSIDE:-}" = "1" ]; then
     wait_active || true
     assert_dns_works
 
+    # With --no-system-dns install never frees resolved's stub, so it must abort too.
     reset_state
-    systemctl stop dnsmasq.service 2>/dev/null || true
+    # uninstall restarts resolved while numa still holds :53, so its stub stays off.
+    systemctl restart systemd-resolved
+    if ! ss -lnup 'sport = :53' | grep -q systemd-resolve; then
+        fail "setup: systemd-resolved stub is not on port 53"
+    fi
+    if "$NUMA" install --no-system-dns >/tmp/installD3.log 2>&1; then
+        fail "install --no-system-dns reported success while resolved holds :53"
+    elif grep -q "held by systemd-resolve" /tmp/installD3.log; then
+        pass "install --no-system-dns aborts on resolved's stub"
+    else
+        fail "install --no-system-dns abort does not name resolved" "$(tail -5 /tmp/installD3.log)"
+    fi
 
     reset_state
     rm -rf /home/builder

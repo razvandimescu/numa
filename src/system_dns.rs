@@ -1283,22 +1283,11 @@ fn unsupported_os_err(op: &str) -> String {
     )
 }
 
-/// Refuse an install that can only crashloop.
-///
-/// `systemctl restart` returns 0 for a `Type=simple` unit that dies
-/// milliseconds later, so a busy port otherwise reaches the success banner
-/// with `/etc/resolv.conf` already repointed at a listener that never comes
-/// up. Runs before anything on the system changes (issue #299).
-///
-/// Linux only: identifying the holder is what makes this safe, and macOS
-/// already unloads the daemon when its readiness probe fails.
+/// Refuse an install whose daemon could not bind (#299).
 #[cfg(target_os = "linux")]
-fn preflight_bind(config_path: &str) -> Result<(), String> {
-    // A running numa owns the port itself — this is a re-install/upgrade.
-    if is_unit_active("numa") {
-        return Ok(());
-    }
-    let config = crate::config::load_config(config_path)
+fn preflight_bind(skip_system_dns: bool) -> Result<(), String> {
+    let config_path = crate::data_dir().join("numa.toml");
+    let config = crate::config::load_config(&config_path.to_string_lossy())
         .map_err(|e| format!("failed to read config: {e}"))?
         .config;
 
@@ -1307,11 +1296,9 @@ fn preflight_bind(config_path: &str) -> Result<(), String> {
             Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
                 let port = addr.parse::<SocketAddr>().map(|a| a.port()).unwrap_or(53);
                 let holder = port_holder(port);
-                // systemd-resolved is the one holder install actually frees
-                // (DNSStubListener=no); numa itself means a stale process.
                 if holder
                     .as_ref()
-                    .is_some_and(|h| h.is_systemd_resolved() || h.comm == "numa")
+                    .is_some_and(|h| install_frees(h, skip_system_dns))
                 {
                     continue;
                 }
@@ -1321,6 +1308,13 @@ fn preflight_bind(config_path: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Holders the install itself stops: its own unit, and resolved's stub via `install_linux`.
+#[cfg(any(target_os = "linux", test))]
+fn install_frees(holder: &PortHolder, skip_system_dns: bool) -> bool {
+    holder.unit.as_deref() == Some("numa.service")
+        || (!skip_system_dns && holder.is_systemd_resolved())
 }
 
 #[cfg(target_os = "linux")]
@@ -1343,7 +1337,7 @@ fn install_conflict(addr: &str, holder: Option<&PortHolder>) -> String {
     };
     let palette = crate::palette::get();
     format!(
-        "  {}Aborted{}: {what}.\n\n  Nothing was installed and your DNS settings were not changed.\n\n{remedy}\n",
+        "  {}Aborted{}: {what}.\n\n  Nothing was installed and your DNS settings were not changed.\n\n{remedy}",
         palette.warning, palette.reset
     )
 }
@@ -1356,12 +1350,7 @@ fn install_conflict(addr: &str, holder: Option<&PortHolder>) -> String {
 /// proxy, browser DoH, etc.
 pub fn install_service(skip_system_dns: bool) -> Result<(), String> {
     #[cfg(target_os = "linux")]
-    if let Err(conflict) = preflight_bind("numa.toml") {
-        // Printed rather than returned: the message is a block, and main
-        // renders a Result error as escaped Debug. Mirrors serve.rs.
-        eprint!("{conflict}");
-        std::process::exit(1);
-    }
+    preflight_bind(skip_system_dns)?;
 
     #[cfg(target_os = "macos")]
     let result = install_service_macos(skip_system_dns);
@@ -1745,9 +1734,9 @@ fn backup_path_linux() -> std::path::PathBuf {
 }
 
 #[cfg(target_os = "linux")]
-fn is_unit_active(unit: &str) -> bool {
+fn is_systemd_resolved_active() -> bool {
     std::process::Command::new("systemctl")
-        .args(["is-active", "--quiet", unit])
+        .args(["is-active", "--quiet", "systemd-resolved"])
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
@@ -1756,7 +1745,7 @@ fn is_unit_active(unit: &str) -> bool {
 #[cfg(target_os = "linux")]
 fn install_linux() -> Result<(), String> {
     // Detect systemd-resolved — direct resolv.conf manipulation won't persist
-    if is_unit_active("systemd-resolved") {
+    if is_systemd_resolved_active() {
         let resolved_dir = std::path::Path::new("/etc/systemd/resolved.conf.d");
         std::fs::create_dir_all(resolved_dir)
             .map_err(|e| format!("failed to create {}: {}", resolved_dir.display(), e))?;
@@ -2441,6 +2430,20 @@ mod tests {
         assert!(msg.contains("sudo systemctl disable --now dnsmasq.service"));
         // Moving numa to a spare port is not a remedy for `numa install`.
         assert!(!msg.contains("Just testing"));
+    }
+
+    #[test]
+    fn install_frees_only_holders_the_install_stops() {
+        let resolved = holder("systemd-resolve", Some("systemd-resolved.service"));
+        assert!(install_frees(&resolved, false));
+        assert!(!install_frees(&resolved, true));
+
+        assert!(install_frees(&holder("numa", Some("numa.service")), true));
+        assert!(!install_frees(&holder("numa", None), false));
+        assert!(!install_frees(
+            &holder("dnsmasq", Some("dnsmasq.service")),
+            false
+        ));
     }
 
     #[test]
