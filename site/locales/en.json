@@ -28,6 +28,7 @@
   "stat.cache_entries": "{n} / {max} entries",
 
   "panel.resolution_paths": "Resolution Paths",
+  "panel.query_latency": "Query Latency",
   "panel.inbound_wire": "Inbound Wire",
   "panel.inbound_wire_sub": "apps → numa",
   "panel.outbound_wire": "Outbound Wire",
