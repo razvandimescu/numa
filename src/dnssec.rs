@@ -183,14 +183,13 @@ pub async fn validate_response(
             .unwrap_or(("", 0));
         let is_nxdomain = response.header.rescode == crate::header::ResultCode::NXDOMAIN;
 
-        let denial = validate_denial(
-            &response.authorities,
-            &all_rrsigs,
-            qname,
-            qtype_num,
-            is_nxdomain,
-            cache,
-        );
+        let denial = match verify_denial_rrsets(&response.authorities, &all_rrsigs, &ctx).await {
+            RrsetVerdict::Verified => {
+                validate_denial(&response.authorities, qname, qtype_num, is_nxdomain)
+            }
+            RrsetVerdict::Insecure => DnssecStatus::Insecure,
+            RrsetVerdict::Bogus => DnssecStatus::Bogus,
+        };
         return finish(start, stats, denial);
     }
 
@@ -1377,90 +1376,39 @@ fn nsec3_any_covers(decoded: &[(Vec<u8>, &DnsRecord)], target: &[u8]) -> bool {
     })
 }
 
-/// Verify that authority-section NSEC/NSEC3 RRSIGs are cryptographically valid.
-fn verify_authority_rrsigs(
+/// The NSEC/NSEC3 RRsets a denial rests on get the same signature and
+/// chain-of-trust checks as answer RRsets.
+async fn verify_denial_rrsets(
     authorities: &[DnsRecord],
     all_rrsigs: &[&DnsRecord],
-    denial_type: QueryType,
-    cache: &RwLock<DnsCache>,
-) -> bool {
-    // Group authority denial records into RRsets
+    ctx: &ValidationCtx<'_>,
+) -> RrsetVerdict {
     let denial_records: Vec<DnsRecord> = authorities
         .iter()
-        .filter(|r| r.query_type() == denial_type)
+        .filter(|r| matches!(r, DnsRecord::NSEC { .. } | DnsRecord::NSEC3 { .. }))
         .cloned()
         .collect();
-    let denial_rrsets = group_rrsets(&denial_records);
-
-    for (name, qtype, rrset) in &denial_rrsets {
-        let rrsig = match matching_rrsigs_for(all_rrsigs, name, *qtype)
-            .first()
-            .copied()
-        {
-            Some(r) => r,
-            None => return false,
-        };
-
-        if let DnsRecord::RRSIG {
-            signer_name,
-            key_tag,
-            algorithm,
-            signature,
-            expiration,
-            inception,
-            ..
-        } = rrsig
-        {
-            if !is_rrsig_time_valid(*expiration, *inception) {
-                return false;
-            }
-
-            // Look up signer DNSKEY in cache
-            let dnskeys = match cache.read().unwrap().lookup(signer_name, QueryType::DNSKEY) {
-                Some(pkt) => pkt.answers,
-                None => return false,
-            };
-
-            let signed_data = build_signed_data(rrsig, rrset);
-            let verified = dnskeys.iter().any(|dk| {
-                if let DnsRecord::DNSKEY {
-                    flags,
-                    protocol,
-                    algorithm: dk_algo,
-                    public_key,
-                    ..
-                } = dk
-                {
-                    if dk_algo != algorithm {
-                        return false;
-                    }
-                    let tag = compute_key_tag(*flags, *protocol, *dk_algo, public_key);
-                    if tag != *key_tag {
-                        return false;
-                    }
-                    verify_signature(*algorithm, public_key, &signed_data, signature)
-                } else {
-                    false
-                }
-            });
-
-            if !verified {
-                return false;
+    let mut verdict = RrsetVerdict::Verified;
+    for (name, qtype, rrset) in &group_rrsets(&denial_records) {
+        let rrsigs = matching_rrsigs_for(all_rrsigs, name, *qtype);
+        match verify_rrset(name, *qtype, rrset, &rrsigs, ctx).await {
+            RrsetVerdict::Verified => {}
+            RrsetVerdict::Insecure => verdict = RrsetVerdict::Insecure,
+            RrsetVerdict::Bogus => {
+                debug!("dnssec: no valid signature for denial {} {:?}", name, qtype);
+                return RrsetVerdict::Bogus;
             }
         }
     }
-
-    !denial_rrsets.is_empty()
+    verdict
 }
 
 /// Validate denial of existence using NSEC or NSEC3 records from authority section.
 fn validate_denial(
     authorities: &[DnsRecord],
-    all_rrsigs: &[&DnsRecord],
     qname: &str,
     qtype: u16,
     is_nxdomain: bool,
-    cache: &RwLock<DnsCache>,
 ) -> DnssecStatus {
     // Try NSEC first
     let nsecs: Vec<&DnsRecord> = authorities
@@ -1469,11 +1417,6 @@ fn validate_denial(
         .collect();
 
     if !nsecs.is_empty() {
-        if !verify_authority_rrsigs(authorities, all_rrsigs, QueryType::NSEC, cache) {
-            debug!("dnssec: NSEC authority RRSIGs failed verification");
-            return DnssecStatus::Indeterminate;
-        }
-
         if is_nxdomain {
             // RFC 4035 §5.4: need (1) NSEC covering the name gap AND (2) NSEC proving
             // no wildcard at *.closest_encloser
@@ -1546,11 +1489,6 @@ fn validate_denial(
         .collect();
 
     if !nsec3s.is_empty() {
-        if !verify_authority_rrsigs(authorities, all_rrsigs, QueryType::NSEC3, cache) {
-            debug!("dnssec: NSEC3 authority RRSIGs failed verification");
-            return DnssecStatus::Indeterminate;
-        }
-
         // Get hash params from first NSEC3
         if let Some(DnsRecord::NSEC3 {
             hash_algorithm,
@@ -2676,5 +2614,64 @@ mod tests {
         want.extend(b"\x01S\x07SIP+D2U\x00"); // character-strings untouched
         want.extend(b"\x03sip\x04test\x00");
         assert_eq!(canon, want);
+    }
+    fn nodata_nsec(owner: &str) -> DnsRecord {
+        DnsRecord::NSEC {
+            domain: owner.into(),
+            next_domain: format!("zzz.{}", owner),
+            type_bitmap: vec![],
+            ttl: 3600,
+        }
+    }
+
+    // A signed denial is only as good as the chain behind its signer's DNSKEY;
+    // a key that is merely cached proves nothing.
+    #[tokio::test]
+    async fn denial_signed_by_an_unchained_key_is_not_secure() {
+        let (cache, srtt, _stats) = empty_ctx();
+        let attacker = mk_signer(257);
+        cache.write().unwrap().insert(
+            "test",
+            QueryType::DNSKEY,
+            &mk_pkt(vec![mk_dnskey("test", &attacker)]),
+        );
+        let nsec = nodata_nsec("www.test");
+        let sig = mk_rrsig(&attacker, "test", QueryType::NSEC, &[&nsec]);
+
+        let mut response = DnsPacket::new();
+        response.questions.push(crate::question::DnsQuestion::new(
+            "www.test".into(),
+            QueryType::A,
+        ));
+        response.authorities = vec![nsec, sig];
+
+        let status = validate_response(&response, &cache, &[], &srtt).await.0;
+        assert_eq!(status, DnssecStatus::Bogus);
+    }
+
+    #[tokio::test]
+    async fn denial_signed_by_a_chained_key_verifies() {
+        let (cache, srtt, stats) = empty_ctx();
+        let (root, anchors) = seed_test_root(&cache);
+        let ksk = mk_signer(257);
+        let dk = mk_dnskey("test", &ksk);
+        seed_ds(&cache, "test", &[&dk], Some(&root));
+        let selfsig = mk_rrsig(&ksk, "test", QueryType::DNSKEY, &[&dk]);
+        cache
+            .write()
+            .unwrap()
+            .insert("test", QueryType::DNSKEY, &mk_pkt(vec![dk, selfsig]));
+
+        let nsec = nodata_nsec("www.test");
+        let sig = mk_rrsig(&ksk, "test", QueryType::NSEC, &[&nsec]);
+        let ctx = ValidationCtx {
+            cache: &cache,
+            root_hints: &[],
+            srtt: &srtt,
+            trust_anchors: &anchors,
+            stats: &stats,
+        };
+        let verdict = verify_denial_rrsets(&[nsec], &[&sig], &ctx).await;
+        assert_eq!(verdict, RrsetVerdict::Verified);
     }
 }
