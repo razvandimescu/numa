@@ -349,14 +349,7 @@ fn spawn_background_services(
     {
         let keepalive_ctx = Arc::clone(ctx);
         tokio::spawn(async move {
-            doh_keepalive_loop(keepalive_ctx).await;
-        });
-    }
-
-    if ctx.upstream_mode == crate::config::UpstreamMode::Forward && config.upstream.srtt {
-        let probe_ctx = Arc::clone(ctx);
-        tokio::spawn(async move {
-            probe_upstreams_loop(probe_ctx).await;
+            upstream_keepalive_loop(keepalive_ctx).await;
         });
     }
 
@@ -945,7 +938,7 @@ async fn warm_domain(ctx: &ServerCtx, domain: &str) {
     }
 }
 
-async fn doh_keepalive_loop(ctx: Arc<ServerCtx>) {
+async fn upstream_keepalive_loop(ctx: Arc<ServerCtx>) {
     // First tick fires immediately so we surface bootstrap-resolver failures
     // (unreachable Quad9/Cloudflare, blocked :53, bad upstream hostname) in
     // the startup logs instead of on the first client query.
@@ -956,14 +949,6 @@ async fn doh_keepalive_loop(ctx: Arc<ServerCtx>) {
         if let Some(upstream) = pool.preferred() {
             crate::forward::keepalive_doh(upstream).await;
         }
-    }
-}
-
-async fn probe_upstreams_loop(ctx: Arc<ServerCtx>) {
-    let mut interval = tokio::time::interval(Duration::from_secs(25));
-    loop {
-        interval.tick().await;
-        let pool = ctx.upstream_pool.lock().unwrap().clone();
         crate::forward::probe_upstreams(&pool, &ctx.srtt, ctx.timeout).await;
     }
 }

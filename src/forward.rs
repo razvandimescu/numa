@@ -781,24 +781,20 @@ pub async fn keepalive_doh(upstream: &Upstream) {
     }
 }
 
-/// Measure every primary so the SRTT sort ranks by RTT rather than config
-/// order: a standby is otherwise only sampled after the primary fails (#289).
-/// Skipped unless it can change the ranking: fallback is never sorted, and an
-/// unkeyed (DoH/ODoH) primary sorts first whatever the others measure.
+/// Measure every keyed primary so the SRTT sort ranks by RTT rather than
+/// config order: a standby is otherwise only sampled after the primary fails
+/// (#289). Fallback is never sorted, so it is never probed.
 pub async fn probe_upstreams(
     pool: &UpstreamPool,
     srtt: &RwLock<SrttCache>,
     timeout_duration: Duration,
 ) {
-    let Some(keyed) = pool
+    let keyed: Vec<_> = pool
         .primary
         .iter()
-        .map(|u| u.tracked_key().map(|key| (u, key)))
-        .collect::<Option<Vec<_>>>()
-    else {
-        return;
-    };
-    if keyed.len() < 2 {
+        .filter_map(|u| u.tracked_key().map(|key| (u, key)))
+        .collect();
+    if keyed.len() < 2 || !srtt.read().unwrap().is_enabled() {
         return;
     }
     let probes = keyed.into_iter().map(|(upstream, (ip, t))| async move {
@@ -1103,20 +1099,6 @@ mod tests {
     async fn probe_skips_a_lone_udp_upstream_and_its_tcp_sibling() {
         let addr = crate::testutil::blackhole_upstream();
         let pool = UpstreamPool::new(vec![Upstream::Udp(addr)], vec![Upstream::Tcp(addr)]);
-        let srtt = RwLock::new(SrttCache::new(true));
-
-        probe_upstreams(&pool, &srtt, Duration::from_millis(50)).await;
-
-        let srtt = srtt.read().unwrap();
-        assert!(!srtt.is_known(addr.ip(), UpstreamTransport::Udp));
-        assert!(!srtt.is_known(addr.ip(), UpstreamTransport::Tcp));
-    }
-
-    #[tokio::test]
-    async fn probe_skips_a_pool_with_an_unkeyed_primary() {
-        let addr = crate::testutil::blackhole_upstream();
-        let (doh, _rx) = doh_upstream(to_wire(&root_ns_response())).await;
-        let pool = UpstreamPool::new(vec![doh, Upstream::Udp(addr), Upstream::Tcp(addr)], vec![]);
         let srtt = RwLock::new(SrttCache::new(true));
 
         probe_upstreams(&pool, &srtt, Duration::from_millis(50)).await;
