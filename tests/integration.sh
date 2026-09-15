@@ -971,6 +971,36 @@ check "AAAA returns real answers with filter off" \
     ":" \
     "$($DIG google.com AAAA +short | head -1)"
 
+# --- HTTPS RR (type 65) clean delivery ---
+# ECH configs make HTTPS RRs large, and a record dropped at the 512-byte UDP
+# boundary reads to a browser as "this site publishes no ECH". Query as
+# `type65`: dig 9.10.6 on macOS misparses `HTTPS` as a domain name.
+ech_marker() {
+    # dig 9.18 pretty-prints `ech=<base64>`; 9.10.6 emits RFC 3597 hex,
+    # where the ECHConfigList version 0xfe0d is the stable marker.
+    if echo "$1" | tr -d ' \t\n' | grep -qiE 'ech=|fe0d'; then
+        echo present
+    else
+        echo absent
+    fi
+}
+
+ECH_HOST="crypto.cloudflare.com"
+
+if [ "$(ech_marker "$($DIG $ECH_HOST type65 2>&1 || true)")" = "present" ]; then
+    check "HTTPS RR: ech SvcParam delivered over TCP" \
+        "present" \
+        "$(ech_marker "$($DIG $ECH_HOST type65 +tcp 2>&1 || true)")"
+
+    # 512 is the floor Numa clamps to. dig retries over TCP if the answer
+    # comes back truncated, so this covers both the fits and TC=1 cases.
+    check "HTTPS RR: ech survives a 512-byte client buffer" \
+        "present" \
+        "$(ech_marker "$($DIG $ECH_HOST type65 +bufsize=512 2>&1 || true)")"
+else
+    printf "  ${DIM}~ HTTPS RR ech delivery (skipped: no ech SvcParam from upstream)${RESET}\n"
+fi
+
 kill "$NUMA_PID" 2>/dev/null || true
 wait "$NUMA_PID" 2>/dev/null || true
 sleep 1
