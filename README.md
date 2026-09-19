@@ -142,6 +142,7 @@ Turnkey compose recipes:
 | Recursive resolver | — | — | Yes | Yes, with SRTT selection |
 | DNSSEC validation | — | — | Yes | Yes (RSA, ECDSA, Ed25519) |
 | Ad blocking | Yes | Yes | — | Hagezi Pro |
+| Per-client rules | Groups | Yes | Views / tags | By CIDR (`[[client_policy]]`), config file only |
 | Web admin UI | Full | Full | — | Dashboard |
 | Encrypted upstream (DoH/DoT) | Needs cloudflared | DoH only | DoT only | DoH + DoT (`tls://`) |
 | Encrypted clients (DoT listener) | Needs stunnel sidecar | Yes | Yes | Native (RFC 7858) |
