@@ -72,7 +72,7 @@ Three resolution modes:
 
 - **`forward`** (default) — transparent proxy to your existing system DNS. Everything works as before, just with caching and ad blocking on top. Captive portals, VPNs, corporate DNS — all respected.
 - **`recursive`** — resolve directly from root nameservers. No upstream dependency, no single entity sees your full query pattern. Add `[dnssec] enabled = true` for full chain-of-trust validation.
-- **`auto`** — probe root servers on startup, recursive if reachable, encrypted DoH fallback if blocked.
+- **`auto`** — probe root servers on startup, recursive if reachable, otherwise forward over DoH to Quad9 (`https://9.9.9.9/dns-query`), which then sees your queries. Use `forward` with your own `[upstream]` to pick a different provider.
 
 DNSSEC validates the full chain of trust: RRSIG signatures, DNSKEY verification, DS delegation, NSEC/NSEC3 denial proofs. [Read how it works →](https://numa.rs/blog/posts/dnssec-from-scratch.html)
 
