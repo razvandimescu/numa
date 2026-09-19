@@ -43,6 +43,7 @@ counters tick.
 ## What the relay keeps and limits
 
 - **Logs:** no per-request logs. Caddy's access log is discarded and the relay only increments the aggregate counters shown at `/health`. A failed forward writes one error line naming the target URL, never the client.
+- **Stats:** the `/health` numbers are four in-memory integers (total, forwarded ok, forwarded error, rejected) incremented per request. No client IP, target or timestamp is stored with them, and they reset to zero when the process restarts. The public instance shows its own at [odoh-relay.numa.rs/health](https://odoh-relay.numa.rs/health).
 - **Request caps:** 4 KiB request body, 8 KiB target response, 5 s for the whole round trip to the target.
 - **Targets:** `targethost` accepts only letters, digits, dots and dashes (at least one dot) and is always dialled over HTTPS with certificate validation, which rules out userinfo, port, path and scheme tricks. Redirects from the target are not followed.
 - **Rate limiting:** none built in. Add it in front of the relay, at Caddy or the host firewall, if you see abuse.
