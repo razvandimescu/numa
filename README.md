@@ -83,6 +83,8 @@ DNSSEC validates the full chain of trust: RRSIG signatures, DNSKEY verification,
 
 ALPN `"dot"` is advertised and enforced in both modes; a handshake with mismatched ALPN is rejected as a cross-protocol confusion defense.
 
+**Oblivious DoH** (RFC 9230) — set `[upstream] mode = "odoh"` with a `relay` and `target` ([recipe](recipes/odoh-upstream.md)) and every outbound query is HPKE-sealed to the target's key and sent through the relay. The relay sees your IP and ciphertext. The target sees the question and the relay's IP. Neither gets both, and a relay that redirects the query elsewhere only produces something the new destination cannot decrypt. Numa refuses a relay and target that share a host or a registrable domain, since the property depends on distinct operators. What ODoH does not hide: the connection you open afterwards. Your ISP still sees the IP you connect to and, without ECH, the hostname in the TLS handshake. ODoH removes the resolver as a party that can link you to your queries, nothing more. If you trust no third party at all, `recursive` mode involves none, at the cost of plaintext queries to authoritative servers.
+
 **Phone setup** — point your iPhone or Android at Numa in one step:
 
 ```bash
@@ -156,6 +158,22 @@ Turnkey compose recipes:
 ## Performance
 
 0.1ms cached queries — matches Unbound and AdGuard Home. Wire-level cache stores raw bytes with in-place TTL patching. Request hedging eliminates p99 spikes: cold recursive p99 538ms vs Unbound 748ms (−28%), σ 4× tighter. [Benchmarks →](benches/)
+
+## FAQ
+
+**Why no DNS library (hickory)?** The wire-protocol parser was a learning project written to understand RFC 1035, and the features were added on top of it one by one. `hickory` is a dev-dependency, used as a test oracle. The cost is real: protocol bugs are this project's to fix, which is why the parsers are fuzzed in CI.
+
+**Was AI used?** Yes. The wire-protocol parser was written by hand. Later features (recursive resolver, DNSSEC validation, dashboard) were built with AI assistance, and reviewed, tested and debugged by the maintainer. The git history shows the progression.
+
+**How much memory does it need?** About 31 MB measured with a 390K-domain blocklist: 23 MB of that is the blocklist, 4 MB the cache, 4 MB everything else. It runs on a Pi Zero.
+
+**Does it run as root?** Binding port 53 needs privilege, so `sudo numa` in the foreground does. The Linux service does not: the systemd unit uses `DynamicUser=yes` with only `CAP_NET_BIND_SERVICE`. The macOS launchd daemon runs as root. To avoid privilege entirely, set `bind_addr` to a high port and pass `--no-system-dns`.
+
+**What about systemd-resolved?** `numa install` detects it and writes a drop-in that points it at Numa and turns off its stub listener, and `numa uninstall` removes the drop-in. Any other process holding port 53 (dnsmasq, including the one NetworkManager spawns) has to be stopped or moved by hand. Numa reports the conflict at startup but does not resolve it.
+
+**What is the local CA, and how do I remove it?** Numa generates a CA on first start to sign certificates for `.numa` services and the self-signed DoT listener. It lives in the data directory (`/var/lib/numa` on Linux, `/usr/local/var/numa` on macOS, `%PROGRAMDATA%\numa` on Windows) with the key readable by its owner only. `numa install` adds it to the system trust store and `numa uninstall` removes it. The CA is not needed if you bring your own certificates: `[proxy]` and `[dot]` both accept `cert_path` / `key_path`.
+
+**Why "Numa"?** *Nume* is Romanian for "name". No relation to NUMA memory.
 
 ## Learn More
 
