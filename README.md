@@ -8,7 +8,7 @@
 
 A portable DNS resolver in a single binary. Block ads on any network, name your local services (`frontend.numa`), override any hostname with auto-revert, and seal every outbound query with **ODoH (RFC 9230)** so no single party sees both who you are and what you asked — all from your laptop, no cloud account or Raspberry Pi required.
 
-Built from scratch in Rust. Zero DNS libraries. Caching, ad blocking, and local service domains out of the box. Optional recursive resolution from root nameservers with full DNSSEC chain-of-trust validation, plus a DNS-over-TLS listener for encrypted client connections (iOS Private DNS, systemd-resolved, etc.). Run `numa relay` and the same binary becomes a public ODoH endpoint too — the curated DNSCrypt list currently has one surviving relay, so every Numa deploy materially expands the ecosystem. One ~8MB binary, everything embedded.
+Built from scratch in Rust. Zero DNS libraries. Caching, ad blocking, and local service domains out of the box. Optional recursive resolution from root nameservers with full DNSSEC chain-of-trust validation, plus a DNS-over-TLS listener for encrypted client connections (iOS Private DNS, systemd-resolved, etc.). Run `numa relay` and the same binary becomes a public ODoH endpoint too — the curated DNSCrypt list currently has one surviving relay, so every Numa deploy materially expands the ecosystem. One ~8MB binary, everything embedded. The wire-protocol parser was written by hand as a learning project; later features (recursive resolver, DNSSEC, dashboard) were built with AI assistance.
 
 ![Numa dashboard](assets/hero-demo.gif)
 
@@ -49,7 +49,7 @@ Set as system DNS:
 | Linux | `sudo numa install` | `sudo numa uninstall` |
 | Windows | `numa install` (admin) + reboot | `numa uninstall` (admin) + reboot |
 
-On macOS and Linux, numa runs as a system service (launchd/systemd). On Windows, numa auto-starts on login via registry. Windows also binds `127.0.0.2:53` (the built-in Dnscache owns `127.0.0.1:53`) and installs an NRPT rule to route queries to it — so edit `bind_addr`/`api_bind_addr` against `127.0.0.2`, not `127.0.0.1`.
+On macOS and Linux, numa runs as a system service (launchd/systemd). The systemd unit is unprivileged (`DynamicUser=yes`, only `CAP_NET_BIND_SERVICE`); the launchd daemon runs as root. `numa install` reconfigures systemd-resolved through a drop-in that `numa uninstall` removes; any other process holding port 53 (dnsmasq, including NetworkManager's) has to be stopped by hand. On Windows, numa auto-starts on login via registry. Windows also binds `127.0.0.2:53` (the built-in Dnscache owns `127.0.0.1:53`) and installs an NRPT rule to route queries to it — so edit `bind_addr`/`api_bind_addr` against `127.0.0.2`, not `127.0.0.1`.
 
 ## Local Services
 
@@ -78,12 +78,12 @@ DNSSEC validates the full chain of trust: RRSIG signatures, DNSKEY verification,
 
 **DNS-over-TLS listener** (RFC 7858) — accept encrypted queries on port 853 from strict clients like iOS Private DNS, systemd-resolved, or stubby. Two modes:
 
-- **Self-signed** (default) — numa generates a local CA automatically. `numa install` adds it to the system trust store on macOS, Linux (Debian/Ubuntu, Fedora/RHEL/SUSE, Arch), and Windows. On iOS, install the `.mobileconfig` from `numa setup-phone`. Firefox keeps its own NSS store and ignores the system one — trust the CA there manually if you need HTTPS for `.numa` services in Firefox.
+- **Self-signed** (default) — numa generates a local CA automatically. `numa install` adds it to the system trust store on macOS, Linux (Debian/Ubuntu, Fedora/RHEL/SUSE, Arch), and Windows, and `numa uninstall` removes it. On iOS, install the `.mobileconfig` from `numa setup-phone`. Firefox keeps its own NSS store and ignores the system one — trust the CA there manually if you need HTTPS for `.numa` services in Firefox.
 - **Bring-your-own cert** — point `[dot] cert_path` / `key_path` at a publicly-trusted cert (e.g., Let's Encrypt via DNS-01 challenge on a domain pointing at your numa instance). Clients connect without any trust-store setup — same UX as AdGuard Home or Cloudflare `1.1.1.1`.
 
 ALPN `"dot"` is advertised and enforced in both modes; a handshake with mismatched ALPN is rejected as a cross-protocol confusion defense.
 
-**Oblivious DoH** (RFC 9230) — set `[upstream] mode = "odoh"` with a `relay` and `target` ([recipe](recipes/odoh-upstream.md)) and every outbound query is HPKE-sealed to the target's key and sent through the relay. The relay sees your IP and ciphertext. The target sees the question and the relay's IP. Neither gets both, and a relay that redirects the query elsewhere only produces something the new destination cannot decrypt. Numa refuses a relay and target that share a host or a registrable domain, since the property depends on distinct operators. What ODoH does not hide: the connection you open afterwards. Your ISP still sees the IP you connect to and, without ECH, the hostname in the TLS handshake. ODoH removes the resolver as a party that can link you to your queries, nothing more. If you trust no third party at all, `recursive` mode involves none, at the cost of plaintext queries to authoritative servers.
+**Oblivious DoH** (RFC 9230) — with `[upstream] mode = "odoh"` ([recipe](recipes/odoh-upstream.md)) each query is HPKE-sealed to the target and sent through a relay. The relay sees your IP and ciphertext, the target sees the question and the relay's IP, and a relay that redirects the query hands the new destination something it cannot decrypt. Numa refuses a relay and target that share a registrable domain. ODoH does not hide the connection you open afterwards: your ISP still sees the destination IP and, without ECH, the hostname in the TLS handshake.
 
 **Phone setup** — point your iPhone or Android at Numa in one step:
 
@@ -158,22 +158,6 @@ Turnkey compose recipes:
 ## Performance
 
 0.1ms cached queries — matches Unbound and AdGuard Home. Wire-level cache stores raw bytes with in-place TTL patching. Request hedging eliminates p99 spikes: cold recursive p99 538ms vs Unbound 748ms (−28%), σ 4× tighter. [Benchmarks →](benches/)
-
-## FAQ
-
-**Why no DNS library (hickory)?** The wire-protocol parser was a learning project written to understand RFC 1035, and the features were added on top of it one by one. `hickory` is a dev-dependency, used as a test oracle. The cost is real: protocol bugs are this project's to fix, which is why the parsers are fuzzed in CI.
-
-**Was AI used?** Yes. The wire-protocol parser was written by hand. Later features (recursive resolver, DNSSEC validation, dashboard) were built with AI assistance, and reviewed, tested and debugged by the maintainer. The git history shows the progression.
-
-**How much memory does it need?** About 31 MB measured with a 390K-domain blocklist: 23 MB of that is the blocklist, 4 MB the cache, 4 MB everything else. It runs on a Pi Zero.
-
-**Does it run as root?** Binding port 53 needs privilege, so `sudo numa` in the foreground does. The Linux service does not: the systemd unit uses `DynamicUser=yes` with only `CAP_NET_BIND_SERVICE`. The macOS launchd daemon runs as root. To avoid privilege entirely, set `bind_addr` to a high port and pass `--no-system-dns`.
-
-**What about systemd-resolved?** `numa install` detects it and writes a drop-in that points it at Numa and turns off its stub listener, and `numa uninstall` removes the drop-in. Any other process holding port 53 (dnsmasq, including the one NetworkManager spawns) has to be stopped or moved by hand. Numa reports the conflict at startup but does not resolve it.
-
-**What is the local CA, and how do I remove it?** Numa generates a CA on first start to sign certificates for `.numa` services and the self-signed DoT listener. It lives in the data directory (`/var/lib/numa` on Linux, `/usr/local/var/numa` on macOS, `%PROGRAMDATA%\numa` on Windows) with the key readable by its owner only. `numa install` adds it to the system trust store and `numa uninstall` removes it. The CA is not needed if you bring your own certificates: `[proxy]` and `[dot]` both accept `cert_path` / `key_path`.
-
-**Why "Numa"?** *Nume* is Romanian for "name". No relation to NUMA memory.
 
 ## Learn More
 
