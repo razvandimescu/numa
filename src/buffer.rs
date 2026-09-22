@@ -1,11 +1,18 @@
 use crate::Result;
 
 pub(crate) const BUF_SIZE: usize = 4096;
+const MAX_COMPRESSION_TARGETS: usize = 64;
+const _: () = assert!(
+    BUF_SIZE <= 0x3FFF,
+    "compression pointers carry a 14-bit offset"
+);
 
 pub struct BytePacketBuffer {
     pub buf: [u8; BUF_SIZE],
     pub pos: usize,
     overflow: bool,
+    compression_targets: [u16; MAX_COMPRESSION_TARGETS],
+    compression_target_count: usize,
 }
 
 impl Default for BytePacketBuffer {
@@ -20,6 +27,8 @@ impl BytePacketBuffer {
             buf: [0; BUF_SIZE],
             pos: 0,
             overflow: false,
+            compression_targets: [0; MAX_COMPRESSION_TARGETS],
+            compression_target_count: 0,
         }
     }
 
@@ -266,6 +275,30 @@ impl BytePacketBuffer {
         Ok(())
     }
 
+    /// `write_qname` plus RFC 1035 §4.1.4 compression: a name a previous
+    /// `write_qname_compressed` wrote in full becomes a pointer.
+    pub fn write_qname_compressed(&mut self, qname: &str) -> Result<()> {
+        let start = self.pos;
+        self.write_qname(qname)?;
+        if self.buf[start] == 0 {
+            return Ok(());
+        }
+        let len = self.pos - start;
+        let earlier = self.compression_targets[..self.compression_target_count]
+            .iter()
+            .map(|&t| usize::from(t))
+            .find(|&t| self.buf[t..t + len] == self.buf[start..self.pos]);
+        if let Some(target) = earlier {
+            self.pos = start;
+            return self.write_u16(0xC000 | target as u16);
+        }
+        if self.compression_target_count < MAX_COMPRESSION_TARGETS {
+            self.compression_targets[self.compression_target_count] = start as u16;
+            self.compression_target_count += 1;
+        }
+        Ok(())
+    }
+
     pub fn write_bytes(&mut self, data: &[u8]) -> Result<()> {
         let end = self.pos + data.len();
         if end > BUF_SIZE {
@@ -446,6 +479,18 @@ mod tests {
         b.write_qname(".").unwrap();
         assert_eq!(&a.buf[..a.pos], b"\x00");
         assert_eq!(&b.buf[..b.pos], b"\x00");
+    }
+
+    #[test]
+    fn compressed_write_points_repeated_names_back() {
+        let mut buf = BytePacketBuffer::new();
+        for name in ["www.example.com", "www.example.com", "mail.example.com"] {
+            buf.write_qname_compressed(name).unwrap();
+        }
+        assert_eq!(
+            &buf.filled()[17..],
+            b"\xc0\x00\x04mail\x07example\x03com\x00"
+        );
     }
 
     #[test]

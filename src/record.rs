@@ -486,7 +486,7 @@ impl DnsRecord {
                 write_header(buffer, domain, QueryType::NS.to_num(), ttl)?;
                 let pos = buffer.pos();
                 buffer.write_u16(0)?;
-                buffer.write_qname(host)?;
+                buffer.write_qname_compressed(host)?;
                 let size = buffer.pos() - (pos + 2);
                 buffer.set_u16(pos, size as u16)?;
             }
@@ -498,7 +498,7 @@ impl DnsRecord {
                 write_header(buffer, domain, QueryType::CNAME.to_num(), ttl)?;
                 let pos = buffer.pos();
                 buffer.write_u16(0)?;
-                buffer.write_qname(host)?;
+                buffer.write_qname_compressed(host)?;
                 let size = buffer.pos() - (pos + 2);
                 buffer.set_u16(pos, size as u16)?;
             }
@@ -510,7 +510,7 @@ impl DnsRecord {
                 write_header(buffer, domain, QueryType::PTR.to_num(), ttl)?;
                 let pos = buffer.pos();
                 buffer.write_u16(0)?;
-                buffer.write_qname(host)?;
+                buffer.write_qname_compressed(host)?;
                 let size = buffer.pos() - (pos + 2);
                 buffer.set_u16(pos, size as u16)?;
             }
@@ -524,7 +524,7 @@ impl DnsRecord {
                 let pos = buffer.pos();
                 buffer.write_u16(0)?;
                 buffer.write_u16(priority)?;
-                buffer.write_qname(host)?;
+                buffer.write_qname_compressed(host)?;
                 let size = buffer.pos() - (pos + 2);
                 buffer.set_u16(pos, size as u16)?;
             }
@@ -542,8 +542,8 @@ impl DnsRecord {
                 write_header(buffer, domain, QueryType::SOA.to_num(), ttl)?;
                 let rdlen_pos = buffer.pos();
                 buffer.write_u16(0)?;
-                buffer.write_qname(mname)?;
-                buffer.write_qname(rname)?;
+                buffer.write_qname_compressed(mname)?;
+                buffer.write_qname_compressed(rname)?;
                 buffer.write_u32(serial)?;
                 buffer.write_u32(refresh)?;
                 buffer.write_u32(retry)?;
@@ -616,6 +616,7 @@ impl DnsRecord {
                 buffer.write_u32(expiration)?;
                 buffer.write_u32(inception)?;
                 buffer.write_u16(key_tag)?;
+                // RFC 4034 §3.1.7 and §4.1.1: signer and next-domain names are never compressed.
                 buffer.write_qname(signer_name)?;
                 buffer.write_bytes(signature)?;
                 let rdlen = buffer.pos() - (rdlen_pos + 2);
@@ -675,7 +676,7 @@ impl DnsRecord {
 }
 
 fn write_header(buffer: &mut BytePacketBuffer, domain: &str, qtype: u16, ttl: u32) -> Result<()> {
-    buffer.write_qname(domain)?;
+    buffer.write_qname_compressed(domain)?;
     buffer.write_u16(qtype)?;
     buffer.write_u16(1)?; // class IN
     buffer.write_u32(ttl)?;

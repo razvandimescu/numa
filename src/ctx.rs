@@ -2654,17 +2654,8 @@ mod tests {
 
     #[test]
     fn serialize_with_fallback_sets_tc_on_buffer_overflow() {
-        // 4096-byte buffer / ~24 bytes per TXT-as-UNKNOWN record → ~170+ fills it.
         let query = DnsPacket::query(0x1234, "example.com", QueryType::TXT);
-        let mut response = DnsPacket::response_from(&query, ResultCode::NOERROR);
-        for _ in 0..256 {
-            response.answers.push(DnsRecord::UNKNOWN {
-                domain: "example.com".into(),
-                qtype: QueryType::TXT.to_num(),
-                data: vec![0u8; 32],
-                ttl: 300,
-            });
-        }
+        let mut response = bulky_response(&query, 2 * crate::buffer::BUF_SIZE);
         let buf =
             serialize_with_fallback(&mut response, &query, "example.com", false, Transport::Udp)
                 .unwrap();
@@ -2702,10 +2693,13 @@ mod tests {
         );
     }
 
-    /// ~`bytes` of TXT-as-UNKNOWN answers (55 bytes each, uncompressed owner).
+    /// Owner pointer to the question, fixed fields, 32 bytes of data.
+    const BULKY_RECORD_LEN: usize = 2 + 10 + 32;
+
+    /// ~`bytes` of TXT-as-UNKNOWN answers.
     fn bulky_response(query: &DnsPacket, bytes: usize) -> DnsPacket {
         let mut response = DnsPacket::response_from(query, ResultCode::NOERROR);
-        for _ in 0..bytes / 55 {
+        for _ in 0..bytes / BULKY_RECORD_LEN {
             response.answers.push(DnsRecord::UNKNOWN {
                 domain: "example.com".into(),
                 qtype: QueryType::TXT.to_num(),
@@ -2744,11 +2738,34 @@ mod tests {
         assert!(parsed.edns.is_none(), "no OPT for an OPT-less client");
     }
 
+    // #404: uncompressed, these 8 A records are 587 bytes and truncate for an
+    // OPT-less client that cannot retry over TCP.
+    #[test]
+    fn udp_reply_compresses_repeated_owner_names_under_512() {
+        let name = "ocfconnect-shard-eu02-euwest1.samsungiotcloud.com";
+        let query = DnsPacket::query(0x1234, name, QueryType::A);
+        let mut response = DnsPacket::response_from(&query, ResultCode::NOERROR);
+        for i in 0..8 {
+            response.answers.push(DnsRecord::A {
+                domain: name.into(),
+                addr: Ipv4Addr::new(52, 49, 100, i),
+                ttl: 35,
+            });
+        }
+        let buf =
+            serialize_with_fallback(&mut response, &query, name, false, Transport::Udp).unwrap();
+        assert_eq!(buf.pos(), 12 + 55 + 8 * 16);
+        let parsed =
+            DnsPacket::from_buffer(&mut BytePacketBuffer::from_bytes(buf.filled())).unwrap();
+        assert!(!parsed.header.truncated_message);
+        assert_eq!(parsed.answers.len(), 8);
+    }
+
     #[test]
     fn udp_reply_within_advertised_payload_passes() {
         let parsed = serialize(&edns_query(1232), 800, Transport::Udp);
         assert!(!parsed.header.truncated_message);
-        assert_eq!(parsed.answers.len(), 800 / 55);
+        assert_eq!(parsed.answers.len(), 800 / BULKY_RECORD_LEN);
     }
 
     #[test]
@@ -2770,7 +2787,7 @@ mod tests {
         let query = DnsPacket::query(0x1234, "example.com", QueryType::TXT);
         let parsed = serialize(&query, 3000, Transport::Tcp);
         assert!(!parsed.header.truncated_message);
-        assert_eq!(parsed.answers.len(), 3000 / 55);
+        assert_eq!(parsed.answers.len(), 3000 / BULKY_RECORD_LEN);
     }
 
     /// #188: cache entries synthesized internally (e.g. NS delegation snapshots)

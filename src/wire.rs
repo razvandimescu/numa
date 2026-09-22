@@ -499,9 +499,12 @@ mod tests {
             ],
         );
         let wire = to_wire(&pkt);
+        let pointers_to_question = wire.windows(2).filter(|w| *w == [0xC0, 0x0C]).count();
+        assert_eq!(
+            pointers_to_question, 2,
+            "both owners must point at the question"
+        );
 
-        // Verify compression is actually present (second name should be a pointer)
-        // The first answer's name is at some offset, and the second should use 0xC0xx
         let meta = scan_ttl_offsets(&wire).unwrap();
         assert_eq!(meta.ttl_offsets.len(), 2);
 
