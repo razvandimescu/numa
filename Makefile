@@ -81,5 +81,7 @@ ifeq ($(shell uname -s),Darwin)
 else
 	sudo systemctl restart numa 2>/dev/null || sudo kill $$(pgrep -f /usr/local/bin/numa) 2>/dev/null || true
 endif
-	@sleep 1
-	@dig @127.0.0.1 google.com +short +time=3 > /dev/null && echo "Service restarted successfully" || echo "Warning: DNS not responding yet"
+	@for i in 1 2 3 4 5 6 7 8 9 10; do \
+		dig @127.0.0.1 google.com +short +time=1 +tries=1 > /dev/null 2>&1 && echo "Service restarted successfully" && exit 0; \
+		sleep 1; \
+	done; echo "Warning: DNS not responding after 10s"
