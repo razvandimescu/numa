@@ -2761,6 +2761,40 @@ mod tests {
         assert_eq!(parsed.answers.len(), 8);
     }
 
+    // the CNAME target is registered when its RDATA is written, so the A
+    // owners that repeat it point back at it instead of at the question.
+    #[test]
+    fn udp_reply_compresses_owners_repeating_a_cname_target() {
+        let target = "edge-shard-eu02-euwest1.akamaiedge-cdn.example.net";
+        let query = DnsPacket::query(0x1234, "www.example.com", QueryType::A);
+        let mut response = DnsPacket::response_from(&query, ResultCode::NOERROR);
+        response.answers.push(DnsRecord::CNAME {
+            domain: "www.example.com".into(),
+            host: target.into(),
+            ttl: 35,
+        });
+        for i in 0..8 {
+            response.answers.push(DnsRecord::A {
+                domain: target.into(),
+                addr: Ipv4Addr::new(52, 49, 100, i),
+                ttl: 35,
+            });
+        }
+        let buf = serialize_with_fallback(
+            &mut response,
+            &query,
+            "www.example.com",
+            false,
+            Transport::Udp,
+        )
+        .unwrap();
+        assert_eq!(buf.pos(), 12 + 21 + (2 + 10 + 52) + 8 * 16);
+        let parsed =
+            DnsPacket::from_buffer(&mut BytePacketBuffer::from_bytes(buf.filled())).unwrap();
+        assert!(!parsed.header.truncated_message);
+        assert_eq!(parsed.answers.len(), 9);
+    }
+
     #[test]
     fn udp_reply_within_advertised_payload_passes() {
         let parsed = serialize(&edns_query(1232), 800, Transport::Udp);
