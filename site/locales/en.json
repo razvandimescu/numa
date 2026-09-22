@@ -15,6 +15,7 @@
   "status.connecting": "connecting...",
   "status.connected": "connected",
   "status.disconnected": "disconnected",
+  "resolver.elsewhere": "This host's DNS points at {ns}, not this Numa instance. To use it:",
 
   "stat.total_queries": "Total Queries",
   "stat.cache_hit_rate": "Cache Hit Rate",

@@ -130,6 +130,7 @@ pub async fn run(config_path: String) -> crate::Result<()> {
         config.lan.enabled,
         config.blocking.enabled,
         doh_enabled,
+        &config.server.bind_addr,
     );
 
     let ca_pem = std::fs::read_to_string(resolved_data_dir.join("ca.pem")).ok();

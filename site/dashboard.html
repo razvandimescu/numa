@@ -22,6 +22,7 @@
   --bg-elevated: #e3dbce;
   --bg-card: #faf7f2;
   --amber: #c0623a;
+  --warn: #b08f3c;
   --amber-dim: #9e4e2d;
   --teal: #6b7c4e;
   --teal-dim: #566540;
@@ -49,6 +50,7 @@
     --bg-elevated: oklch(0.4 0.01 230);
     --bg-card: oklch(0.15 0.005 230);
     --amber: oklch(0.7 0.17 42);
+    --warn: oklch(0.8 0.12 85);
     --amber-dim: oklch(0.6 0.17 42);
     --teal: oklch(0.7 0.09 125);
     --teal-dim: oklch(0.6 0.09 125);
@@ -69,6 +71,7 @@
   --bg-elevated: oklch(0.4 0.01 230);
   --bg-card: oklch(0.15 0.005 230);
   --amber: oklch(0.7 0.17 42);
+  --warn: oklch(0.8 0.12 85);
   --amber-dim: oklch(0.6 0.17 42);
   --teal: oklch(0.7 0.09 125);
   --teal-dim: oklch(0.6 0.09 125);
@@ -623,6 +626,24 @@ body {
   #headerVersion { display: none; }
   #phoneSetup { display: none; }
 }
+#resolverWarn {
+  padding: 0.6rem 0.9rem;
+  border: 1px solid color-mix(in oklab, var(--warn) 70%, transparent);
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--warn) 16%, var(--bg-card));
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  overflow-wrap: anywhere;
+}
+#resolverWarn code {
+  font-weight: 600;
+  background: color-mix(in oklab, var(--warn) 22%, transparent);
+  padding: 0.05rem 0.35rem;
+  border-radius: 3px;
+  user-select: all;
+  white-space: nowrap;
+}
 </style>
 </head>
 <body>
@@ -660,6 +681,7 @@ body {
 </div>
 
 <div class="dashboard">
+  <div id="resolverWarn" hidden></div>
   <!-- Stat cards -->
   <div class="stats-row">
     <div class="stat-card queries">
@@ -1302,6 +1324,20 @@ function renderCache(entries) {
   `).join('');
 }
 
+async function checkResolver() {
+  const el = document.getElementById('resolverWarn');
+  try {
+    const r = (await fetchJSON('/health')).system_resolver;
+    const away = r && !r.matches_listener;
+    if (away) {
+      el.textContent = t('resolver.elsewhere', { ns: r.nameserver }) + ' ';
+      const cmd = el.appendChild(document.createElement('code'));
+      cmd.textContent = 'sudo numa install';
+    }
+    el.hidden = !away;
+  } catch {}
+  setTimeout(checkResolver, el.hidden ? 30000 : 5000);
+}
 async function refresh() {
   try {
     const [stats, logs, overrides, cache, services, blockingInfo, allowlist, manualBlocks] = await Promise.all([
@@ -1806,6 +1842,7 @@ initI18n().then(() => {
   applyTheme(localStorage.getItem('numa-theme') || 'auto');
   refresh();
   setInterval(refresh, 2000);
+  checkResolver();
 });
 </script>
 

@@ -713,9 +713,13 @@ async fn flush_cache_domain(
 /// response; any HTTP client asserting only on `"status"` keeps working.
 pub async fn health(State(ctx): State<Arc<ServerCtx>>) -> Json<crate::health::HealthResponse> {
     let lan_ip = Some(*ctx.lan_ip.lock().unwrap());
+    let os_nameserver = tokio::task::spawn_blocking(crate::system_dns::os_default_nameserver)
+        .await
+        .unwrap_or(None);
     Json(crate::health::HealthResponse::build(
         &ctx.health_meta,
         lan_ip,
+        os_nameserver,
     ))
 }
 

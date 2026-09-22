@@ -66,6 +66,90 @@ pub struct SystemDnsInfo {
     pub forwarding_rules: Vec<ForwardingRule>,
 }
 
+/// The nameserver the OS hands default (unscoped) queries to, as the OS
+/// itself reports it. `None` where numa cannot observe it (Windows).
+pub fn os_default_nameserver() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let output = std::process::Command::new("scutil")
+            .arg("--dns")
+            .output()
+            .ok()?;
+        parse_scutil_default_nameserver(&String::from_utf8_lossy(&output.stdout))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if is_systemd_resolved_active() {
+            let text = resolvectl_status()?;
+            let first = iter_resolvectl_servers(&text).next().map(str::to_string);
+            first
+        } else {
+            let text = std::fs::read_to_string("/etc/resolv.conf").ok()?;
+            let first = iter_nameservers(&text).next().map(str::to_string);
+            first
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        None
+    }
+}
+
+/// `resolver #1` is the default resolver; later blocks are scoped (mDNS,
+/// `/etc/resolver/*`) and must not stand in for it when it has no nameserver.
+#[cfg(any(target_os = "macos", test))]
+fn parse_scutil_default_nameserver(text: &str) -> Option<String> {
+    text.split("\n\n")
+        .find(|block| block.trim_start().starts_with("resolver #1"))?
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("nameserver[0] :"))
+        .map(|s| s.trim().to_string())
+}
+
+/// Every server in `resolvectl status` order, `#SNI` suffixes stripped. The
+/// Global section comes first, so its server (where `numa install` points
+/// resolved) precedes per-link servers. No filtering, like [`iter_nameservers`].
+#[cfg(any(target_os = "linux", test))]
+fn iter_resolvectl_servers(text: &str) -> impl Iterator<Item = &str> {
+    text.lines()
+        .filter_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            matches!(key.trim(), "Current DNS Server" | "DNS Servers").then_some(value)
+        })
+        .flat_map(str::split_whitespace)
+        .filter_map(|server| server.split('#').next())
+}
+
+#[cfg(target_os = "linux")]
+fn resolvectl_status() -> Option<String> {
+    let output = std::process::Command::new("resolvectl")
+        .args(["status", "--no-pager"])
+        .output()
+        .ok()?;
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// True if a resolver at `nameserver` (port 53) matches one of this
+/// instance's configured DNS listeners: configuration, not proof of delivery.
+/// A wildcard listener only claims loopback and this host's LAN address, so
+/// systemd-resolved's 127.0.0.53 stays not-numa.
+pub fn matches_numa_listener(
+    nameserver: &str,
+    lan_ip: Option<std::net::Ipv4Addr>,
+    listeners: &[std::net::SocketAddr],
+) -> bool {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    let Ok(ns) = nameserver.parse::<IpAddr>() else {
+        return false;
+    };
+    let this_host = ns == Ipv4Addr::LOCALHOST
+        || ns == Ipv6Addr::LOCALHOST
+        || lan_ip.map(IpAddr::V4) == Some(ns);
+    listeners.iter().filter(|l| l.port() == 53).any(|l| {
+        l.ip() == ns || (l.ip().is_unspecified() && l.is_ipv4() == ns.is_ipv4() && this_host)
+    })
+}
+
 /// Discover system DNS configuration in a single pass.
 /// On macOS: parses `scutil --dns` once for both the default upstream and forwarding rules.
 /// On Linux: reads `/etc/resolv.conf` for upstream, no forwarding rules yet.
@@ -387,22 +471,14 @@ fn resolv_conf_has_real_upstream(content: &str) -> bool {
 /// Query resolvectl for the real upstream DNS server (e.g. VPC resolver on AWS).
 #[cfg(target_os = "linux")]
 fn resolvectl_dns_server() -> Option<String> {
-    let output = std::process::Command::new("resolvectl")
-        .args(["status", "--no-pager"])
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    for line in text.lines() {
-        if line.contains("DNS Servers") || line.contains("Current DNS Server") {
-            if let Some(ip) = line.split(':').next_back() {
-                let ip = ip.trim();
-                if ip.parse::<std::net::IpAddr>().is_ok() && !is_loopback_or_stub(ip) {
-                    return Some(ip.to_string());
-                }
-            }
-        }
-    }
-    None
+    resolvectl_upstream(&resolvectl_status()?)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn resolvectl_upstream(text: &str) -> Option<String> {
+    iter_resolvectl_servers(text)
+        .find(|ip| ip.parse::<std::net::IpAddr>().is_ok() && !is_loopback_or_stub(ip))
+        .map(str::to_string)
 }
 
 /// Detect DNS server from DHCP lease — fallback when scutil/resolv.conf only shows 127.0.0.1.
@@ -1350,9 +1426,24 @@ fn parse_launchctl_program(stdout: &[u8]) -> Result<String, String> {
 
 /// Show the service status.
 pub fn service_status() -> Result<(), String> {
-    match crate::config_cli::service_config_path() {
+    let config_path = crate::config_cli::service_config_path();
+    match &config_path {
         Ok(path) => eprintln!("  config: {path}"),
         Err(error) => eprintln!("  config: <unavailable: {error}>"),
+    }
+    if let Some(ns) = os_default_nameserver() {
+        let listeners = config_path
+            .ok()
+            .and_then(|path| crate::config::load_config(&path).ok())
+            .map(|load| crate::health::parse_listeners(&load.config.server.bind_addr))
+            .unwrap_or_default();
+        if matches_numa_listener(&ns, crate::lan::detect_lan_ip(), &listeners) {
+            eprintln!("  system resolver: {ns} (matches numa's listener)");
+        } else {
+            eprintln!(
+                "  system resolver: {ns} (not numa; to use numa as this host's resolver: sudo numa install)"
+            );
+        }
     }
     #[cfg(target_os = "macos")]
     {
@@ -2245,5 +2336,78 @@ mod tests {
     #[test]
     fn windows_config_dir_equals_data_dir() {
         assert_eq!(crate::config_dir(), crate::data_dir());
+    }
+
+    const SCUTIL_ON_NUMA: &str = "DNS configuration\n\nresolver #1\n  search domain[0] : numa\n  nameserver[0] : 127.0.0.1\n  flags    : Request A records\n\nresolver #2\n  domain   : local\n  options  : mdns\n";
+    const SCUTIL_ON_ISP: &str = "DNS configuration\n\nresolver #1\n  nameserver[0] : 213.154.124.1\n  if_index : 15 (en0)\n\nresolver #8\n  domain   : numa\n  nameserver[0] : 127.0.0.1\n";
+    const SCUTIL_OFFLINE: &str = "DNS configuration\n\nresolver #1\n  flags    : Request A records\n\nresolver #8\n  domain   : numa\n  nameserver[0] : 127.0.0.1\n";
+
+    #[test]
+    fn scutil_default_nameserver_reads_resolver_1_only() {
+        assert_eq!(
+            parse_scutil_default_nameserver(SCUTIL_ON_NUMA).as_deref(),
+            Some("127.0.0.1")
+        );
+        assert_eq!(
+            parse_scutil_default_nameserver(SCUTIL_ON_ISP).as_deref(),
+            Some("213.154.124.1")
+        );
+        assert_eq!(parse_scutil_default_nameserver(SCUTIL_OFFLINE), None);
+    }
+
+    const RESOLVECTL_ON_NUMA: &str = "Global\n         Protocols: -LLMNR -mDNS -DNSOverTLS DNSSEC=no/unsupported\n  resolv.conf mode: foreign\nCurrent DNS Server: 127.0.0.1\n       DNS Servers: 127.0.0.1\n        DNS Domain: ~. numa\n\nLink 2 (eth0)\n    Current Scopes: DNS\nCurrent DNS Server: 192.168.1.1\n       DNS Servers: 192.168.1.1\n";
+    const RESOLVECTL_ON_ISP: &str = "Global\n         Protocols: -LLMNR -mDNS -DNSOverTLS DNSSEC=no/unsupported\n  resolv.conf mode: stub\n\nLink 2 (eth0)\n    Current Scopes: DNS\nCurrent DNS Server: 2001:db8::1#dns.example\n       DNS Servers: 2001:db8::1#dns.example 192.168.1.1\n";
+
+    #[test]
+    fn resolvectl_servers_start_with_global_and_keep_loopback() {
+        assert_eq!(
+            iter_resolvectl_servers(RESOLVECTL_ON_NUMA).next(),
+            Some("127.0.0.1")
+        );
+        assert_eq!(
+            iter_resolvectl_servers(RESOLVECTL_ON_ISP).next(),
+            Some("2001:db8::1")
+        );
+        assert_eq!(iter_resolvectl_servers("Global\n").next(), None);
+    }
+
+    #[test]
+    fn resolvectl_upstream_skips_loopback_and_reads_ipv6_and_lists() {
+        assert_eq!(
+            resolvectl_upstream(RESOLVECTL_ON_NUMA).as_deref(),
+            Some("192.168.1.1")
+        );
+        assert_eq!(
+            resolvectl_upstream(RESOLVECTL_ON_ISP).as_deref(),
+            Some("2001:db8::1")
+        );
+        assert_eq!(
+            resolvectl_upstream("Global\n       DNS Servers: 127.0.0.1 9.9.9.9\n").as_deref(),
+            Some("9.9.9.9")
+        );
+    }
+
+    #[test]
+    fn matches_numa_listener_needs_a_matching_port_53_listener() {
+        let lan = Some(std::net::Ipv4Addr::new(192, 168, 1, 50));
+        let any = crate::health::parse_listeners(&["0.0.0.0:53".into(), "[::]:53".into()]);
+        assert!(matches_numa_listener("127.0.0.1", None, &any));
+        assert!(matches_numa_listener("::1", None, &any));
+        assert!(matches_numa_listener("192.168.1.50", lan, &any));
+        assert!(!matches_numa_listener("192.168.1.50", None, &any));
+        assert!(!matches_numa_listener("127.0.0.53", lan, &any));
+        assert!(!matches_numa_listener("213.154.124.1", lan, &any));
+        assert!(!matches_numa_listener("garbage", lan, &any));
+
+        let dev_port = crate::health::parse_listeners(&["0.0.0.0:5354".into(), "bogus".into()]);
+        assert_eq!(dev_port.len(), 1);
+        assert!(!matches_numa_listener("127.0.0.1", lan, &dev_port));
+
+        let loopback_only = crate::health::parse_listeners(&["127.0.0.1:53".into()]);
+        assert!(matches_numa_listener("127.0.0.1", lan, &loopback_only));
+        assert!(!matches_numa_listener("192.168.1.50", lan, &loopback_only));
+
+        let exact = crate::health::parse_listeners(&["127.0.0.53:53".into()]);
+        assert!(matches_numa_listener("127.0.0.53", lan, &exact));
     }
 }

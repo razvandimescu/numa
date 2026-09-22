@@ -12,7 +12,7 @@
 //! consumed fields are optional on the Swift side, but `lan_ip` is
 //! load-bearing for the pipeline).
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::time::SystemTime;
 
@@ -31,6 +31,7 @@ pub struct HealthMeta {
     pub api_port: u16,
     pub ca_fingerprint_sha256: Option<String>,
     pub features: Vec<String>,
+    pub dns_listeners: Vec<SocketAddr>,
     // SystemTime, not Instant: monotonic time freezes during host suspend
     // (Linux/macOS), so uptime would drift below systemd's "active since" (#281).
     pub started_at: SystemTime,
@@ -52,6 +53,7 @@ impl HealthMeta {
             api_port: 8765,
             ca_fingerprint_sha256: None,
             features: vec![],
+            dns_listeners: vec!["0.0.0.0:53".parse().unwrap()],
             started_at: SystemTime::now(),
         }
     }
@@ -75,6 +77,7 @@ impl HealthMeta {
         mdns_enabled: bool,
         blocking_enabled: bool,
         doh_enabled: bool,
+        bind_addrs: &[String],
     ) -> Self {
         let ca_path = data_dir.join("ca.pem");
         let ca_fingerprint_sha256 = compute_ca_fingerprint(&ca_path);
@@ -108,9 +111,14 @@ impl HealthMeta {
             api_port,
             ca_fingerprint_sha256,
             features,
+            dns_listeners: parse_listeners(bind_addrs),
             started_at: SystemTime::now(),
         }
     }
+}
+
+pub fn parse_listeners(bind_addrs: &[String]) -> Vec<SocketAddr> {
+    bind_addrs.iter().filter_map(|a| a.parse().ok()).collect()
 }
 
 /// JSON response shape returned by `GET /health` on both main and mobile APIs.
@@ -129,6 +137,14 @@ pub struct HealthResponse {
     pub api: ApiBlock,
     pub ca: CaBlock,
     pub features: Vec<String>,
+    /// Absent where numa cannot observe the OS resolver (Windows).
+    pub system_resolver: Option<SystemResolverBlock>,
+}
+
+#[derive(Serialize)]
+pub struct SystemResolverBlock {
+    pub nameserver: String,
+    pub matches_listener: bool,
 }
 
 #[derive(Serialize)]
@@ -153,7 +169,11 @@ impl HealthResponse {
     /// the current LAN IP (which may change across network transitions).
     /// Pass `None` for `lan_ip` if detection fails — the response still
     /// returns 200 OK, just without the LAN address.
-    pub fn build(meta: &HealthMeta, lan_ip: Option<Ipv4Addr>) -> Self {
+    pub fn build(
+        meta: &HealthMeta,
+        lan_ip: Option<Ipv4Addr>,
+        os_nameserver: Option<String>,
+    ) -> Self {
         HealthResponse {
             status: "ok",
             version: meta.version,
@@ -177,6 +197,14 @@ impl HealthResponse {
                 fingerprint_sha256: meta.ca_fingerprint_sha256.clone(),
             },
             features: meta.features.clone(),
+            system_resolver: os_nameserver.map(|nameserver| SystemResolverBlock {
+                matches_listener: crate::system_dns::matches_numa_listener(
+                    &nameserver,
+                    lan_ip,
+                    &meta.dns_listeners,
+                ),
+                nameserver,
+            }),
         }
     }
 }
@@ -204,17 +232,17 @@ mod tests {
     fn health_response_contains_required_fields() {
         let meta = HealthMeta {
             version: "0.10.0",
-            hostname: "test-host".to_string(),
-            sni: "numa.numa".to_string(),
             dot_enabled: true,
-            dot_port: 853,
-            api_port: 8765,
             ca_fingerprint_sha256: Some("abcd1234".to_string()),
             features: vec!["dot".to_string(), "dnssec".to_string()],
-            started_at: SystemTime::now(),
+            ..HealthMeta::test_fixture()
         };
 
-        let response = HealthResponse::build(&meta, Some(Ipv4Addr::new(192, 168, 1, 50)));
+        let response = HealthResponse::build(
+            &meta,
+            Some(Ipv4Addr::new(192, 168, 1, 50)),
+            Some("213.154.124.1".to_string()),
+        );
         let json = serde_json::to_string(&response).unwrap();
 
         assert!(json.contains("\"status\":\"ok\""));
@@ -226,23 +254,16 @@ mod tests {
         assert!(json.contains("\"port\":8765"));
         assert!(json.contains("\"fingerprint_sha256\":\"abcd1234\""));
         assert!(json.contains("\"features\":[\"dot\",\"dnssec\"]"));
+        assert!(json.contains(
+            "\"system_resolver\":{\"nameserver\":\"213.154.124.1\",\"matches_listener\":false}"
+        ));
     }
 
     #[test]
     fn health_response_omits_dot_port_when_disabled() {
-        let meta = HealthMeta {
-            version: "0.10.0",
-            hostname: "t".to_string(),
-            sni: "numa.numa".to_string(),
-            dot_enabled: false,
-            dot_port: 853,
-            api_port: 8765,
-            ca_fingerprint_sha256: None,
-            features: vec![],
-            started_at: SystemTime::now(),
-        };
+        let meta = HealthMeta::test_fixture();
 
-        let response = HealthResponse::build(&meta, None);
+        let response = HealthResponse::build(&meta, None, None);
         let json = serde_json::to_string(&response).unwrap();
 
         assert!(json.contains("\"enabled\":false"));
