@@ -245,7 +245,7 @@ pub async fn run(config_path: String) -> crate::Result<()> {
         api_port,
     );
 
-    spawn_background_services(&ctx, &config, &bootstrap_resolver, api_port)?;
+    spawn_background_services(&ctx, &config, &bootstrap_resolver, api_port).await?;
 
     // UDP DNS listener — shares `[server.proxy_protocol]` with TCP, which
     // already logged any parse error. Silently disable on Err.
@@ -293,7 +293,7 @@ async fn bind_udp_listeners(addrs: &[String]) -> crate::Result<Vec<Arc<UdpListen
     Ok(sockets)
 }
 
-fn spawn_background_services(
+async fn spawn_background_services(
     ctx: &Arc<ServerCtx>,
     config: &crate::config::Config,
     bootstrap_resolver: &Arc<NumaResolver>,
@@ -372,12 +372,12 @@ fn spawn_background_services(
             ),
         }
     }
+    let listener = bind_api(api_addr).await?;
     tokio::spawn(async move {
         let app = crate::api::router(api_ctx).layer(axum::middleware::from_fn_with_state(
             api_auth,
             crate::api_auth::require_auth,
         ));
-        let listener = tokio::net::TcpListener::bind(api_addr).await.unwrap();
         info!("HTTP API listening on {}", api_addr);
         axum::serve(
             listener,
@@ -974,9 +974,23 @@ async fn cache_warm_loop(ctx: Arc<ServerCtx>, domains: Vec<String>) {
     }
 }
 
+async fn bind_api(addr: SocketAddr) -> crate::Result<tokio::net::TcpListener> {
+    tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|e| format!("cannot bind the API on {addr}: {e}").into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn bind_api_reports_a_taken_port_instead_of_panicking() {
+        let held = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = held.local_addr().unwrap();
+        let err = bind_api(addr).await.unwrap_err().to_string();
+        assert!(err.contains(&addr.to_string()), "{err}");
+    }
 
     #[tokio::test]
     async fn bind_udp_listeners_rejects_empty() {
