@@ -23,7 +23,7 @@ use base64::Engine;
 use rand_core::{OsRng, TryRngCore};
 
 const TOKEN_ENV: &str = "NUMA_API_TOKEN";
-const TOKEN_FILE: &str = "api_token";
+pub(crate) const TOKEN_FILE: &str = "api_token";
 
 /// Set by the `.numa` reverse proxy; trusted only on a loopback peer — see
 /// `effective_peer`.
