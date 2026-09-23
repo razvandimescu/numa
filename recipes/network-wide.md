@@ -11,7 +11,9 @@ Numa does not serve DHCP. Your router keeps handing out addresses; you only chan
 
 ## 1. Let other devices reach Numa
 
-DNS already listens on all interfaces (`0.0.0.0:53`, except on Windows). The `.numa` proxy and the dashboard listen on loopback by default, so open them to the LAN:
+Give the Numa host a fixed address, either a DHCP reservation on the router or a static IP. Everything below assumes it is `192.168.1.5`.
+
+On macOS and Linux, DNS already listens on all IPv4 interfaces (`0.0.0.0:53`). The `.numa` proxy and the dashboard listen on loopback by default, so open them to the LAN:
 
 ```toml
 [server]
@@ -23,7 +25,16 @@ bind_addr = "0.0.0.0"          # router.numa etc. from other devices
 
 Restart Numa (`sudo numa service restart`). The Docker image already binds both to `0.0.0.0`.
 
-Give the Numa host a fixed address, either a DHCP reservation on the router or a static IP. Everything below assumes it is `192.168.1.5`.
+### Windows (untested)
+
+On Windows, DNS listens only on `127.0.0.2:53`, where the system resolver forwards to it. Keep that address and add the host's LAN address:
+
+```toml
+[server]
+bind_addr = ["127.0.0.2:53", "192.168.1.5:53"]
+```
+
+Then allow inbound UDP and TCP port 53 in Windows Firewall. This configuration has not been tested; if the system resolver stops working after the change, remove the LAN address and open an issue.
 
 ## 2. Check it before touching the router
 
@@ -45,7 +56,18 @@ Leave the secondary DNS empty, or set it to a second Numa instance. Do not put a
 
 ### IPv6
 
-Many routers also advertise their own IPv6 DNS server (RDNSS or DHCPv6). Clients that use it bypass Numa for some or all lookups, which shows up as ads that come and go and `.numa` names that fail intermittently. Either set the router's IPv6 DNS to the Numa host's IPv6 address, or turn off the router's IPv6 DNS advertisement.
+Many routers also advertise their own IPv6 DNS server (RDNSS or DHCPv6). Clients that use it bypass Numa for some or all lookups, which shows up as ads that come and go and `.numa` names that fail intermittently.
+
+The simple fix is to turn off the router's IPv6 DNS advertisement. Clients then use Numa over IPv4 for every lookup, including AAAA records, so IPv6 connectivity is unaffected.
+
+To serve DNS over IPv6 instead, first give Numa an IPv6 listener; by default it has none. Bind one stable address of the host, such as a ULA or static address, not a temporary one that rotates:
+
+```toml
+[server]
+bind_addr = ["0.0.0.0:53", "[fd12::5]:53"]
+```
+
+`[::]:53` does not work here: on Linux it collides with `0.0.0.0:53`. Restart Numa, check `dig @fd12::5 example.com +short` from another device, and only then set the router's IPv6 DNS to that address.
 
 ## 4. Confirm
 
