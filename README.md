@@ -108,7 +108,7 @@ Machine A (192.168.1.5)              Machine B (192.168.1.20)
 
 From Machine B: `curl http://api.numa` → proxied to Machine A's port 8000. Enable with `numa lan on`.
 
-**Hub mode**: run one instance with `bind_addr = "0.0.0.0:53"` and point other devices' DNS to it — they get ad blocking + `.numa` resolution without installing anything. `bind_addr` also accepts a list to bind a specific subset of interfaces.
+**Hub mode**: run one instance with `bind_addr = "0.0.0.0:53"` and point other devices' DNS to it — they get ad blocking + `.numa` resolution without installing anything. `bind_addr` also accepts a list to bind a specific subset of interfaces. Step-by-step: [network-wide recipe](recipes/network-wide.md).
 
 ## Docker
 

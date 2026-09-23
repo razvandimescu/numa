@@ -10,6 +10,7 @@ Scenario-driven configs for common Numa deployments. Each recipe is self-contain
 
 ## Local network
 
+- [Network-wide Numa](network-wide.md) — point the router at Numa so every device gets blocking and `.numa` names; IPv6 and fallback pitfalls.
 - [Local DNS records and split DNS](local-dns-records.md) — name your LAN hosts on any domain, answer reverse lookups, hand an internal zone to another resolver.
 
 Missing a scenario? Open an issue or PR — these are plain Markdown with no build step.
