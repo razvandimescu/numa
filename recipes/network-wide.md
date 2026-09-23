@@ -71,7 +71,7 @@ On Windows, append `"[fd12::5]:53"` to the list from the Windows section instead
 
 ## 4. Confirm
 
-Open the dashboard from any device (`http://192.168.1.5:5380`, or `http://numa.numa` once DNS points at Numa). Other devices ask for the API token: any username, and the password from `api_token` in Numa's data directory. Their queries should appear in the query log with their own IPs.
+Open the dashboard from any device (`http://192.168.1.5:5380`, or `http://numa.numa` once DNS points at Numa). Other devices ask for the API token: any username, and the password from `sudo numa token` on the Numa host. Their queries should appear in the query log with their own IPs.
 
 ## When the Numa host is down
 

@@ -76,8 +76,8 @@ owner-only as `api_token` in `data_dir`. No deployment is unauthenticated, and n
 start over it — a resolver that won't run costs the host its DNS. To read one back:
 
 ```sh
-cat /var/lib/numa/api_token                        # or data_dir/api_token
-docker compose exec numa cat /var/lib/numa/api_token
+sudo numa token
+docker compose exec numa numa token
 ```
 
 Pin your own instead when you want it in config management:

@@ -50,18 +50,34 @@ pub(crate) struct MintedToken {
     pub stored: Option<PathBuf>,
 }
 
-/// Precedence: `NUMA_API_TOKEN` > `[server] api_token` > `<data_dir>/api_token`
-/// > freshly minted.
+#[derive(Debug, PartialEq)]
+pub(crate) enum TokenSource {
+    Env,
+    Config,
+    File(PathBuf),
+}
+
+/// Precedence: `NUMA_API_TOKEN` > `[server] api_token` > `<data_dir>/api_token`.
+pub(crate) fn locate_token(
+    config_token: Option<&str>,
+    data_dir: &Path,
+) -> Option<(String, TokenSource)> {
+    if let Some(token) = std::env::var(TOKEN_ENV).ok().filter(|t| !t.is_empty()) {
+        return Some((token, TokenSource::Env));
+    }
+    if let Some(token) = config_token.filter(|t| !t.is_empty()) {
+        return Some((token.to_string(), TokenSource::Config));
+    }
+    let path = data_dir.join(TOKEN_FILE);
+    read_token(&path).map(|token| (token, TokenSource::File(path)))
+}
+
+/// `locate_token`, else freshly minted.
 pub(crate) fn ensure_token(
     config_token: Option<&str>,
     data_dir: &Path,
 ) -> (ApiAuth, Option<MintedToken>) {
-    let existing = std::env::var(TOKEN_ENV)
-        .ok()
-        .filter(|t| !t.is_empty())
-        .or_else(|| config_token.filter(|t| !t.is_empty()).map(str::to_string))
-        .or_else(|| read_token(&data_dir.join(TOKEN_FILE)));
-    if let Some(token) = existing {
+    if let Some((token, _)) = locate_token(config_token, data_dir) {
         return (ApiAuth { token }, None);
     }
 
@@ -156,8 +172,7 @@ pub(crate) async fn require_auth(
         StatusCode::UNAUTHORIZED,
         [(header::WWW_AUTHENTICATE, "Basic realm=\"numa\"")],
         // Name no filesystem path to an unauthenticated caller.
-        "unauthorized — numa logs its API token on first start and stores it as `api_token` in \
-         its data dir\n",
+        "unauthorized — run `numa token` on the numa host and log in with any username\n",
     )
         .into_response()
 }
@@ -316,6 +331,24 @@ mod tests {
         assert!(
             minted.is_none(),
             "an empty api_token is not a credential, and the stored one still stands"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn locate_reports_where_the_token_came_from() {
+        let dir = fresh_dir("locate");
+        assert_eq!(locate_token(None, &dir), None, "nothing minted yet");
+
+        let (_, minted) = ensure_token(None, &dir);
+        let minted = minted.unwrap().token;
+        assert_eq!(
+            locate_token(Some(""), &dir),
+            Some((minted, TokenSource::File(dir.join(TOKEN_FILE))))
+        );
+        assert_eq!(
+            locate_token(Some("configured"), &dir),
+            Some(("configured".to_string(), TokenSource::Config))
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

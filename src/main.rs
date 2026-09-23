@@ -74,6 +74,7 @@ fn main() -> numa::Result<()> {
                 }
             };
         }
+        "token" => return numa::config_cli::print_token().map_err(|e| e.into()),
         "setup-phone" => {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -157,6 +158,7 @@ fn main() -> numa::Result<()> {
             eprintln!("  service status  Check if the service is running");
             eprintln!("  config path     Show the effective config file");
             eprintln!("  config edit     Open the effective config file in an editor");
+            eprintln!("  token           Print the dashboard/API token for other devices");
             eprintln!("  lan on|off      Enable/disable LAN service discovery (mDNS)");
             eprintln!("  block on|off    Enable/disable ad-blocking");
             eprintln!("  dnssec on|off   Enable/disable DNSSEC validation");

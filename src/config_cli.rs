@@ -71,6 +71,44 @@ pub fn edit_config() -> Result<(), String> {
     Ok(())
 }
 
+pub fn print_token() -> Result<(), String> {
+    use crate::api_auth::{locate_token, TokenSource, TOKEN_FILE};
+
+    let config_path = effective_config_path()?.path;
+    let server = crate::config::load_config(&config_path)
+        .map_err(|error| format!("cannot read {config_path}: {error}"))?
+        .config
+        .server;
+    let data_dir = server.data_dir.unwrap_or_else(crate::data_dir);
+    let file = data_dir.join(TOKEN_FILE);
+
+    let Some((token, source)) = locate_token(server.api_token.as_deref(), &data_dir) else {
+        return Err(match std::fs::File::open(&file) {
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                let elevate = if cfg!(windows) {
+                    "an administrator shell"
+                } else {
+                    "sudo"
+                };
+                format!("cannot read {}: run with {elevate}", file.display())
+            }
+            _ => format!(
+                "no token at {} yet: numa creates one on first start",
+                file.display()
+            ),
+        });
+    };
+    println!("{token}");
+    match source {
+        TokenSource::Env => {
+            eprintln!("source: NUMA_API_TOKEN in this shell (the service may see another)")
+        }
+        TokenSource::Config => eprintln!("source: [server] api_token in {config_path}"),
+        TokenSource::File(path) => eprintln!("source: {}", path.display()),
+    }
+    Ok(())
+}
+
 pub(crate) fn service_config_path() -> Result<String, String> {
     effective_config_path().map(|resolved| resolved.display())
 }
