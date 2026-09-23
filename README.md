@@ -157,15 +157,15 @@ Turnkey compose recipes:
 
 ## Running Numa as Your Primary DNS
 
-Numa is young, so here is what backs it and what it leaves out.
+**If Numa stops.** `numa install` registers Numa with launchd (macOS) or systemd (Linux), which restart it when it exits. If Numa is your only resolver, DNS lookups fail until it restarts. To stop using Numa and restore the machine's previous DNS settings, run `sudo numa uninstall`.
 
-- **Restarts itself.** `numa install` runs it under launchd (`KeepAlive`) or systemd (`Restart=always`); a crash is restarted within seconds.
-- **Degrades instead of failing.** Expired cache entries are served while upstream is unreachable (RFC 8767), and slow upstreams are hedged across UDP, DoT and DoH.
-- **Parser is fuzzed.** The hand-rolled wire format runs under `cargo-fuzz` on every PR that touches it and weekly on a longer pass ([`fuzz.yml`](.github/workflows/fuzz.yml)). CI also runs `cargo audit` and a full install/uninstall cycle on macOS and Linux runners.
-- **Hardened against the standard resolver attacks:** bailiwick filtering of referrals, glue and DS (#354, #355), bogon nameserver rejection (#356), per-resolution query budget and NXNS fan-out cap (#357), random and validated TXIDs (#358, #397), ANY refusal (#343). DNSSEC validation is opt-in (`numa dnssec on`).
-- **Security reports** go through private advisories; scope and process are in [SECURITY.md](SECURITY.md).
+If Numa is running but upstreams are unreachable, it can serve cached answers for up to an hour past their TTL (RFC 8767). Names it hasn't cached fail.
 
-Not included: DHCP (your router keeps that job), clustering or config sync between instances, and a full settings UI (most options live in [`numa.toml`](numa.toml)). For a whole network, run it on a box that stays on.
+**Testing.** The DNS parser is fuzzed on every pull request that touches it, with longer runs weekly ([`fuzz.yml`](.github/workflows/fuzz.yml)). CI runs `cargo audit` on dependencies and installs, reinstalls and uninstalls Numa on macOS and Linux.
+
+**Resolver hardening.** In recursive mode, Numa drops answer records outside the zone being queried, refuses to query nameservers at private or loopback addresses, and caps each lookup's upstream queries and referral depth. Replies over plain UDP must match the query's random transaction ID and question. ANY queries are refused. DNSSEC validation is off by default; `numa dnssec on` turns it on. To report a vulnerability privately, see [SECURITY.md](SECURITY.md).
+
+**What Numa doesn't do.** No DHCP, no clustering, no config sync between instances. Most settings live in [`numa.toml`](numa.toml), not the dashboard. For a whole network, run it on a machine that stays on.
 
 ## Performance
 
