@@ -34,7 +34,7 @@ On Windows, DNS listens only on `127.0.0.2:53`, where the system resolver forwar
 bind_addr = ["127.0.0.2:53", "192.168.1.5:53"]
 ```
 
-Then allow inbound UDP and TCP port 53 in Windows Firewall. This configuration has not been tested; if the system resolver stops working after the change, remove the LAN address and open an issue.
+Apply the dashboard and proxy settings above as well, restart Numa, then allow inbound UDP and TCP port 53 in Windows Firewall. This configuration has not been tested; if the system resolver stops working after the change, remove the LAN address and open an issue.
 
 ## 2. Check it before touching the router
 
@@ -67,7 +67,7 @@ To serve DNS over IPv6 instead, first give Numa an IPv6 listener; by default it 
 bind_addr = ["0.0.0.0:53", "[fd12::5]:53"]
 ```
 
-`[::]:53` does not work here: on Linux it collides with `0.0.0.0:53`. Restart Numa, check `dig @fd12::5 example.com +short` from another device, and only then set the router's IPv6 DNS to that address.
+On Windows, append `"[fd12::5]:53"` to the list from the Windows section instead. `[::]:53` does not work here: on Linux it collides with `0.0.0.0:53`. Restart Numa, check `dig @fd12::5 example.com +short` from another device, and only then set the router's IPv6 DNS to that address.
 
 ## 4. Confirm
 
