@@ -1167,21 +1167,18 @@ fn print_install_summary(skip_system_dns: bool) {
     // system config, not numa.toml in the caller's cwd.
     let config_path = crate::data_dir().join("numa.toml");
     let server = crate::config::load_config(&config_path.to_string_lossy())
-        .ok()
-        .map(|c| c.config.server);
-    let api_port = server
-        .as_ref()
-        .map_or(crate::config::DEFAULT_API_PORT, |s| s.api_port);
-    let token_source = match server {
-        Some(s) if s.api_token.as_deref().is_some_and(|t| !t.is_empty()) => {
-            format!("[server] api_token in {}", config_path.display())
-        }
-        s => s
-            .and_then(|s| s.data_dir)
+        .map(|c| c.config.server)
+        .unwrap_or_default();
+    let api_port = server.api_port;
+    let token_source = if server.api_token.as_deref().is_some_and(|t| !t.is_empty()) {
+        format!("[server] api_token in {}", config_path.display())
+    } else {
+        server
+            .data_dir
             .unwrap_or_else(crate::data_dir)
             .join(crate::api_auth::TOKEN_FILE)
             .display()
-            .to_string(),
+            .to_string()
     };
 
     if skip_system_dns {
