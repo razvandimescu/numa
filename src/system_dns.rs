@@ -1198,8 +1198,8 @@ fn print_install_summary(skip_system_dns: bool) {
     let uninstall = "sudo numa uninstall";
 
     eprintln!("  Dashboard  https://numa.numa  (or http://127.0.0.1:{api_port})");
-    eprintln!("  API token  {token_source}  # other devices only; any username");
-    eprintln!("  Remove    {uninstall}  # restores original DNS");
+    eprintln!("  API token  {token_source}  # not needed over localhost; any username");
+    eprintln!("  Remove     {uninstall}  # restores original DNS");
 }
 
 /// Start the service. If already installed, just starts it via the platform

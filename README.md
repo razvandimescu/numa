@@ -41,7 +41,7 @@ sudo numa                              # run in foreground (port 53 requires roo
 
 Open the dashboard: **http://numa.numa** (or `http://localhost:5380`)
 
-From the same machine no login is needed. Other devices are asked for the API token, which Numa generates on first start and saves as `api_token` in its data directory (`/var/lib/numa` on Linux, `/usr/local/var/numa` on macOS, `C:\ProgramData\numa` on Windows). Any username works. `numa install` prints the path; pin your own with `[server] api_token` or `NUMA_API_TOKEN`.
+Over loopback (`localhost`, `127.0.0.1`, `numa.numa`) no login is needed. Anything else, including Docker port mapping or this machine's LAN address, is asked for the API token, which Numa generates on first start and saves as `api_token` in its data directory (`/var/lib/numa` on Linux, `/usr/local/var/numa` on macOS, `C:\ProgramData\numa` on Windows). Any username works. `numa install` prints the path; pin your own with `[server] api_token` or `NUMA_API_TOKEN`.
 
 Set as system DNS:
 
@@ -122,7 +122,7 @@ docker run -d --name numa --network host -v numa-data:/var/lib/numa ghcr.io/razv
 docker run -d --name numa -p 53:53/udp -p 53:53/tcp -p 5380:5380 -v numa-data:/var/lib/numa ghcr.io/razvandimescu/numa
 ```
 
-Dashboard at `http://localhost:5380`. From another device, log in with any username and the token from `docker exec numa cat /var/lib/numa/api_token`. The `numa-data` volume keeps the token and the local CA across container recreates. The image binds the API and proxy to `0.0.0.0` by default. Override with a custom config:
+Dashboard at `http://localhost:5380`. With port mapping or from another device, log in with any username and the token from `docker exec numa cat /var/lib/numa/api_token`. The `numa-data` volume keeps the token and the local CA across container recreates. The image binds the API and proxy to `0.0.0.0` by default. Override with a custom config:
 
 ```bash
 docker run -d --name numa --network host -v numa-data:/var/lib/numa \
