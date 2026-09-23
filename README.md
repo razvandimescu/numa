@@ -155,6 +155,18 @@ Turnkey compose recipes:
 | Portable (laptop) | No (appliance) | No (appliance) | Server | Single binary, macOS/Linux/Windows |
 | Community maturity | 56K stars, 10 years | 33K stars | 20 years | New |
 
+## Running Numa as Your Primary DNS
+
+Numa is young, so here is what backs it and what it leaves out.
+
+- **Restarts itself.** `numa install` runs it under launchd (`KeepAlive`) or systemd (`Restart=always`); a crash is restarted within seconds.
+- **Degrades instead of failing.** Expired cache entries are served while upstream is unreachable (RFC 8767), and slow upstreams are hedged across UDP, DoT and DoH.
+- **Parser is fuzzed.** The hand-rolled wire format runs under `cargo-fuzz` on every PR that touches it and weekly on a longer pass ([`fuzz.yml`](.github/workflows/fuzz.yml)). CI also runs `cargo audit` and a full install/uninstall cycle on macOS and Linux runners.
+- **Hardened against the standard resolver attacks:** bailiwick filtering of referrals, glue and DS (#354, #355), bogon nameserver rejection (#356), per-resolution query budget and NXNS fan-out cap (#357), random and validated TXIDs (#358, #397), ANY refusal (#343). DNSSEC validation is opt-in (`numa dnssec on`).
+- **Security reports** go through private advisories; scope and process are in [SECURITY.md](SECURITY.md).
+
+Not included: DHCP (your router keeps that job), clustering or config sync between instances, and a full settings UI (most options live in [`numa.toml`](numa.toml)). For a whole network, run it on a box that stays on.
+
 ## Performance
 
 0.1ms cached queries — matches Unbound and AdGuard Home. Wire-level cache stores raw bytes with in-place TTL patching. Request hedging eliminates p99 spikes: cold recursive p99 538ms vs Unbound 748ms (−28%), σ 4× tighter. [Benchmarks →](benches/)
