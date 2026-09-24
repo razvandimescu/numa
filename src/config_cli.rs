@@ -76,7 +76,7 @@ pub fn print_token() -> Result<(), String> {
 
     let config_path = effective_config_path()?.path;
     let server = crate::config::load_config(&config_path)
-        .map_err(|error| format!("cannot read {config_path}: {error}"))?
+        .map_err(|error| unreadable(&config_path, &error))?
         .config
         .server;
     let data_dir = server.data_dir.unwrap_or_else(crate::data_dir);
@@ -85,12 +85,7 @@ pub fn print_token() -> Result<(), String> {
     let Some((token, source)) = locate_token(server.api_token.as_deref(), &data_dir) else {
         return Err(match std::fs::File::open(&file) {
             Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-                let elevate = if cfg!(windows) {
-                    "an administrator shell"
-                } else {
-                    "sudo"
-                };
-                format!("cannot read {}: run with {elevate}", file.display())
+                format!("cannot read {}: run with {ELEVATE}", file.display())
             }
             _ => format!(
                 "no token at {} yet: numa creates one on first start",
@@ -107,6 +102,21 @@ pub fn print_token() -> Result<(), String> {
         TokenSource::File(path) => eprintln!("source: {}", path.display()),
     }
     Ok(())
+}
+
+const ELEVATE: &str = if cfg!(windows) {
+    "an administrator shell"
+} else {
+    "sudo"
+};
+
+fn unreadable(path: &str, error: &crate::Error) -> String {
+    match error.downcast_ref::<std::io::Error>() {
+        Some(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            format!("cannot read {path}: run with {ELEVATE}")
+        }
+        _ => format!("cannot read {path}: {error}"),
+    }
 }
 
 pub(crate) fn service_config_path() -> Result<String, String> {
@@ -309,6 +319,17 @@ mod tests {
             config_path: path.to_string(),
             config_found: found,
         }
+    }
+
+    #[test]
+    fn unreadable_config_suggests_elevation() {
+        let denied: crate::Error =
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied).into();
+        let message = unreadable("/root/.config/numa/numa.toml", &denied);
+        assert!(
+            message.ends_with(&format!(": run with {ELEVATE}")),
+            "{message}"
+        );
     }
 
     #[test]
