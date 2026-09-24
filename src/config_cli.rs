@@ -101,14 +101,14 @@ pub fn print_token() -> Result<(), String> {
             ),
         });
     };
+    let origin = match source {
+        TokenSource::Env => "NUMA_API_TOKEN in this shell (the service may see another)".into(),
+        TokenSource::Config => format!("[server] api_token in {config_path}"),
+        TokenSource::File(path) => path.display().to_string(),
+    };
+    eprintln!("API token, from {origin}");
+    eprintln!("use it as the password on other devices (any username; localhost needs none):");
     println!("{token}");
-    match source {
-        TokenSource::Env => {
-            eprintln!("source: NUMA_API_TOKEN in this shell (the service may see another)")
-        }
-        TokenSource::Config => eprintln!("source: [server] api_token in {config_path}"),
-        TokenSource::File(path) => eprintln!("source: {}", path.display()),
-    }
     Ok(())
 }
 
