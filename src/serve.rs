@@ -113,7 +113,8 @@ pub async fn run(config_path: String) -> crate::Result<()> {
     let resolved_data_dir = config
         .server
         .data_dir
-        .clone()
+        .as_deref()
+        .map(|dir| std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf()))
         .unwrap_or_else(crate::data_dir);
 
     let (initial_tls, tls_byo) =
