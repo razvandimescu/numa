@@ -152,7 +152,7 @@ pub fn matches_numa_listener(
 
 /// Discover system DNS configuration in a single pass.
 /// On macOS: parses `scutil --dns` once for both the default upstream and forwarding rules.
-/// On Linux: reads `/etc/resolv.conf` for upstream, no forwarding rules yet.
+/// On Linux: reads `/etc/resolv.conf` for the upstream; search domains forward to it.
 pub fn discover_system_dns() -> SystemDnsInfo {
     #[cfg(target_os = "macos")]
     {
@@ -354,15 +354,31 @@ fn discover_macos() -> SystemDnsInfo {
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 fn make_rule(domain: &str, nameserver: &str) -> Option<ForwardingRule> {
     let addr = crate::forward::parse_upstream_addr(nameserver, 53).ok()?;
     let pool = UpstreamPool::new(vec![Upstream::Udp(addr)], vec![]);
     Some(ForwardingRule::new(domain.to_string(), pool))
 }
 
-#[cfg(target_os = "linux")]
-const CLOUD_VPC_RESOLVER: &str = "169.254.169.253";
+#[cfg(any(target_os = "linux", test))]
+fn search_domain_rules(search_domains: &[String], upstream: Option<&str>) -> Vec<ForwardingRule> {
+    let Some(forwarder) = upstream else {
+        return Vec::new();
+    };
+    let rules: Vec<_> = search_domains
+        .iter()
+        .filter_map(|domain| {
+            let rule = make_rule(domain, forwarder)?;
+            info!("forwarding .{} to {}", domain, forwarder);
+            Some(rule)
+        })
+        .collect();
+    if !rules.is_empty() {
+        info!("detected {} search domain forwarding rules", rules.len());
+    }
+    rules
+}
 
 #[cfg(target_os = "linux")]
 fn discover_linux() -> SystemDnsInfo {
@@ -390,24 +406,9 @@ fn discover_linux() -> SystemDnsInfo {
         ns
     };
 
-    // On cloud VMs (AWS/GCP), internal domains need to reach the VPC resolver
-    let forwarding_rules = if search_domains.is_empty() {
-        Vec::new()
-    } else {
-        let forwarder = resolvectl_dns_server().unwrap_or_else(|| CLOUD_VPC_RESOLVER.to_string());
-        let rules: Vec<_> = search_domains
-            .iter()
-            .filter_map(|domain| {
-                let rule = make_rule(domain, &forwarder)?;
-                info!("forwarding .{} to {}", domain, forwarder);
-                Some(rule)
-            })
-            .collect();
-        if !rules.is_empty() {
-            info!("detected {} search domain forwarding rules", rules.len());
-        }
-        rules
-    };
+    // Private zones (e.g. ec2.internal) are only visible through the resolver
+    // that handed out the search domain.
+    let forwarding_rules = search_domain_rules(&search_domains, default_upstream.as_deref());
 
     SystemDnsInfo {
         default_upstream,
@@ -2208,6 +2209,24 @@ mod tests {
             search_domains,
             vec!["ec2.internal", "compute.internal", "corp.example"]
         );
+    }
+
+    #[test]
+    fn search_domain_rules_use_system_upstream() {
+        let rules = search_domain_rules(&["example.com".to_string()], Some("1.1.1.1"));
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].suffix, "example.com");
+        assert_eq!(rules[0].upstream.label(), "1.1.1.1:53");
+    }
+
+    #[test]
+    fn search_domain_rules_empty_without_upstream() {
+        assert!(search_domain_rules(&["example.com".to_string()], None).is_empty());
+    }
+
+    #[test]
+    fn search_domain_rules_empty_without_search_domains() {
+        assert!(search_domain_rules(&[], Some("1.1.1.1")).is_empty());
     }
 
     #[test]
