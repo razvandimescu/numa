@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 use log::info;
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 use crate::forward::Upstream;
 use crate::forward::UpstreamPool;
 
