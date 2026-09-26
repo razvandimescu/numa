@@ -225,28 +225,38 @@ if [ "${NUMA_INSIDE:-}" = "1" ]; then
     systemctl stop systemd-resolved 2>/dev/null || true
     systemctl mask systemd-resolved >/dev/null 2>&1 || true
     resolv_before=$(cat /etc/resolv.conf)
-    printf 'nameserver 10.53.0.1\nsearch lan\n' > /etc/resolv.conf
-    "$NUMA" install >/tmp/installD.log 2>&1 || { fail "install failed"; tail -20 /tmp/installD.log; }
-    wait_active || true
-    upstream=""
-    for _ in $(seq 1 20); do
-        upstream=$(curl -s --max-time 2 http://127.0.0.1:5380/stats \
-            | grep -o '"upstream": *"[^"]*"' | cut -d'"' -f4)
-        [ -n "$upstream" ] && break
-        sleep 0.5
-    done
-    if [[ "$upstream" == 10.53.0.1:53* ]]; then
-        pass "daemon upstream is the original nameserver ($upstream)"
-    else
-        fail "daemon upstream is '${upstream:-<none>}', expected 10.53.0.1:53"
-        grep -i 'saved\|backup' /tmp/installD.log
-    fi
-    "$NUMA" uninstall >/dev/null 2>&1 || true
-    if grep -q '^nameserver 10.53.0.1' /etc/resolv.conf; then
-        pass "uninstall restored the original resolv.conf"
-    else
-        fail "uninstall did not restore resolv.conf: $(tr '\n' ' ' < /etc/resolv.conf)"
-    fi
+    install_keeps_nameserver() {
+        printf 'nameserver 10.53.0.1\nsearch lan\n' > /etc/resolv.conf
+        "$NUMA" install >/tmp/installD.log 2>&1 || { fail "install failed"; tail -20 /tmp/installD.log; }
+        wait_active || true
+        upstream=""
+        for _ in $(seq 1 20); do
+            upstream=$(curl -s --max-time 2 http://127.0.0.1:5380/stats \
+                | grep -o '"upstream": *"[^"]*"' | cut -d'"' -f4)
+            [ -n "$upstream" ] && break
+            sleep 0.5
+        done
+        if [[ "$upstream" == 10.53.0.1:53* ]]; then
+            pass "$1: daemon upstream is the original nameserver ($upstream)"
+        else
+            fail "$1: daemon upstream is '${upstream:-<none>}', expected 10.53.0.1:53"
+            grep -i 'saved\|backup' /tmp/installD.log
+        fi
+        "$NUMA" uninstall >/dev/null 2>&1 || true
+        if grep -q '^nameserver 10.53.0.1' /etc/resolv.conf; then
+            pass "$1: uninstall restored the original resolv.conf"
+        else
+            fail "$1: uninstall did not restore resolv.conf: $(tr '\n' ' ' < /etc/resolv.conf)"
+        fi
+    }
+    install_keeps_nameserver "fresh layout"
+
+    # Pre-FHS installs have /usr/local/var/numa and no /var/lib/numa until the
+    # service starts, so data_dir() differs between install and the daemon.
+    reset_state
+    mkdir -p /usr/local/var/numa
+    install_keeps_nameserver "legacy /usr/local/var/numa layout"
+    rm -rf /usr/local/var/numa
 
     # Installs from before the data-dir backup left it in /root/.numa.
     mkdir -p /root/.numa

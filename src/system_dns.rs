@@ -1579,10 +1579,12 @@ fn service_status_macos() -> Result<(), String> {
 
 // --- Linux implementation ---
 
-// In the data dir so the DynamicUser daemon can read it; install runs as root.
+// In the service's StateDirectory so the DynamicUser daemon can read it. Fixed
+// rather than data_dir(): on a legacy /usr/local/var/numa layout, data_dir()
+// flips to /var/lib/numa once systemd creates it, between install and start.
 #[cfg(target_os = "linux")]
 fn backup_path_linux() -> std::path::PathBuf {
-    crate::data_dir().join("original-resolv.conf")
+    std::path::PathBuf::from("/var/lib/numa/original-resolv.conf")
 }
 
 /// Installs before the data-dir backup wrote to `$HOME/.numa` (`/root` under
