@@ -388,13 +388,7 @@ fn discover_linux() -> SystemDnsInfo {
         info!("detected system upstream via resolvectl: {}", ns);
         Some(ns)
     } else {
-        // Fallback to backup from a previous `numa install`
-        let backup = {
-            let home = std::env::var("HOME")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|_| std::path::PathBuf::from("/root"));
-            home.join(".numa").join("original-resolv.conf")
-        };
+        let backup = backup_path_linux();
         let (ns, _) = parse_resolv_conf(backup.to_str().unwrap_or(""));
         if let Some(ref ns) = ns {
             info!("detected original upstream from backup: {}", ns);
@@ -1585,12 +1579,29 @@ fn service_status_macos() -> Result<(), String> {
 
 // --- Linux implementation ---
 
+// In the data dir so the DynamicUser daemon can read it; install runs as root.
 #[cfg(target_os = "linux")]
 fn backup_path_linux() -> std::path::PathBuf {
+    crate::data_dir().join("original-resolv.conf")
+}
+
+/// Installs before the data-dir backup wrote to `$HOME/.numa` (`/root` under
+/// sudo), which the daemon can't read. Move it so install/uninstall only see one.
+#[cfg(target_os = "linux")]
+fn migrate_legacy_backup_linux(backup: &std::path::Path) {
     let home = std::env::var("HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::path::PathBuf::from("/root"));
-    home.join(".numa").join("original-resolv.conf")
+    let legacy = home.join(".numa").join("original-resolv.conf");
+    if backup.exists() || !legacy.exists() {
+        return;
+    }
+    if let Some(parent) = backup.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if std::fs::copy(&legacy, backup).is_ok() {
+        let _ = std::fs::remove_file(&legacy);
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1628,6 +1639,7 @@ fn install_linux() -> Result<(), String> {
     // Fallback: direct resolv.conf manipulation
     let resolv = std::path::Path::new("/etc/resolv.conf");
     let backup = backup_path_linux();
+    migrate_legacy_backup_linux(&backup);
 
     // Ensure backup directory exists
     if let Some(parent) = backup.parent() {
@@ -1694,6 +1706,7 @@ fn uninstall_linux() -> Result<(), String> {
 
     // Fallback: restore resolv.conf from backup
     let backup = backup_path_linux();
+    migrate_legacy_backup_linux(&backup);
     let resolv = std::path::Path::new("/etc/resolv.conf");
 
     match std::fs::copy(&backup, resolv) {
