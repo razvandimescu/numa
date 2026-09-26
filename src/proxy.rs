@@ -334,10 +334,18 @@ pre .str {{ color: #d48a5a }}
 }
 
 pub fn extract_host(req: &Request) -> Option<String> {
-    req.headers()
-        .get(hyper::header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .map(|h| h.split(':').next().unwrap_or(h).to_lowercase())
+    req.headers().get(hyper::header::HOST).and_then(host_name)
+}
+
+/// Lowercased host without port or IPv6 brackets.
+pub fn host_name(host: &HeaderValue) -> Option<String> {
+    let authority = hyper::http::uri::Authority::try_from(host.as_bytes()).ok()?;
+    Some(
+        authority
+            .host()
+            .trim_matches(['[', ']'])
+            .to_ascii_lowercase(),
+    )
 }
 
 async fn proxy_handler(
@@ -536,6 +544,21 @@ mod tests {
     use crate::packet::DnsPacket;
     use crate::question::QueryType;
     use crate::record::DnsRecord;
+
+    #[test]
+    fn extract_host_strips_port_and_keeps_ipv6_literals() {
+        let host = |h: &str| {
+            let req = Request::builder()
+                .header("host", h)
+                .body(Body::empty())
+                .unwrap();
+            extract_host(&req)
+        };
+        assert_eq!(host("[::1]:443").as_deref(), Some("::1"));
+        assert_eq!(host("Numa.Numa:80").as_deref(), Some("numa.numa"));
+        assert_eq!(host("localhost").as_deref(), Some("localhost"));
+        assert_eq!(host("bad host"), None);
+    }
 
     /// Self-signed TLS server config that vouches for `*.numa` + `numa.numa`,
     /// matching the SAN shape produced by `tls::build_tls_config` in production.

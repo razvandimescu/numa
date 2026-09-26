@@ -106,33 +106,11 @@ fn doh_validate(
 }
 
 fn is_doh_host(host: Option<&str>, tld: &str) -> bool {
-    let h = match host {
-        Some(h) => h,
-        None => return false,
-    };
-    let base = strip_port(h).unwrap_or(h);
-    is_loopback_host(base) || is_tld_match(base, tld)
-}
-
-fn strip_port(h: &str) -> Option<&str> {
-    if h.starts_with('[') {
-        // [::1]:443 → [::1]
-        let (base, port) = h.rsplit_once("]:")?;
-        port.bytes()
-            .all(|b| b.is_ascii_digit())
-            .then(|| &h[..base.len() + 1])
-    } else {
-        let (base, port) = h.rsplit_once(':')?;
-        // Bare IPv6 like "::1" has multiple colons — not a port suffix
-        if base.contains(':') {
-            return None;
-        }
-        port.bytes().all(|b| b.is_ascii_digit()).then_some(base)
-    }
+    host.is_some_and(|h| is_loopback_host(h) || is_tld_match(h, tld))
 }
 
 fn is_loopback_host(h: &str) -> bool {
-    matches!(h, "127.0.0.1" | "::1" | "[::1]" | "localhost")
+    matches!(h, "127.0.0.1" | "::1" | "localhost")
 }
 
 fn is_tld_match(h: &str, tld: &str) -> bool {
@@ -226,12 +204,8 @@ mod tests {
         assert!(is_doh_host(Some("numa"), "numa"));
         assert!(is_doh_host(Some("numa.numa"), "numa"));
         assert!(is_doh_host(Some("127.0.0.1"), "numa"));
-        assert!(is_doh_host(Some("127.0.0.1:443"), "numa"));
         assert!(is_doh_host(Some("::1"), "numa"));
-        assert!(is_doh_host(Some("[::1]"), "numa"));
-        assert!(is_doh_host(Some("[::1]:443"), "numa"));
         assert!(is_doh_host(Some("localhost"), "numa"));
-        assert!(is_doh_host(Some("localhost:443"), "numa"));
         assert!(!is_doh_host(Some("foo.numa"), "numa"));
         assert!(!is_doh_host(None, "numa"));
     }

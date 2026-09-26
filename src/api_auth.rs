@@ -18,7 +18,6 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 use axum::extract::{ConnectInfo, Request, State};
-use axum::http::uri::Authority;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -53,21 +52,18 @@ impl ApiAuth {
     }
 
     /// A rebound page can't forge Host: it carries the attacker's domain, never
-    /// an IP literal, `localhost`, or a `.numa` name the proxy answers for.
+    /// an IP literal, a `localhost` name (RFC 6761: resolved by the browser
+    /// itself), or a `.numa` name the proxy answers for.
     fn names_this_host(&self, headers: &HeaderMap) -> bool {
         let Some(host) = headers.get(header::HOST) else {
             return true;
         };
-        let Ok(authority) = Authority::try_from(host.as_bytes()) else {
-            return false;
-        };
-        let name = authority
-            .host()
-            .trim_matches(['[', ']'])
-            .to_ascii_lowercase();
-        name == "localhost"
-            || name.parse::<IpAddr>().is_ok()
-            || (!self.proxy_tld_suffix.is_empty() && name.ends_with(&self.proxy_tld_suffix))
+        crate::proxy::host_name(host).is_some_and(|name| {
+            name == "localhost"
+                || name.ends_with(".localhost")
+                || name.parse::<IpAddr>().is_ok()
+                || (!self.proxy_tld_suffix.is_empty() && name.ends_with(&self.proxy_tld_suffix))
+        })
     }
 }
 
@@ -313,6 +309,7 @@ mod tests {
         assert!(!a.permits(ip("127.0.0.1"), &with_host("evil.example:5380")));
         for host in [
             "localhost:5380",
+            "numa.localhost:5380",
             "127.0.0.1:5380",
             "[::1]:5380",
             "numa.numa",
