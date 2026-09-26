@@ -1,8 +1,10 @@
 //! Authentication for the HTTP control plane (dashboard + REST API), which can
-//! mutate how Numa resolves DNS. Loopback is always allowed (local dashboard +
-//! CLI), mirroring `acl.rs`; any other peer must present `api_token` via HTTP
-//! `Bearer` or `Basic` (so browsers prompt natively). The token is drive-by
-//! protection, not wire encryption — the API is plain HTTP. Because loopback is
+//! mutate how Numa resolves DNS. Loopback is allowed (local dashboard + CLI),
+//! mirroring `acl.rs`, unless `Host` names a foreign domain: that is a
+//! DNS-rebound page, whose browser connects from loopback. Any other peer must
+//! present `api_token` via HTTP `Bearer` or `Basic` (so browsers prompt
+//! natively). The token is drive-by protection, not wire encryption — the API
+//! is plain HTTP. Because loopback is
 //! exempt, a same-host TLS terminator pointed at the loopback API forwards
 //! *unauthenticated*; front it via a non-loopback bind instead. See
 //! `recipes/dnsdist-front.md`.
@@ -16,6 +18,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 use axum::extract::{ConnectInfo, Request, State};
+use axum::http::uri::Authority;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -32,14 +35,39 @@ pub(crate) const CLIENT_IP_HEADER: &str = "x-numa-client-ip";
 #[derive(Clone)]
 pub(crate) struct ApiAuth {
     token: String,
+    proxy_tld_suffix: String,
 }
 
 impl ApiAuth {
+    pub(crate) fn with_proxy_tld_suffix(mut self, suffix: &str) -> Self {
+        self.proxy_tld_suffix = suffix.to_string();
+        self
+    }
+
     fn permits(&self, peer: IpAddr, headers: &HeaderMap) -> bool {
         // `effective_peer` may hand back a v4-mapped address, either the raw peer
         // or one parsed out of the header, so canonicalize before judging it.
-        effective_peer(peer, headers).to_canonical().is_loopback()
+        (effective_peer(peer, headers).to_canonical().is_loopback()
+            && self.names_this_host(headers))
             || credential(headers).is_some_and(|given| ct_eq(&self.token, &given))
+    }
+
+    /// A rebound page can't forge Host: it carries the attacker's domain, never
+    /// an IP literal, `localhost`, or a `.numa` name the proxy answers for.
+    fn names_this_host(&self, headers: &HeaderMap) -> bool {
+        let Some(host) = headers.get(header::HOST) else {
+            return true;
+        };
+        let Ok(authority) = Authority::try_from(host.as_bytes()) else {
+            return false;
+        };
+        let name = authority
+            .host()
+            .trim_matches(['[', ']'])
+            .to_ascii_lowercase();
+        name == "localhost"
+            || name.parse::<IpAddr>().is_ok()
+            || (!self.proxy_tld_suffix.is_empty() && name.ends_with(&self.proxy_tld_suffix))
     }
 }
 
@@ -77,19 +105,20 @@ pub(crate) fn ensure_token(
     config_token: Option<&str>,
     data_dir: &Path,
 ) -> (ApiAuth, Option<MintedToken>) {
-    if let Some((token, _)) = locate_token(config_token, data_dir) {
-        return (ApiAuth { token }, None);
-    }
-
-    let token = mint_token();
-    let path = data_dir.join(TOKEN_FILE);
-    let stored = store_token(&path, &token).is_ok().then_some(path);
-    (
-        ApiAuth {
-            token: token.clone(),
-        },
-        Some(MintedToken { token, stored }),
-    )
+    let (token, minted) = match locate_token(config_token, data_dir) {
+        Some((token, _)) => (token, None),
+        None => {
+            let token = mint_token();
+            let path = data_dir.join(TOKEN_FILE);
+            let stored = store_token(&path, &token).is_ok().then_some(path);
+            (token.clone(), Some(MintedToken { token, stored }))
+        }
+    };
+    let auth = ApiAuth {
+        token,
+        proxy_tld_suffix: String::new(),
+    };
+    (auth, minted)
 }
 
 fn read_token(path: &Path) -> Option<String> {
@@ -184,6 +213,7 @@ mod tests {
     fn auth(token: &str) -> ApiAuth {
         ApiAuth {
             token: token.to_string(),
+            proxy_tld_suffix: ".numa".into(),
         }
     }
 
@@ -269,6 +299,26 @@ mod tests {
         // Loopback proxy peer + stamped LAN IP → resolves to the LAN IP → gated.
         let a = auth("secret");
         assert!(!a.permits(ip("127.0.0.1"), &with_client_ip("192.168.1.9")));
+    }
+
+    fn with_host(host: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(header::HOST, host.parse().unwrap());
+        h
+    }
+
+    #[test]
+    fn rebound_page_on_loopback_is_gated_without_token() {
+        let a = auth("secret");
+        assert!(!a.permits(ip("127.0.0.1"), &with_host("evil.example:5380")));
+        for host in [
+            "localhost:5380",
+            "127.0.0.1:5380",
+            "[::1]:5380",
+            "numa.numa",
+        ] {
+            assert!(a.permits(ip("127.0.0.1"), &with_host(host)), "{host}");
+        }
     }
 
     #[test]

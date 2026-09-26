@@ -359,6 +359,7 @@ async fn spawn_background_services(
     let api_addr: SocketAddr = format!("{}:{}", config.server.api_bind_addr, api_port).parse()?;
     let (api_auth, minted) =
         crate::api_auth::ensure_token(config.server.api_token.as_deref(), &ctx.data_dir);
+    let api_auth = api_auth.with_proxy_tld_suffix(&ctx.proxy_tld_suffix);
     if let Some(m) = minted {
         info!(
             "generated an API token for the HTTP control plane: {}",
