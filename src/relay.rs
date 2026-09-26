@@ -180,16 +180,23 @@ async fn forward_to_target(
             .send()
             .await?;
         let status = StatusCode::from_u16(resp.status().as_u16())?;
-        let resp_body = resp.bytes().await?;
-        Ok::<_, crate::Error>((status, resp_body))
+        Ok::<_, crate::Error>((status, read_capped(resp).await?))
     })
     .await
     .map_err(|_| "timed out talking to target")??;
-
-    if response.1.len() > MAX_TARGET_RESPONSE_BYTES {
-        return Err("target response exceeds cap".into());
-    }
     Ok(response)
+}
+
+/// Capped while streaming: a hostile target could otherwise send an unbounded or gzip-inflated body.
+async fn read_capped(mut resp: reqwest::Response) -> Result<Bytes> {
+    let mut body = Vec::new();
+    while let Some(chunk) = resp.chunk().await? {
+        if body.len() + chunk.len() > MAX_TARGET_RESPONSE_BYTES {
+            return Err("target response exceeds cap".into());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body.into())
 }
 
 /// Strict DNS-hostname validator, aimed at closing the SSRF surface a naive
@@ -373,6 +380,31 @@ mod tests {
         let body = resp.text().await.unwrap();
         assert!(body.contains("ok\n"));
         assert!(body.contains("forwarded_ok 0"));
+    }
+
+    #[tokio::test]
+    async fn endless_target_body_is_cut_off_at_the_cap() {
+        let target = Router::new().route(
+            "/dns-query",
+            post(|| async {
+                let chunk = Ok::<_, std::convert::Infallible>(Bytes::from_static(&[0; 1024]));
+                axum::body::Body::from_stream(futures::stream::repeat(chunk))
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, target).await;
+        });
+
+        let err = forward_to_target(
+            &crate::forward::default_client(),
+            &format!("http://{}/dns-query", target_addr),
+            Bytes::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("exceeds cap"), "got: {err}");
     }
 
     #[test]
