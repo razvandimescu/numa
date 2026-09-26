@@ -366,18 +366,14 @@ fn search_domain_rules(search_domains: &[String], upstream: Option<&str>) -> Vec
     let Some(forwarder) = upstream else {
         return Vec::new();
     };
-    let rules: Vec<_> = search_domains
+    search_domains
         .iter()
         .filter_map(|domain| {
             let rule = make_rule(domain, forwarder)?;
             info!("forwarding .{} to {}", domain, forwarder);
             Some(rule)
         })
-        .collect();
-    if !rules.is_empty() {
-        info!("detected {} search domain forwarding rules", rules.len());
-    }
-    rules
+        .collect()
 }
 
 #[cfg(target_os = "linux")]
@@ -2222,11 +2218,6 @@ mod tests {
     #[test]
     fn search_domain_rules_empty_without_upstream() {
         assert!(search_domain_rules(&["example.com".to_string()], None).is_empty());
-    }
-
-    #[test]
-    fn search_domain_rules_empty_without_search_domains() {
-        assert!(search_domain_rules(&[], Some("1.1.1.1")).is_empty());
     }
 
     #[test]

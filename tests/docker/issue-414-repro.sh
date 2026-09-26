@@ -1,28 +1,15 @@
 #!/usr/bin/env bash
-# Regression for issue #414: names under a resolv.conf search domain must reach
-# the system resolver, not a hardcoded cloud address.
+# Regression for #414: names under a resolv.conf search domain must reach the
+# system resolver. The slim image has no systemd-resolved (the reporter's setup;
+# CI runners have it). One container runs two numas:
 #
-# On Linux, discover_linux() turns every `search`/`domain` entry into a
-# forwarding rule. Without systemd-resolved the rule used to point at
-# 169.254.169.253 (the AWS VPC resolver), which only answers inside a VPC, so
-# off AWS everything under the search domain SERVFAILed. CI never saw it: the
-# GitHub runners run systemd-resolved, so resolvectl returned a working server.
+#   zone numa   <container-ip>:53   serves host.example.test, acts as the network resolver
+#   numa        127.0.0.1:5353      auto-detects upstream + search domain from resolv.conf
 #
-# The slim image has no resolvectl, which is exactly the reporter's setup. One
-# container runs two numas:
-#
-#   zone numa   <container-ip>:53   serves host.example.test from a local zone
-#   numa        127.0.0.1:5353      auto-detected upstream, no zones
-#
-# resolv.conf gets `search example.test` + `nameserver <container-ip>`, so the
-# zone numa stands in for the network's resolver. The container IP is used
-# because loopback nameservers are filtered out of detection.
+# The container IP is used because loopback nameservers are filtered from detection.
 #
 #   PASS → host.example.test resolves through numa
-#   FAIL → SERVFAIL / no answer (the #414 rule to 169.254.169.253)
-#
-# Usage:
-#   tests/docker/issue-414-repro.sh
+#   FAIL → no answer (search domain forwarded elsewhere)
 
 set -euo pipefail
 
