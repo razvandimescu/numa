@@ -386,7 +386,12 @@ pub(crate) async fn forward_udp(
 /// A connected UDP socket to `upstream`: the kernel then drops datagrams from
 /// anyone but it, leaving source-spoofed off-path injection as the only path in.
 async fn connected_udp(upstream: SocketAddr) -> Result<UdpSocket> {
-    let socket = UdpSocket::bind("0.0.0.0:0").await?;
+    let bind_addr = if upstream.is_ipv6() {
+        "[::]:0"
+    } else {
+        "0.0.0.0:0"
+    };
+    let socket = UdpSocket::bind(bind_addr).await?;
     socket.connect(upstream).await?;
     Ok(socket)
 }
@@ -1363,6 +1368,30 @@ mod tests {
             .await
             .expect("the matching reply must win the race");
         assert_eq!(resp.header.id, query.header.id);
+        assert_eq!(resp.answers.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn udp_reaches_an_ipv6_upstream() {
+        let query = make_query();
+        let reply = to_wire(&make_response(&query));
+        let sock = match UdpSocket::bind("[::1]:0").await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("skipping: IPv6 loopback not available ({e})");
+                return;
+            }
+        };
+        let addr = sock.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            let (_, src) = sock.recv_from(&mut buf).await.unwrap();
+            sock.send_to(&reply, src).await.unwrap();
+        });
+
+        let resp = forward_udp(&query, addr, Duration::from_millis(500))
+            .await
+            .expect("an IPv6 upstream must be reachable over UDP");
         assert_eq!(resp.answers.len(), 1);
     }
 
