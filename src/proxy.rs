@@ -1,5 +1,6 @@
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::{ConnectInfo, Request, State};
@@ -19,6 +20,13 @@ use tokio_rustls::TlsAcceptor;
 use crate::config::ProxyProtocolConfig;
 use crate::ctx::ServerCtx;
 use crate::pp2::{self, PpConfig};
+use crate::tcp::serve_connections;
+use crate::tls::accept_tls;
+
+#[cfg(not(test))]
+const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(1);
 
 type HttpClient = Client<hyper_util::client::legacy::connect::HttpConnector, Body>;
 
@@ -142,79 +150,71 @@ async fn accept_loop_tls(
         remote_addr: None,
     };
 
-    loop {
-        let (tcp_stream, tcp_peer) = match listener.accept().await {
-            Ok(conn) => conn,
-            Err(e) => {
-                error!("TLS accept error: {}", e);
-                continue;
-            }
-        };
+    serve_connections(
+        listener,
+        pp,
+        ctx,
+        "proxy(tls)",
+        move |stream, remote_addr, ctx| {
+            serve_tls_connection(
+                stream,
+                remote_addr,
+                ctx,
+                proxy_state.clone(),
+                doh_state.clone(),
+            )
+        },
+    )
+    .await;
+}
 
-        // Load the latest TLS config on each connection (picks up new service certs)
-        // unwrap safe: caller guards on ctx.tls_config.is_some()
-        let acceptor = TlsAcceptor::from(Arc::clone(&*ctx.tls_config.as_ref().unwrap().load()));
+async fn serve_tls_connection(
+    stream: pp2::Stream,
+    remote_addr: SocketAddr,
+    ctx: Arc<ServerCtx>,
+    proxy_state: ProxyState,
+    doh_state: DohState,
+) {
+    // Load the latest TLS config on each connection (picks up new service certs)
+    // unwrap safe: caller guards on ctx.tls_config.is_some()
+    let acceptor = TlsAcceptor::from(Arc::clone(&*ctx.tls_config.as_ref().unwrap().load()));
+    let Some(tls_stream) = accept_tls(&acceptor, stream, remote_addr, "proxy(tls)").await else {
+        return;
+    };
 
-        let proxy_state = proxy_state.clone();
-        let doh_state = doh_state.clone();
-        let ctx_for_pp2 = Arc::clone(&ctx);
-        let pp = pp.clone();
+    let doh_state = DohState {
+        remote_addr: Some(remote_addr),
+        ..doh_state
+    };
 
-        tokio::spawn(async move {
-            let Some((stream, remote_addr, local_command)) =
-                pp2::handshake(tcp_stream, tcp_peer, pp.as_deref(), &ctx_for_pp2).await
-            else {
-                return;
-            };
+    // The TLS path serves via hyper directly, so `ConnectInfo` isn't
+    // populated as it is on the plain listener — inject the real peer
+    // (post-PROXY-protocol) so `proxy_handler` can stamp it.
+    let app = Router::new()
+        .route(
+            "/dns-query",
+            get(crate::doh::doh_get)
+                .post(crate::doh::doh_post)
+                .with_state(doh_state),
+        )
+        .fallback(any(proxy_handler))
+        .with_state(proxy_state)
+        .layer(axum::Extension(ConnectInfo(remote_addr)));
 
-            if !ctx_for_pp2
-                .allow_from
-                .admits(remote_addr.ip(), local_command)
-            {
-                debug!(
-                    "proxy(tls): dropping {} — not in allow_from",
-                    remote_addr.ip()
-                );
-                return;
-            }
+    let io = hyper_util::rt::TokioIo::new(tls_stream);
+    let svc = hyper_util::service::TowerToHyperService::new(app.into_service());
 
-            let mut conn_doh_state = doh_state;
-            conn_doh_state.remote_addr = Some(remote_addr);
-
-            // The TLS path serves via hyper directly, so `ConnectInfo` isn't
-            // populated as it is on the plain listener — inject the real peer
-            // (post-PROXY-protocol) so `proxy_handler` can stamp it.
-            let app = Router::new()
-                .route(
-                    "/dns-query",
-                    get(crate::doh::doh_get)
-                        .post(crate::doh::doh_post)
-                        .with_state(conn_doh_state),
-                )
-                .fallback(any(proxy_handler))
-                .with_state(proxy_state)
-                .layer(axum::Extension(ConnectInfo(remote_addr)));
-
-            let tls_stream = match acceptor.accept(stream).await {
-                Ok(s) => s,
-                Err(e) => {
-                    debug!("TLS handshake failed from {}: {}", remote_addr, e);
-                    return;
-                }
-            };
-
-            let io = hyper_util::rt::TokioIo::new(tls_stream);
-            let svc = hyper_util::service::TowerToHyperService::new(app.into_service());
-
-            if let Err(e) = hyper::server::conn::http1::Builder::new()
-                .preserve_header_case(true)
-                .serve_connection(io, svc)
-                .with_upgrades()
-                .await
-            {
-                debug!("TLS connection error from {}: {}", remote_addr, e);
-            }
-        });
+    // Also closes idle keep-alive connections, which would otherwise pin a
+    // connection slot forever.
+    if let Err(e) = hyper::server::conn::http1::Builder::new()
+        .timer(hyper_util::rt::TokioTimer::new())
+        .header_read_timeout(HEADER_READ_TIMEOUT)
+        .preserve_header_case(true)
+        .serve_connection(io, svc)
+        .with_upgrades()
+        .await
+    {
+        debug!("TLS connection error from {}: {}", remote_addr, e);
     }
 }
 
@@ -681,6 +681,38 @@ mod tests {
             .and_then(|s| s.parse().ok())
             .expect("HTTP status line");
         (status, all[split + 4..].to_vec())
+    }
+
+    #[tokio::test]
+    async fn silent_client_is_dropped_after_handshake_timeout() {
+        let (addr, _) = spawn_doh_server_with_pp(&[], &[]).await;
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+
+        let read = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut [0u8; 1])).await;
+        assert!(matches!(read, Ok(Ok(0))), "silent connection kept open");
+    }
+
+    #[tokio::test]
+    async fn idle_tls_client_is_dropped_after_header_timeout() {
+        let (addr, cert_der) = spawn_doh_server_with_pp(&[], &[]).await;
+        let mut root_store = rustls::RootCertStore::empty();
+        root_store.add(cert_der).unwrap();
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(root_store)
+                .with_no_client_auth(),
+        ));
+        let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let mut stream = connector
+            .connect(ServerName::try_from("numa.numa").unwrap(), tcp)
+            .await
+            .unwrap();
+
+        let read = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut [0u8; 1])).await;
+        assert!(
+            matches!(read, Ok(Ok(0)) | Ok(Err(_))),
+            "idle connection kept open: {read:?}"
+        );
     }
 
     #[tokio::test]

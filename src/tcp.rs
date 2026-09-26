@@ -1,7 +1,8 @@
 //! Plain DNS-over-TCP listener (RFC 1035 §4.2.2, RFC 7766). Required so
 //! clients can retry after a TC=1 truncated UDP response — without it, those
-//! retries hit a closed port. Connection model mirrors `dot.rs`.
+//! retries hit a closed port.
 
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -56,27 +57,52 @@ pub async fn start_tcp(ctx: Arc<ServerCtx>, bind_addr: &str, pp_cfg: &ProxyProto
 }
 
 async fn accept_loop(listener: TcpListener, pp: Option<Arc<PpConfig>>, ctx: Arc<ServerCtx>) {
+    serve_connections(
+        listener,
+        pp,
+        ctx,
+        "TCP",
+        |stream, remote_addr, ctx| async move {
+            handle_framed_dns_connection(stream, remote_addr, &ctx, Transport::Tcp).await;
+        },
+    )
+    .await;
+}
+
+/// Accept loop shared by the TCP, DoT and HTTPS listeners: caps concurrent
+/// connections, then strips the PROXY header and applies `allow_from` before
+/// `handle` sees the stream.
+pub(crate) async fn serve_connections<H, F>(
+    listener: TcpListener,
+    pp: Option<Arc<PpConfig>>,
+    ctx: Arc<ServerCtx>,
+    label: &'static str,
+    handle: H,
+) where
+    H: Fn(pp2::Stream, SocketAddr, Arc<ServerCtx>) -> F + Send + Sync + 'static,
+    F: Future<Output = ()> + Send + 'static,
+{
     let semaphore = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+    let handle = Arc::new(handle);
 
     loop {
         let (tcp_stream, tcp_peer) = match listener.accept().await {
             Ok(conn) => conn,
             Err(e) => {
-                error!("TCP: accept error: {}", e);
+                error!("{label}: accept error: {e}");
+                // Back off to avoid tight-looping on persistent failures (e.g. fd exhaustion).
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 continue;
             }
         };
 
-        let permit = match semaphore.clone().try_acquire_owned() {
-            Ok(p) => p,
-            Err(_) => {
-                debug!("TCP: connection limit reached, rejecting {}", tcp_peer);
-                continue;
-            }
+        let Ok(permit) = semaphore.clone().try_acquire_owned() else {
+            debug!("{label}: connection limit reached, rejecting {tcp_peer}");
+            continue;
         };
         let ctx = Arc::clone(&ctx);
         let pp = pp.clone();
+        let handle = Arc::clone(&handle);
 
         tokio::spawn(async move {
             let _permit = permit;
@@ -88,11 +114,12 @@ async fn accept_loop(listener: TcpListener, pp: Option<Arc<PpConfig>>, ctx: Arc<
             };
 
             if !ctx.allow_from.admits(remote_addr.ip(), local_command) {
-                debug!("TCP: dropping {} — not in allow_from", remote_addr);
+                // Close before any TLS handshake: no fingerprint, no cert exposure.
+                debug!("{label}: dropping {remote_addr} — not in allow_from");
                 return;
             }
 
-            handle_framed_dns_connection(stream, remote_addr, &ctx, Transport::Tcp).await;
+            handle(stream, remote_addr, ctx).await;
         });
     }
 }

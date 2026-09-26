@@ -1,21 +1,17 @@
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::time::Duration;
 
-use log::{debug, error, info, warn};
+use log::{error, info, warn};
 use rustls::ServerConfig;
 use tokio::net::TcpListener;
-use tokio::sync::Semaphore;
 use tokio_rustls::TlsAcceptor;
 
 use crate::config::DotConfig;
 use crate::ctx::ServerCtx;
 use crate::pp2::{self, PpConfig};
 use crate::stats::Transport;
-use crate::tcp::handle_framed_dns_connection;
-
-const MAX_CONNECTIONS: usize = 512;
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+use crate::tcp::{handle_framed_dns_connection, serve_connections};
+use crate::tls::accept_tls;
 
 fn dot_alpn() -> Vec<Vec<u8>> {
     vec![b"dot".to_vec()]
@@ -90,67 +86,22 @@ async fn accept_loop(
     pp: Option<Arc<PpConfig>>,
     ctx: Arc<ServerCtx>,
 ) {
-    let semaphore = Arc::new(Semaphore::new(MAX_CONNECTIONS));
-
-    loop {
-        let (tcp_stream, tcp_peer) = match listener.accept().await {
-            Ok(conn) => conn,
-            Err(e) => {
-                error!("DoT: TCP accept error: {}", e);
-                // Back off to avoid tight-looping on persistent failures (e.g. fd exhaustion).
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                continue;
-            }
-        };
-
-        let permit = match semaphore.clone().try_acquire_owned() {
-            Ok(p) => p,
-            Err(_) => {
-                debug!("DoT: connection limit reached, rejecting {}", tcp_peer);
-                continue;
-            }
-        };
+    serve_connections(listener, pp, ctx, "DoT", move |stream, remote_addr, ctx| {
         let acceptor = acceptor.clone();
-        let ctx = Arc::clone(&ctx);
-        let pp = pp.clone();
-
-        tokio::spawn(async move {
-            let _permit = permit; // held until task exits
-
-            let Some((stream, remote_addr, local_command)) =
-                pp2::handshake(tcp_stream, tcp_peer, pp.as_deref(), &ctx).await
-            else {
-                return;
-            };
-
-            if !ctx.allow_from.admits(remote_addr.ip(), local_command) {
-                // Close before TLS handshake — no fingerprint, no cert exposure.
-                debug!("DoT: dropping {} — not in allow_from", remote_addr);
-                return;
+        async move {
+            if let Some(tls_stream) = accept_tls(&acceptor, stream, remote_addr, "DoT").await {
+                handle_framed_dns_connection(tls_stream, remote_addr, &ctx, Transport::Dot).await;
             }
-
-            let tls_stream =
-                match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
-                    Ok(Ok(s)) => s,
-                    Ok(Err(e)) => {
-                        debug!("DoT: TLS handshake failed from {}: {}", remote_addr, e);
-                        return;
-                    }
-                    Err(_) => {
-                        debug!("DoT: TLS handshake timeout from {}", remote_addr);
-                        return;
-                    }
-                };
-
-            handle_framed_dns_connection(tls_stream, remote_addr, &ctx, Transport::Dot).await;
-        });
-    }
+        }
+    })
+    .await;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Mutex;
+    use std::time::Duration;
 
     use rcgen::{CertificateParams, DnType, KeyPair};
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
