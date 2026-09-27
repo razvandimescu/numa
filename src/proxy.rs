@@ -33,7 +33,7 @@ type HttpClient = Client<hyper_util::client::legacy::connect::HttpConnector, Bod
 #[derive(Clone)]
 pub struct DohState {
     pub ctx: Arc<ServerCtx>,
-    pub remote_addr: Option<std::net::SocketAddr>,
+    pub remote_addr: SocketAddr,
 }
 
 #[derive(Clone)]
@@ -141,26 +141,13 @@ async fn accept_loop_tls(
         client,
     };
 
-    // DoH route (RFC 8484) served only on the TLS listener.
-    // DohState.remote_addr is set per-connection below.
-    let doh_state = DohState {
-        ctx: Arc::clone(&ctx),
-        remote_addr: None,
-    };
-
     serve_connections(
         listener,
         pp,
         ctx,
         "proxy(tls)",
         move |stream, remote_addr, ctx| {
-            serve_tls_connection(
-                stream,
-                remote_addr,
-                ctx,
-                proxy_state.clone(),
-                doh_state.clone(),
-            )
+            serve_tls_connection(stream, remote_addr, ctx, proxy_state.clone())
         },
     )
     .await;
@@ -171,7 +158,6 @@ async fn serve_tls_connection(
     remote_addr: SocketAddr,
     ctx: Arc<ServerCtx>,
     proxy_state: ProxyState,
-    doh_state: DohState,
 ) {
     // Load the latest TLS config on each connection (picks up new service certs)
     // unwrap safe: caller guards on ctx.tls_config.is_some()
@@ -180,10 +166,8 @@ async fn serve_tls_connection(
         return;
     };
 
-    let doh_state = DohState {
-        remote_addr: Some(remote_addr),
-        ..doh_state
-    };
+    // DoH route (RFC 8484) served only on the TLS listener.
+    let doh_state = DohState { ctx, remote_addr };
 
     // The TLS path serves via hyper directly, so `ConnectInfo` isn't
     // populated as it is on the plain listener — inject the real peer

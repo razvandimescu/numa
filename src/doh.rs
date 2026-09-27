@@ -89,24 +89,15 @@ fn doh_validate(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    // Gate DoH only — service-proxy routes on the same TLS listener
-    // aren't subject to the DNS ACL. Fail closed when the peer is unknown.
-    if state.ctx.allow_from.is_enabled() {
-        let allowed = state
-            .remote_addr
-            .is_some_and(|a| state.ctx.allow_from.allows(a.ip()));
-        if !allowed {
-            match state.remote_addr {
-                Some(a) => debug!("DoH: dropping {a} — not in allow_from"),
-                None => debug!("DoH: dropping unknown peer — not in allow_from"),
-            }
-            return Err(StatusCode::FORBIDDEN);
-        }
+    // The accept loop admits PROXY LOCAL probes regardless of `allow_from`;
+    // they must not resolve.
+    let peer = state.remote_addr;
+    if !state.ctx.allow_from.allows(peer.ip()) {
+        debug!("DoH: dropping {peer} — not in allow_from");
+        return Err(StatusCode::FORBIDDEN);
     }
 
-    Ok(state
-        .remote_addr
-        .unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], 0))))
+    Ok(peer)
 }
 
 fn is_doh_host(host: Option<&str>, tld: &str) -> bool {
@@ -280,7 +271,7 @@ mod tests {
         let ctx = std::sync::Arc::new(crate::testutil::test_ctx().await);
         let state = crate::proxy::DohState {
             ctx,
-            remote_addr: Some("127.0.0.1:1234".parse().unwrap()),
+            remote_addr: "127.0.0.1:1234".parse().unwrap(),
         };
         let req = Request::builder()
             .uri(format!("/dns-query?{query}"))
