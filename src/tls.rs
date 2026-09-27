@@ -8,8 +8,8 @@ use log::{debug, error, info, warn};
 
 use crate::config::Config;
 use crate::ctx::ServerCtx;
-use crate::pp2;
 use crate::service_store::ServiceStore;
+use crate::tcp::SlottedStream;
 use rcgen::{
     BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair, KeyUsagePurpose, SanType,
 };
@@ -28,10 +28,10 @@ const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1)
 
 pub(crate) async fn accept_tls(
     acceptor: &TlsAcceptor,
-    stream: pp2::Stream,
+    stream: SlottedStream,
     remote_addr: SocketAddr,
     label: &str,
-) -> Option<TlsStream<pp2::Stream>> {
+) -> Option<TlsStream<SlottedStream>> {
     match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
         Ok(Ok(s)) => Some(s),
         Ok(Err(e)) => {

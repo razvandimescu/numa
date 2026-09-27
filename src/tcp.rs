@@ -8,9 +8,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use log::{debug, error, info, warn};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::buffer::BytePacketBuffer;
 use crate::config::ProxyProtocolConfig;
@@ -20,7 +20,10 @@ use crate::packet::DnsPacket;
 use crate::pp2::{self, PpConfig};
 use crate::stats::Transport;
 
-const MAX_CONNECTIONS: usize = 512;
+#[cfg(not(test))]
+pub(crate) const MAX_CONNECTIONS: usize = 512;
+#[cfg(test)]
+pub(crate) const MAX_CONNECTIONS: usize = 16;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 // Matches BytePacketBuffer::BUF_SIZE — RFC 1035 allows up to 65535 but our
@@ -79,7 +82,7 @@ pub(crate) async fn serve_connections<H, F>(
     label: &'static str,
     handle: H,
 ) where
-    H: Fn(pp2::Stream, SocketAddr, Arc<ServerCtx>) -> F + Send + Sync + 'static,
+    H: Fn(SlottedStream, SocketAddr, Arc<ServerCtx>) -> F + Send + Sync + 'static,
     F: Future<Output = ()> + Send + 'static,
 {
     let semaphore = Arc::new(Semaphore::new(MAX_CONNECTIONS));
@@ -105,8 +108,6 @@ pub(crate) async fn serve_connections<H, F>(
         let handle = Arc::clone(&handle);
 
         tokio::spawn(async move {
-            let _permit = permit;
-
             let Some((stream, remote_addr, local_command)) =
                 pp2::handshake(tcp_stream, tcp_peer, pp.as_deref(), &ctx).await
             else {
@@ -119,8 +120,53 @@ pub(crate) async fn serve_connections<H, F>(
                 return;
             }
 
+            let stream = SlottedStream {
+                inner: stream,
+                _permit: permit,
+            };
             handle(stream, remote_addr, ctx).await;
         });
+    }
+}
+
+/// Holds its `serve_connections` slot for as long as the socket lives, so a
+/// connection handed off to a detached task (HTTP upgrades) stays counted.
+pub(crate) struct SlottedStream {
+    inner: pp2::Stream,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl AsyncRead for SlottedStream {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for SlottedStream {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
     }
 }
 

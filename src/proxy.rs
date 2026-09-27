@@ -20,13 +20,13 @@ use tokio_rustls::TlsAcceptor;
 use crate::config::ProxyProtocolConfig;
 use crate::ctx::ServerCtx;
 use crate::pp2::{self, PpConfig};
-use crate::tcp::serve_connections;
+use crate::tcp::{serve_connections, SlottedStream};
 use crate::tls::accept_tls;
 
 #[cfg(not(test))]
-const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(test)]
-const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(1);
+pub(crate) const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(1);
 
 type HttpClient = Client<hyper_util::client::legacy::connect::HttpConnector, Body>;
 
@@ -169,7 +169,7 @@ async fn accept_loop_tls(
 }
 
 async fn serve_tls_connection(
-    stream: pp2::Stream,
+    stream: SlottedStream,
     remote_addr: SocketAddr,
     ctx: Arc<ServerCtx>,
     proxy_state: ProxyState,
@@ -208,7 +208,7 @@ async fn serve_tls_connection(
     // connection slot forever.
     if let Err(e) = hyper::server::conn::http1::Builder::new()
         .timer(hyper_util::rt::TokioTimer::new())
-        .header_read_timeout(HEADER_READ_TIMEOUT)
+        .header_read_timeout(REQUEST_READ_TIMEOUT)
         .preserve_header_case(true)
         .serve_connection(io, svc)
         .with_upgrades()
@@ -614,6 +614,14 @@ mod tests {
         pp_from: &[&str],
         allow_from: &[&str],
     ) -> (SocketAddr, CertificateDer<'static>) {
+        let (addr, cert_der, _) = spawn_doh_server_with_ctx(pp_from, allow_from).await;
+        (addr, cert_der)
+    }
+
+    async fn spawn_doh_server_with_ctx(
+        pp_from: &[&str],
+        allow_from: &[&str],
+    ) -> (SocketAddr, CertificateDer<'static>, Arc<ServerCtx>) {
         let (server_tls, cert_der) = test_tls_configs();
         let upstream_addr = crate::testutil::blackhole_upstream();
 
@@ -642,9 +650,55 @@ mod tests {
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        tokio::spawn(accept_loop_tls(listener, ctx, pp));
+        tokio::spawn(accept_loop_tls(listener, Arc::clone(&ctx), pp));
 
-        (addr, cert_der)
+        (addr, cert_der, ctx)
+    }
+
+    async fn tls_connect(
+        addr: SocketAddr,
+        cert_der: CertificateDer<'static>,
+    ) -> tokio_rustls::client::TlsStream<tokio::net::TcpStream> {
+        let mut root_store = rustls::RootCertStore::empty();
+        root_store.add(cert_der).unwrap();
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(root_store)
+                .with_no_client_auth(),
+        ));
+        let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        connector
+            .connect(ServerName::try_from("numa.numa").unwrap(), tcp)
+            .await
+            .unwrap()
+    }
+
+    /// Backend that answers every request with 101 and then holds the socket.
+    async fn spawn_upgrading_backend() -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut head = Vec::new();
+                    let mut byte = [0u8; 1];
+                    while !head.ends_with(b"\r\n\r\n") {
+                        if sock.read(&mut byte).await.unwrap_or(0) == 0 {
+                            return;
+                        }
+                        head.push(byte[0]);
+                    }
+                    let _ = sock
+                        .write_all(
+                            b"HTTP/1.1 101 Switching Protocols\r\n\
+                              Upgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+                        )
+                        .await;
+                    let _ = sock.read(&mut byte).await;
+                });
+            }
+        });
+        port
     }
 
     /// Drive a single HTTP/1.1 `POST /dns-query` over an open TLS stream.
@@ -695,23 +749,66 @@ mod tests {
     #[tokio::test]
     async fn idle_tls_client_is_dropped_after_header_timeout() {
         let (addr, cert_der) = spawn_doh_server_with_pp(&[], &[]).await;
-        let mut root_store = rustls::RootCertStore::empty();
-        root_store.add(cert_der).unwrap();
-        let connector = tokio_rustls::TlsConnector::from(Arc::new(
-            rustls::ClientConfig::builder()
-                .with_root_certificates(root_store)
-                .with_no_client_auth(),
-        ));
-        let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
-        let mut stream = connector
-            .connect(ServerName::try_from("numa.numa").unwrap(), tcp)
-            .await
-            .unwrap();
+        let mut stream = tls_connect(addr, cert_der).await;
 
         let read = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut [0u8; 1])).await;
         assert!(
             matches!(read, Ok(Ok(0)) | Ok(Err(_))),
             "idle connection kept open: {read:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stalled_doh_body_is_dropped_after_read_timeout() {
+        let (addr, cert_der) = spawn_doh_server_with_pp(&[], &[]).await;
+        let mut stream = tls_connect(addr, cert_der).await;
+        stream
+            .write_all(
+                b"POST /dns-query HTTP/1.1\r\nHost: numa.numa\r\n\
+                  Content-Type: application/dns-message\r\nContent-Length: 12\r\n\r\n",
+            )
+            .await
+            .unwrap();
+
+        let mut all = Vec::new();
+        let read = tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut all)).await;
+        assert!(
+            matches!(read, Ok(Ok(_)) | Ok(Err(_))),
+            "stalled body kept the connection open"
+        );
+    }
+
+    #[tokio::test]
+    async fn upgraded_connections_hold_their_slot() {
+        let (addr, cert_der, ctx) = spawn_doh_server_with_ctx(&[], &[]).await;
+        let backend_port = spawn_upgrading_backend().await;
+        ctx.services
+            .lock()
+            .unwrap()
+            .insert_from_config("ws", backend_port, None, Vec::new());
+
+        let mut upgraded = Vec::with_capacity(crate::tcp::MAX_CONNECTIONS);
+        for _ in 0..crate::tcp::MAX_CONNECTIONS {
+            let mut stream = tls_connect(addr, cert_der.clone()).await;
+            stream
+                .write_all(
+                    b"GET / HTTP/1.1\r\nHost: ws.numa\r\n\
+                      Upgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            let mut head = [0u8; 12];
+            stream.read_exact(&mut head).await.unwrap();
+            assert_eq!(&head, b"HTTP/1.1 101");
+            upgraded.push(stream);
+        }
+
+        let mut extra = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let read =
+            tokio::time::timeout(Duration::from_millis(500), extra.read(&mut [0u8; 1])).await;
+        assert!(
+            matches!(read, Ok(Ok(0)) | Ok(Err(_))),
+            "connection admitted past the cap while upgrades were open"
         );
     }
 

@@ -32,11 +32,15 @@ pub async fn doh_post(State(state): State<super::proxy::DohState>, req: Request)
         return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
     }
 
-    let body = match axum::body::to_bytes(req.into_body(), MAX_DNS_MSG).await {
-        Ok(b) => b,
-        Err(_) => {
+    // Past the headers hyper's read timeout no longer applies, so a withheld
+    // body would pin the connection slot.
+    let read = axum::body::to_bytes(req.into_body(), MAX_DNS_MSG);
+    let body = match tokio::time::timeout(super::proxy::REQUEST_READ_TIMEOUT, read).await {
+        Ok(Ok(b)) => b,
+        Ok(Err(_)) => {
             return (StatusCode::PAYLOAD_TOO_LARGE, "body exceeds 4096 bytes").into_response();
         }
+        Err(_) => return StatusCode::REQUEST_TIMEOUT.into_response(),
     };
 
     if body.is_empty() {
