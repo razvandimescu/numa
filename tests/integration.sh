@@ -133,9 +133,9 @@ CONF
     if echo "$SUITE_CONFIG" | grep -q 'enabled = true'; then
         check "Blocked domain → 0.0.0.0" \
             "0.0.0.0" \
-            "$($DIG ads.google.com A +short)"
+            "$($DIG googlesyndication.com A +short)"
     else
-        local ADS=$($DIG ads.google.com A +short 2>/dev/null)
+        local ADS=$($DIG googlesyndication.com A +short 2>/dev/null)
         if echo "$ADS" | grep -q "0.0.0.0"; then
             check "Blocking disabled but domain blocked" "should-resolve" "0.0.0.0"
         else
@@ -352,11 +352,11 @@ sleep 3
 
 echo ""
 echo "=== Blocking disabled ==="
-ADS_RESULT=$($DIG ads.google.com A +short 2>/dev/null || true)
+ADS_RESULT=$($DIG googlesyndication.com A +short 2>/dev/null || true)
 if echo "$ADS_RESULT" | grep -q "0.0.0.0"; then
-    check "ads.google.com NOT blocked (blocking disabled)" "not-0.0.0.0" "0.0.0.0"
+    check "googlesyndication.com NOT blocked (blocking disabled)" "not-0.0.0.0" "0.0.0.0"
 else
-    check "ads.google.com NOT blocked (blocking disabled)" "." "$ADS_RESULT"
+    check "googlesyndication.com NOT blocked (blocking disabled)" "." "$ADS_RESULT"
 fi
 
 kill "$NUMA_PID" 2>/dev/null || true
