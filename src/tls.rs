@@ -9,29 +9,27 @@ use log::{debug, error, info, warn};
 use crate::config::Config;
 use crate::ctx::ServerCtx;
 use crate::service_store::ServiceStore;
-use crate::tcp::SlottedStream;
 use rcgen::{
     BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair, KeyUsagePurpose, SanType,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::ServerConfig;
 use time::{Duration, OffsetDateTime};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_rustls::server::TlsStream;
 use tokio_rustls::TlsAcceptor;
 
 const CA_VALIDITY_DAYS: i64 = 3650; // 10 years
 const CERT_VALIDITY_DAYS: i64 = 365; // 1 year
-#[cfg(not(test))]
-const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-#[cfg(test)]
-const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+const HANDSHAKE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(if cfg!(test) { 1 } else { 10 });
 
-pub(crate) async fn accept_tls(
+pub(crate) async fn accept_tls<S: AsyncRead + AsyncWrite + Unpin>(
     acceptor: &TlsAcceptor,
-    stream: SlottedStream,
+    stream: S,
     remote_addr: SocketAddr,
     label: &str,
-) -> Option<TlsStream<SlottedStream>> {
+) -> Option<TlsStream<S>> {
     match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
         Ok(Ok(s)) => Some(s),
         Ok(Err(e)) => {

@@ -23,10 +23,8 @@ use crate::pp2::{self, PpConfig};
 use crate::tcp::{serve_connections, SlottedStream};
 use crate::tls::accept_tls;
 
-#[cfg(not(test))]
-pub(crate) const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(30);
-#[cfg(test)]
-pub(crate) const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(1);
+pub(crate) const REQUEST_READ_TIMEOUT: Duration =
+    Duration::from_secs(if cfg!(test) { 1 } else { 30 });
 
 type HttpClient = Client<hyper_util::client::legacy::connect::HttpConnector, Body>;
 
@@ -613,14 +611,6 @@ mod tests {
     async fn spawn_doh_server_with_pp(
         pp_from: &[&str],
         allow_from: &[&str],
-    ) -> (SocketAddr, CertificateDer<'static>) {
-        let (addr, cert_der, _) = spawn_doh_server_with_ctx(pp_from, allow_from).await;
-        (addr, cert_der)
-    }
-
-    async fn spawn_doh_server_with_ctx(
-        pp_from: &[&str],
-        allow_from: &[&str],
     ) -> (SocketAddr, CertificateDer<'static>, Arc<ServerCtx>) {
         let (server_tls, cert_der) = test_tls_configs();
         let upstream_addr = crate::testutil::blackhole_upstream();
@@ -655,19 +645,22 @@ mod tests {
         (addr, cert_der, ctx)
     }
 
+    fn client_config(cert_der: CertificateDer<'static>) -> Arc<rustls::ClientConfig> {
+        let mut root_store = rustls::RootCertStore::empty();
+        root_store.add(cert_der).unwrap();
+        Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(root_store)
+                .with_no_client_auth(),
+        )
+    }
+
     async fn tls_connect(
         addr: SocketAddr,
         cert_der: CertificateDer<'static>,
     ) -> tokio_rustls::client::TlsStream<tokio::net::TcpStream> {
-        let mut root_store = rustls::RootCertStore::empty();
-        root_store.add(cert_der).unwrap();
-        let connector = tokio_rustls::TlsConnector::from(Arc::new(
-            rustls::ClientConfig::builder()
-                .with_root_certificates(root_store)
-                .with_no_client_auth(),
-        ));
         let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
-        connector
+        tokio_rustls::TlsConnector::from(client_config(cert_der))
             .connect(ServerName::try_from("numa.numa").unwrap(), tcp)
             .await
             .unwrap()
@@ -680,21 +673,15 @@ mod tests {
         tokio::spawn(async move {
             while let Ok((mut sock, _)) = listener.accept().await {
                 tokio::spawn(async move {
-                    let mut head = Vec::new();
-                    let mut byte = [0u8; 1];
-                    while !head.ends_with(b"\r\n\r\n") {
-                        if sock.read(&mut byte).await.unwrap_or(0) == 0 {
-                            return;
-                        }
-                        head.push(byte[0]);
-                    }
+                    let mut buf = [0u8; 1024];
+                    let _ = sock.read(&mut buf).await;
                     let _ = sock
                         .write_all(
                             b"HTTP/1.1 101 Switching Protocols\r\n\
                               Upgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
                         )
                         .await;
-                    let _ = sock.read(&mut byte).await;
+                    let _ = sock.read(&mut buf).await;
                 });
             }
         });
@@ -739,7 +726,7 @@ mod tests {
 
     #[tokio::test]
     async fn silent_client_is_dropped_after_handshake_timeout() {
-        let (addr, _) = spawn_doh_server_with_pp(&[], &[]).await;
+        let (addr, _, _) = spawn_doh_server_with_pp(&[], &[]).await;
         let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
 
         let read = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut [0u8; 1])).await;
@@ -748,7 +735,7 @@ mod tests {
 
     #[tokio::test]
     async fn idle_tls_client_is_dropped_after_header_timeout() {
-        let (addr, cert_der) = spawn_doh_server_with_pp(&[], &[]).await;
+        let (addr, cert_der, _) = spawn_doh_server_with_pp(&[], &[]).await;
         let mut stream = tls_connect(addr, cert_der).await;
 
         let read = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut [0u8; 1])).await;
@@ -760,7 +747,7 @@ mod tests {
 
     #[tokio::test]
     async fn stalled_doh_body_is_dropped_after_read_timeout() {
-        let (addr, cert_der) = spawn_doh_server_with_pp(&[], &[]).await;
+        let (addr, cert_der, _) = spawn_doh_server_with_pp(&[], &[]).await;
         let mut stream = tls_connect(addr, cert_der).await;
         stream
             .write_all(
@@ -772,15 +759,12 @@ mod tests {
 
         let mut all = Vec::new();
         let read = tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut all)).await;
-        assert!(
-            matches!(read, Ok(Ok(_)) | Ok(Err(_))),
-            "stalled body kept the connection open"
-        );
+        assert!(read.is_ok(), "stalled body kept the connection open");
     }
 
     #[tokio::test]
     async fn upgraded_connections_hold_their_slot() {
-        let (addr, cert_der, ctx) = spawn_doh_server_with_ctx(&[], &[]).await;
+        let (addr, cert_der, ctx) = spawn_doh_server_with_pp(&[], &[]).await;
         let backend_port = spawn_upgrading_backend().await;
         ctx.services
             .lock()
@@ -817,15 +801,8 @@ mod tests {
         // Trusted client (127.0.0.1) sends a v4 PROXY header before the TLS
         // ClientHello; server completes TLS, parses the wire DNS message,
         // and returns NOERROR with the local-zone A record.
-        let (addr, cert_der) = spawn_doh_server_with_pp(&["127.0.0.1"], &[]).await;
-
-        let mut root_store = rustls::RootCertStore::empty();
-        root_store.add(cert_der).unwrap();
-        let client_config = Arc::new(
-            rustls::ClientConfig::builder()
-                .with_root_certificates(root_store)
-                .with_no_client_auth(),
-        );
+        let (addr, cert_der, _) = spawn_doh_server_with_pp(&["127.0.0.1"], &[]).await;
+        let client_config = client_config(cert_der);
 
         let mut tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
         let pp = pp2_v4_proxy(
@@ -887,15 +864,9 @@ mod tests {
     /// loopback test peer), so the 443 ACL is genuinely exercised.
     #[tokio::test]
     async fn proxy_tls_allow_from_gates_proxied_client() {
-        let (addr, cert_der) = spawn_doh_server_with_pp(&["127.0.0.1"], &["203.0.113.0/24"]).await;
-
-        let mut root_store = rustls::RootCertStore::empty();
-        root_store.add(cert_der).unwrap();
-        let client_config = Arc::new(
-            rustls::ClientConfig::builder()
-                .with_root_certificates(root_store)
-                .with_no_client_auth(),
-        );
+        let (addr, cert_der, _) =
+            spawn_doh_server_with_pp(&["127.0.0.1"], &["203.0.113.0/24"]).await;
+        let client_config = client_config(cert_der);
 
         async fn tls_connects(
             addr: SocketAddr,

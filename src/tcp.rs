@@ -20,10 +20,7 @@ use crate::packet::DnsPacket;
 use crate::pp2::{self, PpConfig};
 use crate::stats::Transport;
 
-#[cfg(not(test))]
-pub(crate) const MAX_CONNECTIONS: usize = 512;
-#[cfg(test)]
-pub(crate) const MAX_CONNECTIONS: usize = 16;
+pub(crate) const MAX_CONNECTIONS: usize = if cfg!(test) { 16 } else { 512 };
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 // Matches BytePacketBuffer::BUF_SIZE — RFC 1035 allows up to 65535 but our
@@ -138,35 +135,35 @@ pub(crate) struct SlottedStream {
 
 impl AsyncRead for SlottedStream {
     fn poll_read(
-        self: std::pin::Pin<&mut Self>,
+        mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
+        std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
     }
 }
 
 impl AsyncWrite for SlottedStream {
     fn poll_write(
-        self: std::pin::Pin<&mut Self>,
+        mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
         buf: &[u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
-        std::pin::Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+        std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
     }
 
     fn poll_flush(
-        self: std::pin::Pin<&mut Self>,
+        mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
     }
 
     fn poll_shutdown(
-        self: std::pin::Pin<&mut Self>,
+        mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
     }
 }
 
