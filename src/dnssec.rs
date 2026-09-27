@@ -19,10 +19,28 @@ pub struct ValidationStats {
     pub dnskey_fetches: u16,
     pub ds_cache_hits: u16,
     pub ds_fetches: u16,
+    pub signature_checks: u16,
     pub elapsed_ms: u64,
 }
 
 const MAX_CHAIN_DEPTH: u8 = 10;
+// KeyTrap (CVE-2023-50387): colliding key tags make RRSIGs x DNSKEYs checks
+// quadratic, and each valid signature re-walks its chain. Headroom covers long
+// CNAME chains, which re-walk a chain per RRset.
+const MAX_SIGNATURE_CHECKS: u16 = 128;
+
+fn signature_budget_spent(stats: &Mutex<ValidationStats>) -> bool {
+    stats.lock().unwrap().signature_checks >= MAX_SIGNATURE_CHECKS
+}
+
+fn spend_signature_check(stats: &Mutex<ValidationStats>) -> bool {
+    let mut stats = stats.lock().unwrap();
+    if stats.signature_checks >= MAX_SIGNATURE_CHECKS {
+        return false;
+    }
+    stats.signature_checks += 1;
+    true
+}
 
 // IANA root zone trust anchors (algorithm 8 RSASHA256, flags 257 = KSK).
 // Both the incumbent KSK-2017 (tag 20326) and its successor KSK-2024 (tag 38696)
@@ -360,7 +378,7 @@ async fn try_verify_with_key(
     dnskey_response: &[DnsRecord],
     ctx: &ValidationCtx<'_>,
 ) -> KeyOutcome {
-    if !rrsig_verified_by(rrsig, dk, rrset) {
+    if !rrsig_verified_by(rrsig, dk, rrset, ctx.stats) {
         return KeyOutcome::Skip;
     }
 
@@ -400,6 +418,9 @@ fn validate_chain<'a>(
         if depth > MAX_CHAIN_DEPTH {
             return DnssecStatus::Indeterminate;
         }
+        if signature_budget_spent(stats) {
+            return DnssecStatus::Bogus;
+        }
 
         // Root base case: a trust anchor must be present *and* have signed the
         // DNSKEY RRset. Present-but-unsigned is an attack signal → Bogus (fail
@@ -408,7 +429,7 @@ fn validate_chain<'a>(
             .iter()
             .any(|dk| trust_anchors.iter().any(|ta| same_dnskey(dk, ta)));
         if anchor_present {
-            return if verify_rrset_signed(zone_records, QueryType::DNSKEY, trust_anchors) {
+            return if verify_rrset_signed(zone_records, QueryType::DNSKEY, trust_anchors, stats) {
                 debug!("dnssec: root DNSKEY signed by trust anchor for '{}'", zone);
                 DnssecStatus::Secure
             } else {
@@ -459,7 +480,12 @@ fn validate_chain<'a>(
                 debug!("dnssec: DS digest mismatch for zone '{}'", zone);
                 return DnssecStatus::Bogus;
             }
-            if !verify_rrset_signed(zone_records, QueryType::DNSKEY, &ds_authenticated_ksks) {
+            if !verify_rrset_signed(
+                zone_records,
+                QueryType::DNSKEY,
+                &ds_authenticated_ksks,
+                stats,
+            ) {
                 debug!(
                     "dnssec: DNSKEY RRset not signed by a DS-matched KSK: '{}'",
                     zone
@@ -493,7 +519,7 @@ fn validate_chain<'a>(
 
         // The DS RRset must itself be signed by the (now-validated) parent.
         // A digest match alone lets a forged DS endorse an attacker's KSK.
-        if !verify_rrset_signed(&ds_response, QueryType::DS, &parent_records) {
+        if !verify_rrset_signed(&ds_response, QueryType::DS, &parent_records, stats) {
             debug!("dnssec: DS RRset for '{}' not signed by parent", zone);
             return DnssecStatus::Bogus;
         }
@@ -525,7 +551,12 @@ fn same_dnskey(a: &DnsRecord, b: &DnsRecord) -> bool {
 /// The chain's single signature gate: does `dk` make a time-valid RRSIG `rrsig`
 /// over `rrset`? Matches algorithm + key tag, checks validity window, then
 /// verifies the signature over the canonical RRset bytes.
-fn rrsig_verified_by(rrsig: &DnsRecord, dk: &DnsRecord, rrset: &[&DnsRecord]) -> bool {
+fn rrsig_verified_by(
+    rrsig: &DnsRecord,
+    dk: &DnsRecord,
+    rrset: &[&DnsRecord],
+    stats: &Mutex<ValidationStats>,
+) -> bool {
     let (
         DnsRecord::RRSIG {
             algorithm,
@@ -546,15 +577,19 @@ fn rrsig_verified_by(rrsig: &DnsRecord, dk: &DnsRecord, rrset: &[&DnsRecord]) ->
     else {
         return false;
     };
-    dk_algo == algorithm
-        && compute_key_tag(*flags, *protocol, *dk_algo, public_key) == *key_tag
-        && is_rrsig_time_valid(*expiration, *inception)
-        && verify_signature(
-            *algorithm,
-            public_key,
-            &build_signed_data(rrsig, rrset),
-            signature,
-        )
+    if dk_algo != algorithm
+        || compute_key_tag(*flags, *protocol, *dk_algo, public_key) != *key_tag
+        || !is_rrsig_time_valid(*expiration, *inception)
+        || !spend_signature_check(stats)
+    {
+        return false;
+    }
+    verify_signature(
+        *algorithm,
+        public_key,
+        &build_signed_data(rrsig, rrset),
+        signature,
+    )
 }
 
 /// Does the `rrset_type` RRset in `records` carry an RRSIG made by one of
@@ -566,6 +601,7 @@ fn verify_rrset_signed(
     records: &[DnsRecord],
     rrset_type: QueryType,
     signing_keys: &[DnsRecord],
+    stats: &Mutex<ValidationStats>,
 ) -> bool {
     let rrset: Vec<&DnsRecord> = records
         .iter()
@@ -579,7 +615,7 @@ fn verify_rrset_signed(
             if QueryType::from_num(*type_covered) == rrset_type)
             && signing_keys
                 .iter()
-                .any(|dk| rrsig_verified_by(r, dk, &rrset))
+                .any(|dk| rrsig_verified_by(r, dk, &rrset, stats))
     })
 }
 
@@ -594,6 +630,9 @@ async fn fetch_dnskeys(
     srtt: &RwLock<SrttCache>,
     stats: &Mutex<ValidationStats>,
 ) -> Vec<DnsRecord> {
+    if signature_budget_spent(stats) {
+        return Vec::new();
+    }
     if let Some(pkt) = cache.read().unwrap().lookup(zone, QueryType::DNSKEY) {
         stats.lock().unwrap().dnskey_cache_hits += 1;
         trace!(
@@ -634,6 +673,9 @@ async fn fetch_ds(
 ) -> Vec<DnsRecord> {
     // Returns the full answer set (DS records *and* their RRSIGs); the caller
     // both digest-matches the DS and verifies the parent's signature over it.
+    if signature_budget_spent(stats) {
+        return Vec::new();
+    }
     if let Some(pkt) = cache.read().unwrap().lookup(child, QueryType::DS) {
         stats.lock().unwrap().ds_cache_hits += 1;
         return pkt.answers;
@@ -1944,6 +1986,51 @@ mod tests {
         )
     }
 
+    // Duplicate keys share a key tag, so every RRSIG x DNSKEY pair reaches the
+    // signature check: the same cross-product colliding key tags produce.
+    #[tokio::test]
+    async fn keytrap_candidate_cross_product_is_bounded() {
+        const CANDIDATES: usize = 16;
+        let (cache, srtt, _) = empty_ctx();
+        let signer = mk_signer(256);
+        let key = mk_dnskey(".", &signer);
+        let answer = DnsRecord::A {
+            domain: "example".into(),
+            addr: "192.0.2.1".parse().unwrap(),
+            ttl: 3600,
+        };
+        let good_sig = mk_rrsig(&signer, ".", QueryType::A, &[&answer]);
+
+        let mut keys = BytePacketBuffer::new();
+        mk_pkt(vec![key; CANDIDATES]).write(&mut keys).unwrap();
+        assert!(!keys.overflowed());
+        let key_packet =
+            DnsPacket::from_buffer(&mut BytePacketBuffer::from_bytes(keys.filled())).unwrap();
+        cache
+            .write()
+            .unwrap()
+            .insert(".", QueryType::DNSKEY, &key_packet);
+
+        let mut answers = vec![answer];
+        for i in 0..CANDIDATES {
+            let mut bad_sig = good_sig.clone();
+            if let DnsRecord::RRSIG { signature, .. } = &mut bad_sig {
+                signature[0] ^= (i + 1) as u8;
+            }
+            answers.push(bad_sig);
+        }
+        let mut wire = BytePacketBuffer::new();
+        mk_pkt(answers).write(&mut wire).unwrap();
+        assert!(!wire.overflowed());
+        let response =
+            DnsPacket::from_buffer(&mut BytePacketBuffer::from_bytes(wire.filled())).unwrap();
+
+        let (status, stats) = validate_response(&response, &cache, &[], &srtt).await;
+        assert_eq!(status, DnssecStatus::Bogus);
+        assert_eq!(stats.signature_checks, MAX_SIGNATURE_CHECKS);
+        assert_eq!(stats.dnskey_fetches + stats.ds_fetches, 0);
+    }
+
     // Positive control: a fully-signed delegation must stay Secure.
     #[tokio::test]
     async fn properly_signed_delegation_validates() {
@@ -2521,13 +2608,13 @@ mod tests {
             let refs = [&rr];
             let rrsig = mk_rrsig(&zsk, "test", qtype, &refs);
             assert!(
-                rrsig_verified_by(&rrsig, &dk, &refs),
+                rrsig_verified_by(&rrsig, &dk, &refs, &Mutex::default()),
                 "genuine {qtype:?} signature must verify"
             );
 
             let tampered = mk_unknown("www.test", qtype, b"\x08TAMPERED");
             assert!(
-                !rrsig_verified_by(&rrsig, &dk, &[&tampered]),
+                !rrsig_verified_by(&rrsig, &dk, &[&tampered], &Mutex::default()),
                 "tampered {qtype:?} rdata must not verify"
             );
         }
@@ -2567,7 +2654,12 @@ mod tests {
         let as_served = mk_unknown("_sip._udp.test", QueryType::SRV, &srv_rdata(b"SIP"));
 
         let rrsig = mk_rrsig(&zsk, "test", QueryType::SRV, &[&canonical]);
-        assert!(rrsig_verified_by(&rrsig, &dk, &[&as_served]));
+        assert!(rrsig_verified_by(
+            &rrsig,
+            &dk,
+            &[&as_served],
+            &Mutex::default()
+        ));
     }
 
     #[test]
@@ -2617,18 +2709,24 @@ mod tests {
         assert_eq!(status, DnssecStatus::Bogus);
     }
 
-    #[tokio::test]
-    async fn denial_signed_by_a_chained_key_verifies() {
-        let (cache, srtt, stats) = empty_ctx();
-        let (root, anchors) = seed_test_root(&cache);
+    /// Zone "test" chained to a test root; its KSK also signs data.
+    fn seed_chained_test_zone(cache: &RwLock<DnsCache>) -> (TestSigner, Vec<DnsRecord>) {
+        let (root, anchors) = seed_test_root(cache);
         let ksk = mk_signer(257);
         let dk = mk_dnskey("test", &ksk);
-        seed_ds(&cache, "test", &[&dk], Some(&root));
+        seed_ds(cache, "test", &[&dk], Some(&root));
         let selfsig = mk_rrsig(&ksk, "test", QueryType::DNSKEY, &[&dk]);
         cache
             .write()
             .unwrap()
             .insert("test", QueryType::DNSKEY, &mk_pkt(vec![dk, selfsig]));
+        (ksk, anchors)
+    }
+
+    #[tokio::test]
+    async fn denial_signed_by_a_chained_key_verifies() {
+        let (cache, srtt, stats) = empty_ctx();
+        let (ksk, anchors) = seed_chained_test_zone(&cache);
 
         let nsec = nodata_nsec("www.test");
         let sig = mk_rrsig(&ksk, "test", QueryType::NSEC, &[&nsec]);
@@ -2642,6 +2740,83 @@ mod tests {
         let verdict = verify_denial_rrsets(&[nsec], &[&sig], &ctx).await;
         assert_eq!(verdict, RrsetVerdict::Verified);
     }
+
+    // Verifying www.test interleaves four checks with three cache lookups:
+    // DNSKEY(test), check A, DS(test), check DNSKEY(test), DNSKEY(.), check
+    // DNSKEY(.), check DS. Leaving fewer checks exhausts the budget at each
+    // step in turn; no lookup may follow the last check.
+    #[tokio::test]
+    async fn spent_signature_budget_stops_validation() {
+        let max = MAX_SIGNATURE_CHECKS;
+        for (spent, expected, lookups) in [
+            (max - 4, RrsetVerdict::Verified, 3),
+            (max - 3, RrsetVerdict::Bogus, 3),
+            (max - 2, RrsetVerdict::Bogus, 2),
+            (max - 1, RrsetVerdict::Bogus, 1),
+            (max, RrsetVerdict::Bogus, 0),
+        ] {
+            let (cache, srtt, stats) = empty_ctx();
+            let (ksk, anchors) = seed_chained_test_zone(&cache);
+            stats.lock().unwrap().signature_checks = spent;
+            let a = DnsRecord::A {
+                domain: "www.test".into(),
+                addr: "192.0.2.1".parse().unwrap(),
+                ttl: 3600,
+            };
+            let rrsig = mk_rrsig(&ksk, "test", QueryType::A, &[&a]);
+            let ctx = ValidationCtx {
+                cache: &cache,
+                root_hints: &[],
+                srtt: &srtt,
+                trust_anchors: &anchors,
+                stats: &stats,
+            };
+            let verdict = verify_rrset("www.test", QueryType::A, &[&a], &[&rrsig], &ctx).await;
+            assert_eq!(verdict, expected, "{spent} checks already spent");
+            let stats = stats.lock().unwrap();
+            assert!(stats.signature_checks <= max);
+            assert_eq!(
+                stats.dnskey_cache_hits + stats.ds_cache_hits,
+                lookups,
+                "{spent} checks already spent"
+            );
+        }
+    }
+
+    // The budget must refuse floods, not RRsets where a few invalid signatures
+    // precede the valid one.
+    #[tokio::test]
+    async fn invalid_signature_minority_still_validates() {
+        let (cache, srtt, stats) = empty_ctx();
+        let (ksk, anchors) = seed_chained_test_zone(&cache);
+        let a = DnsRecord::A {
+            domain: "www.test".into(),
+            addr: "192.0.2.1".parse().unwrap(),
+            ttl: 3600,
+        };
+        let good_sig = mk_rrsig(&ksk, "test", QueryType::A, &[&a]);
+        let mut sigs: Vec<DnsRecord> = (0..3)
+            .map(|_| {
+                let mut bad_sig = good_sig.clone();
+                if let DnsRecord::RRSIG { signature, .. } = &mut bad_sig {
+                    signature.fill(0xAA);
+                }
+                bad_sig
+            })
+            .collect();
+        sigs.push(good_sig);
+        let sig_refs: Vec<&DnsRecord> = sigs.iter().collect();
+        let ctx = ValidationCtx {
+            cache: &cache,
+            root_hints: &[],
+            srtt: &srtt,
+            trust_anchors: &anchors,
+            stats: &stats,
+        };
+        let verdict = verify_rrset("www.test", QueryType::A, &[&a], &sig_refs, &ctx).await;
+        assert_eq!(verdict, RrsetVerdict::Verified);
+    }
+
     fn nsec(owner: &str, next: &str) -> DnsRecord {
         DnsRecord::NSEC {
             domain: owner.into(),
