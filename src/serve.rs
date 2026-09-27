@@ -246,7 +246,7 @@ pub async fn run(config_path: String) -> crate::Result<()> {
         api_port,
     );
 
-    spawn_background_services(&ctx, &config, &bootstrap_resolver, api_port).await?;
+    spawn_background_services(&ctx, &config, &bootstrap_resolver, api_port)?;
 
     // UDP DNS listener — shares `[server.proxy_protocol]` with TCP, which
     // already logged any parse error. Silently disable on Err.
@@ -294,7 +294,7 @@ async fn bind_udp_listeners(addrs: &[String]) -> crate::Result<Vec<Arc<UdpListen
     Ok(sockets)
 }
 
-async fn spawn_background_services(
+fn spawn_background_services(
     ctx: &Arc<ServerCtx>,
     config: &crate::config::Config,
     bootstrap_resolver: &Arc<NumaResolver>,
@@ -374,8 +374,8 @@ async fn spawn_background_services(
             ),
         }
     }
-    let listener = bind_api(api_addr).await?;
     tokio::spawn(async move {
+        let listener = bind_api(api_addr, Duration::from_secs(5)).await;
         let app = crate::api::router(api_ctx).layer(axum::middleware::from_fn_with_state(
             api_auth,
             crate::api_auth::require_auth,
@@ -976,10 +976,22 @@ async fn cache_warm_loop(ctx: Arc<ServerCtx>, domains: Vec<String>) {
     }
 }
 
-async fn bind_api(addr: SocketAddr) -> crate::Result<tokio::net::TcpListener> {
-    tokio::net::TcpListener::bind(addr)
-        .await
-        .map_err(|e| format!("cannot bind the API on {addr}: {e}").into())
+/// DNS must not depend on the control plane: a taken API port is retried in
+/// the background instead of failing startup (a failed start under launchd or
+/// systemd takes the host's DNS down with it).
+async fn bind_api(addr: SocketAddr, retry: Duration) -> tokio::net::TcpListener {
+    let mut reported = false;
+    loop {
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(listener) => return listener,
+            Err(e) if !reported => {
+                error!("cannot bind the API on {addr}: {e} (DNS keeps serving, retrying every {retry:?})");
+                reported = true;
+            }
+            Err(_) => {}
+        }
+        tokio::time::sleep(retry).await;
+    }
 }
 
 #[cfg(test)]
@@ -987,11 +999,18 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn bind_api_reports_a_taken_port_instead_of_panicking() {
+    async fn bind_api_waits_for_a_taken_port_instead_of_failing_startup() {
         let held = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = held.local_addr().unwrap();
-        let err = bind_api(addr).await.unwrap_err().to_string();
-        assert!(err.contains(&addr.to_string()), "{err}");
+        let bind = tokio::spawn(bind_api(addr, Duration::from_millis(10)));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!bind.is_finished(), "gave up while the port was taken");
+        drop(held);
+        let listener = tokio::time::timeout(Duration::from_secs(2), bind)
+            .await
+            .expect("port freed but bind kept retrying")
+            .unwrap();
+        assert_eq!(listener.local_addr().unwrap(), addr);
     }
 
     #[tokio::test]
