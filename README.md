@@ -81,7 +81,9 @@ Over loopback (`localhost`, `127.0.0.1`, `numa.numa`) no login is needed. Anythi
 | Linux | the binary (`/usr/local/bin/numa` from install.sh), `/var/lib/numa`, `/etc/numa` |
 | Windows | the binary, `%PROGRAMDATA%\numa` |
 
-Package-manager installs remove the binary with `brew uninstall`, `pacman -R` or `cargo uninstall`.
+Package-manager installs remove the binary with `brew uninstall`, `pacman -R` or `cargo uninstall`. On Linux, `numa install` copies a binary it can't run from its original location (e.g. `~/.cargo/bin`) to `/usr/local/bin/numa`, and uninstall leaves that copy.
+
+Also delete `~/.config/numa` if you created a user config, and the `[server] data_dir` path if you set one.
 
 ## Local Services
 
