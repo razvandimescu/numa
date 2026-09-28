@@ -14,6 +14,23 @@ Built from scratch in Rust. Zero DNS libraries. Caching, ad blocking, and local 
 
 ## Quick Start
 
+Three ways in, from least to most commitment. Only the third changes your system DNS.
+
+### 1. Try it in Docker (nothing installed on the host)
+
+```bash
+docker run -d --name numa -p 127.0.0.1:5553:53/udp -p 127.0.0.1:5553:53/tcp \
+  -p 127.0.0.1:5380:5380 ghcr.io/razvandimescu/numa
+dig @127.0.0.1 -p 5553 example.com
+docker exec numa numa token            # dashboard password
+```
+
+Open `http://localhost:5380` and log in with any username and that token. Port 5553 sidesteps whatever already holds 53 on the host. `numa.numa` won't resolve here, because the host isn't using Numa for DNS. Clean up with `docker rm -f numa`.
+
+### 2. Run in the foreground (system DNS untouched)
+
+Install the binary:
+
 ```bash
 # macOS
 brew install razvandimescu/tap/numa
@@ -28,22 +45,17 @@ pacman -S numa
 # All platforms
 cargo install numa
 
-# Docker
-docker run -d --name numa --network host -v numa-data:/var/lib/numa ghcr.io/razvandimescu/numa
-
 # Nix
 nix run github:razvandimescu/numa
 ```
 
 ```bash
-sudo numa                              # run in foreground (port 53 requires root/admin)
+sudo numa                              # Ctrl-C to stop (port 53 requires root/admin)
 ```
 
-Open the dashboard: **http://numa.numa** (or `http://localhost:5380`)
+Numa listens on port 53, but your system keeps its current resolver until you run `numa install`, so test with `dig @127.0.0.1 example.com`. The dashboard is at `http://localhost:5380`. If port 53 is taken (systemd-resolved on Ubuntu/Mint), set `bind_addr` in [`numa.toml`](numa.toml) or use Docker.
 
-Over loopback (`localhost`, `127.0.0.1`, `numa.numa`) no login is needed. Anything else, including Docker port mapping or this machine's LAN address, is asked for the API token, which Numa generates on first start. Print it with `sudo numa token` (an administrator shell on Windows) and log in with any username. Pin your own with `[server] api_token` or `NUMA_API_TOKEN`.
-
-Set as system DNS:
+### 3. Set as system DNS
 
 | Platform | Install | Uninstall |
 |----------|---------|-----------|
@@ -51,7 +63,25 @@ Set as system DNS:
 | Linux | `sudo numa install` | `sudo numa uninstall` |
 | Windows | `numa install` (admin) + reboot | `numa uninstall` (admin) + reboot |
 
+`install` registers a service, points system DNS at Numa and trusts its local CA. `uninstall` reverses all three. Once installed, the dashboard is also at **http://numa.numa**.
+
 On macOS and Linux, numa runs as a system service (launchd/systemd). The systemd unit is unprivileged (`DynamicUser=yes`, only `CAP_NET_BIND_SERVICE`); the launchd daemon runs as root. `numa install` reconfigures systemd-resolved through a drop-in that `numa uninstall` removes; any other process holding port 53 (dnsmasq, including NetworkManager's) has to be stopped by hand. On Windows, numa auto-starts on login via registry. Windows also binds `127.0.0.2:53` (the built-in Dnscache owns `127.0.0.1:53`) and installs an NRPT rule to route queries to it — so edit `bind_addr`/`api_bind_addr` against `127.0.0.2`, not `127.0.0.1`.
+
+### Logging in
+
+Over loopback (`localhost`, `127.0.0.1`, `numa.numa`) no login is needed. Anything else, including Docker port mapping or this machine's LAN address, is asked for the API token, which Numa generates on first start. Print it with `sudo numa token` (an administrator shell on Windows) and log in with any username. Pin your own with `[server] api_token` or `NUMA_API_TOKEN`.
+
+### Removing every trace
+
+`uninstall` restores DNS but keeps the data directory, so a reinstall keeps the same token and CA. To remove everything, uninstall first, then delete:
+
+| Platform | Left behind |
+|----------|-------------|
+| macOS | the binary, `/usr/local/var/numa`, `/usr/local/var/log/numa.log` |
+| Linux | the binary (`/usr/local/bin/numa` from install.sh), `/var/lib/numa`, `/etc/numa` |
+| Windows | the binary, `%PROGRAMDATA%\numa` |
+
+Package-manager installs remove the binary with `brew uninstall`, `pacman -R` or `cargo uninstall`.
 
 ## Local Services
 
