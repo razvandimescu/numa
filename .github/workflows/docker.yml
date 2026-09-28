@@ -1,9 +1,11 @@
 name: Docker
 
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       version:
@@ -14,13 +16,36 @@ permissions:
   contents: read
   packages: write
 
+env:
+  VERSION: ${{ inputs.version }}
+
 jobs:
   docker:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.version }}
+
+      - name: Fetch release binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$VERSION" -p 'numa-linux-x86_64.tar.gz*' -p 'numa-linux-aarch64.tar.gz*'
+          sha256sum -c numa-linux-*.sha256
+          for pair in amd64:x86_64 arm64:aarch64; do
+            mkdir -p "dist/${pair%%:*}"
+            tar xzf "numa-linux-${pair#*:}.tar.gz" -C "dist/${pair%%:*}"
+          done
 
       - uses: docker/setup-qemu-action@v4
+
+      - name: Smoke-test binaries on Alpine
+        run: |
+          for arch in amd64 arm64; do
+            docker run --rm --platform "linux/$arch" -v "$PWD/dist/$arch/numa:/numa:ro" alpine:3.24 /numa --version \
+              | grep -Fx "numa ${VERSION#v}"
+          done
 
       - uses: docker/setup-buildx-action@v4
 
@@ -35,16 +60,15 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
-            type=semver,pattern={{version}},value=${{ inputs.version || github.ref_name }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ inputs.version || github.ref_name }}
+            type=semver,pattern={{version}},value=${{ inputs.version }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ inputs.version }}
             type=raw,value=latest
 
       - uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64
+          build-args: NUMA_BINARY=prebuilt
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max

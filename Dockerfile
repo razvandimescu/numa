@@ -1,3 +1,6 @@
+# Release images set NUMA_BINARY=prebuilt to package the static release binaries from dist/<arch>/.
+ARG NUMA_BINARY=builder
+
 FROM rust:1.98-alpine AS builder
 RUN apk add --no-cache musl-dev cmake make perl
 WORKDIR /app
@@ -12,8 +15,14 @@ COPY numa.toml com.numa.dns.plist numa.service ./
 RUN touch src/main.rs src/lib.rs
 RUN cargo build --release
 
+FROM scratch AS prebuilt
+ARG TARGETARCH
+COPY dist/${TARGETARCH}/numa /app/target/release/numa
+
+FROM ${NUMA_BINARY} AS binary
+
 FROM alpine:3.24
-COPY --from=builder /app/target/release/numa /usr/local/bin/numa
+COPY --from=binary /app/target/release/numa /usr/local/bin/numa
 RUN mkdir -p /root/.config/numa && printf '[server]\napi_bind_addr = "0.0.0.0"\n\n[proxy]\nenabled = true\nbind_addr = "0.0.0.0"\n' > /root/.config/numa/numa.toml
 EXPOSE 53/udp 80/tcp 443/tcp 853/tcp 5380/tcp
 ENTRYPOINT ["numa"]

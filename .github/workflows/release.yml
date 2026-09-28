@@ -114,6 +114,15 @@ jobs:
             *.zip
             *.sha256
 
+  docker:
+    needs: release
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/docker.yml
+    with:
+      version: ${{ github.ref_name }}
+
   bump-homebrew:
     needs: release
     uses: ./.github/workflows/homebrew-bump.yml
