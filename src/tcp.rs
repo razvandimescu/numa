@@ -4,7 +4,7 @@
 
 use std::future::Future;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use log::{debug, error, info, warn};
@@ -119,7 +119,7 @@ pub(crate) async fn serve_connections<H, F>(
 
             let stream = SlottedStream {
                 inner: stream,
-                _permit: permit,
+                slot: Slot(Arc::new(Mutex::new(permit))),
             };
             handle(stream, remote_addr, ctx).await;
         });
@@ -130,7 +130,34 @@ pub(crate) async fn serve_connections<H, F>(
 /// connection handed off to a detached task (HTTP upgrades) stays counted.
 pub(crate) struct SlottedStream {
     inner: pp2::Stream,
-    _permit: OwnedSemaphorePermit,
+    slot: Slot,
+}
+
+impl SlottedStream {
+    pub(crate) fn slot(&self) -> Slot {
+        self.slot.clone()
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct Slot(Arc<Mutex<OwnedSemaphorePermit>>);
+
+impl Slot {
+    /// Takes a permit from `pool` before releasing the current one, so the
+    /// connection is never uncounted; false when `pool` is full.
+    pub(crate) fn move_to(&self, pool: &Arc<Semaphore>) -> bool {
+        let mut permit = self.0.lock().unwrap();
+        if Arc::ptr_eq(permit.semaphore(), pool) {
+            return true;
+        }
+        match Arc::clone(pool).try_acquire_owned() {
+            Ok(moved) => {
+                *permit = moved;
+                true
+            }
+            Err(_) => false,
+        }
+    }
 }
 
 impl AsyncRead for SlottedStream {
