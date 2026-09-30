@@ -31,9 +31,15 @@ static UDP_FAILURES: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::
 pub(crate) static UDP_DISABLED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-// Shared by reference across the whole recursion, so every branch draws from one pool.
-fn claim_query_budget(spent: &AtomicUsize) -> bool {
-    spent.fetch_add(1, Ordering::Relaxed) < MAX_TOTAL_QUERIES
+// Shared by reference across the whole recursion, so every branch draws from one
+// pool. Charged per packet sent, so hedges and TCP retries count.
+fn charge_query(spent: &AtomicUsize) -> crate::Result<()> {
+    spent
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+            (n < MAX_TOTAL_QUERIES).then_some(n + 1)
+        })
+        .map(|_| ())
+        .map_err(|_| "query budget exhausted".into())
 }
 
 fn dns_addr(ip: impl Into<IpAddr>) -> SocketAddr {
@@ -122,7 +128,7 @@ pub async fn prime_tld_cache(
     let mut root_addr = root_hints[0];
     for hint in root_hints {
         info!("prime: probing root {}", hint);
-        match send_query(".", QueryType::NS, *hint, srtt).await {
+        match send_query(".", QueryType::NS, *hint, srtt, &AtomicUsize::new(0)).await {
             Ok(_) => {
                 info!("prime: root {} reachable", hint);
                 root_addr = *hint;
@@ -135,7 +141,15 @@ pub async fn prime_tld_cache(
     }
 
     // Fetch root DNSKEY (needed for DNSSEC chain-of-trust terminus)
-    if let Ok(root_dnskey) = send_query(".", QueryType::DNSKEY, root_addr, srtt).await {
+    if let Ok(root_dnskey) = send_query(
+        ".",
+        QueryType::DNSKEY,
+        root_addr,
+        srtt,
+        &AtomicUsize::new(0),
+    )
+    .await
+    {
         cache
             .write()
             .unwrap()
@@ -147,13 +161,14 @@ pub async fn prime_tld_cache(
 
     for tld in tlds {
         // Fetch NS referral (includes DS in authority section from root)
-        let response = match send_query(tld, QueryType::NS, root_addr, srtt).await {
-            Ok(r) => r,
-            Err(e) => {
-                debug!("prime: failed to query NS for .{}: {}", tld, e);
-                continue;
-            }
-        };
+        let response =
+            match send_query(tld, QueryType::NS, root_addr, srtt, &AtomicUsize::new(0)).await {
+                Ok(r) => r,
+                Err(e) => {
+                    debug!("prime: failed to query NS for .{}: {}", tld, e);
+                    continue;
+                }
+            };
 
         let ns_names = extract_ns_names(&response);
         if ns_names.is_empty() {
@@ -171,7 +186,9 @@ pub async fn prime_tld_cache(
         let first_ns_name = ns_names.first().map(|s| s.as_str()).unwrap_or("");
         let first_ns = glue_addrs_for(&response, first_ns_name);
         if let Some(ns_addr) = first_ns.first() {
-            if let Ok(dnskey_resp) = send_query(tld, QueryType::DNSKEY, *ns_addr, srtt).await {
+            if let Ok(dnskey_resp) =
+                send_query(tld, QueryType::DNSKEY, *ns_addr, srtt, &AtomicUsize::new(0)).await
+            {
                 cache
                     .write()
                     .unwrap()
@@ -237,10 +254,6 @@ pub(crate) fn resolve_iterative<'a>(
                 return Err("no nameserver available".into());
             }
 
-            if !claim_query_budget(budget) {
-                return Err(format!("query budget exhausted resolving {}", qname).into());
-            }
-
             let (q_name, q_type) = minimize_query(qname, qtype, &current_zone);
 
             debug!(
@@ -248,16 +261,16 @@ pub(crate) fn resolve_iterative<'a>(
                 ns_addrs[ns_idx], q_type, q_name, current_zone, referral_depth
             );
 
-            let response = match send_query_hedged(q_name, q_type, &ns_addrs[ns_idx..], srtt).await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    debug!("recursive: NS query failed: {}", e);
-                    let remaining = ns_addrs.len().saturating_sub(ns_idx);
-                    ns_idx += remaining.min(2);
-                    continue;
-                }
-            };
+            let response =
+                match send_query_hedged(q_name, q_type, &ns_addrs[ns_idx..], srtt, budget).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        debug!("recursive: NS query failed: {}", e);
+                        let remaining = ns_addrs.len().saturating_sub(ns_idx);
+                        ns_idx += remaining.min(2);
+                        continue;
+                    }
+                };
 
             // The zone we queried, captured before a referral moves current_zone
             // to the child: glue/DS trust is judged against the server's zone,
@@ -720,12 +733,13 @@ async fn send_query_hedged(
     qtype: QueryType,
     servers: &[SocketAddr],
     srtt: &RwLock<SrttCache>,
+    budget: &AtomicUsize,
 ) -> crate::Result<DnsPacket> {
     if servers.is_empty() {
         return Err("no nameserver available".into());
     }
     if servers.len() == 1 {
-        return send_query(qname, qtype, servers[0], srtt).await;
+        return send_query(qname, qtype, servers[0], srtt, budget).await;
     }
 
     let primary = servers[0];
@@ -741,8 +755,8 @@ async fn send_query_hedged(
             "recursive: parallel query to {} and {} for {:?} {}",
             primary, secondary, qtype, qname
         );
-        let fut_a = send_query(qname, qtype, primary, srtt);
-        let fut_b = send_query(qname, qtype, secondary, srtt);
+        let fut_a = send_query(qname, qtype, primary, srtt, budget);
+        let fut_b = send_query(qname, qtype, secondary, srtt, budget);
         tokio::pin!(fut_a);
         tokio::pin!(fut_b);
 
@@ -784,7 +798,7 @@ async fn send_query_hedged(
             * 3;
         let hedge_delay = Duration::from_millis(hedge_ms.max(50));
 
-        let fut_a = send_query(qname, qtype, primary, srtt);
+        let fut_a = send_query(qname, qtype, primary, srtt, budget);
         tokio::pin!(fut_a);
         let delay = tokio::time::sleep(hedge_delay);
         tokio::pin!(delay);
@@ -798,7 +812,7 @@ async fn send_query_hedged(
             "recursive: hedging {} -> {} after {}ms for {:?} {}",
             primary, secondary, hedge_ms, qtype, qname
         );
-        let fut_b = send_query(qname, qtype, secondary, srtt);
+        let fut_b = send_query(qname, qtype, secondary, srtt, budget);
         tokio::pin!(fut_b);
 
         // First Ok wins; if one errors, wait for the other.
@@ -834,7 +848,9 @@ async fn send_query(
     qtype: QueryType,
     server: SocketAddr,
     srtt: &RwLock<SrttCache>,
+    budget: &AtomicUsize,
 ) -> crate::Result<DnsPacket> {
+    charge_query(budget)?;
     let mut query = DnsPacket::query(crate::packet::random_id(), qname, qtype);
     query.header.recursion_desired = false;
     query.edns = Some(crate::packet::EdnsOpt {
@@ -857,6 +873,7 @@ async fn send_query(
     match forward_udp(&query, server, NS_QUERY_TIMEOUT).await {
         Ok(resp) if resp.header.truncated_message => {
             debug!("send_query: truncated from {}, retrying TCP", server);
+            charge_query(budget)?;
             tcp_with_srtt(&query, server, srtt, start).await
         }
         Ok(resp) => {
@@ -877,6 +894,7 @@ async fn send_query(
                     fails
                 );
                 // Now that UDP is disabled, retry this query via TCP
+                charge_query(budget)?;
                 return tcp_with_srtt(&query, server, srtt, start).await;
             }
             // UDP works in general (priming succeeded) but this server timed out.
@@ -1048,10 +1066,30 @@ mod tests {
     fn query_budget_permits_exactly_max_then_denies() {
         let spent = AtomicUsize::new(0);
         for i in 0..MAX_TOTAL_QUERIES {
-            assert!(claim_query_budget(&spent), "query {i} within budget");
+            assert!(charge_query(&spent).is_ok(), "query {i} within budget");
         }
-        assert!(!claim_query_budget(&spent), "one past the budget is denied");
-        assert!(!claim_query_budget(&spent), "stays denied");
+        assert!(
+            charge_query(&spent).is_err(),
+            "one past the budget is denied"
+        );
+        assert!(charge_query(&spent).is_err(), "stays denied");
+        assert_eq!(spent.into_inner(), MAX_TOTAL_QUERIES);
+    }
+
+    #[tokio::test]
+    async fn tcp_retry_after_truncation_is_charged() {
+        let _guard = UDP_STATE_LOCK.lock().unwrap();
+        UDP_DISABLED.store(false, Ordering::Release);
+        let mut truncated = DnsPacket::new();
+        truncated.header.response = true;
+        truncated.header.truncated_message = true;
+        let upstream = crate::testutil::mock_upstream(truncated).await;
+        let spent = AtomicUsize::new(MAX_TOTAL_QUERIES - 1);
+        let srtt = RwLock::new(SrttCache::new(true));
+        let err = send_query("example.com", QueryType::A, upstream, &srtt, &spent)
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "query budget exhausted");
     }
 
     #[test]
@@ -1456,7 +1494,14 @@ mod tests {
         .await;
 
         let srtt = RwLock::new(SrttCache::new(true));
-        let result = send_query("test.example.com", QueryType::A, server_addr, &srtt).await;
+        let result = send_query(
+            "test.example.com",
+            QueryType::A,
+            server_addr,
+            &srtt,
+            &AtomicUsize::new(0),
+        )
+        .await;
 
         let resp = result.expect("should resolve via TCP fallback");
         assert_eq!(resp.header.rescode, ResultCode::NOERROR);

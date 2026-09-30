@@ -2850,7 +2850,8 @@ mod tests {
         let mut refused = DnsPacket::new();
         refused.header.response = true;
         refused.header.rescode = crate::header::ResultCode::REFUSED;
-        let (upstream, mut sent) = crate::testutil::recording_upstream(refused).await;
+        let (upstream_a, mut sent_a) = crate::testutil::recording_upstream(refused.clone()).await;
+        let (upstream_b, mut sent_b) = crate::testutil::recording_upstream(refused).await;
         let (cache, srtt, _) = empty_ctx();
         let a = DnsRecord::A {
             domain: "www.test".into(),
@@ -2866,9 +2867,9 @@ mod tests {
             }
             answers.push(sig);
         }
-        validate_response(&mk_pkt(answers), &cache, &[upstream], &srtt).await;
+        validate_response(&mk_pkt(answers), &cache, &[upstream_a, upstream_b], &srtt).await;
         let mut queries = 0;
-        while sent.try_recv().is_ok() {
+        while sent_a.try_recv().is_ok() || sent_b.try_recv().is_ok() {
             queries += 1;
         }
         assert!(
