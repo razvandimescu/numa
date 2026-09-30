@@ -5,6 +5,10 @@ use numa::system_dns::{
 
 const NO_SYSTEM_DNS_FLAG: &str = "--no-system-dns";
 
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 // libmimalloc-sys does not export this option; index 4 in the v2 and v3 headers of the pinned 0.1.49.
 #[cfg(target_env = "musl")]
 const MI_OPTION_ARENA_EAGER_COMMIT: libmimalloc_sys::mi_option_t = 4;
