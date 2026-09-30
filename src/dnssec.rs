@@ -180,7 +180,8 @@ pub async fn validate_response(
     for (name, qtype, rrset) in &rrsets {
         let matching_rrsigs = matching_rrsigs_for(&all_rrsigs, name, *qtype);
         if matching_rrsigs.is_empty() {
-            continue; // No RRSIG for this RRset — might be Insecure
+            status = DnssecStatus::Insecure;
+            continue;
         }
         match verify_rrset(name, *qtype, rrset, &matching_rrsigs, &ctx).await {
             RrsetVerdict::Verified => {}
@@ -2835,6 +2836,20 @@ mod tests {
         };
         let verdict = verify_rrset("www.test", QueryType::A, &[&a], &sig_refs, &ctx).await;
         assert_eq!(verdict, RrsetVerdict::Verified);
+    }
+
+    #[tokio::test]
+    async fn unsigned_answer_with_unrelated_rrsig_must_not_validate_secure() {
+        let (cache, srtt, _) = empty_ctx();
+        let a = DnsRecord::A {
+            domain: "www.test".into(),
+            addr: "192.0.2.1".parse().unwrap(),
+            ttl: 3600,
+        };
+        let unrelated_sig = mk_rrsig(&mk_signer(256), "test", QueryType::AAAA, &[&a]);
+        let response = mk_pkt(vec![a, unrelated_sig]);
+        let (status, _) = validate_response(&response, &cache, &[], &srtt).await;
+        assert_ne!(status, DnssecStatus::Secure);
     }
 
     fn nsec(owner: &str, next: &str) -> DnsRecord {
