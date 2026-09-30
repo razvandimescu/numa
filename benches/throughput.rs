@@ -137,3 +137,7 @@ criterion_group!(
     bench_buffer_alloc,
 );
 criterion_main!(benches);
+
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;

@@ -298,3 +298,7 @@ criterion_group!(
     bench_serialize_with_fallback,
 );
 criterion_main!(benches);
+
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
