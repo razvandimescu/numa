@@ -1266,17 +1266,14 @@ fn nsec_proves_nodata(owner: &str, qname: &str, bitmap: &[u8], qtype: u16) -> bo
         && !type_bitmap_contains(bitmap, QueryType::CNAME.to_num())
 }
 
-/// RFC 9276 recommends 0 iterations; we reject anything above this as a DoS vector.
-const MAX_NSEC3_ITERATIONS: u16 = 500;
+/// RFC 9276 recommends 0 iterations; above this, hashing is a DoS vector
+/// (CVE-2023-50868) and the proof is treated as Insecure (RFC 9276 §3.2).
+const MAX_NSEC3_ITERATIONS: u16 = 150;
 
 fn nsec3_hash(name: &str, algorithm: u8, iterations: u16, salt: &[u8]) -> Option<Vec<u8>> {
     if algorithm != 1 {
         return None; // Only SHA-1 (algorithm 1) defined
     }
-    if iterations > MAX_NSEC3_ITERATIONS {
-        return None;
-    }
-
     let wire_name = name_to_wire(name);
     let mut buf = Vec::with_capacity(wire_name.len() + salt.len());
     buf.extend(&wire_name);
@@ -1517,6 +1514,9 @@ fn validate_denial(
             ..
         }) = nsec3s.first().copied()
         {
+            if *iterations > MAX_NSEC3_ITERATIONS {
+                return DnssecStatus::Insecure;
+            }
             let qname_hash = match nsec3_hash(qname, *hash_algorithm, *iterations, salt) {
                 Some(h) => h,
                 None => return DnssecStatus::Indeterminate,
@@ -1815,10 +1815,30 @@ mod tests {
         ));
     }
 
+    // RFC 9276 §3.2: a proof hashed past the iteration cap is Insecure.
     #[test]
-    fn nsec3_hash_rejects_high_iterations() {
-        assert!(nsec3_hash("example.com", 1, 500, &[]).is_some());
-        assert!(nsec3_hash("example.com", 1, 501, &[]).is_none());
+    fn nsec3_proof_over_iteration_cap_is_insecure() {
+        let nsec3 = DnsRecord::NSEC3 {
+            domain: "0p9mhaveqvm6t7vbl5lop2u3t2rp3tom.example.com".into(),
+            hash_algorithm: 1,
+            flags: 0,
+            iterations: 151,
+            salt: vec![],
+            next_hashed_owner: vec![0xFF; 20],
+            type_bitmap: vec![],
+            ttl: 3600,
+        };
+        for is_nxdomain in [true, false] {
+            assert_eq!(
+                validate_denial(
+                    std::slice::from_ref(&nsec3),
+                    "a.example.com",
+                    1,
+                    is_nxdomain
+                ),
+                DnssecStatus::Insecure
+            );
+        }
     }
 
     #[test]
