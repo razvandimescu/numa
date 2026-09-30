@@ -20,6 +20,7 @@ pub struct ValidationStats {
     pub ds_cache_hits: u16,
     pub ds_fetches: u16,
     pub signature_checks: u16,
+    pub upstream_queries: usize,
     pub elapsed_ms: u64,
 }
 
@@ -646,23 +647,29 @@ async fn fetch_dnskeys(
 
     trace!("dnssec: fetch_dnskeys('{}') cache miss — resolving", zone);
     stats.lock().unwrap().dnskey_fetches += 1;
-    if let Ok(pkt) = crate::recursive::resolve_iterative(
-        zone,
-        QueryType::DNSKEY,
-        cache,
-        root_hints,
-        srtt,
-        0,
-        0,
-        &std::sync::atomic::AtomicUsize::new(0),
-    )
-    .await
-    {
-        cache.write().unwrap().insert(zone, QueryType::DNSKEY, &pkt);
-        return pkt.answers;
-    }
+    resolve_for_validation(zone, QueryType::DNSKEY, cache, root_hints, srtt, stats)
+        .await
+        .map_or_else(Vec::new, |pkt| pkt.answers)
+}
 
-    Vec::new()
+// Validation fetches run one at a time, so carrying the spent count from one
+// to the next gives the whole validation a single query budget.
+async fn resolve_for_validation(
+    name: &str,
+    qtype: QueryType,
+    cache: &RwLock<DnsCache>,
+    root_hints: &[std::net::SocketAddr],
+    srtt: &RwLock<SrttCache>,
+    stats: &Mutex<ValidationStats>,
+) -> Option<DnsPacket> {
+    let spent = std::sync::atomic::AtomicUsize::new(stats.lock().unwrap().upstream_queries);
+    let resolved =
+        crate::recursive::resolve_iterative(name, qtype, cache, root_hints, srtt, 0, 0, &spent)
+            .await;
+    stats.lock().unwrap().upstream_queries = spent.into_inner();
+    let pkt = resolved.ok()?;
+    cache.write().unwrap().insert(name, qtype, &pkt);
+    Some(pkt)
 }
 
 async fn fetch_ds(
@@ -683,23 +690,9 @@ async fn fetch_ds(
     }
 
     stats.lock().unwrap().ds_fetches += 1;
-    if let Ok(pkt) = crate::recursive::resolve_iterative(
-        child,
-        QueryType::DS,
-        cache,
-        root_hints,
-        srtt,
-        0,
-        0,
-        &std::sync::atomic::AtomicUsize::new(0),
-    )
-    .await
-    {
-        cache.write().unwrap().insert(child, QueryType::DS, &pkt);
-        return pkt.answers;
-    }
-
-    Vec::new()
+    resolve_for_validation(child, QueryType::DS, cache, root_hints, srtt, stats)
+        .await
+        .map_or_else(Vec::new, |pkt| pkt.answers)
 }
 
 // -- Crypto primitives --
@@ -2850,6 +2843,38 @@ mod tests {
         let response = mk_pkt(vec![a, unrelated_sig]);
         let (status, _) = validate_response(&response, &cache, &[], &srtt).await;
         assert_ne!(status, DnssecStatus::Secure);
+    }
+
+    #[tokio::test]
+    async fn signer_fetches_share_one_query_budget() {
+        let mut refused = DnsPacket::new();
+        refused.header.response = true;
+        refused.header.rescode = crate::header::ResultCode::REFUSED;
+        let (upstream, mut sent) = crate::testutil::recording_upstream(refused).await;
+        let (cache, srtt, _) = empty_ctx();
+        let a = DnsRecord::A {
+            domain: "www.test".into(),
+            addr: "192.0.2.1".parse().unwrap(),
+            ttl: 3600,
+        };
+        let proto = mk_rrsig(&mk_signer(256), "test", QueryType::A, &[&a]);
+        let mut answers = vec![a];
+        for i in 0..100 {
+            let mut sig = proto.clone();
+            if let DnsRecord::RRSIG { signer_name, .. } = &mut sig {
+                *signer_name = format!("s{i}.example");
+            }
+            answers.push(sig);
+        }
+        validate_response(&mk_pkt(answers), &cache, &[upstream], &srtt).await;
+        let mut queries = 0;
+        while sent.try_recv().is_ok() {
+            queries += 1;
+        }
+        assert!(
+            queries <= crate::recursive::MAX_TOTAL_QUERIES,
+            "{queries} queries"
+        );
     }
 
     fn nsec(owner: &str, next: &str) -> DnsRecord {

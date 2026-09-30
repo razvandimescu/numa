@@ -21,7 +21,7 @@ const MAX_CNAME_DEPTH: u8 = 8;
 // Depth bounds each branch; these bound the whole resolution against NXNS /
 // NRDelegation fan-out. 48 total upstream queries (~hickory 24, <BIND 100), and
 // MaxFetch(k) caps glue-less NS names chased per referral (only balloons on failure).
-const MAX_TOTAL_QUERIES: usize = 48;
+pub(crate) const MAX_TOTAL_QUERIES: usize = 48;
 const MAX_NS_FETCH: usize = 10;
 const NS_QUERY_TIMEOUT: Duration = Duration::from_millis(400);
 const TCP_TIMEOUT: Duration = Duration::from_millis(400);

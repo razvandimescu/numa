@@ -131,7 +131,7 @@ pub async fn resolve_query(
                 .await;
 
         debug!(
-            "DNSSEC | {} | {:?} | {}ms | dnskey_hit={} dnskey_fetch={} ds_hit={} ds_fetch={} sig_checks={}",
+            "DNSSEC | {} | {:?} | {}ms | dnskey_hit={} dnskey_fetch={} ds_hit={} ds_fetch={} sig_checks={} upstream_q={}",
             qname,
             status,
             vstats.elapsed_ms,
@@ -140,6 +140,7 @@ pub async fn resolve_query(
             vstats.ds_cache_hits,
             vstats.ds_fetches,
             vstats.signature_checks,
+            vstats.upstream_queries,
         );
 
         dnssec = status;
