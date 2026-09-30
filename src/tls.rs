@@ -254,14 +254,14 @@ fn ensure_ca(dir: &Path) -> crate::Result<(CertificateDer<'static>, Issuer<'stat
 
     let cert = params.self_signed(&key_pair)?;
 
-    std::fs::write(&ca_key_path, key_pair.serialize_pem())?;
-    std::fs::write(&ca_cert_path, cert.pem())?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&ca_key_path, std::fs::Permissions::from_mode(0o600))?;
+    // A key without its cert is an orphan from an interrupted run; replace it
+    // with a fresh 0600 inode rather than truncating one that may be 0644.
+    match std::fs::remove_file(&ca_key_path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+        _ => {}
     }
+    crate::persist::write_private(&ca_key_path, key_pair.serialize_pem().as_bytes())?;
+    std::fs::write(&ca_cert_path, cert.pem())?;
 
     info!("generated CA at {:?}", ca_cert_path);
     let ca_der = cert.der().clone();
@@ -364,6 +364,26 @@ mod tests {
     fn try_data_dir_advisory_skips_non_io_errors() {
         let err: crate::Error = "rcgen failure".into();
         assert!(try_data_dir_advisory(&err, &PathBuf::from("/x")).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn orphaned_ca_key_is_replaced_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("numa-test-ca-perm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let key_path = dir.join("ca.key");
+        std::fs::write(&key_path, "stale").unwrap();
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        ensure_ca(&dir).unwrap();
+
+        let mode = std::fs::metadata(&key_path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert_ne!(std::fs::read_to_string(&key_path).unwrap(), "stale");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

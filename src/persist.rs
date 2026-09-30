@@ -55,6 +55,22 @@ pub fn save_text(path: &Path, contents: &str) {
     }
 }
 
+/// `create_new` so a concurrent writer can't be clobbered, and 0600 *at* creation
+/// so the secret is never briefly world-readable.
+pub fn write_private(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    opts.open(path)?.write_all(contents)
+}
+
 fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
     // Appended, not `with_extension`, so a non-JSON payload keeps its own
     // extension and two files in the same dir cannot collide on the temp name.
