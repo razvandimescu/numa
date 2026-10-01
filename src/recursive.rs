@@ -33,6 +33,8 @@ pub(crate) static UDP_DISABLED: std::sync::atomic::AtomicBool =
 
 // Shared by reference across the whole recursion, so every branch draws from one
 // pool. Charged per packet sent, so hedges and TCP retries count.
+// `fetch_update` is deprecated for `try_update`, stable only since Rust 1.99.
+#[allow(deprecated)]
 fn charge_query(spent: &AtomicUsize) -> crate::Result<()> {
     spent
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
