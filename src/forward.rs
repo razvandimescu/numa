@@ -3,7 +3,8 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-use tokio::net::UdpSocket;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::{TcpStream, UdpSocket};
 use tokio::time::{timeout, timeout_at};
 
 use crate::buffer::BytePacketBuffer;
@@ -433,26 +434,8 @@ async fn forward_tcp_raw(
     upstream: SocketAddr,
     timeout_duration: Duration,
 ) -> Result<Vec<u8>> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpStream;
-
     let mut stream = timeout(timeout_duration, TcpStream::connect(upstream)).await??;
-
-    // Single write: Microsoft/Azure DNS servers close TCP connections on split segments
-    let mut outbuf = Vec::with_capacity(2 + wire.len());
-    outbuf.extend_from_slice(&(wire.len() as u16).to_be_bytes());
-    outbuf.extend_from_slice(wire);
-    stream.write_all(&outbuf).await?;
-
-    // Read length-prefixed response
-    let mut len_buf = [0u8; 2];
-    timeout(timeout_duration, stream.read_exact(&mut len_buf)).await??;
-    let resp_len = u16::from_be_bytes(len_buf) as usize;
-
-    let mut data = vec![0u8; resp_len];
-    timeout(timeout_duration, stream.read_exact(&mut data)).await??;
-
-    Ok(data)
+    exchange_framed(&mut stream, wire, timeout_duration).await
 }
 
 async fn forward_dot_raw(
@@ -463,8 +446,6 @@ async fn forward_dot_raw(
     timeout_duration: Duration,
 ) -> Result<Vec<u8>> {
     use rustls::pki_types::ServerName;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpStream;
 
     let server_name = match tls_name {
         Some(name) => ServerName::try_from(name.clone())?,
@@ -473,19 +454,27 @@ async fn forward_dot_raw(
 
     let tcp = timeout(timeout_duration, TcpStream::connect(addr)).await??;
     let mut tls = timeout(timeout_duration, connector.connect(server_name, tcp)).await??;
+    exchange_framed(&mut tls, wire, timeout_duration).await
+}
 
+async fn exchange_framed<S>(
+    stream: &mut S,
+    wire: &[u8],
+    timeout_duration: Duration,
+) -> Result<Vec<u8>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    // Single write: Microsoft/Azure DNS servers close TCP connections on split segments
     let mut outbuf = Vec::with_capacity(2 + wire.len());
     outbuf.extend_from_slice(&(wire.len() as u16).to_be_bytes());
     outbuf.extend_from_slice(wire);
-    timeout(timeout_duration, tls.write_all(&outbuf)).await??;
+    timeout(timeout_duration, stream.write_all(&outbuf)).await??;
 
     let mut len_buf = [0u8; 2];
-    timeout(timeout_duration, tls.read_exact(&mut len_buf)).await??;
-    let resp_len = u16::from_be_bytes(len_buf) as usize;
-
-    let mut data = vec![0u8; resp_len];
-    timeout(timeout_duration, tls.read_exact(&mut data)).await??;
-
+    timeout(timeout_duration, stream.read_exact(&mut len_buf)).await??;
+    let mut data = vec![0u8; u16::from_be_bytes(len_buf) as usize];
+    timeout(timeout_duration, stream.read_exact(&mut data)).await??;
     Ok(data)
 }
 
@@ -794,6 +783,19 @@ mod tests {
     use crate::header::ResultCode;
     use crate::question::QueryType;
     use crate::record::DnsRecord;
+
+    #[tokio::test]
+    async fn exchange_framed_times_out_when_peer_stops_reading() {
+        let (mut client, _peer) = tokio::io::duplex(64);
+        let wire = vec![0u8; 4096];
+        let result = timeout(
+            Duration::from_secs(2),
+            exchange_framed(&mut client, &wire, Duration::from_millis(100)),
+        )
+        .await
+        .expect("exchange must give up on its own");
+        assert!(result.is_err());
+    }
 
     #[test]
     fn upstream_display_udp() {
