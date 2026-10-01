@@ -202,6 +202,16 @@ async fn spawn_stub(
 ) -> SocketAddr {
     let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let addr = sock.local_addr().unwrap();
+    serve_stub(sock, bytes, honor_budget, record);
+    addr
+}
+
+fn serve_stub(
+    sock: UdpSocket,
+    bytes: Vec<u8>,
+    honor_budget: bool,
+    record: Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>,
+) {
     tokio::spawn(async move {
         let mut buf = [0u8; 4096];
         while let Ok((n, src)) = sock.recv_from(&mut buf).await {
@@ -220,7 +230,6 @@ async fn spawn_stub(
             }
         }
     });
-    addr
 }
 
 /// A resolver honors the requestor's advertised payload size: an answer that
@@ -267,13 +276,23 @@ fn echo_question(full: &[u8], query: &DnsPacket) -> Vec<u8> {
     }
 }
 
-/// TCP counterpart of `mock_upstream_raw`, bound to the given address —
-/// answers each length-prefixed query with `bytes` verbatim (ID patched).
-/// Bind it to a UDP stub's address (disjoint port spaces) for TC=1 retry
-/// tests, where UDP truncates and TCP holds the full answer.
-pub async fn tcp_upstream_raw_on(addr: SocketAddr, bytes: Vec<u8>) {
+/// UDP stub answering `udp_bytes` and a TCP stub answering `tcp_bytes` on one
+/// port, for TC=1 retry tests. The OS-assigned UDP port may already be taken
+/// on TCP by a parallel test, so retry until both bind.
+pub async fn udp_tcp_upstream_raw(udp_bytes: Vec<u8>, tcp_bytes: Vec<u8>) -> SocketAddr {
+    loop {
+        let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = udp.local_addr().unwrap();
+        if let Ok(tcp) = tokio::net::TcpListener::bind(addr).await {
+            serve_stub(udp, udp_bytes, false, None);
+            serve_tcp_raw(tcp, tcp_bytes);
+            return addr;
+        }
+    }
+}
+
+fn serve_tcp_raw(listener: tokio::net::TcpListener, bytes: Vec<u8>) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     tokio::spawn(async move {
         while let Ok((mut stream, _)) = listener.accept().await {
             let mut len_buf = [0u8; 2];

@@ -1080,8 +1080,11 @@ mod tests {
         // client's own TCP retry re-enters this same UDP path and loops
         // forever.
         let query = make_query();
-        let addr = crate::testutil::mock_upstream_raw(truncated_response(&query)).await;
-        crate::testutil::tcp_upstream_raw_on(addr, to_wire(&make_response(&query))).await;
+        let addr = crate::testutil::udp_tcp_upstream_raw(
+            truncated_response(&query),
+            to_wire(&make_response(&query)),
+        )
+        .await;
 
         let pool = UpstreamPool::new(vec![Upstream::Udp(addr)], vec![]);
         let srtt = RwLock::new(SrttCache::new(true));
@@ -1163,8 +1166,11 @@ mod tests {
         // cut into a parse error and a poisoned cache slot — refusing it
         // turns that into a plain upstream failure.
         let query = make_query();
-        let addr = crate::testutil::mock_upstream_raw(truncated_response(&query)).await;
-        crate::testutil::tcp_upstream_raw_on(addr, oversized_response(&query)).await;
+        let addr = crate::testutil::udp_tcp_upstream_raw(
+            truncated_response(&query),
+            oversized_response(&query),
+        )
+        .await;
 
         let result = forward_query_raw(
             &to_wire(&query),
