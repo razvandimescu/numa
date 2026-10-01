@@ -1612,6 +1612,21 @@ relay = "https://odoh-relay.numa.rs/relay"
     }
 
     #[test]
+    fn forwarding_config_suffix_matches_regardless_of_case_and_trailing_dot() {
+        let config_rules = vec![ForwardingRuleConfig {
+            suffix: vec!["Home.Lan.".to_string()],
+            upstream: vec!["10.0.0.1:53".to_string()],
+        }];
+        let merged = merge_forwarding_rules(&config_rules, vec![]).unwrap();
+        for qname in ["home.lan", "nas.home.lan"] {
+            assert!(
+                crate::system_dns::match_forwarding_rule(qname, &merged).is_some(),
+                "{qname} should match suffix Home.Lan."
+            );
+        }
+    }
+
+    #[test]
     fn forwarding_merge_preserves_non_overlapping_discovered() {
         let config_rules = vec![ForwardingRuleConfig {
             suffix: vec!["home.local".to_string()],

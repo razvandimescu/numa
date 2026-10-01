@@ -51,6 +51,7 @@ pub struct ForwardingRule {
 
 impl ForwardingRule {
     pub fn new(suffix: String, upstream: UpstreamPool) -> Self {
+        let suffix = crate::blocklist::normalize(&suffix);
         let dot_suffix = format!(".{}", suffix);
         Self {
             suffix,
