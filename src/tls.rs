@@ -256,10 +256,7 @@ fn ensure_ca(dir: &Path) -> crate::Result<(CertificateDer<'static>, Issuer<'stat
 
     // A key without its cert is an orphan from an interrupted run; replace it
     // with a fresh 0600 inode rather than truncating one that may be 0644.
-    match std::fs::remove_file(&ca_key_path) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
-        _ => {}
-    }
+    let _ = std::fs::remove_file(&ca_key_path);
     crate::persist::write_private(&ca_key_path, key_pair.serialize_pem().as_bytes())?;
     std::fs::write(&ca_cert_path, cert.pem())?;
 
