@@ -5,7 +5,7 @@ use axum::body::Bytes;
 use axum::extract::{Request, State};
 use axum::response::{IntoResponse, Response};
 use hyper::StatusCode;
-use log::{debug, warn};
+use log::warn;
 
 use crate::buffer::BytePacketBuffer;
 use crate::ctx::{resolve_query, ServerCtx};
@@ -89,15 +89,7 @@ fn doh_validate(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    // The accept loop admits PROXY LOCAL probes regardless of `allow_from`;
-    // they must not resolve.
-    let peer = state.remote_addr;
-    if !state.ctx.allow_from.allows(peer.ip()) {
-        debug!("DoH: dropping {peer} — not in allow_from");
-        return Err(StatusCode::FORBIDDEN);
-    }
-
-    Ok(peer)
+    Ok(state.remote_addr)
 }
 
 fn is_doh_host(host: Option<&str>, tld: &str) -> bool {
@@ -203,6 +195,21 @@ mod tests {
         assert!(is_doh_host(Some("localhost"), "numa"));
         assert!(!is_doh_host(Some("foo.numa"), "numa"));
         assert!(!is_doh_host(None, "numa"));
+    }
+
+    /// A PROXY LOCAL probe resolves to the balancer's own address, which may sit
+    /// outside `allow_from`. The accept loop already admitted it, so DoH must not
+    /// re-apply the client allowlist.
+    #[tokio::test]
+    async fn doh_defers_allow_from_to_the_accept_loop() {
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.allow_from =
+            crate::acl::AllowFromAcl::from_entries(&["203.0.113.0/24".to_string()]).unwrap();
+        let state = super::super::proxy::DohState {
+            ctx: std::sync::Arc::new(ctx),
+            remote_addr: "198.51.100.7:443".parse().unwrap(),
+        };
+        assert!(doh_validate(&state, Some("numa.numa")).is_ok());
     }
 
     #[test]

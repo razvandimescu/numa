@@ -108,7 +108,8 @@ impl AllowFromAcl {
     /// Whether to admit a connection given its PROXY-v2 command kind. A LOCAL
     /// command is the front-end/LB probing for itself (already vetted by
     /// `proxy_protocol.from`) — it carries no client, so it bypasses the
-    /// client allowlist.
+    /// client allowlist. Gating it would add nothing: a trusted sender can put
+    /// any allowed address in a PROXY header instead.
     pub fn admits(&self, peer: IpAddr, local_command: bool) -> bool {
         local_command || self.allows(peer)
     }
