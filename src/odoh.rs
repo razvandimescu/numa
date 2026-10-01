@@ -13,11 +13,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwapOption;
+use getrandom::{rand_core::UnwrapErr, SysRng};
 use odoh_rs::{
     ObliviousDoHConfigContents, ObliviousDoHConfigs, ObliviousDoHMessage,
     ObliviousDoHMessagePlaintext,
 };
-use rand_core::{OsRng, TryRngCore};
 use reqwest::header::HeaderMap;
 use tokio::sync::Mutex;
 use tokio::time::timeout_at;
@@ -279,9 +279,7 @@ async fn attempt_query(req: &OdohRequest<'_>) -> std::result::Result<Vec<u8>, At
         .map_err(AttemptError::Other)?;
 
     let plaintext = ObliviousDoHMessagePlaintext::new(req.wire, 0);
-    // rand_core 0.9's OsRng is fallible-only; wrap for the infallible bound.
-    let mut os = OsRng;
-    let mut rng = os.unwrap_mut();
+    let mut rng = UnwrapErr(SysRng);
     let (encrypted_query, client_secret) =
         odoh_rs::encrypt_query(&plaintext, &cfg.contents, &mut rng)
             .map_err(|e| AttemptError::Other(format!("ODoH encrypt failed: {e}").into()))?;
@@ -606,8 +604,7 @@ mod tests {
 
         let query_wire = b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01";
         let query_pt = ObliviousDoHMessagePlaintext::new(query_wire, 0);
-        let mut os = OsRng;
-        let mut rng = os.unwrap_mut();
+        let mut rng = UnwrapErr(SysRng);
         let (query_enc, client_secret) =
             odoh_rs::encrypt_query(&query_pt, kp.public(), &mut rng).unwrap();
 

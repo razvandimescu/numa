@@ -22,7 +22,6 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use base64::Engine;
-use rand_core::{OsRng, TryRngCore};
 
 const TOKEN_ENV: &str = "NUMA_API_TOKEN";
 pub(crate) const TOKEN_FILE: &str = "api_token";
@@ -126,9 +125,7 @@ fn read_token(path: &Path) -> Option<String> {
 
 fn mint_token() -> String {
     let mut bytes = [0u8; 32];
-    OsRng
-        .try_fill_bytes(&mut bytes)
-        .expect("OS RNG unavailable");
+    getrandom::fill(&mut bytes).expect("OS RNG unavailable");
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 

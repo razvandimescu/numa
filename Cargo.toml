@@ -31,10 +31,9 @@ arc-swap = "1"
 ring = "0.17"
 odoh-rs = "1"
 psl = "2"
-# rand_core 0.9 matches the version odoh-rs (via hpke 0.13) depends on, so we
-# share one RngCore trait and OsRng impl across the dep tree.
 base64 = "0.23"
-rand_core = { version = "0.9", features = ["os_rng"] }
+# sys_rng re-exports the rand_core odoh-rs (via hpke) bounds on; keep the majors in step.
+getrandom = { version = "0.4", features = ["sys_rng"] }
 rustls-pemfile = "2.2.0"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 # Bundled Mozilla roots (DER) for both the reqwest and DoT TLS paths — see forward.rs.
