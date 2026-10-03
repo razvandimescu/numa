@@ -93,6 +93,36 @@ jobs:
         run: nix build .#numa
       - name: smoke test
         run: ./result/bin/numa --version
+      - name: install from the store, then delete the store path
+        run: |
+          store=$(readlink -f result)
+          sudo "$store/bin/numa" install
+          sleep 2
+          curl -sf http://127.0.0.1:5380/health
+          # GC skips paths a running process uses, so the outage needs
+          # numa stopped while its package loses every other root
+          sudo systemctl stop numa
+          rm result
+          nix-store --delete "$store" || true
+          sudo systemctl start numa
+          sleep 2
+          curl -sf http://127.0.0.1:5380/health
+          dig @127.0.0.1 example.com +short +timeout=5 | grep -q '.'
+          sudo "$store/bin/numa" uninstall
+          test ! -e /nix/var/nix/gcroots/numa
+      - name: diagnostics on failure
+        if: failure()
+        run: |
+          sudo systemctl status numa --no-pager -l || true
+          sudo journalctl -u numa --no-pager -n 100 || true
+      - name: cleanup
+        if: always()
+        run: |
+          sudo /nix/var/nix/gcroots/numa/bin/numa uninstall 2>/dev/null || true
+          # see integration-linux cleanup: bridge systemd-resolved's restart stall
+          sudo rm -f /etc/resolv.conf
+          echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf > /dev/null
+          getent hosts github.com >/dev/null
 
   cross-build-freebsd:
     runs-on: ubuntu-latest
@@ -130,6 +160,22 @@ jobs:
           sudo ./target/release/numa uninstall
           sleep 1
           ! curl -sf http://127.0.0.1:5380/health 2>/dev/null
+      - name: install from a homebrew keg, then delete the keg
+        run: |
+          keg=/home/linuxbrew/.linuxbrew/Cellar/numa/0.0.0/bin
+          sudo mkdir -p "$keg"
+          sudo chmod a+rx /home/linuxbrew /home/linuxbrew/.linuxbrew
+          sudo cp target/release/numa "$keg/numa"
+          sudo "$keg/numa" install
+          sleep 2
+          curl -sf http://127.0.0.1:5380/health
+          # brew upgrade deletes the previous keg; restart stands in for a reboot
+          sudo rm -rf /home/linuxbrew/.linuxbrew/Cellar/numa
+          sudo systemctl restart numa
+          sleep 2
+          curl -sf http://127.0.0.1:5380/health
+          dig @127.0.0.1 example.com +short +timeout=5 | grep -q '.'
+          sudo ./target/release/numa uninstall
       - name: diagnostics on failure
         if: failure()
         run: |
