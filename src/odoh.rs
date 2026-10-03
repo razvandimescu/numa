@@ -76,9 +76,7 @@ fn refresh_backoff(streak: u32) -> Duration {
 ///
 /// Reads go through `ArcSwapOption` (lock-free hot path). Refreshes serialize
 /// on an async mutex so a burst of simultaneous misses produces a single
-/// outbound fetch, and a failed refresh blocks subsequent refetches for an
-/// escalating window (see [`MAX_REFRESH_BACKOFF`]) to prevent hot-looping
-/// against a broken target.
+/// outbound fetch; failed refreshes back off per [`MAX_REFRESH_BACKOFF`].
 pub struct OdohConfigCache {
     target_host: String,
     configs_url: String,
@@ -566,27 +564,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cache_backoff_blocks_refetch_after_failure() {
+    async fn backoff_blocks_refetch_then_escalates() {
         let cache = unreachable_cache();
-
         let deadline = || Instant::now() + Duration::from_secs(5);
-        let first = cache.get(deadline()).await;
-        assert!(first.is_err(), "first fetch must fail against invalid host");
+        let attempt = || async { cache.get(deadline()).await.unwrap_err().to_string() };
 
-        // Within the backoff window, the cached error is returned immediately.
-        let second = cache.get(deadline()).await.unwrap_err().to_string();
+        attempt().await;
+        let immediate = attempt().await;
         assert!(
-            second.contains("backoff active"),
-            "expected backoff hint, got: {second}"
+            immediate.contains("backoff active"),
+            "expected backoff hint, got: {immediate}"
         );
 
-        // Reaching past the backoff window allows a fresh attempt — simulate
-        // by rewinding the recorded failure timestamp.
-        rewind_failure(&cache, MAX_REFRESH_BACKOFF + Duration::from_secs(1));
-        let third = cache.get(deadline()).await.unwrap_err().to_string();
+        rewind_failure(&cache, Duration::from_millis(1100));
+        let retry = attempt().await;
         assert!(
-            !third.contains("backoff active"),
-            "expected fresh fetch attempt, got: {third}"
+            !retry.contains("backoff active"),
+            "one failure must back off only briefly, got: {retry}"
+        );
+
+        rewind_failure(&cache, Duration::from_millis(1100));
+        let escalated = attempt().await;
+        assert!(
+            escalated.contains("backoff active"),
+            "a second consecutive failure must back off longer, got: {escalated}"
         );
     }
 
@@ -608,36 +609,6 @@ mod tests {
             err: fail.err.clone(),
             streak: fail.streak,
         })));
-    }
-
-    #[tokio::test]
-    async fn single_failure_backs_off_briefly() {
-        let cache = unreachable_cache();
-        let deadline = || Instant::now() + Duration::from_secs(5);
-        assert!(cache.get(deadline()).await.is_err());
-
-        rewind_failure(&cache, Duration::from_millis(1100));
-        let retry = cache.get(deadline()).await.unwrap_err().to_string();
-        assert!(
-            !retry.contains("backoff active"),
-            "one transient failure must not block refetch for long, got: {retry}"
-        );
-    }
-
-    #[tokio::test]
-    async fn consecutive_failures_escalate_backoff() {
-        let cache = unreachable_cache();
-        let deadline = || Instant::now() + Duration::from_secs(5);
-        assert!(cache.get(deadline()).await.is_err());
-        rewind_failure(&cache, Duration::from_millis(1100));
-        assert!(cache.get(deadline()).await.is_err());
-
-        rewind_failure(&cache, Duration::from_millis(1100));
-        let blocked = cache.get(deadline()).await.unwrap_err().to_string();
-        assert!(
-            blocked.contains("backoff active"),
-            "second consecutive failure must back off longer, got: {blocked}"
-        );
     }
 
     #[test]
