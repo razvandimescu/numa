@@ -936,7 +936,7 @@ pub async fn download_blocklists(
                         warn!(
                             "blocklist {} unreadable: {} — skipping",
                             source,
-                            format_error_chain(&e)
+                            crate::format_error_chain(&e)
                         );
                         Err("unreadable".to_string())
                     }
@@ -1024,7 +1024,7 @@ impl FetchError {
         };
         FetchError {
             short,
-            detail: format_error_chain(&e),
+            detail: crate::format_error_chain(&e),
         }
     }
 }
@@ -1038,16 +1038,6 @@ async fn fetch_once(client: &reqwest::Client, url: &str) -> Result<String, Fetch
         .error_for_status()
         .map_err(FetchError::new)?;
     resp.text().await.map_err(FetchError::new)
-}
-
-fn format_error_chain(e: &(dyn std::error::Error + 'static)) -> String {
-    let mut parts = vec![e.to_string()];
-    let mut src = e.source();
-    while let Some(s) = src {
-        parts.push(s.to_string());
-        src = s.source();
-    }
-    parts.join(": ")
 }
 
 #[cfg(test)]

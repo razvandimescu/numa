@@ -41,11 +41,10 @@ const DEFAULT_CONFIG_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 /// Keeps a misconfigured server from pinning an old key indefinitely.
 const MAX_CONFIG_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
-/// After a failed `/.well-known/odohconfigs` fetch, refuse to refetch again
-/// within this window — a target that is genuinely broken would otherwise
-/// receive one request per query. Queries that arrive during the backoff
-/// return the cached error immediately.
-const REFRESH_BACKOFF: Duration = Duration::from_secs(60);
+/// After failed `/.well-known/odohconfigs` fetches, refetching backs off from
+/// 1 s, doubling per consecutive failure up to this cap: a blip costs a
+/// second, a broken target still sees one request per window, not per query.
+const MAX_REFRESH_BACKOFF: Duration = Duration::from_secs(60);
 
 const BUDGET_EXHAUSTED: &str = "ran out of query budget";
 
@@ -66,14 +65,20 @@ impl OdohTargetConfig {
 struct FailedRefresh {
     at: Instant,
     err: String,
+    streak: u32,
+}
+
+fn refresh_backoff(streak: u32) -> Duration {
+    Duration::from_secs(2u64.saturating_pow(streak.saturating_sub(1))).min(MAX_REFRESH_BACKOFF)
 }
 
 /// TTL-gated cache of a single target's HPKE config.
 ///
 /// Reads go through `ArcSwapOption` (lock-free hot path). Refreshes serialize
 /// on an async mutex so a burst of simultaneous misses produces a single
-/// outbound fetch, and a failed refresh blocks subsequent refetches for
-/// [`REFRESH_BACKOFF`] to prevent hot-looping against a broken target.
+/// outbound fetch, and a failed refresh blocks subsequent refetches for an
+/// escalating window (see [`MAX_REFRESH_BACKOFF`]) to prevent hot-looping
+/// against a broken target.
 pub struct OdohConfigCache {
     target_host: String,
     configs_url: String,
@@ -101,7 +106,7 @@ impl OdohConfigCache {
     }
 
     /// Return a valid config, refetching when the cache is cold or expired.
-    /// Within [`REFRESH_BACKOFF`] of a failed refresh, returns the cached
+    /// Within the backoff window of a failed refresh, returns the cached
     /// error without issuing another fetch.
     ///
     /// A refetch lands on a user query and the shared client sets no request
@@ -132,7 +137,7 @@ impl OdohConfigCache {
             return Err(err);
         }
 
-        // Only the target's own failures arm REFRESH_BACKOFF: our budget
+        // Only the target's own failures arm the backoff: our budget
         // running out says nothing about its health.
         let fetched = timeout_at(
             deadline.into(),
@@ -149,10 +154,19 @@ impl OdohConfigCache {
                 Ok(fresh)
             }
             Err(e) => {
-                let msg = format!("ODoH config fetch failed: {e}");
+                let msg = format!(
+                    "ODoH config fetch failed: {}",
+                    crate::format_error_chain(&*e)
+                );
+                let streak = self
+                    .last_failure
+                    .load()
+                    .as_ref()
+                    .map_or(1, |prev| prev.streak.saturating_add(1));
                 self.last_failure.store(Some(Arc::new(FailedRefresh {
                     at: Instant::now(),
                     err: msg.clone(),
+                    streak,
                 })));
                 Err(msg.into())
             }
@@ -167,7 +181,7 @@ impl OdohConfigCache {
 
     fn backoff_error(&self) -> Option<crate::Error> {
         let fail = self.last_failure.load_full()?;
-        if fail.at.elapsed() < REFRESH_BACKOFF {
+        if fail.at.elapsed() < refresh_backoff(fail.streak) {
             Some(format!("{} (backoff active)", fail.err).into())
         } else {
             None
@@ -553,16 +567,7 @@ mod tests {
 
     #[tokio::test]
     async fn cache_backoff_blocks_refetch_after_failure() {
-        // Point the cache at a host that does not exist so the fetch fails
-        // deterministically; this exercises the backoff wiring without a
-        // network round-trip succeeding.
-        let cache = OdohConfigCache::new(
-            "odoh-target.invalid".to_string(),
-            crate::forward::numa_tls_builder()
-                .timeout(Duration::from_millis(200))
-                .build()
-                .unwrap(),
-        );
+        let cache = unreachable_cache();
 
         let deadline = || Instant::now() + Duration::from_secs(5);
         let first = cache.get(deadline()).await;
@@ -577,14 +582,84 @@ mod tests {
 
         // Reaching past the backoff window allows a fresh attempt — simulate
         // by rewinding the recorded failure timestamp.
-        cache.last_failure.store(Some(Arc::new(FailedRefresh {
-            at: Instant::now() - (REFRESH_BACKOFF + Duration::from_secs(1)),
-            err: "prior".to_string(),
-        })));
+        rewind_failure(&cache, MAX_REFRESH_BACKOFF + Duration::from_secs(1));
         let third = cache.get(deadline()).await.unwrap_err().to_string();
         assert!(
             !third.contains("backoff active"),
             "expected fresh fetch attempt, got: {third}"
+        );
+    }
+
+    /// `.invalid` never resolves, so every fetch fails deterministically.
+    fn unreachable_cache() -> OdohConfigCache {
+        OdohConfigCache::new(
+            "odoh-target.invalid".to_string(),
+            crate::forward::numa_tls_builder()
+                .timeout(Duration::from_millis(200))
+                .build()
+                .unwrap(),
+        )
+    }
+
+    fn rewind_failure(cache: &OdohConfigCache, by: Duration) {
+        let fail = cache.last_failure.load_full().unwrap();
+        cache.last_failure.store(Some(Arc::new(FailedRefresh {
+            at: fail.at - by,
+            err: fail.err.clone(),
+            streak: fail.streak,
+        })));
+    }
+
+    #[tokio::test]
+    async fn single_failure_backs_off_briefly() {
+        let cache = unreachable_cache();
+        let deadline = || Instant::now() + Duration::from_secs(5);
+        assert!(cache.get(deadline()).await.is_err());
+
+        rewind_failure(&cache, Duration::from_millis(1100));
+        let retry = cache.get(deadline()).await.unwrap_err().to_string();
+        assert!(
+            !retry.contains("backoff active"),
+            "one transient failure must not block refetch for long, got: {retry}"
+        );
+    }
+
+    #[tokio::test]
+    async fn consecutive_failures_escalate_backoff() {
+        let cache = unreachable_cache();
+        let deadline = || Instant::now() + Duration::from_secs(5);
+        assert!(cache.get(deadline()).await.is_err());
+        rewind_failure(&cache, Duration::from_millis(1100));
+        assert!(cache.get(deadline()).await.is_err());
+
+        rewind_failure(&cache, Duration::from_millis(1100));
+        let blocked = cache.get(deadline()).await.unwrap_err().to_string();
+        assert!(
+            blocked.contains("backoff active"),
+            "second consecutive failure must back off longer, got: {blocked}"
+        );
+    }
+
+    #[test]
+    fn backoff_doubles_up_to_cap() {
+        assert_eq!(refresh_backoff(1), Duration::from_secs(1));
+        assert_eq!(refresh_backoff(2), Duration::from_secs(2));
+        assert_eq!(refresh_backoff(6), Duration::from_secs(32));
+        assert_eq!(refresh_backoff(7), MAX_REFRESH_BACKOFF);
+        assert_eq!(refresh_backoff(u32::MAX), MAX_REFRESH_BACKOFF);
+    }
+
+    #[tokio::test]
+    async fn fetch_failure_names_the_underlying_cause() {
+        let cache = unreachable_cache();
+        let err = cache
+            .get(Instant::now() + Duration::from_secs(5))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.matches(": ").count() >= 2,
+            "expected the source chain after the reqwest summary, got: {err}"
         );
     }
 

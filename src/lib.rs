@@ -57,6 +57,18 @@ pub(crate) mod testutil;
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// `Display` for errors like reqwest's stops at the summary ("error sending
+/// request"); the actual cause (DNS, TLS, connect) is only in the source chain.
+pub fn format_error_chain(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut parts = vec![e.to_string()];
+    let mut src = e.source();
+    while let Some(s) = src {
+        parts.push(s.to_string());
+        src = s.source();
+    }
+    parts.join(": ")
+}
+
 /// Build version string. On tagged releases: `0.13.1`. On commits ahead
 /// of a tag: `0.13.1+a87f907`. With uncommitted changes: `0.13.1+a87f907-dirty`.
 /// Falls back to `CARGO_PKG_VERSION` when built outside a git repo (e.g.
