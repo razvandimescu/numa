@@ -1727,7 +1727,8 @@ fn uninstall_linux() -> Result<(), String> {
 }
 
 /// Fallback install location when current_exe() sits on a path the
-/// dynamic user cannot traverse (e.g. `/home/<user>/` mode 0700).
+/// dynamic user cannot traverse (e.g. `/home/<user>/` mode 0700) or one a
+/// package manager deletes on upgrade.
 #[cfg(target_os = "linux")]
 fn linux_service_exe_path() -> std::path::PathBuf {
     std::path::PathBuf::from("/usr/local/bin/numa")
@@ -1735,10 +1736,9 @@ fn linux_service_exe_path() -> std::path::PathBuf {
 
 /// True iff every ancestor of `p` (excluding `/`) grants world-execute —
 /// i.e. the `DynamicUser=yes` service account can traverse the path and
-/// exec the binary without being in any group. Linuxbrew's
-/// `/home/linuxbrew` is 0755 (traversable, keep brew's path, upgrades
-/// via `brew` propagate). A build tree under `/home/<user>/` (0700) or
-/// `~/.cargo/bin/` is not (copy to /usr/local/bin so systemd can reach it).
+/// exec the binary without being in any group. A build tree under
+/// `/home/<user>/` (0700) or `~/.cargo/bin/` is not (copy to /usr/local/bin
+/// so systemd can reach it).
 #[cfg(target_os = "linux")]
 fn path_world_traversable_linux(p: &std::path::Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
@@ -1756,10 +1756,48 @@ fn path_world_traversable_linux(p: &std::path::Path) -> bool {
     true
 }
 
+/// A keg is deleted by `brew upgrade`, and `current_exe()` resolves symlinks
+/// on Linux, so a unit pointing into one loses its binary at the next boot.
+/// The Linux bottle is the static musl build, so copying it out is safe.
+#[cfg(any(target_os = "linux", test))]
+fn is_homebrew_keg_path(p: &std::path::Path) -> bool {
+    p.components().any(|c| c.as_os_str() == "Cellar")
+}
+
+/// The store package containing `p`. A Nix build links dynamically against
+/// other store paths, so a copy of the binary alone dies at the next GC; the
+/// package is pinned with a GC root instead.
+#[cfg(any(target_os = "linux", test))]
+fn nix_store_package(p: &std::path::Path) -> Option<std::path::PathBuf> {
+    let store = std::path::Path::new("/nix/store");
+    let entry = p.strip_prefix(store).ok()?.components().next()?;
+    Some(store.join(entry))
+}
+
+#[cfg(target_os = "linux")]
+const NIX_GC_ROOT: &str = "/nix/var/nix/gcroots/numa";
+
+/// Re-pointed on every install, so the previous version becomes collectable
+/// once the service runs the new one.
+#[cfg(target_os = "linux")]
+fn pin_nix_gc_root(pkg: &std::path::Path) -> Result<(), String> {
+    let root = std::path::Path::new(NIX_GC_ROOT);
+    let tmp = root.with_extension("new");
+    let _ = std::fs::remove_file(&tmp);
+    std::os::unix::fs::symlink(pkg, &tmp)
+        .and_then(|()| std::fs::rename(&tmp, root))
+        .map_err(|e| format!("failed to pin {} as a Nix GC root: {}", pkg.display(), e))
+}
+
 #[cfg(target_os = "linux")]
 fn install_service_binary_linux() -> Result<std::path::PathBuf, String> {
     let src = std::env::current_exe().map_err(|e| format!("current_exe(): {}", e))?;
-    if path_world_traversable_linux(&src) {
+    if let Some(pkg) = nix_store_package(&src) {
+        pin_nix_gc_root(&pkg)?;
+        return Ok(src);
+    }
+    let _ = std::fs::remove_file(NIX_GC_ROOT);
+    if path_world_traversable_linux(&src) && !is_homebrew_keg_path(&src) {
         return Ok(src);
     }
     let dst = linux_service_exe_path();
@@ -1839,6 +1877,7 @@ fn uninstall_service_linux() -> Result<(), String> {
             return Err(format!("failed to remove {}: {}", SYSTEMD_UNIT, e));
         }
     }
+    let _ = std::fs::remove_file(NIX_GC_ROOT);
     let _ = run_systemctl(&["daemon-reload"]);
 
     eprintln!("  Service uninstalled. Numa will no longer auto-start.\n");
@@ -2100,6 +2139,29 @@ fn untrust_ca_windows() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn homebrew_keg_paths_are_detected() {
+        let p = |s: &str| is_homebrew_keg_path(std::path::Path::new(s));
+        assert!(p("/home/linuxbrew/.linuxbrew/Cellar/numa/0.24.0/bin/numa"));
+        assert!(p("/opt/homebrew/Cellar/numa/0.24.0/bin/numa"));
+        assert!(!p("/home/linuxbrew/.linuxbrew/bin/numa"));
+        assert!(!p("/home/me/src/Cellar-notes/numa"));
+        assert!(!p("/usr/local/bin/numa"));
+        assert!(!p("/nix/store/abc123-numa-0.24.0/bin/numa"));
+    }
+
+    #[test]
+    fn nix_store_package_is_the_top_store_entry() {
+        let pkg = |s: &str| nix_store_package(std::path::Path::new(s));
+        assert_eq!(
+            pkg("/nix/store/abc123-numa-0.24.0/bin/numa"),
+            Some(std::path::PathBuf::from("/nix/store/abc123-numa-0.24.0"))
+        );
+        assert_eq!(pkg("/nix/store"), None);
+        assert_eq!(pkg("/opt/nix/store-backup/numa"), None);
+        assert_eq!(pkg("/usr/local/bin/numa"), None);
+    }
 
     #[cfg(target_os = "macos")]
     #[test]
