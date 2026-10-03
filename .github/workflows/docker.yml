@@ -43,7 +43,7 @@ jobs:
       - name: Smoke-test binaries on Alpine
         run: |
           for arch in amd64 arm64; do
-            docker run --rm --platform "linux/$arch" -v "$PWD/dist/$arch/numa:/numa:ro" alpine:3.24 /numa --version \
+            docker run --rm --platform "linux/$arch" -v "$PWD/dist/$arch/numa:/numa:ro" alpine:3.24 /numa --version 2>&1 \
               | grep -Fx "numa ${VERSION#v}"
           done
 
