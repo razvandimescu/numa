@@ -25,7 +25,7 @@ bind_addr = "0.0.0.0"          # router.numa etc. from other devices
 
 Restart Numa (`sudo numa service restart`). The Docker image already binds both to `0.0.0.0`.
 
-### Windows (untested)
+### Windows
 
 On Windows, DNS listens only on `127.0.0.2:53`, where the system resolver forwards to it. Keep that address and add the host's LAN address:
 
@@ -34,7 +34,16 @@ On Windows, DNS listens only on `127.0.0.2:53`, where the system resolver forwar
 bind_addr = ["127.0.0.2:53", "192.168.1.5:53"]
 ```
 
-Apply the dashboard and proxy settings above as well, restart Numa, then allow inbound UDP and TCP port 53 in Windows Firewall. This configuration has not been tested; if the system resolver stops working after the change, remove the LAN address and open an issue.
+Apply the dashboard and proxy settings above as well, then restart Numa (`Restart-Service numa` in an admin PowerShell).
+
+Windows Firewall blocks the service until you allow port 53. `numa install` runs Numa from `C:\ProgramData\numa\bin`, so an "Allow" you clicked for a copy in Downloads does not cover it. In an admin PowerShell:
+
+```powershell
+New-NetFirewallRule -DisplayName Numa-DNS-UDP -Direction Inbound -Protocol UDP -LocalPort 53 -Profile Private -Action Allow
+New-NetFirewallRule -DisplayName Numa-DNS-TCP -Direction Inbound -Protocol TCP -LocalPort 53 -Profile Private -Action Allow
+```
+
+These rules apply only on networks marked Private. If Windows marked your home network Public, switch it under Settings → Network & internet → Wi-Fi (or Ethernet) → Private network.
 
 ## 2. Check it before touching the router
 
