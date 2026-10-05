@@ -186,27 +186,59 @@ pub(crate) fn build_rdata(priority: u16, target: &[&str], params: &[(u16, Vec<u8
     out
 }
 
+/// SvcParamKey = 5 (RFC 9460 §14.3.2, draft-ietf-tls-esni): `ech`.
+#[cfg(test)]
+pub(crate) const ECH_KEY: u16 = 5;
+
+#[cfg(test)]
+pub(crate) fn alpn_h3() -> (u16, Vec<u8>) {
+    // alpn = ["h3"]: one length-prefixed ALPN id
+    (1, vec![0x02, b'h', b'3'])
+}
+
+#[cfg(test)]
+pub(crate) fn ipv6hint_single() -> (u16, Vec<u8>) {
+    // 2606:4700::1
+    (
+        IPV6_HINT_KEY,
+        vec![
+            0x26, 0x06, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01,
+        ],
+    )
+}
+
+/// A realistic ECHConfigList (draft-ietf-tls-esni §4): version 0xfe0d, X25519
+/// key config, `public_name` = "cloudflare-ech.com". Opaque to this module —
+/// the point is that these bytes survive an edit untouched.
+#[cfg(test)]
+pub(crate) fn ech_config_list() -> Vec<u8> {
+    let mut contents = vec![0x2a]; // config_id
+    contents.extend_from_slice(&0x0020u16.to_be_bytes()); // DHKEM(X25519, HKDF-SHA256)
+    contents.extend_from_slice(&32u16.to_be_bytes());
+    contents.extend_from_slice(&[0xab; 32]); // public_key
+    contents.extend_from_slice(&4u16.to_be_bytes());
+    contents.extend_from_slice(&[0x00, 0x01, 0x00, 0x01]); // HKDF-SHA256 / AES-128-GCM
+    contents.push(0); // maximum_name_length
+    let public_name = b"cloudflare-ech.com";
+    contents.push(public_name.len() as u8);
+    contents.extend_from_slice(public_name);
+    contents.extend_from_slice(&0u16.to_be_bytes()); // extensions
+
+    let mut config = 0xfe0du16.to_be_bytes().to_vec();
+    config.extend_from_slice(&(contents.len() as u16).to_be_bytes());
+    config.extend_from_slice(&contents);
+
+    let mut list = (config.len() as u16).to_be_bytes().to_vec();
+    list.extend_from_slice(&config);
+    list
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn alpn_h3() -> (u16, Vec<u8>) {
-        // alpn = ["h3"]: one length-prefixed ALPN id
-        (1, vec![0x02, b'h', b'3'])
-    }
-
     fn ipv4hint_single() -> (u16, Vec<u8>) {
         (4, vec![93, 184, 216, 34])
-    }
-
-    fn ipv6hint_single() -> (u16, Vec<u8>) {
-        // 2606:4700::1
-        (
-            6,
-            vec![
-                0x26, 0x06, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01,
-            ],
-        )
     }
 
     #[test]
@@ -321,5 +353,44 @@ mod tests {
         // ipv4hint value length 5 is not a multiple of 4.
         let rdata = build_rdata(1, &[], &[(4, vec![1, 2, 3, 4, 5])]);
         assert!(strip_private_hints(&rdata, is_priv).is_none());
+    }
+
+    /// Params in ascending key order, as RFC 9460 §2.2 requires.
+    fn sorted_rdata(params: &[(u16, Vec<u8>)]) -> Vec<u8> {
+        let mut p = params.to_vec();
+        p.sort_by_key(|(k, _)| *k);
+        build_rdata(1, &[], &p)
+    }
+
+    #[test]
+    fn opaque_params_survive_hint_edits() {
+        // `edit_svcparams` copies every non-hint param verbatim, so key 5
+        // (`ech`) is in no way special. The TLV-framing case proves params
+        // are walked by framing rather than scanned for.
+        for (label, key, value) in [
+            ("low key", 0u16, vec![0xde, 0xad]),
+            (
+                "ech mimicking an ipv6hint TLV header",
+                ECH_KEY,
+                vec![0x00, 0x06, 0x00, 0x10, 0xfe, 0x0d],
+            ),
+            ("realistic ECHConfigList", ECH_KEY, ech_config_list()),
+            ("private-use key", 65280, vec![0x01]),
+        ] {
+            let param = (key, value);
+            let with_v6 = sorted_rdata(&[param.clone(), ipv6hint_single()]);
+            assert_eq!(
+                strip_ipv6hint(&with_v6).expect("ipv6hint present → stripped"),
+                sorted_rdata(std::slice::from_ref(&param)),
+                "{label} must survive strip_ipv6hint byte-identical"
+            );
+
+            let with_priv = sorted_rdata(&[ipv4hint(&[PUB4, PRIV4]), param.clone()]);
+            assert_eq!(
+                strip_private_hints(&with_priv, is_priv).expect("private hint → rewritten"),
+                sorted_rdata(&[ipv4hint(&[PUB4]), param]),
+                "{label} must survive strip_private_hints byte-identical"
+            );
+        }
     }
 }
