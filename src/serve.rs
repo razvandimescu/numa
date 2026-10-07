@@ -310,6 +310,7 @@ fn spawn_background_services(
             let mut loaded =
                 load_blocklists(&bl_ctx, &blocklist_lists, Some(bl_resolver.clone())).await;
             loop {
+                release_freed_memory();
                 // A refresh that left us with nothing is not blocking at all, so
                 // waiting the full cycle to try again turns a brief upstream
                 // outage into a day without blocking (issue #336). The config
@@ -856,6 +857,15 @@ fn live_domains(
     );
     cache.store(source, text);
     Ok(parsed.domains)
+}
+
+// mimalloc purges freed pages only on later activity in the freeing thread, and
+// the loader goes idle after a reload, so without this RSS stays near the peak.
+fn release_freed_memory() {
+    #[cfg(target_env = "musl")]
+    unsafe {
+        libmimalloc_sys::mi_collect(true);
+    }
 }
 
 /// Returns `false` only when a failure left nothing loaded at all. An emptied
