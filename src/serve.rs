@@ -861,7 +861,11 @@ async fn load_blocklists(
                             source
                         );
                         cache.store(source, text);
-                        all_domains.extend(parsed.domains);
+                        if all_domains.is_empty() {
+                            all_domains = parsed.domains;
+                        } else {
+                            all_domains.extend(parsed.domains);
+                        }
                         outcomes.push((source.clone(), SourceResult::Loaded));
                         continue;
                     }
@@ -889,6 +893,7 @@ async fn load_blocklists(
         }
     }
     cache.prune(lists);
+    all_domains.shrink_to_fit();
     let total = all_domains.len();
 
     // Lock work stays sub-microsecond: record, then swap or keep.

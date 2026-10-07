@@ -382,7 +382,7 @@ pub fn parse_blocklist(text: &str) -> HashSet<String> {
 /// could drift. Lines are judged for validity, not novelty: a dual-stack hosts
 /// file names every domain on both a `0.0.0.0` and a `::` line, and both count.
 pub(crate) fn parse_blocklist_counted(text: &str) -> ParsedList {
-    let mut domains = HashSet::new();
+    let mut domains = HashSet::with_capacity(text.lines().count());
     let mut entry_lines = 0;
     let mut parsed_lines = 0;
     for line in text.lines() {
