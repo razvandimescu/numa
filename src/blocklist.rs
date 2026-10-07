@@ -377,21 +377,21 @@ pub fn parse_blocklist(text: &str) -> HashSet<String> {
     parse_blocklist_counted(text).domains
 }
 
+fn entry_lines(text: &str) -> impl Iterator<Item = &str> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#') && !line.starts_with('!'))
+}
+
 /// One walk that also counts how many entry lines yielded a domain, so
 /// `source_defect` never re-derives that from a second pass with a filter that
 /// could drift. Lines are judged for validity, not novelty: a dual-stack hosts
 /// file names every domain on both a `0.0.0.0` and a `::` line, and both count.
 pub(crate) fn parse_blocklist_counted(text: &str) -> ParsedList {
-    let mut domains = HashSet::with_capacity(text.lines().count());
-    let mut entry_lines = 0;
+    let entries = entry_lines(text).count();
+    let mut domains = HashSet::with_capacity(entries);
     let mut parsed_lines = 0;
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
-            continue;
-        }
-        entry_lines += 1;
-
+    for line in entry_lines(text) {
         if line.starts_with("0.0.0.0") || line.starts_with("127.0.0.1") || line.starts_with("::") {
             // BSD hosts(5): an IP followed by N aliases; '#' starts an inline comment.
             let payload = line.split('#').next().unwrap_or(line);
@@ -414,7 +414,7 @@ pub(crate) fn parse_blocklist_counted(text: &str) -> ParsedList {
     }
     ParsedList {
         domains,
-        entry_lines,
+        entry_lines: entries,
         parsed_lines,
     }
 }
@@ -612,6 +612,14 @@ mod tests {
         assert!(!result.blocked);
         assert_eq!(result.reason, "not in blocklist");
         assert!(result.matched_rule.is_none());
+    }
+
+    #[test]
+    fn comment_and_blank_lines_do_not_reserve_capacity() {
+        let text = "# padding\n\n".repeat(100_000) + "a.com\n";
+        let domains = parse_blocklist(&text);
+        assert_eq!(domains.len(), 1);
+        assert!(domains.capacity() < 1_000, "{}", domains.capacity());
     }
 
     #[test]
