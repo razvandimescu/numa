@@ -308,9 +308,8 @@ fn spawn_background_services(
         let bl_resolver = bootstrap_resolver.clone();
         tokio::spawn(async move {
             let mut loaded =
-                load_blocklists(&bl_ctx, &blocklist_lists, Some(bl_resolver.clone())).await;
+                load_blocklists_purging(&bl_ctx, &blocklist_lists, Some(bl_resolver.clone())).await;
             loop {
-                release_freed_memory();
                 // A refresh that left us with nothing is not blocking at all, so
                 // waiting the full cycle to try again turns a brief upstream
                 // outage into a day without blocking (issue #336). The config
@@ -323,7 +322,8 @@ fn spawn_background_services(
                 tokio::time::sleep(Duration::from_secs(wait)).await;
                 info!("refreshing blocklists...");
                 loaded =
-                    load_blocklists(&bl_ctx, &blocklist_lists, Some(bl_resolver.clone())).await;
+                    load_blocklists_purging(&bl_ctx, &blocklist_lists, Some(bl_resolver.clone()))
+                        .await;
             }
         });
     }
@@ -859,13 +859,32 @@ fn live_domains(
     Ok(parsed.domains)
 }
 
-// mimalloc purges freed pages only on later activity in the freeing thread, and
-// the loader goes idle after a reload, so without this RSS stays near the peak.
-fn release_freed_memory() {
+// Index in the v2 and v3 headers of the pinned libmimalloc-sys 0.1.49, which does not export it.
+#[cfg(target_env = "musl")]
+const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
+
+// mimalloc keeps freed pages resident until a delayed purge, so every table a
+// reload outgrows would stack into its peak, and the purge only runs on later
+// activity in a loader that goes idle. Purge eagerly for the load alone: query
+// throughput pays for eager purging, and queries are not what a reload is doing.
+async fn load_blocklists_purging(
+    ctx: &ServerCtx,
+    lists: &[String],
+    resolver: Option<Arc<NumaResolver>>,
+) -> bool {
+    #[cfg(target_env = "musl")]
+    let delay = unsafe {
+        let delay = libmimalloc_sys::mi_option_get(MI_OPTION_PURGE_DELAY);
+        libmimalloc_sys::mi_option_set(MI_OPTION_PURGE_DELAY, 0);
+        delay
+    };
+    let loaded = load_blocklists(ctx, lists, resolver).await;
     #[cfg(target_env = "musl")]
     unsafe {
         libmimalloc_sys::mi_collect(true);
+        libmimalloc_sys::mi_option_set(MI_OPTION_PURGE_DELAY, delay);
     }
+    loaded
 }
 
 /// Returns `false` only when a failure left nothing loaded at all. An emptied
