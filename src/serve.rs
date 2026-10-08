@@ -899,7 +899,6 @@ async fn load_blocklists(
         outcomes.push((source.clone(), result));
     }
     cache.prune(lists);
-    all_domains.shrink_to_fit();
     let total = all_domains.len();
 
     // Lock work stays sub-microsecond: record, then swap or keep.

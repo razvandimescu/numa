@@ -388,10 +388,11 @@ fn entry_lines(text: &str) -> impl Iterator<Item = &str> {
 /// could drift. Lines are judged for validity, not novelty: a dual-stack hosts
 /// file names every domain on both a `0.0.0.0` and a `::` line, and both count.
 pub(crate) fn parse_blocklist_counted(text: &str) -> ParsedList {
-    let entries = entry_lines(text).count();
-    let mut domains = HashSet::with_capacity(entries);
+    let mut domains = HashSet::new();
+    let mut entries = 0;
     let mut parsed_lines = 0;
     for line in entry_lines(text) {
+        entries += 1;
         if line.starts_with("0.0.0.0") || line.starts_with("127.0.0.1") || line.starts_with("::") {
             // BSD hosts(5): an IP followed by N aliases; '#' starts an inline comment.
             let payload = line.split('#').next().unwrap_or(line);
@@ -615,11 +616,13 @@ mod tests {
     }
 
     #[test]
-    fn comment_and_blank_lines_do_not_reserve_capacity() {
-        let text = "# padding\n\n".repeat(100_000) + "a.com\n";
+    fn dual_stack_hosts_lines_do_not_oversize_the_set() {
+        let text: String = (0..1_000)
+            .map(|i| format!("0.0.0.0 d{i}.com\n:: d{i}.com\n"))
+            .collect();
         let domains = parse_blocklist(&text);
-        assert_eq!(domains.len(), 1);
-        assert!(domains.capacity() < 1_000, "{}", domains.capacity());
+        assert_eq!(domains.len(), 1_000);
+        assert!(domains.capacity() < 2_000, "{}", domains.capacity());
     }
 
     #[test]
