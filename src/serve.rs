@@ -4,6 +4,7 @@
 //! Windows service dispatcher (`windows_service` module) can drive the
 //! same startup/serve loop.
 
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
@@ -829,6 +830,34 @@ async fn network_watch_loop(ctx: Arc<ServerCtx>) {
     }
 }
 
+/// Extends the larger set with the smaller, so the bigger table is never rehashed.
+fn merge_into(acc: &mut HashSet<String>, mut set: HashSet<String>) {
+    if acc.len() < set.len() {
+        std::mem::swap(acc, &mut set);
+    }
+    acc.extend(set);
+}
+
+fn live_domains(
+    source: &str,
+    fetched: &Result<String, String>,
+    cache: &BlocklistCache,
+) -> Result<HashSet<String>, String> {
+    let text = fetched.as_ref().map_err(Clone::clone)?;
+    let parsed = parse_blocklist_counted(text);
+    if let Some(why) = source_defect(source, &parsed) {
+        error!("blocklist source failed: {source} — {why}");
+        return Err("not a domain list".to_string());
+    }
+    info!(
+        "blocklist: {} domains from {}",
+        parsed.domains.len(),
+        source
+    );
+    cache.store(source, text);
+    Ok(parsed.domains)
+}
+
 /// Returns `false` only when a failure left nothing loaded at all. An emptied
 /// list is a successful load of nothing, and has nothing to retry.
 async fn load_blocklists(
@@ -839,56 +868,38 @@ async fn load_blocklists(
     let downloaded = download_blocklists(lists, resolver).await;
 
     // Parse outside the lock to avoid blocking DNS queries during parse (~100ms)
-    let mut all_domains = std::collections::HashSet::new();
+    let mut all_domains = HashSet::new();
     let mut outcomes = Vec::with_capacity(downloaded.len());
     let mut failed = 0;
     let mut stale = 0;
     let cache = BlocklistCache::new(&ctx.data_dir);
     for (source, fetched) in &downloaded {
-        let live_error = match fetched {
-            Err(why) => why.clone(),
-            Ok(text) => {
-                let parsed = parse_blocklist_counted(text);
-                match source_defect(source, &parsed) {
-                    Some(why) => {
-                        error!("blocklist source failed: {source} — {why}");
-                        "not a domain list".to_string()
-                    }
-                    None => {
-                        info!(
-                            "blocklist: {} domains from {}",
-                            parsed.domains.len(),
-                            source
-                        );
-                        cache.store(source, text);
-                        all_domains.extend(parsed.domains);
-                        outcomes.push((source.clone(), SourceResult::Loaded));
-                        continue;
+        let result = match live_domains(source, fetched, &cache) {
+            Ok(domains) => {
+                merge_into(&mut all_domains, domains);
+                SourceResult::Loaded
+            }
+            // A stale list still blocks; nothing at all does not. The cached copy
+            // is never refused for being old (issue #336).
+            Err(error) => match cache.load(source) {
+                Some(cached) => {
+                    stale += 1;
+                    merge_into(&mut all_domains, parse_blocklist(&cached.text));
+                    SourceResult::Cached {
+                        error,
+                        fetched_unix: cached.fetched_unix,
                     }
                 }
-            }
+                None => {
+                    failed += 1;
+                    SourceResult::Failed(error)
+                }
+            },
         };
-        // A stale list still blocks; nothing at all does not. The cached copy
-        // is never refused for being old (issue #336).
-        match cache.load(source) {
-            Some(cached) => {
-                stale += 1;
-                all_domains.extend(parse_blocklist(&cached.text));
-                outcomes.push((
-                    source.clone(),
-                    SourceResult::Cached {
-                        error: live_error,
-                        fetched_unix: cached.fetched_unix,
-                    },
-                ));
-            }
-            None => {
-                failed += 1;
-                outcomes.push((source.clone(), SourceResult::Failed(live_error)));
-            }
-        }
+        outcomes.push((source.clone(), result));
     }
     cache.prune(lists);
+    all_domains.shrink_to_fit();
     let total = all_domains.len();
 
     // Lock work stays sub-microsecond: record, then swap or keep.
@@ -997,6 +1008,28 @@ async fn bind_api(addr: SocketAddr, retry: Duration) -> tokio::net::TcpListener 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merge_into_keeps_the_larger_table_in_either_order() {
+        let small: HashSet<String> = ["a.com", "shared.com"].map(String::from).into();
+        let large_ptr = |s: &HashSet<String>| s.get("d0.com").unwrap() as *const String;
+
+        for large_first in [false, true] {
+            let large: HashSet<String> = (0..1_000).map(|i| format!("d{i}.com")).collect();
+            let kept = large_ptr(&large);
+            let (first, second) = if large_first {
+                (large, small.clone())
+            } else {
+                (small.clone(), large)
+            };
+            let mut acc = HashSet::new();
+            merge_into(&mut acc, first);
+            merge_into(&mut acc, second);
+            assert_eq!(acc.len(), 1_002);
+            assert!(acc.contains("a.com") && acc.contains("d999.com"));
+            assert_eq!(large_ptr(&acc), kept, "large set was rehashed, not kept");
+        }
+    }
 
     #[tokio::test]
     async fn bind_api_waits_for_a_taken_port_instead_of_failing_startup() {
