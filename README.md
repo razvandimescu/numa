@@ -46,7 +46,7 @@ pacman -S numa
 cargo install numa
 
 # Nix
-nix run github:razvandimescu/numa
+nix profile install github:razvandimescu/numa
 ```
 
 ```bash
@@ -57,15 +57,17 @@ Numa listens on port 53, but your system keeps its current resolver until you ru
 
 ### 3. Set as system DNS
 
-| Platform | Install | Uninstall |
-|----------|---------|-----------|
-| macOS | `sudo numa install` | `sudo numa uninstall` |
-| Linux | `sudo numa install` | `sudo numa uninstall` |
-| Windows | `numa install` (admin) + reboot | `numa uninstall` (admin) + reboot |
+| Platform | Install | Upgrade | Uninstall |
+|----------|---------|---------|-----------|
+| macOS | `sudo numa install` | update the binary, then `sudo numa install` | `sudo numa uninstall` |
+| Linux | `sudo numa install` | update the binary, then `sudo "$(command -v numa)" install` | `sudo numa uninstall` |
+| Windows | `numa install` (admin) + reboot | run the new `numa.exe install` (admin) | `numa uninstall` (admin) + reboot |
 
 `install` registers a service, points system DNS at Numa and trusts its local CA. `uninstall` reverses all three. Once installed, the dashboard is also at **http://numa.numa**.
 
-On macOS and Linux, numa runs as a system service (launchd/systemd). The systemd unit is unprivileged (`DynamicUser=yes`, only `CAP_NET_BIND_SERVICE`); the launchd daemon runs as root. `numa install` reconfigures systemd-resolved through a drop-in that `numa uninstall` removes; any other process holding port 53 (dnsmasq, including NetworkManager's) has to be stopped by hand. On Windows, numa auto-starts on login via registry. Windows also binds `127.0.0.2:53` (the built-in Dnscache owns `127.0.0.1:53`) and installs an NRPT rule to route queries to it — so edit `bind_addr`/`api_bind_addr` against `127.0.0.2`, not `127.0.0.1`.
+Update the binary the way you installed it (`brew upgrade`, `cargo install numa`, rerun install.sh). Re-running `install` restarts the service on the new binary and keeps the token and CA. On Linux, `sudo` searches its own `secure_path` and skips `~/.cargo/bin`, `~/.nix-profile/bin` and Linuxbrew, and an earlier `install` may have left a copy in `/usr/local/bin`, so call numa by its full path: `sudo "$(command -v numa)"`.
+
+On macOS and Linux, numa runs as a system service (launchd/systemd). The systemd unit is unprivileged (`DynamicUser=yes`, only `CAP_NET_BIND_SERVICE`); the launchd daemon runs as root. `numa install` reconfigures systemd-resolved through a drop-in that `numa uninstall` removes; any other process holding port 53 (dnsmasq, including NetworkManager's) has to be stopped by hand. On Windows, numa runs as a Windows service that starts at boot. Windows also binds `127.0.0.2:53` (the built-in Dnscache owns `127.0.0.1:53`) and installs an NRPT rule to route queries to it — so edit `bind_addr`/`api_bind_addr` against `127.0.0.2`, not `127.0.0.1`.
 
 ### Logging in
 
