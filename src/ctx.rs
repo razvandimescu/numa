@@ -430,31 +430,13 @@ fn resolve_local(
     let mut policy_allow = false;
     if ctx.client_policy.is_enabled() {
         match ctx.client_policy.evaluate(src_addr.ip(), qname) {
-            crate::client_policy::Decision::Block => {
-                let mut resp = DnsPacket::response_from(query, ResultCode::NOERROR);
-                resp.answers.extend(answer_record(
-                    qname,
-                    qtype,
-                    Some(std::net::Ipv4Addr::UNSPECIFIED),
-                    Some(std::net::Ipv6Addr::UNSPECIFIED),
-                    60,
-                ));
-                return Some((resp, QueryPath::Blocked, DnssecStatus::Indeterminate));
-            }
+            crate::client_policy::Decision::Block => return Some(sinkhole(query, qname, qtype)),
             crate::client_policy::Decision::Allow => policy_allow = true,
             crate::client_policy::Decision::Passthrough => {}
         }
     }
     if !policy_allow && ctx.blocklist.read().unwrap().is_blocked(qname) {
-        let mut resp = DnsPacket::response_from(query, ResultCode::NOERROR);
-        resp.answers.extend(answer_record(
-            qname,
-            qtype,
-            Some(std::net::Ipv4Addr::UNSPECIFIED),
-            Some(std::net::Ipv6Addr::UNSPECIFIED),
-            60,
-        ));
-        return Some((resp, QueryPath::Blocked, DnssecStatus::Indeterminate));
+        return Some(sinkhole(query, qname, qtype));
     }
     if qtype == QueryType::AAAA
         && ctx
@@ -894,6 +876,22 @@ fn answer_record(
         }),
         _ => None,
     }
+}
+
+fn sinkhole(
+    query: &DnsPacket,
+    qname: &str,
+    qtype: QueryType,
+) -> (DnsPacket, QueryPath, DnssecStatus) {
+    let mut resp = DnsPacket::response_from(query, ResultCode::NOERROR);
+    resp.answers.extend(answer_record(
+        qname,
+        qtype,
+        Some(std::net::Ipv4Addr::UNSPECIFIED),
+        Some(std::net::Ipv6Addr::UNSPECIFIED),
+        60,
+    ));
+    (resp, QueryPath::Blocked, DnssecStatus::Indeterminate)
 }
 
 enum Disposition {
