@@ -106,6 +106,24 @@ jobs:
       - name: build
         run: cross build --target x86_64-unknown-freebsd --release
 
+  cross-build-musl:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl, arm-unknown-linux-musleabihf]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - uses: taiki-e/install-action@cross
+      - name: build
+        run: cross build --target ${{ matrix.target }} --release
+
   integration-linux:
     needs: [check]
     runs-on: ubuntu-latest
