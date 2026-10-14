@@ -1869,19 +1869,16 @@ mod tests {
 
     #[tokio::test]
     async fn pipeline_filter_aaaa_strips_ipv6hint_from_https_and_svcb() {
-        let rdata = crate::svcb::build_rdata(
-            1,
-            &[],
-            &[
-                (1, vec![0x02, b'h', b'3']),
-                (
-                    6,
-                    vec![
-                        0x26, 0x06, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01,
-                    ],
-                ),
+        let alpn = (1, vec![0x02, b'h', b'3']);
+        let ech = (5, vec![0xfe, 0x0d, 0x00, 0x2a]);
+        let ipv6hint = (
+            6,
+            vec![
+                0x26, 0x06, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01,
             ],
         );
+        let rdata = crate::svcb::build_rdata(1, &[], &[alpn.clone(), ech.clone(), ipv6hint]);
+        let filtered = crate::svcb::build_rdata(1, &[], &[alpn, ech]);
 
         let mut pkt = DnsPacket::new();
         pkt.header.response = true;
@@ -1925,18 +1922,7 @@ mod tests {
             assert_eq!(path, QueryPath::Cached, "{label}");
             assert_eq!(resp.answers.len(), 1, "{label}");
             match &resp.answers[0] {
-                DnsRecord::UNKNOWN { data, .. } => {
-                    assert!(
-                        data.len() < rdata.len(),
-                        "{label}: ipv6hint (20 bytes) must be removed"
-                    );
-                    // Bytes for key=6 must not appear at any 4-byte boundary in the
-                    // params section — cheap structural check.
-                    assert!(
-                        !data.windows(4).any(|w| w == [0, 6, 0, 16]),
-                        "{label}: ipv6hint TLV header must be absent"
-                    );
-                }
+                DnsRecord::UNKNOWN { data, .. } => assert_eq!(data, &filtered, "{label}"),
                 other => panic!("{label}: expected UNKNOWN record, got {other:?}"),
             }
         }
