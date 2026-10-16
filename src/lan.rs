@@ -325,13 +325,10 @@ fn build_announcement(
     let rdlen_pos = buf.pos();
     buf.write_u16(0)?;
     let rdata_start = buf.pos();
-    let svc_str = services
-        .iter()
-        .map(|(name, port)| format!("{}:{}", name, port))
-        .collect::<Vec<_>>()
-        .join(",");
     // Legacy peer-discovery entries (consumed by parse_mdns_response)
-    write_txt_string(&mut buf, &format!("{}{}", TXT_SERVICES, svc_str))?;
+    for s in services_txt_strings(services) {
+        write_txt_string(&mut buf, &s)?;
+    }
     write_txt_string(&mut buf, &format!("{}{}", TXT_ID, inst_id))?;
     // Enriched entries (consumed by the iOS/Android companion apps)
     write_txt_string(&mut buf, &format!("{}{}", TXT_VERSION, meta.version))?;
@@ -384,6 +381,28 @@ fn patch_rdlen(
 ) -> crate::Result<()> {
     let rdlen = (buf.pos() - rdata_start) as u16;
     buf.set_u16(rdlen_pos, rdlen)
+}
+
+/// One `services=` string per batch of whole entries: a TXT string holds at
+/// most 255 bytes and peers parse each string on its own.
+fn services_txt_strings(services: &[(String, u16)]) -> Vec<String> {
+    let mut strings = vec![TXT_SERVICES.to_string()];
+    for (name, port) in services {
+        let entry = format!("{name}:{port}");
+        let last = strings.last_mut().expect("starts with one string");
+        let sep = if last.len() > TXT_SERVICES.len() {
+            ","
+        } else {
+            ""
+        };
+        if last.len() + sep.len() + entry.len() > 255 {
+            strings.push(format!("{TXT_SERVICES}{entry}"));
+        } else {
+            last.push_str(sep);
+            last.push_str(&entry);
+        }
+    }
+    strings
 }
 
 fn write_txt_string(buf: &mut BytePacketBuffer, s: &str) -> crate::Result<()> {
@@ -462,7 +481,7 @@ fn parse_mdns_response(data: &[u8]) -> Option<MdnsAnnouncement> {
                                 })
                                 .collect();
                             if !svcs.is_empty() {
-                                txt_services = Some(svcs);
+                                txt_services.get_or_insert_with(Vec::new).extend(svcs);
                             }
                         } else if let Some(id) = txt.strip_prefix(TXT_ID) {
                             peer_instance_id = Some(id.to_string());
@@ -522,5 +541,24 @@ mod tests {
             local_ip_toward(IpAddr::V4(Ipv4Addr::LOCALHOST)),
             Some(Ipv4Addr::LOCALHOST)
         );
+    }
+
+    #[test]
+    fn announcement_round_trips_services_past_one_txt_string() {
+        let services: Vec<(String, u16)> = (0..30)
+            .map(|i| (format!("service-{i}"), 3000 + i))
+            .collect();
+        let meta = crate::health::HealthMeta::test_fixture();
+        let buf = build_announcement(
+            "host",
+            Ipv4Addr::new(192, 168, 1, 7),
+            &services,
+            "id",
+            &meta,
+        )
+        .unwrap();
+
+        let parsed = parse_mdns_response(buf.filled()).expect("announcement parses");
+        assert_eq!(parsed.services, services);
     }
 }
