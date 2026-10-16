@@ -19,7 +19,7 @@ use crate::blocklist_cache::BlocklistCache;
 use crate::bootstrap_resolver::NumaResolver;
 use crate::buffer::BytePacketBuffer;
 use crate::cache::DnsCache;
-use crate::config::{build_zone_map, load_config, ConfigLoad};
+use crate::config::{build_zone_map, ConfigLoad};
 use crate::ctx::{handle_query, ServerCtx};
 use crate::forward::{
     build_https_client_with_resolver, parse_upstream_list, Upstream, UpstreamPool,
@@ -36,12 +36,12 @@ const DOH_FALLBACK: &str = "https://9.9.9.9/dns-query";
 const BLOCKLIST_RETRY_SECS: u64 = 3600;
 
 /// Boot the DNS server and run until the UDP listener errors out.
-pub async fn run(config_path: String) -> crate::Result<()> {
+pub async fn run(load: ConfigLoad) -> crate::Result<()> {
     let ConfigLoad {
         config,
         path: resolved_config_path,
         found: config_found,
-    } = load_config(&config_path)?;
+    } = load;
 
     // Discover system DNS in a single pass (upstream + forwarding rules)
     let system_dns = discover_system_dns();

@@ -7,8 +7,9 @@ const NO_SYSTEM_DNS_FLAG: &str = "--no-system-dns";
 
 fn main() -> numa::Result<()> {
     let palette = numa::palette::get();
-    // Handle CLI subcommands
-    let arg1 = std::env::args().nth(1).unwrap_or_default();
+    let (config_flag, args) = take_config_flag(std::env::args().skip(1).collect())?;
+    let arg = |i: usize| args.get(i).cloned();
+    let arg1 = arg(0).unwrap_or_default();
 
     #[cfg(windows)]
     if arg1 == "--service" {
@@ -32,7 +33,16 @@ fn main() -> numa::Result<()> {
         .format_timestamp_millis()
         .init();
 
-    let skip_system_dns = std::env::args().any(|a| a == NO_SYSTEM_DNS_FLAG);
+    let skip_system_dns = args.iter().any(|a| a == NO_SYSTEM_DNS_FLAG);
+
+    if config_flag.is_some()
+        && matches!(
+            arg1.as_str(),
+            "install" | "uninstall" | "service" | "setup-phone" | "relay"
+        )
+    {
+        return Err(format!("-c/--config is not supported by `numa {arg1}`").into());
+    }
 
     match arg1.as_str() {
         "install" => {
@@ -47,7 +57,7 @@ fn main() -> numa::Result<()> {
             return uninstall_service().map_err(|e| e.into());
         }
         "service" => {
-            let sub = std::env::args().nth(2).unwrap_or_default();
+            let sub = arg(1).unwrap_or_default();
             eprintln!(
                 "{}Numa{} — service management\n",
                 palette.brand_bold, palette.reset
@@ -64,17 +74,20 @@ fn main() -> numa::Result<()> {
             };
         }
         "config" => {
-            let sub = std::env::args().nth(2).unwrap_or_default();
+            let sub = arg(1).unwrap_or_default();
+            let explicit = config_flag.as_deref();
             return match sub.as_str() {
-                "path" => numa::config_cli::print_config_path().map_err(|e| e.into()),
-                "edit" => numa::config_cli::edit_config().map_err(|e| e.into()),
+                "path" => numa::config_cli::print_config_path(explicit).map_err(|e| e.into()),
+                "edit" => numa::config_cli::edit_config(explicit).map_err(|e| e.into()),
                 _ => {
                     eprintln!("Usage: numa config <path|edit>");
                     Ok(())
                 }
             };
         }
-        "token" => return numa::config_cli::print_token().map_err(|e| e.into()),
+        "token" => {
+            return numa::config_cli::print_token(config_flag.as_deref()).map_err(|e| e.into())
+        }
         "setup-phone" => {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -84,13 +97,11 @@ fn main() -> numa::Result<()> {
                 .map_err(|e| e.into());
         }
         "relay" => {
-            let port: u16 = std::env::args()
-                .nth(2)
+            let port: u16 = arg(1)
                 .as_deref()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(8443);
-            let bind: std::net::IpAddr = std::env::args()
-                .nth(3)
+            let bind: std::net::IpAddr = arg(2)
                 .as_deref()
                 .map(|s| {
                     s.parse().unwrap_or_else(|e| {
@@ -110,7 +121,7 @@ fn main() -> numa::Result<()> {
             return runtime.block_on(numa::relay::run(addr));
         }
         "lan" | "block" | "dnssec" => {
-            let sub = std::env::args().nth(2).unwrap_or_default();
+            let sub = arg(1).unwrap_or_default();
             let enabled = match sub.as_str() {
                 "on" => true,
                 "off" => false,
@@ -121,8 +132,8 @@ fn main() -> numa::Result<()> {
             };
             // The daemon knows which file it loaded; a cwd-relative guess
             // writes a config nothing reads under systemd or launchd (#371).
-            let config_path = match std::env::args().nth(3) {
-                Some(explicit) => explicit,
+            let config_path = match one_config_path(config_flag, arg(2))? {
+                Some(named) => numa::config_cli::named_config_path(&named)?,
                 None => numa::config_cli::config_write_target()?,
             };
             let (section, feature_name) = match arg1.as_str() {
@@ -138,7 +149,7 @@ fn main() -> numa::Result<()> {
             return Ok(());
         }
         "help" | "--help" | "-h" => {
-            eprintln!("Usage: numa [command] [config-path]");
+            eprintln!("Usage: numa [-c CONFIG] [command]");
             eprintln!();
             eprintln!("Commands:");
             eprintln!("  (none)          Start the DNS server (default)");
@@ -167,7 +178,9 @@ fn main() -> numa::Result<()> {
             eprintln!("  setup-phone     Generate a QR code to install Numa DoT on a phone");
             eprintln!("  help            Show this help");
             eprintln!();
-            eprintln!("Config path defaults to numa.toml");
+            eprintln!("Options:");
+            eprintln!("  -c, --config FILE  Use FILE as the config, for the server and for the");
+            eprintln!("                     config/token/on|off commands");
             return Ok(());
         }
         _ => {
@@ -190,18 +203,55 @@ fn main() -> numa::Result<()> {
         }
     }
 
-    let config_path = if arg1.is_empty() || arg1 == "run" {
-        std::env::args()
-            .nth(2)
-            .unwrap_or_else(|| "numa.toml".to_string())
+    let positional = if arg1.is_empty() || arg1 == "run" {
+        arg(1)
     } else {
-        arg1 // treat as config path for backwards compatibility
+        Some(arg1) // bare config path: `numa /etc/numa/numa.toml`
+    };
+    let load = match one_config_path(config_flag, positional)? {
+        Some(named) => numa::config::load_config_file(&named)?,
+        None => numa::config::load_config("numa.toml")?,
     };
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(numa::serve::run(config_path))
+    runtime.block_on(numa::serve::run(load))
+}
+
+/// Pulls `-c FILE`, `--config FILE` or `--config=FILE` out of argv so the
+/// flag can sit before or after the subcommand.
+fn take_config_flag(args: Vec<String>) -> Result<(Option<String>, Vec<String>), String> {
+    let mut config = None;
+    let mut rest = Vec::with_capacity(args.len());
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        let value = match arg.strip_prefix("--config=") {
+            Some(value) => Some(value.to_string()),
+            None if arg == "-c" || arg == "--config" => args.next(),
+            None => {
+                rest.push(arg);
+                continue;
+            }
+        };
+        let value = value
+            .filter(|v| !v.is_empty() && !v.starts_with('-'))
+            .ok_or("-c/--config needs a config file path")?;
+        if config.replace(value).is_some() {
+            return Err("-c/--config given more than once".to_string());
+        }
+    }
+    Ok((config, rest))
+}
+
+fn one_config_path(
+    flag: Option<String>,
+    positional: Option<String>,
+) -> Result<Option<String>, String> {
+    match (flag, positional) {
+        (Some(_), Some(_)) => Err("config file given both with -c and as an argument".to_string()),
+        (flag, positional) => Ok(flag.or(positional)),
+    }
 }
 
 fn set_config_bool(
@@ -297,6 +347,48 @@ fn print_toggle_status(feature: &str, enabled: bool, path: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn split(args: &[&str]) -> Result<(Option<String>, Vec<String>), String> {
+        take_config_flag(args.iter().map(|a| a.to_string()).collect())
+    }
+
+    #[test]
+    fn config_flag_is_taken_from_any_position() {
+        for args in [
+            &["-c", "t1.toml", "config", "path"][..],
+            &["config", "path", "--config", "t1.toml"],
+            &["config", "--config=t1.toml", "path"],
+        ] {
+            let (config, rest) = split(args).unwrap();
+            assert_eq!(config.as_deref(), Some("t1.toml"));
+            assert_eq!(rest, ["config", "path"]);
+        }
+    }
+
+    #[test]
+    fn config_flag_leaves_other_args_alone() {
+        let (config, rest) = split(&["install", "--no-system-dns"]).unwrap();
+        assert_eq!(config, None);
+        assert_eq!(rest, ["install", "--no-system-dns"]);
+    }
+
+    #[test]
+    fn config_flag_rejects_missing_or_repeated_values() {
+        assert!(split(&["run", "-c"]).is_err());
+        assert!(split(&["--config", ""]).is_err());
+        assert!(split(&["--config="]).is_err());
+        assert!(split(&["-c", "--no-system-dns"]).is_err());
+        assert!(split(&["-c", "a.toml", "-c", "b.toml"]).is_err());
+    }
+
+    #[test]
+    fn config_path_comes_from_flag_or_argument_not_both() {
+        let some = |s: &str| Some(s.to_string());
+        assert_eq!(one_config_path(some("a.toml"), None), Ok(some("a.toml")));
+        assert_eq!(one_config_path(None, some("b.toml")), Ok(some("b.toml")));
+        assert_eq!(one_config_path(None, None), Ok(None));
+        assert!(one_config_path(some("a.toml"), some("b.toml")).is_err());
+    }
 
     #[test]
     fn test_update_config_content() {

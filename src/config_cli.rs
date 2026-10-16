@@ -39,8 +39,8 @@ fn default_true() -> bool {
     true
 }
 
-pub fn print_config_path() -> Result<(), String> {
-    let resolved = effective_config_path()?;
+pub fn print_config_path(explicit: Option<&str>) -> Result<(), String> {
+    let resolved = effective_config_path(explicit)?;
     println!("{}", resolved.path);
     if let Some(note) = &resolved.note {
         eprintln!("note: {note}");
@@ -48,8 +48,8 @@ pub fn print_config_path() -> Result<(), String> {
     Ok(())
 }
 
-pub fn edit_config() -> Result<(), String> {
-    let resolved = effective_config_path()?;
+pub fn edit_config(explicit: Option<&str>) -> Result<(), String> {
+    let resolved = effective_config_path(explicit)?;
     let path = Path::new(&resolved.path);
     ensure_writable(path)?;
 
@@ -74,10 +74,10 @@ pub fn edit_config() -> Result<(), String> {
     Ok(())
 }
 
-pub fn print_token() -> Result<(), String> {
+pub fn print_token(explicit: Option<&str>) -> Result<(), String> {
     use crate::api_auth::{locate_token, TokenSource, TOKEN_FILE};
 
-    let resolved = effective_config_path()?;
+    let resolved = effective_config_path(explicit)?;
     let config_path = resolved.path;
     let server = crate::config::load_config(&config_path)
         .map_err(|error| unreadable(&config_path, &error))?
@@ -128,22 +128,43 @@ fn unreadable(path: &str, error: &crate::Error) -> String {
 }
 
 pub(crate) fn service_config_path() -> Result<String, String> {
-    effective_config_path().map(|resolved| resolved.display())
+    effective_config_path(None).map(|resolved| resolved.display())
 }
 
 /// The config file a CLI write should land in: what the running daemon
 /// loaded, else the first candidate that exists, else where one would be
 /// created. The bare path, not the `display()` string carrying the note.
 pub fn config_write_target() -> Result<String, String> {
-    let resolved =
-        effective_config_path().map_err(|error| format!("cannot resolve config path: {error}"))?;
+    let resolved = effective_config_path(None)
+        .map_err(|error| format!("cannot resolve config path: {error}"))?;
     ensure_writable(Path::new(&resolved.path))?;
     Ok(resolved.path)
 }
 
-fn effective_config_path() -> Result<EffectiveConfigPath, String> {
-    let local = crate::config::load_config(&crate::cli_config_path());
-    resolve_effective_config_path(local, query_daemon_config_path)
+/// A config file the user named must exist: reporting on or writing to a
+/// mistyped path would leave the config numa actually reads untouched.
+pub fn named_config_path(path: &str) -> Result<String, String> {
+    let resolved = crate::config::resolve_path(path);
+    if Path::new(&resolved).is_file() {
+        Ok(resolved)
+    } else {
+        Err(format!("config file not found: {resolved}"))
+    }
+}
+
+fn effective_config_path(explicit: Option<&str>) -> Result<EffectiveConfigPath, String> {
+    match explicit {
+        Some(path) => Ok(EffectiveConfigPath {
+            path: named_config_path(path)?,
+            from_daemon: false,
+            note: None,
+            data_dir: None,
+        }),
+        None => {
+            let local = crate::config::load_config(&crate::cli_config_path());
+            resolve_effective_config_path(local, query_daemon_config_path)
+        }
+    }
 }
 
 fn resolve_effective_config_path<F>(
@@ -330,6 +351,22 @@ mod tests {
             config_found: found,
             data_dir: None,
         }
+    }
+
+    #[test]
+    fn named_config_path_must_be_an_existing_file() {
+        let dir = std::env::temp_dir();
+        let file = dir.join(format!("numa-named-cli-{}.toml", std::process::id()));
+        std::fs::write(&file, "").unwrap();
+        let named = named_config_path(&file.to_string_lossy());
+        let _ = std::fs::remove_file(&file);
+        assert!(named.unwrap().ends_with(".toml"));
+
+        let missing = format!("numa-missing-cli-{}.toml", std::process::id());
+        let error = named_config_path(&missing).unwrap_err();
+        let reported = error.strip_prefix("config file not found: ").unwrap();
+        assert!(Path::new(reported).is_absolute(), "{error}");
+        assert!(named_config_path(&dir.to_string_lossy()).is_err());
     }
 
     #[test]

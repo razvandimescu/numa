@@ -61,7 +61,6 @@ fn run_service() -> windows_service::Result<()> {
     // dedicated thread runs the runtime so this function can return cleanly
     // once the SCM tells us to stop — we can't block the dispatcher thread
     // forever without preventing graceful shutdown.
-    let config_path = crate::cli_config_path();
     let (server_done_tx, server_done_rx) = mpsc::channel::<()>();
 
     let server_thread = std::thread::spawn(move || {
@@ -77,7 +76,9 @@ fn run_service() -> windows_service::Result<()> {
             }
         };
 
-        if let Err(e) = runtime.block_on(crate::serve::run(config_path)) {
+        let served = crate::config::load_config(&crate::cli_config_path())
+            .and_then(|load| runtime.block_on(crate::serve::run(load)));
+        if let Err(e) = served {
             log::error!("numa serve exited with error: {}", e);
         }
         let _ = server_done_tx.send(());

@@ -872,6 +872,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn load_config_file_rejects_a_missing_file() {
+        let name = format!("numa-missing-{}.toml", std::process::id());
+        let error = load_config_file(&name).err().unwrap().to_string();
+        assert!(error.starts_with("config file not found: "), "{error}");
+        assert!(error.ends_with(&name), "{error}");
+    }
+
+    #[test]
+    fn load_config_file_reads_the_named_file() {
+        let path = std::env::temp_dir().join(format!("numa-named-{}.toml", std::process::id()));
+        std::fs::write(&path, "[server]\napi_port = 5382\n").unwrap();
+        let load = load_config_file(&path.to_string_lossy()).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(load.found);
+        assert_eq!(load.config.server.api_port, 5382);
+    }
+
+    #[test]
     fn resolution_ceiling_defaults_and_parses() {
         let default: Config = toml::from_str("").unwrap();
         assert_eq!(
@@ -1701,7 +1719,7 @@ pub struct ConfigLoad {
     pub found: bool,
 }
 
-fn resolve_path(path: &str) -> String {
+pub(crate) fn resolve_path(path: &str) -> String {
     // canonicalize gives the real absolute path for existing files;
     // for non-existent files, build an absolute path manually
     std::fs::canonicalize(path)
@@ -1709,6 +1727,25 @@ fn resolve_path(path: &str) -> String {
         .unwrap_or_else(|_| Path::new(path).to_path_buf())
         .to_string_lossy()
         .to_string()
+}
+
+/// Reads exactly `path`, with no fallback locations and no defaults: a
+/// mistyped path the user named must not start numa on another config.
+pub fn load_config_file(path: &str) -> Result<ConfigLoad> {
+    read_config(Path::new(path))?
+        .ok_or_else(|| format!("config file not found: {}", resolve_path(path)).into())
+}
+
+fn read_config(path: &Path) -> Result<Option<ConfigLoad>> {
+    match std::fs::read_to_string(path) {
+        Ok(contents) => Ok(Some(ConfigLoad {
+            config: toml::from_str(&contents)?,
+            path: resolve_path(&path.to_string_lossy()),
+            found: true,
+        })),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
 }
 
 pub fn load_config(path: &str) -> Result<ConfigLoad> {
@@ -1732,18 +1769,8 @@ pub fn load_config(path: &str) -> Result<ConfigLoad> {
     };
 
     for candidate in &candidates {
-        match std::fs::read_to_string(candidate) {
-            Ok(contents) => {
-                let resolved = resolve_path(&candidate.to_string_lossy());
-                let config: Config = toml::from_str(&contents)?;
-                return Ok(ConfigLoad {
-                    config,
-                    path: resolved,
-                    found: true,
-                });
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(e.into()),
+        if let Some(load) = read_config(candidate)? {
+            return Ok(load);
         }
     }
 
