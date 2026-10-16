@@ -3215,6 +3215,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cname_chase_matches_local_target_written_as_typed() {
+        for target in ["nas.lan.", "NAS.lan"] {
+            let ctx = Arc::new(
+                ctx_with_zone(vec![
+                    crate::testutil::cname_record("app.example.com", target, 60),
+                    crate::testutil::a_record("nas.lan", Ipv4Addr::new(192, 168, 1, 42), 60),
+                ])
+                .await,
+            );
+
+            let (resp, path) = resolve_in_test(&ctx, "app.example.com", QueryType::A).await;
+            assert_eq!(path, QueryPath::Local, "{target:?}");
+            assert_eq!(resp.header.rescode, ResultCode::NOERROR, "{target:?}");
+            assert!(
+                matches!(resp.answers.get(1), Some(DnsRecord::A { addr, .. }) if *addr == Ipv4Addr::new(192, 168, 1, 42)),
+                "{target:?}: {:?}",
+                resp.answers
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn cname_chase_direct_cname_query_does_not_chase() {
         let ctx = Arc::new(
             ctx_with_zone(vec![

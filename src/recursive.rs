@@ -920,7 +920,7 @@ pub(crate) fn follow_cname_links(
 ) -> Result<Option<String>, ()> {
     let mut current = None;
     while let Some(next) = extract_cname_target(response, current.as_deref().unwrap_or(start)) {
-        if visited.len() > MAX_CNAME_DEPTH as usize || !visited.insert(next.to_ascii_lowercase()) {
+        if visited.len() > MAX_CNAME_DEPTH as usize || !visited.insert(next.clone()) {
             return Err(());
         }
         current = Some(next);
@@ -930,8 +930,9 @@ pub(crate) fn follow_cname_links(
 
 fn extract_cname_target(response: &DnsPacket, qname: &str) -> Option<String> {
     response.answers.iter().find_map(|r| match r {
+        // Zone and override targets keep the case and trailing dot the user typed.
         DnsRecord::CNAME { domain, host, .. } if domain.eq_ignore_ascii_case(qname) => {
-            Some(host.clone())
+            Some(host.trim_end_matches('.').to_ascii_lowercase())
         }
         _ => None,
     })
