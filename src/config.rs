@@ -872,11 +872,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn load_config_file_rejects_a_missing_file() {
-        let name = format!("numa-missing-{}.toml", std::process::id());
-        let error = load_config_file(&name).err().unwrap().to_string();
-        assert!(error.starts_with("config file not found: "), "{error}");
-        assert!(error.ends_with(&name), "{error}");
+    fn named_config_path_must_be_an_existing_file() {
+        let missing = format!("numa-missing-{}.toml", std::process::id());
+        let error = named_config_path(&missing).unwrap_err().to_string();
+        let reported = error.strip_prefix("config file not found: ").unwrap();
+        assert!(Path::new(reported).is_absolute(), "{error}");
+        assert!(reported.ends_with(&missing), "{error}");
+        assert!(named_config_path(&std::env::temp_dir().to_string_lossy()).is_err());
     }
 
     #[test]
@@ -1719,7 +1721,7 @@ pub struct ConfigLoad {
     pub found: bool,
 }
 
-pub(crate) fn resolve_path(path: &str) -> String {
+fn resolve_path(path: &str) -> String {
     // canonicalize gives the real absolute path for existing files;
     // for non-existent files, build an absolute path manually
     std::fs::canonicalize(path)
@@ -1729,11 +1731,20 @@ pub(crate) fn resolve_path(path: &str) -> String {
         .to_string()
 }
 
-/// Reads exactly `path`, with no fallback locations and no defaults: a
-/// mistyped path the user named must not start numa on another config.
+/// A config file the user named must exist: falling back to another file,
+/// to defaults, or creating it would silently ignore a mistyped path.
+pub fn named_config_path(path: &str) -> Result<String> {
+    let resolved = resolve_path(path);
+    if Path::new(&resolved).is_file() {
+        Ok(resolved)
+    } else {
+        Err(format!("config file not found: {resolved}").into())
+    }
+}
+
 pub fn load_config_file(path: &str) -> Result<ConfigLoad> {
-    read_config(Path::new(path))?
-        .ok_or_else(|| format!("config file not found: {}", resolve_path(path)).into())
+    let named = named_config_path(path)?;
+    read_config(Path::new(&named))?.ok_or_else(|| format!("config file not found: {named}").into())
 }
 
 fn read_config(path: &Path) -> Result<Option<ConfigLoad>> {

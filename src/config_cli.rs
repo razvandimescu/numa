@@ -141,21 +141,10 @@ pub fn config_write_target() -> Result<String, String> {
     Ok(resolved.path)
 }
 
-/// A config file the user named must exist: reporting on or writing to a
-/// mistyped path would leave the config numa actually reads untouched.
-pub fn named_config_path(path: &str) -> Result<String, String> {
-    let resolved = crate::config::resolve_path(path);
-    if Path::new(&resolved).is_file() {
-        Ok(resolved)
-    } else {
-        Err(format!("config file not found: {resolved}"))
-    }
-}
-
 fn effective_config_path(explicit: Option<&str>) -> Result<EffectiveConfigPath, String> {
     match explicit {
         Some(path) => Ok(EffectiveConfigPath {
-            path: named_config_path(path)?,
+            path: crate::config::named_config_path(path).map_err(|e| e.to_string())?,
             from_daemon: false,
             note: None,
             data_dir: None,
@@ -351,22 +340,6 @@ mod tests {
             config_found: found,
             data_dir: None,
         }
-    }
-
-    #[test]
-    fn named_config_path_must_be_an_existing_file() {
-        let dir = std::env::temp_dir();
-        let file = dir.join(format!("numa-named-cli-{}.toml", std::process::id()));
-        std::fs::write(&file, "").unwrap();
-        let named = named_config_path(&file.to_string_lossy());
-        let _ = std::fs::remove_file(&file);
-        assert!(named.unwrap().ends_with(".toml"));
-
-        let missing = format!("numa-missing-cli-{}.toml", std::process::id());
-        let error = named_config_path(&missing).unwrap_err();
-        let reported = error.strip_prefix("config file not found: ").unwrap();
-        assert!(Path::new(reported).is_absolute(), "{error}");
-        assert!(named_config_path(&dir.to_string_lossy()).is_err());
     }
 
     #[test]

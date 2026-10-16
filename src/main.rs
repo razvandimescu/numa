@@ -35,12 +35,11 @@ fn main() -> numa::Result<()> {
 
     let skip_system_dns = args.iter().any(|a| a == NO_SYSTEM_DNS_FLAG);
 
-    if config_flag.is_some()
-        && matches!(
-            arg1.as_str(),
-            "install" | "uninstall" | "service" | "setup-phone" | "relay"
-        )
-    {
+    let reads_config = matches!(
+        arg1.as_str(),
+        "" | "run" | "config" | "token" | "lan" | "block" | "dnssec"
+    ) || names_config_file(&arg1);
+    if config_flag.is_some() && !reads_config {
         return Err(format!("-c/--config is not supported by `numa {arg1}`").into());
     }
 
@@ -133,7 +132,7 @@ fn main() -> numa::Result<()> {
             // The daemon knows which file it loaded; a cwd-relative guess
             // writes a config nothing reads under systemd or launchd (#371).
             let config_path = match one_config_path(config_flag, arg(2))? {
-                Some(named) => numa::config_cli::named_config_path(&named)?,
+                Some(named) => numa::config::named_config_path(&named)?,
                 None => numa::config_cli::config_write_target()?,
             };
             let (section, feature_name) = match arg1.as_str() {
@@ -184,12 +183,7 @@ fn main() -> numa::Result<()> {
             return Ok(());
         }
         _ => {
-            if !arg1.is_empty()
-                && arg1 != "run"
-                && !arg1.contains('/')
-                && !arg1.contains('\\')
-                && !arg1.ends_with(".toml")
-            {
+            if !arg1.is_empty() && arg1 != "run" && !names_config_file(&arg1) {
                 eprintln!(
                     "{}Numa{} — unknown command: {}{}{}\n",
                     palette.brand_bold, palette.reset, palette.bold, arg1, palette.reset
@@ -217,6 +211,10 @@ fn main() -> numa::Result<()> {
         .enable_all()
         .build()?;
     runtime.block_on(numa::serve::run(load))
+}
+
+fn names_config_file(arg: &str) -> bool {
+    arg.contains('/') || arg.contains('\\') || arg.ends_with(".toml")
 }
 
 /// Pulls `-c FILE`, `--config FILE` or `--config=FILE` out of argv so the
