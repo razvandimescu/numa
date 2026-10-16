@@ -22,6 +22,8 @@ ttl         = 300
 
 Any domain works, not just a local suffix. Zones are checked before the cache and before any upstream or recursive lookup, so a match never leaves the box.
 
+A name you list is answered by Numa for every record type. A type you did not list gets an empty answer, not the upstream one. This keeps IPv6 clients from going around an A record on a public name, the same as Unbound's default `transparent` local zone.
+
 ## Reverse lookups
 
 Reverse the address and append `in-addr.arpa`, so `192.168.1.1` becomes `1.1.168.192.in-addr.arpa`:
