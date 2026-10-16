@@ -387,14 +387,7 @@ fn patch_rdlen(
 }
 
 fn write_txt_string(buf: &mut BytePacketBuffer, s: &str) -> crate::Result<()> {
-    let bytes = s.as_bytes();
-    for chunk in bytes.chunks(255) {
-        buf.write_u8(chunk.len() as u8)?;
-        for &b in chunk {
-            buf.write_u8(b)?;
-        }
-    }
-    Ok(())
+    buf.write_bytes(&crate::record::txt_rdata(s))
 }
 
 // --- mDNS Packet Parsing ---

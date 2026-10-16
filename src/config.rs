@@ -936,6 +936,45 @@ mod tests {
         }
     }
 
+    #[test]
+    fn mx_value_splits_on_any_whitespace() {
+        for value in ["10 mail.home.lan", "10  mail.home.lan", "10\tmail.home.lan"] {
+            let map = build_zone_map(&[zone("home.lan", "MX", value)]).unwrap();
+            let records = map.lookup("home.lan", QueryType::MX).expect("hit");
+            assert!(
+                matches!(&records[0], DnsRecord::MX { priority: 10, host, .. } if host == "mail.home.lan"),
+                "{value:?} parsed as {:?}",
+                records[0]
+            );
+        }
+        assert!(build_zone_map(&[zone("home.lan", "MX", "10 mail.home.lan extra")]).is_err());
+    }
+
+    #[test]
+    fn txt_value_is_split_into_255_byte_strings() {
+        let long = "a".repeat(300);
+        let map = build_zone_map(&[
+            zone("home.lan", "TXT", "v=spf1 -all"),
+            zone("long.home.lan", "TXT", &long),
+            zone("empty.home.lan", "TXT", ""),
+        ])
+        .unwrap();
+        let rdata = |name| match &map.lookup(name, QueryType::TXT).expect("hit")[0] {
+            DnsRecord::UNKNOWN {
+                qtype: 16, data, ..
+            } => data.clone(),
+            other => panic!("expected TXT, got {other:?}"),
+        };
+
+        assert_eq!(rdata("home.lan"), b"\x0bv=spf1 -all");
+        let mut expected = vec![255];
+        expected.extend_from_slice(&long.as_bytes()[..255]);
+        expected.push(45);
+        expected.extend_from_slice(&long.as_bytes()[255..]);
+        assert_eq!(rdata("long.home.lan"), expected);
+        assert_eq!(rdata("empty.home.lan"), [0]);
+    }
+
     fn zone(domain: &str, record_type: &str, value: &str) -> ZoneRecord {
         ZoneRecord {
             domain: domain.into(),
@@ -1938,25 +1977,33 @@ pub fn build_zone_map(zones: &[ZoneRecord]) -> Result<ZoneMap> {
                 },
             ),
             "MX" => {
-                let parts: Vec<&str> = zone.value.splitn(2, ' ').collect();
-                if parts.len() != 2 {
+                let [priority, host] = zone.value.split_whitespace().collect::<Vec<_>>()[..] else {
                     return Err(
                         format!("MX value must be 'priority host', got '{}'", zone.value).into(),
                     );
-                }
-                let priority: u16 = parts[0]
+                };
+                let priority: u16 = priority
                     .parse()
-                    .map_err(|e| format!("invalid MX priority '{}': {}", parts[0], e))?;
+                    .map_err(|e| format!("invalid MX priority '{}': {}", priority, e))?;
                 (
                     QueryType::MX,
                     DnsRecord::MX {
                         domain: domain.clone(),
                         priority,
-                        host: parts[1].to_string(),
+                        host: host.to_string(),
                         ttl: zone.ttl,
                     },
                 )
             }
+            "TXT" => (
+                QueryType::TXT,
+                DnsRecord::UNKNOWN {
+                    domain: domain.clone(),
+                    qtype: QueryType::TXT.to_num(),
+                    data: crate::record::txt_rdata(&zone.value),
+                    ttl: zone.ttl,
+                },
+            ),
             other => {
                 return Err(format!("unsupported record type '{}'", other).into());
             }

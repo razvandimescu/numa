@@ -683,6 +683,20 @@ fn write_header(buffer: &mut BytePacketBuffer, domain: &str, qtype: u16, ttl: u3
     Ok(())
 }
 
+pub fn txt_rdata(text: &str) -> Vec<u8> {
+    // RFC 1035 §3.3.14: TXT-DATA is one or more character-strings, so empty text is one empty string.
+    if text.is_empty() {
+        return vec![0];
+    }
+    let bytes = text.as_bytes();
+    let mut rdata = Vec::with_capacity(bytes.len() + bytes.len().div_ceil(255));
+    for chunk in bytes.chunks(255) {
+        rdata.push(chunk.len() as u8);
+        rdata.extend_from_slice(chunk);
+    }
+    rdata
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -15,7 +15,7 @@ This is unrelated to `.numa` services, which are a reverse-proxy registry that h
 ```toml
 [[zones]]
 domain      = "nas.home.lan"
-record_type = "A"              # A, AAAA, CNAME, PTR, NS, MX
+record_type = "A"              # A, AAAA, CNAME, PTR, NS, MX, TXT
 value       = "192.168.1.10"
 ttl         = 300
 ```
@@ -33,6 +33,22 @@ record_type = "PTR"
 value       = "router.home.lan"
 ttl         = 300
 ```
+
+## Mail and text records
+
+```toml
+[[zones]]
+domain      = "home.lan"
+record_type = "MX"
+value       = "10 mail.home.lan"   # priority, then host
+
+[[zones]]
+domain      = "home.lan"
+record_type = "TXT"
+value       = "v=spf1 mx -all"
+```
+
+A TXT value is plain text, without zone-file quotes. Numa splits values longer than 255 bytes, such as DKIM keys, into 255-byte strings.
 
 ## Cover a subtree with a wildcard
 
