@@ -13,12 +13,22 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[cfg(target_env = "musl")]
 const MI_OPTION_ARENA_EAGER_COMMIT: libmimalloc_sys::mi_option_t = 4;
 
-fn main() -> numa::Result<()> {
+fn main() -> std::process::ExitCode {
     // mimalloc eagerly commits arenas on overcommit OSes; that is 27 MB idle vs 11 MB without.
     #[cfg(target_env = "musl")]
     unsafe {
         libmimalloc_sys::mi_option_set(MI_OPTION_ARENA_EAGER_COMMIT, 0);
     }
+    match run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> numa::Result<()> {
     let palette = numa::palette::get();
     let (config_flag, args) = take_config_flag(std::env::args().skip(1).collect())?;
     let arg = |i: usize| args.get(i).cloned();

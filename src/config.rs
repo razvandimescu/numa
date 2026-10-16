@@ -892,6 +892,22 @@ mod tests {
     }
 
     #[test]
+    fn parse_error_names_the_file_and_line() {
+        let path = std::env::temp_dir().join(format!("numa-bad-{}.toml", std::process::id()));
+        std::fs::write(&path, "[[zones]]\nvalue = 192.168.1.10\n").unwrap();
+        let Err(err) = load_config_file(&path.to_string_lossy()) else {
+            panic!("a bare IP must not parse");
+        };
+        let _ = std::fs::remove_file(&path);
+        let err = err.to_string();
+        assert!(
+            err.contains(&format!("numa-bad-{}.toml", std::process::id())),
+            "{err}"
+        );
+        assert!(err.contains("line 2"), "{err}");
+    }
+
+    #[test]
     fn resolution_ceiling_defaults_and_parses() {
         let default: Config = toml::from_str("").unwrap();
         assert_eq!(
@@ -1834,7 +1850,7 @@ pub fn load_config_file(path: &str) -> Result<ConfigLoad> {
 fn read_config(path: &Path) -> Result<Option<ConfigLoad>> {
     match std::fs::read_to_string(path) {
         Ok(contents) => Ok(Some(ConfigLoad {
-            config: toml::from_str(&contents)?,
+            config: toml::from_str(&contents).map_err(|e| format!("{}: {e}", path.display()))?,
             path: resolve_path(&path.to_string_lossy()),
             found: true,
         })),
