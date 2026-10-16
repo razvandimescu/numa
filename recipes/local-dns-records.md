@@ -50,6 +50,24 @@ value       = "v=spf1 mx -all"
 
 A TXT value is plain text, without zone-file quotes. Numa splits values longer than 255 bytes, such as DKIM keys, into 255-byte strings.
 
+## Many records
+
+A `[[zones]]` table takes four lines per record. For a long list, put the same records in an inline array, one record per line:
+
+```toml
+zones = [
+  { domain = "nas.home.lan",              record_type = "A",   value = "192.168.1.10", ttl = 3600 },
+  { domain = "*.dev.home.lan",            record_type = "A",   value = "192.168.1.20" },
+  { domain = "home.lan",                  record_type = "MX",  value = "10 mail.home.lan" },
+  { domain = "10.1.168.192.in-addr.arpa", record_type = "PTR", value = "nas.home.lan" },
+]
+
+[server]
+# ...
+```
+
+Put the array before the first `[section]` header. After a header, TOML reads it as part of that section and Numa ignores the records. Use the array or `[[zones]]` tables, not both. TOML rejects the file with a duplicate key error.
+
 ## Cover a subtree with a wildcard
 
 ```toml

@@ -1,3 +1,12 @@
+# Many local records fit one per line in an inline array. Keep it above
+# [server]: after a [section] header it belongs to that section. Use this
+# or the [[zones]] tables further down, not both (TOML duplicate key).
+# zones = [
+#   { domain = "nas.home.lan", record_type = "A",   value = "192.168.1.10" },
+#   { domain = "home.lan",     record_type = "MX",  value = "10 mail.home.lan" },
+#   { domain = "home.lan",     record_type = "TXT", value = "v=spf1 mx -all" },
+# ]
+
 [server]
 bind_addr = "0.0.0.0:53"           # or a list: ["10.0.0.1:53", "127.0.0.1:53"]
 api_port = 5380
