@@ -2076,7 +2076,8 @@ fn zone_name(what: &str, name: &str) -> Result<String> {
 }
 
 /// Room left in a response after the header, the longest possible question
-/// and an EDNS OPT record.
+/// and an EDNS OPT record. Covers the direct answer only: CNAMEs chased in
+/// front of it can still overflow the buffer (TODO on serialize_with_fallback).
 const TXT_RRSET_BUDGET: usize = crate::buffer::BUF_SIZE - 12 - (255 + 4) - 11;
 
 fn check_txt_fits(name: &str, rrset: &[DnsRecord]) -> Result<()> {
