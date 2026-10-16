@@ -404,6 +404,12 @@ value = "10 smtp.local"
 ttl = 60
 
 [[zones]]
+domain = "txt.local"
+record_type = "TXT"
+value = "v=spf1 mx -all"
+ttl = 60
+
+[[zones]]
 domain = "1.0.168.192.in-addr.arpa"
 record_type = "PTR"
 value = "router.lan"
@@ -450,6 +456,10 @@ check "Local A record (test.local)" \
 check "Local MX record (mail.local)" \
     "smtp.local" \
     "$($DIG mail.local MX +short)"
+
+check "Local TXT record (txt.local)" \
+    '"v=spf1 mx -all"' \
+    "$($DIG txt.local TXT +short)"
 
 # PTR in 192.168/16 — proves zone_map beats RFC 6303 NXDOMAIN shortcut
 check "Local PTR record (192.168.0.1 → router.lan)" \

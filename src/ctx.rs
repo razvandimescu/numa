@@ -1901,6 +1901,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pipeline_zone_txt_parses_in_hickory() {
+        let long = "a".repeat(300);
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.zone_map = crate::config::build_zone_map(&[crate::config::ZoneRecord {
+            domain: "home.lan".into(),
+            record_type: "TXT".into(),
+            value: long.clone(),
+            ttl: 300,
+        }])
+        .unwrap();
+        let ctx = Arc::new(ctx);
+
+        let query = DnsPacket::query(0xBEEF, "home.lan", QueryType::TXT);
+        let mut buf = BytePacketBuffer::new();
+        query.write(&mut buf).unwrap();
+        let src = "127.0.0.1:1234".parse().unwrap();
+        let (wire, _) = resolve_query(query, buf.filled(), src, &ctx, Transport::Tcp)
+            .await
+            .unwrap();
+
+        let msg = hickory_proto::op::Message::from_vec(wire.filled()).unwrap();
+        let hickory_proto::rr::RData::TXT(txt) = &msg.answers[0].data else {
+            panic!("expected TXT, got {:?}", msg.answers[0].data);
+        };
+        let strings: Vec<&[u8]> = txt.txt_data.iter().map(|s| &s[..]).collect();
+        assert_eq!(strings, [&long.as_bytes()[..255], &long.as_bytes()[255..]]);
+    }
+
+    #[tokio::test]
     async fn pipeline_tld_proxy_resolves_service() {
         let ctx = crate::testutil::test_ctx().await;
         ctx.services.lock().unwrap().insert("grafana", 3000, None);

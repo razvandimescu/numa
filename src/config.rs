@@ -975,6 +975,51 @@ mod tests {
         assert_eq!(rdata("empty.home.lan"), [0]);
     }
 
+    #[test]
+    fn zone_names_ignore_surrounding_whitespace() {
+        let map = build_zone_map(&[
+            zone(" nas.home.lan ", "A", " 192.168.1.10 "),
+            zone("app.home.lan", "CNAME", "nas.home.lan "),
+            zone("10.1.168.192.in-addr.arpa", "PTR", " nas.home.lan"),
+            zone("home.lan", "NS", "\tns.home.lan\n"),
+        ])
+        .unwrap();
+
+        assert!(!map
+            .lookup("nas.home.lan", QueryType::A)
+            .expect("hit")
+            .is_empty());
+        for (name, qtype, expected) in [
+            ("app.home.lan", QueryType::CNAME, "nas.home.lan"),
+            ("10.1.168.192.in-addr.arpa", QueryType::PTR, "nas.home.lan"),
+            ("home.lan", QueryType::NS, "ns.home.lan"),
+        ] {
+            match &map.lookup(name, qtype).expect("hit")[0] {
+                DnsRecord::CNAME { host, .. }
+                | DnsRecord::PTR { host, .. }
+                | DnsRecord::NS { host, .. } => assert_eq!(host, expected),
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert!(build_zone_map(&[zone("app.home.lan", "CNAME", "nas .home.lan")]).is_err());
+        assert!(build_zone_map(&[zone("nas .home.lan", "A", "192.168.1.10")]).is_err());
+    }
+
+    #[test]
+    fn txt_that_cannot_fit_a_response_is_rejected_at_load() {
+        let dkim_4096 = "a".repeat(800);
+        assert!(build_zone_map(&[zone("k._domainkey.home.lan", "TXT", &dkim_4096)]).is_ok());
+
+        let huge = "a".repeat(4000);
+        assert!(build_zone_map(&[zone("big.home.lan", "TXT", &huge)]).is_err());
+
+        let part = "a".repeat(900);
+        let many: Vec<_> = (0..5)
+            .map(|_| zone("many.home.lan", "TXT", &part))
+            .collect();
+        assert!(build_zone_map(&many).is_err(), "one RRset, 4.5 KB in total");
+    }
+
     fn zone(domain: &str, record_type: &str, value: &str) -> ZoneRecord {
         ZoneRecord {
             domain: domain.into(),
@@ -1915,20 +1960,20 @@ pub fn build_zone_map(zones: &[ZoneRecord]) -> Result<ZoneMap> {
     let mut map = ZoneMap::default();
 
     for zone in zones {
-        let raw = zone.domain.to_lowercase();
+        let raw = zone.domain.trim().to_lowercase();
         let raw = raw.trim_end_matches('.');
         let is_wildcard = raw.starts_with("*.");
         let key = if is_wildcard { &raw[2..] } else { raw };
         if key.is_empty() || key.contains('*') {
             return Err(format!("invalid wildcard zone '{}'", raw).into());
         }
-        let domain = key.to_string();
+        let domain = zone_name("zone domain", key)?;
+        let value = zone.value.trim();
         let (qtype, record) = match zone.record_type.to_uppercase().as_str() {
             "A" => {
-                let addr: Ipv4Addr = zone
-                    .value
+                let addr: Ipv4Addr = value
                     .parse()
-                    .map_err(|e| format!("invalid A record value '{}': {}", zone.value, e))?;
+                    .map_err(|e| format!("invalid A record value '{}': {}", value, e))?;
                 (
                     QueryType::A,
                     DnsRecord::A {
@@ -1939,10 +1984,9 @@ pub fn build_zone_map(zones: &[ZoneRecord]) -> Result<ZoneMap> {
                 )
             }
             "AAAA" => {
-                let addr: Ipv6Addr = zone
-                    .value
+                let addr: Ipv6Addr = value
                     .parse()
-                    .map_err(|e| format!("invalid AAAA record value '{}': {}", zone.value, e))?;
+                    .map_err(|e| format!("invalid AAAA record value '{}': {}", value, e))?;
                 (
                     QueryType::AAAA,
                     DnsRecord::AAAA {
@@ -1956,7 +2000,7 @@ pub fn build_zone_map(zones: &[ZoneRecord]) -> Result<ZoneMap> {
                 QueryType::CNAME,
                 DnsRecord::CNAME {
                     domain: domain.clone(),
-                    host: zone.value.clone(),
+                    host: zone_name("CNAME target", value)?,
                     ttl: zone.ttl,
                 },
             ),
@@ -1964,7 +2008,7 @@ pub fn build_zone_map(zones: &[ZoneRecord]) -> Result<ZoneMap> {
                 QueryType::PTR,
                 DnsRecord::PTR {
                     domain: domain.clone(),
-                    host: zone.value.clone(),
+                    host: zone_name("PTR target", value)?,
                     ttl: zone.ttl,
                 },
             ),
@@ -1972,12 +2016,12 @@ pub fn build_zone_map(zones: &[ZoneRecord]) -> Result<ZoneMap> {
                 QueryType::NS,
                 DnsRecord::NS {
                     domain: domain.clone(),
-                    host: zone.value.clone(),
+                    host: zone_name("NS host", value)?,
                     ttl: zone.ttl,
                 },
             ),
             "MX" => {
-                let [priority, host] = zone.value.split_whitespace().collect::<Vec<_>>()[..] else {
+                let [priority, host] = value.split_whitespace().collect::<Vec<_>>()[..] else {
                     return Err(
                         format!("MX value must be 'priority host', got '{}'", zone.value).into(),
                     );
@@ -2014,13 +2058,41 @@ pub fn build_zone_map(zones: &[ZoneRecord]) -> Result<ZoneMap> {
         } else {
             &mut map.exact
         };
-        bucket
-            .entry(domain)
-            .or_default()
-            .entry(qtype)
-            .or_default()
-            .push(record);
+        let rrset = bucket.entry(domain).or_default().entry(qtype).or_default();
+        rrset.push(record);
+        if qtype == QueryType::TXT {
+            check_txt_fits(raw, rrset)?;
+        }
     }
 
     Ok(map)
+}
+
+fn zone_name(what: &str, name: &str) -> Result<String> {
+    if name.contains(char::is_whitespace) {
+        return Err(format!("{what} '{name}' contains whitespace").into());
+    }
+    Ok(name.to_string())
+}
+
+/// Room left in a response after the header, the longest possible question
+/// and an EDNS OPT record.
+const TXT_RRSET_BUDGET: usize = crate::buffer::BUF_SIZE - 12 - (255 + 4) - 11;
+
+fn check_txt_fits(name: &str, rrset: &[DnsRecord]) -> Result<()> {
+    // Each answer: owner pointer to the question, fixed fields, RDATA.
+    let size: usize = rrset
+        .iter()
+        .map(|r| match r {
+            DnsRecord::UNKNOWN { data, .. } => 2 + 10 + data.len(),
+            _ => 0,
+        })
+        .sum();
+    if size > TXT_RRSET_BUDGET {
+        return Err(format!(
+            "TXT records at '{name}' need {size} bytes, a response holds {TXT_RRSET_BUDGET}"
+        )
+        .into());
+    }
+    Ok(())
 }
