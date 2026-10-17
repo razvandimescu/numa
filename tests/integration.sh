@@ -345,9 +345,9 @@ enabled = false
 enabled = false
 "
 
-# Verify blocking is actually off. [dnssec] is only for the checks below:
+# Verify blocking is actually off. [dnssec] goes in only now, since
 # run_test_suite reads any `enabled = true` as blocking on.
-printf '\n[dnssec]\nenabled = true\n' >> "$CONFIG"
+DNSSEC_ON=$("$BINARY" dnssec on "$CONFIG" 2>&1 || true)
 RUST_LOG=info "$BINARY" "$CONFIG" > "$LOG" 2>&1 &
 NUMA_PID=$!
 sleep 3
@@ -369,9 +369,9 @@ check "/stats reports DNSSEC off" \
 check "Startup log warns the flag has no effect" \
     "^1$" \
     "$(grep -cF '[dnssec] enabled has no effect' "$LOG" || true)"
-check "numa dnssec on names the mode it needs" \
-    'mode = "recursive"' \
-    "$("$BINARY" dnssec on "$CONFIG" 2>&1)"
+check "numa dnssec on says it has no effect in forward mode" \
+    "enabled, no effect in forward mode" \
+    "$DNSSEC_ON"
 
 kill "$NUMA_PID" 2>/dev/null || true
 wait "$NUMA_PID" 2>/dev/null || true

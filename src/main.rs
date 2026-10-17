@@ -164,10 +164,11 @@ fn run() -> numa::Result<()> {
                 "dnssec" => ("dnssec", "DNSSEC validation"),
                 _ => unreachable!(),
             };
-            set_config_bool(&config_path, section, "enabled", enabled, feature_name)?;
-            if section == "dnssec" && enabled {
-                note_dnssec_needs_recursive(&config_path);
-            }
+            let config = set_config_bool(&config_path, section, "enabled", enabled)?;
+            let dnssec_inactive_in = (section == "dnssec" && enabled)
+                .then_some(config.upstream.mode)
+                .filter(|mode| mode.validates_dnssec() == Some(false));
+            print_toggle_status(feature_name, enabled, &config_path, dnssec_inactive_in);
             return Ok(());
         }
         "version" | "--version" | "-V" => {
@@ -198,7 +199,7 @@ fn run() -> numa::Result<()> {
             eprintln!("  token           Print the dashboard/API token for other devices");
             eprintln!("  lan on|off      Enable/disable LAN service discovery (mDNS)");
             eprintln!("  block on|off    Enable/disable ad-blocking");
-            eprintln!("  dnssec on|off   Enable/disable DNSSEC validation");
+            eprintln!("  dnssec on|off   Enable/disable DNSSEC validation (recursive mode)");
             eprintln!("  relay [PORT] [BIND]");
             eprintln!("                  Run as an ODoH relay (RFC 9230, default 127.0.0.1:8443)");
             eprintln!("  setup-phone     Generate a QR code to install Numa DoT on a phone");
@@ -284,8 +285,7 @@ fn set_config_bool(
     section: &str,
     key: &str,
     value: bool,
-    feature_name: &str,
-) -> numa::Result<()> {
+) -> numa::Result<numa::config::Config> {
     let contents = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -295,21 +295,31 @@ fn set_config_bool(
             {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::write(path, format!("[{}]\n{} = {}\n", section, key, value))?;
-            print_toggle_status(feature_name, value, path);
-            return Ok(());
+            String::new()
         }
         Err(e) => return Err(e.into()),
     };
 
-    let result = update_config_content(&contents, section, key, value);
-    std::fs::write(path, result)?;
-    print_toggle_status(feature_name, value, path);
-    Ok(())
+    let updated = update_config_content(&contents, section, key, value);
+    // A config the daemon can't parse stops it on the next restart.
+    let config = toml::from_str(&updated).map_err(|e| {
+        format!(
+            "{path} left unchanged, the edit would not parse: {}",
+            e.to_string().trim_end()
+        )
+    })?;
+    std::fs::write(path, updated)?;
+    Ok(config)
+}
+
+/// `[ name ]  # note` gives `name`; array tables give `None`.
+fn table_name(header: &str) -> Option<&str> {
+    let name = header.split('#').next()?.trim();
+    let name = name.strip_prefix('[')?.strip_suffix(']')?.trim();
+    (!name.starts_with('[')).then_some(name)
 }
 
 fn update_config_content(contents: &str, section: &str, key: &str, value: bool) -> String {
-    let section_header = format!("[{}]", section);
     let mut in_section = false;
     let mut found = false;
     let mut lines: Vec<String> = contents
@@ -317,7 +327,7 @@ fn update_config_content(contents: &str, section: &str, key: &str, value: bool) 
         .map(|line| {
             let trimmed = line.trim();
             if trimmed.starts_with('[') {
-                in_section = trimmed == section_header;
+                in_section = table_name(trimmed) == Some(section);
             }
             if in_section && !found {
                 if let Some((k, _)) = trimmed.split_once('=') {
@@ -333,13 +343,16 @@ fn update_config_content(contents: &str, section: &str, key: &str, value: bool) 
         .collect();
 
     if !found {
-        if let Some(i) = lines.iter().position(|l| l.trim() == section_header) {
+        if let Some(i) = lines
+            .iter()
+            .position(|l| table_name(l.trim()) == Some(section))
+        {
             lines.insert(i + 1, format!("{} = {}", key, value));
         } else {
             if !lines.is_empty() && !lines.last().unwrap().is_empty() {
                 lines.push(String::new());
             }
-            lines.push(section_header);
+            lines.push(format!("[{}]", section));
             lines.push(format!("{} = {}", key, value));
         }
     }
@@ -351,38 +364,33 @@ fn update_config_content(contents: &str, section: &str, key: &str, value: bool) 
     result
 }
 
-fn print_toggle_status(feature: &str, enabled: bool, path: &str) {
-    let label = if enabled { "enabled" } else { "disabled" };
+fn print_toggle_status(
+    feature: &str,
+    enabled: bool,
+    path: &str,
+    dnssec_inactive_in: Option<numa::config::UpstreamMode>,
+) {
     let palette = numa::palette::get();
-    let color = if enabled {
-        palette.green
-    } else {
-        palette.warning
+    let (label, color, hint) = match (enabled, dnssec_inactive_in) {
+        (false, _) => ("disabled".to_string(), palette.warning, None),
+        (true, None) => (
+            "enabled".to_string(),
+            palette.green,
+            Some("Restart Numa for changes to take effect"),
+        ),
+        (true, Some(mode)) => (
+            format!("enabled, no effect in {} mode", mode.as_str()),
+            palette.warning,
+            Some(numa::config::DNSSEC_NEEDS_RECURSIVE),
+        ),
     };
     eprintln!(
         "{}Numa{} — {} {}{}{}",
         palette.brand_bold, palette.reset, feature, color, label, palette.reset
     );
     eprintln!("  Wrote {}", path);
-    if enabled {
-        eprintln!("  Restart Numa for changes to take effect");
-    }
-}
-
-fn note_dnssec_needs_recursive(config_path: &str) {
-    use numa::config::UpstreamMode;
-    let Ok(load) = numa::config::load_config_file(config_path) else {
-        return;
-    };
-    let mode = load.config.upstream.mode;
-    if matches!(mode, UpstreamMode::Forward | UpstreamMode::Odoh) {
-        let palette = numa::palette::get();
-        eprintln!(
-            "  {}No effect in {} mode: validation needs [upstream] mode = \"recursive\"{}",
-            palette.warning,
-            mode.as_str(),
-            palette.reset
-        );
+    if let Some(hint) = hint {
+        eprintln!("  {hint}");
     }
 }
 
@@ -448,6 +456,27 @@ mod tests {
 
         let output = update_config_content(input, "mobile", "enabled", true);
         assert!(output.contains("[mobile]\nenabled = true"));
+    }
+
+    #[test]
+    fn update_config_finds_headers_with_a_comment_or_spaces() {
+        for header in ["[dnssec]  # chain of trust", "[ dnssec ]"] {
+            let input = format!("{header}\nenabled = false\n");
+            let output = update_config_content(&input, "dnssec", "enabled", true);
+            assert_eq!(output, format!("{header}\nenabled = true\n"));
+        }
+    }
+
+    #[test]
+    fn set_config_bool_leaves_a_config_it_cannot_edit_untouched() {
+        let path = std::env::temp_dir().join(format!("numa-toggle-{}.toml", std::process::id()));
+        let original = "dnssec = { enabled = false }\n";
+        std::fs::write(&path, original).unwrap();
+        let result = set_config_bool(path.to_str().unwrap(), "dnssec", "enabled", true);
+        let after = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(result.is_err());
+        assert_eq!(after, original);
     }
 
     #[test]
