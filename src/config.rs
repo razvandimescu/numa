@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::buffer::canonical_name;
 use crate::question::QueryType;
 use crate::record::DnsRecord;
 use crate::Result;
@@ -1167,6 +1168,31 @@ mod tests {
     }
 
     #[test]
+    fn owner_and_cname_target_typed_alike_match() {
+        for name in ["näs.lan", "\\065.lan", "NAS.lan."] {
+            let map = build_zone_map(&[
+                zone("app.lan", "CNAME", name),
+                zone(name, "A", "192.168.1.42"),
+            ])
+            .unwrap();
+            let cname = map.lookup("app.lan", QueryType::CNAME).expect("hit");
+            let DnsRecord::CNAME { host, .. } = &cname[0] else {
+                panic!("expected CNAME, got {:?}", cname[0]);
+            };
+            assert!(
+                map.lookup(host, QueryType::A).is_some(),
+                "{name:?} -> {host:?}"
+            );
+        }
+        for root in [".", ""] {
+            assert!(
+                build_zone_map(&[zone(root, "A", "192.168.1.42")]).is_err(),
+                "{root:?}"
+            );
+        }
+    }
+
+    #[test]
     fn cname_returned_when_qtype_absent() {
         // RFC 1034 §3.6.2: a query on a CNAME owner for a different qtype must
         // return the CNAME so the chase layer can follow it. Exact + wildcard.
@@ -2012,14 +2038,13 @@ pub fn build_zone_map(zones: &[ZoneRecord]) -> Result<ZoneMap> {
     let mut map = ZoneMap::default();
 
     for zone in zones {
-        let raw = zone.domain.trim().to_lowercase();
-        let raw = raw.trim_end_matches('.');
+        let raw = canonical_zone_name("zone domain", zone.domain.trim())?;
         let is_wildcard = raw.starts_with("*.");
-        let key = if is_wildcard { &raw[2..] } else { raw };
-        if key.is_empty() || key.contains('*') {
+        let key = if is_wildcard { &raw[2..] } else { &raw };
+        if key == "." || key.contains('*') {
             return Err(format!("invalid wildcard zone '{}'", raw).into());
         }
-        let domain = zone_name("zone domain", key)?;
+        let domain = key.to_string();
         let value = zone.value.trim();
         let (qtype, record) = match zone.record_type.to_uppercase().as_str() {
             "A" => {
@@ -2113,7 +2138,7 @@ pub fn build_zone_map(zones: &[ZoneRecord]) -> Result<ZoneMap> {
         let rrset = bucket.entry(domain).or_default().entry(qtype).or_default();
         rrset.push(record);
         if qtype == QueryType::TXT {
-            check_txt_fits(raw, rrset)?;
+            check_txt_fits(&raw, rrset)?;
         }
     }
 
@@ -2129,7 +2154,7 @@ fn zone_name(what: &str, name: &str) -> Result<String> {
 
 fn canonical_zone_name(what: &str, name: &str) -> Result<String> {
     let name = zone_name(what, name)?;
-    crate::buffer::canonical_name(&name).map_err(|e| format!("invalid {what} '{name}': {e}").into())
+    canonical_name(&name).map_err(|e| format!("invalid {what} '{name}': {e}").into())
 }
 
 /// Room left in a response after the header, the longest possible question
