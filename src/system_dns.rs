@@ -1609,11 +1609,16 @@ fn migrate_legacy_backup_linux(backup: &std::path::Path) {
 
 #[cfg(target_os = "linux")]
 fn is_systemd_resolved_active() -> bool {
-    std::process::Command::new("systemctl")
-        .args(["is-active", "--quiet", "systemd-resolved"])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    command_succeeds(std::process::Command::new("systemctl").args([
+        "is-active",
+        "--quiet",
+        "systemd-resolved",
+    ]))
+}
+
+#[cfg(target_os = "linux")]
+fn command_succeeds(cmd: &mut std::process::Command) -> bool {
+    cmd.output().is_ok_and(|o| o.status.success())
 }
 
 #[cfg(target_os = "linux")]
@@ -2221,6 +2226,18 @@ mod tests {
             search_domains,
             vec!["ec2.internal", "compute.internal", "corp.example"]
         );
+    }
+
+    // /health runs this per poll; an inherited stderr puts the child's errors in the daemon log.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn command_succeeds_keeps_child_stderr_out_of_ours() {
+        let ours = std::fs::read_link("/proc/self/fd/2").unwrap();
+        assert!(command_succeeds(
+            std::process::Command::new("sh")
+                .args(["-c", r#"[ "$(readlink /proc/self/fd/2)" != "$1" ]"#, "sh"])
+                .arg(ours),
+        ));
     }
 
     #[test]
