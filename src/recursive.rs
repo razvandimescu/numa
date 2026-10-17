@@ -267,12 +267,18 @@ pub(crate) fn resolve_iterative<'a>(
     })
 }
 
+/// An empty NOERROR counts only with an SOA: that is an authoritative NODATA,
+/// which must replace a record that has since been removed.
 pub(crate) fn is_cacheable(response: &DnsPacket) -> bool {
     !response.answers.is_empty()
         || matches!(
             response.header.rescode,
             ResultCode::NXDOMAIN | ResultCode::REFUSED
         )
+        || response
+            .authorities
+            .iter()
+            .any(|r| matches!(r, DnsRecord::SOA { .. }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -366,17 +372,26 @@ async fn walk(
                     return Err("max CNAME depth exceeded".into());
                 }
                 debug!("recursive: chasing CNAME {} -> {}", qname, cname_target);
-                let final_resp = resolve_iterative(
-                    &cname_target,
-                    qtype,
-                    cache,
-                    root_hints,
-                    srtt,
-                    0,
-                    cname_depth + 1,
-                    budget,
-                )
-                .await?;
+                // Read the cache but never write the target: it is validated
+                // only as part of the combined answer, so on its own it must
+                // not reach clients.
+                let cached = cache.read().unwrap().lookup(&cname_target, qtype);
+                let final_resp = match cached {
+                    Some(resp) => resp,
+                    None => {
+                        Box::pin(walk(
+                            &cname_target,
+                            qtype,
+                            cache,
+                            root_hints,
+                            srtt,
+                            0,
+                            cname_depth + 1,
+                            budget,
+                        ))
+                        .await?
+                    }
+                };
 
                 let mut combined = response;
                 combined.answers.extend(final_resp.answers);
@@ -1659,6 +1674,50 @@ mod tests {
             addr(&cached),
             Ipv4Addr::new(10, 0, 0, 1),
             "the caller caches the answer once it is validated"
+        );
+    }
+
+    #[tokio::test]
+    async fn cname_chase_leaves_the_target_out_of_the_cache() {
+        let _guard = UDP_STATE_LOCK.lock().unwrap();
+        reset_udp_state();
+        let server = spawn_udp_dns_server(|query| {
+            let mut resp = DnsPacket::response_from(query, ResultCode::NOERROR);
+            match query.questions.first().map(|q| q.name.as_str()) {
+                Some("alias") => resp.answers.push(DnsRecord::CNAME {
+                    domain: "alias".into(),
+                    host: "target".into(),
+                    ttl: 300,
+                }),
+                Some("target") => resp.answers.push(DnsRecord::A {
+                    domain: "target".into(),
+                    addr: Ipv4Addr::new(10, 0, 0, 9),
+                    ttl: 300,
+                }),
+                _ => {}
+            }
+            resp
+        })
+        .await;
+        let cache = RwLock::new(DnsCache::new(100, 60, 86400));
+        let srtt = RwLock::new(SrttCache::new(true));
+        let query = DnsPacket::query(0x78, "alias", QueryType::A);
+
+        let resp = resolve_recursive("alias", QueryType::A, &cache, &query, &[server], &srtt)
+            .await
+            .unwrap();
+
+        assert!(
+            resp.has_answer_of_type(QueryType::A),
+            "the chase must still reach the target"
+        );
+        assert!(
+            cache
+                .read()
+                .unwrap()
+                .lookup("target", QueryType::A)
+                .is_none(),
+            "the target is only validated as part of this answer"
         );
     }
 

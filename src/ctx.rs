@@ -2717,6 +2717,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn refresh_entry_lets_nodata_replace_a_removed_record() {
+        let _guard = crate::recursive::UDP_STATE_LOCK.lock().unwrap();
+        crate::recursive::reset_udp_state();
+        let mut nodata = DnsPacket::response_from(
+            &DnsPacket::query(0, "gone", QueryType::A),
+            ResultCode::NOERROR,
+        );
+        nodata.authorities.push(DnsRecord::SOA {
+            domain: "gone".into(),
+            mname: "ns.gone".into(),
+            rname: "admin.gone".into(),
+            serial: 1,
+            refresh: 3600,
+            retry: 600,
+            expire: 86400,
+            minimum: 300,
+            ttl: 300,
+        });
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.upstream_mode = UpstreamMode::Recursive;
+        ctx.root_hints = vec![crate::testutil::mock_upstream(nodata).await];
+        let earlier = crate::testutil::a_record_response("gone", Ipv4Addr::new(10, 0, 0, 1), 300);
+        ctx.cache
+            .write()
+            .unwrap()
+            .insert("gone", QueryType::A, &earlier);
+        let ctx = Arc::new(ctx);
+
+        refresh_entry(&ctx, "gone", QueryType::A).await;
+
+        let cached = ctx
+            .cache
+            .read()
+            .unwrap()
+            .lookup("gone", QueryType::A)
+            .unwrap();
+        assert!(
+            cached.answers.is_empty(),
+            "the removed record must not stay servable: {:?}",
+            cached.answers
+        );
+    }
+
+    #[tokio::test]
     async fn refresh_entry_resolves_again_and_validates() {
         let _guard = crate::recursive::UDP_STATE_LOCK.lock().unwrap();
         crate::recursive::reset_udp_state();
