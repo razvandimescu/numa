@@ -39,17 +39,22 @@ api_port = 5380
 #
 # max_concurrent_resolutions = 512   # default
 
+# ── Upstream ───────────────────────────────────────────────────────
+# Where numa sends the queries it can't answer itself. Uncomment one
+# [upstream] block: forward (the default), recursive, odoh or auto.
+
+# Forward: relay to upstream servers. Without `address`, numa follows
+# your system DNS as networks change, or uses Quad9 over DoH if it
+# finds none.
 # [upstream]
-# mode = "forward"                              # "forward" (default) — relay to upstream
-#                                               # "recursive" — resolve from root hints (no address needed)
-#                                               # "odoh" — Oblivious DoH (see ODoH block below)
+# mode = "forward"
 # address = "9.9.9.9"                           # single upstream (plain UDP)
 # address = ["192.168.1.1", "9.9.9.9:5353"]    # multiple upstreams — SRTT picks fastest
 # address = "https://dns.quad9.net/dns-query"   # DNS-over-HTTPS (encrypted)
 # address = "tls://9.9.9.9#dns.quad9.net"       # DNS-over-TLS (encrypted, port 853)
 # fallback = ["8.8.8.8", "1.1.1.1"]            # tried only when all primaries fail
 # port = 53                                     # default port for addresses without :port
-# timeout_ms = 3000
+# timeout_ms = 5000                             # default
 # hedge_ms = 0                                   # request hedging delay (ms). Default: 0 (off).
 #                                                # Set to e.g. 10 to fire a parallel upstream
 #                                                # request after 10ms of silence — rescues packet
@@ -57,6 +62,39 @@ api_port = 5380
 #                                                # (DoT). Doubles the upstream query count, so
 #                                                # leave off for quota'd providers (NextDNS,
 #                                                # Control D).
+
+# Recursive: resolve from the root servers, with no upstream provider.
+# `address`, `port`, `timeout_ms` and `hedge_ms` only affect forwarding,
+# and `fallback` is not tried when recursion fails. For DNSSEC
+# validation, also set [dnssec] enabled = true.
+# [upstream]
+# mode = "recursive"
+# root_hints = [                                # default: the 13 root servers
+#     "198.41.0.4",      # a.root-servers.net (Verisign)
+#     "199.9.14.201",    # b.root-servers.net (USC-ISI)
+#     "192.33.4.12",     # c.root-servers.net (Cogent)
+#     "199.7.91.13",     # d.root-servers.net (UMD)
+#     "192.203.230.10",  # e.root-servers.net (NASA)
+#     "192.5.5.241",     # f.root-servers.net (ISC)
+#     "192.112.36.4",    # g.root-servers.net (US DoD)
+#     "198.97.190.53",   # h.root-servers.net (US Army)
+#     "192.36.148.17",   # i.root-servers.net (Netnod)
+#     "192.58.128.30",   # j.root-servers.net (Verisign)
+#     "193.0.14.129",    # k.root-servers.net (RIPE NCC)
+#     "199.7.83.42",     # l.root-servers.net (ICANN)
+#     "202.12.27.33",    # m.root-servers.net (WIDE)
+# ]
+# prime_tlds = [                                # TLDs to pre-warm on startup (default list)
+#     "com", "net", "org", "info",              # gTLDs
+#     "io", "dev", "app", "xyz", "me",
+#     "eu", "uk", "de", "fr", "nl",             # EU + European ccTLDs
+#     "it", "es", "pl", "se", "no",
+#     "dk", "fi", "at", "be", "ie",
+#     "pt", "cz", "ro", "gr", "hu",
+#     "bg", "hr", "sk", "si", "lt",
+#     "lv", "ee", "ch", "is",
+#     "co", "br", "au", "ca", "jp",             # other major ccTLDs
+# ]
 
 # ODoH (Oblivious DNS-over-HTTPS, RFC 9230). The relay sees your IP but
 # not the question; the target sees the question but not your IP. Numa
@@ -73,32 +111,11 @@ api_port = 5380
 #                                                # resolver on cold boot when numa is its
 #                                                # own system DNS. See
 #                                                # recipes/odoh-upstream.md.
-# root_hints = [                                # only used in recursive mode
-#     "198.41.0.4",      # a.root-servers.net (Verisign)
-#     "199.9.14.201",    # b.root-servers.net (USC-ISI)
-#     "192.33.4.12",     # c.root-servers.net (Cogent)
-#     "199.7.91.13",     # d.root-servers.net (UMD)
-#     "192.203.230.10",  # e.root-servers.net (NASA)
-#     "192.5.5.241",     # f.root-servers.net (ISC)
-#     "192.112.36.4",    # g.root-servers.net (US DoD)
-#     "198.97.190.53",   # h.root-servers.net (US Army)
-#     "192.36.148.17",   # i.root-servers.net (Netnod)
-#     "192.58.128.30",   # j.root-servers.net (Verisign)
-#     "193.0.14.129",    # k.root-servers.net (RIPE NCC)
-#     "199.7.83.42",     # l.root-servers.net (ICANN)
-#     "202.12.27.33",    # m.root-servers.net (WIDE)
-# ]
-# prime_tlds = [                                # TLDs to pre-warm on startup (recursive mode)
-#     "com", "net", "org", "info",              # gTLDs
-#     "io", "dev", "app", "xyz", "me",
-#     "eu", "uk", "de", "fr", "nl",             # EU + European ccTLDs
-#     "it", "es", "pl", "se", "no",
-#     "dk", "fi", "at", "be", "ie",
-#     "pt", "cz", "ro", "gr", "hu",
-#     "bg", "hr", "sk", "si", "lt",
-#     "lv", "ee", "ch", "is",
-#     "co", "br", "au", "ca", "jp",             # other major ccTLDs
-# ]
+
+# Auto: probe the root servers at startup. Resolve recursively if they
+# answer, otherwise forward to Quad9 over DoH until the next restart.
+# [upstream]
+# mode = "auto"
 
 # [[forwarding]]                                  # per-suffix conditional forwarding rules
 # suffix = "168.192.in-addr.arpa"                  # single suffix → one upstream
@@ -229,7 +246,8 @@ tld = "numa"
 # value = "time.onsite"
 # ttl = 60
 
-# DNSSEC signature validation (requires mode = "recursive")
+# DNSSEC signature validation. Needs recursive resolution: forward and
+# odoh modes ignore it.
 # [dnssec]
 # enabled = false             # opt-in: verify chain of trust from root KSK
 # strict = false              # true = SERVFAIL on bogus signatures
