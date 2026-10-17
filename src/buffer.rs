@@ -325,6 +325,17 @@ impl BytePacketBuffer {
     }
 }
 
+/// A typed name as `read_qname` returns it off the wire, so it matches parsed
+/// names byte for byte. Fails where `write_qname` would.
+pub fn canonical_name(name: &str) -> Result<String> {
+    let mut buf = BytePacketBuffer::new();
+    buf.write_qname(name)?;
+    buf.seek(0)?;
+    let mut out = String::new();
+    buf.read_qname(&mut out)?;
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

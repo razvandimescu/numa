@@ -333,9 +333,14 @@ async fn resolve_with_cname_chase(
                 Some((r, p, d)) => (r, p, d, None),
                 None => {
                     let mut sub_buf = BytePacketBuffer::new();
-                    sub_query
-                        .write(&mut sub_buf)
-                        .expect("sub-query serialization");
+                    if sub_query.write(&mut sub_buf).is_err() {
+                        return (
+                            DnsPacket::response_from(query, ResultCode::SERVFAIL),
+                            path,
+                            dnssec,
+                            ut,
+                        );
+                    }
                     resolve_remote(
                         &sub_query,
                         sub_buf.filled(),
@@ -3215,25 +3220,61 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cname_chase_matches_local_target_written_as_typed() {
+    async fn cname_chase_finds_local_target_written_as_typed() {
+        let nas = Ipv4Addr::new(192, 168, 1, 42);
         for target in ["nas.lan.", "NAS.lan"] {
-            let ctx = Arc::new(
-                ctx_with_zone(vec![
-                    crate::testutil::cname_record("app.example.com", target, 60),
-                    crate::testutil::a_record("nas.lan", Ipv4Addr::new(192, 168, 1, 42), 60),
-                ])
-                .await,
-            );
+            let (upstream, seen) = crate::testutil::counting_blackhole_upstream().await;
+            let mut ctx = crate::testutil::test_ctx().await;
+            ctx.upstream_pool =
+                Mutex::new(UpstreamPool::new(vec![Upstream::Udp(upstream)], vec![]));
+            ctx.zone_map = crate::config::build_zone_map(&[
+                crate::config::ZoneRecord {
+                    domain: "zone.example.com".into(),
+                    record_type: "CNAME".into(),
+                    value: target.into(),
+                    ttl: 60,
+                },
+                crate::config::ZoneRecord {
+                    domain: "nas.lan".into(),
+                    record_type: "A".into(),
+                    value: nas.to_string(),
+                    ttl: 60,
+                },
+            ])
+            .unwrap();
+            ctx.overrides
+                .write()
+                .unwrap()
+                .insert("override.example.com", target, 60, None)
+                .unwrap();
+            let ctx = Arc::new(ctx);
 
-            let (resp, path) = resolve_in_test(&ctx, "app.example.com", QueryType::A).await;
-            assert_eq!(path, QueryPath::Local, "{target:?}");
-            assert_eq!(resp.header.rescode, ResultCode::NOERROR, "{target:?}");
-            assert!(
-                matches!(resp.answers.get(1), Some(DnsRecord::A { addr, .. }) if *addr == Ipv4Addr::new(192, 168, 1, 42)),
-                "{target:?}: {:?}",
-                resp.answers
+            for qname in ["zone.example.com", "override.example.com"] {
+                let (resp, _) = resolve_in_test(&ctx, qname, QueryType::A).await;
+                assert!(
+                    matches!(&resp.answers[..], [DnsRecord::CNAME { host, .. }, DnsRecord::A { addr, .. }] if host == "nas.lan" && *addr == nas),
+                    "{qname} -> {target:?}: {:?}",
+                    resp.answers
+                );
+            }
+            assert_eq!(
+                seen.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "{target:?} leaked upstream"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn cname_chase_unwritable_target_returns_servfail() {
+        let ctx = Arc::new(
+            ctx_with_zone(vec![crate::testutil::cname_record(
+                "app.test", "x.ab\\", 60,
+            )])
+            .await,
+        );
+        let (resp, _) = resolve_in_test(&ctx, "app.test", QueryType::A).await;
+        assert_eq!(resp.header.rescode, ResultCode::SERVFAIL);
     }
 
     #[tokio::test]

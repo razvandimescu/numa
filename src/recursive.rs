@@ -920,7 +920,7 @@ pub(crate) fn follow_cname_links(
 ) -> Result<Option<String>, ()> {
     let mut current = None;
     while let Some(next) = extract_cname_target(response, current.as_deref().unwrap_or(start)) {
-        if visited.len() > MAX_CNAME_DEPTH as usize || !visited.insert(next.clone()) {
+        if visited.len() > MAX_CNAME_DEPTH as usize || !visited.insert(next.to_ascii_lowercase()) {
             return Err(());
         }
         current = Some(next);
@@ -930,9 +930,8 @@ pub(crate) fn follow_cname_links(
 
 fn extract_cname_target(response: &DnsPacket, qname: &str) -> Option<String> {
     response.answers.iter().find_map(|r| match r {
-        // Zone and override targets keep the case and trailing dot the user typed.
         DnsRecord::CNAME { domain, host, .. } if domain.eq_ignore_ascii_case(qname) => {
-            Some(host.trim_end_matches('.').to_ascii_lowercase())
+            Some(host.clone())
         }
         _ => None,
     })
@@ -1108,6 +1107,32 @@ mod tests {
             Some("example.com".into())
         );
         assert_eq!(extract_cname_target(&pkt, "other.com"), None);
+    }
+
+    #[test]
+    fn cname_links_keep_names_as_the_wire_reads_them() {
+        let cases: [(&[(&str, &str)], &str); 2] = [
+            (
+                &[("q.example.com", "x.ab\\."), ("x.ab\\.", "y.test")],
+                "y.test",
+            ),
+            (&[("q.example.com", ".")], "."),
+        ];
+        for (links, end) in cases {
+            let mut pkt = DnsPacket::new();
+            for (domain, host) in links {
+                pkt.answers.push(DnsRecord::CNAME {
+                    domain: domain.to_string(),
+                    host: host.to_string(),
+                    ttl: 300,
+                });
+            }
+            let mut visited = HashSet::new();
+            assert_eq!(
+                follow_cname_links(&pkt, "q.example.com", &mut visited),
+                Ok(Some(end.to_string()))
+            );
+        }
     }
 
     #[test]

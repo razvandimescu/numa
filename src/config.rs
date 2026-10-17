@@ -1156,6 +1156,17 @@ mod tests {
     }
 
     #[test]
+    fn cname_target_is_stored_as_the_wire_reads_it() {
+        let map = build_zone_map(&[zone("app.test", "CNAME", "NAS.lan.")]).unwrap();
+        let records = map.lookup("app.test", QueryType::CNAME).expect("hit");
+        assert!(matches!(&records[0], DnsRecord::CNAME { host, .. } if host == "nas.lan"));
+
+        let long_label = format!("{}.lan", "a".repeat(64));
+        assert!(build_zone_map(&[zone("app.test", "CNAME", &long_label)]).is_err());
+        assert!(build_zone_map(&[zone("app.test", "CNAME", "x.ab\\")]).is_err());
+    }
+
+    #[test]
     fn cname_returned_when_qtype_absent() {
         // RFC 1034 §3.6.2: a query on a CNAME owner for a different qtype must
         // return the CNAME so the chase layer can follow it. Exact + wildcard.
@@ -2041,7 +2052,7 @@ pub fn build_zone_map(zones: &[ZoneRecord]) -> Result<ZoneMap> {
                 QueryType::CNAME,
                 DnsRecord::CNAME {
                     domain: domain.clone(),
-                    host: zone_name("CNAME target", value)?,
+                    host: canonical_zone_name("CNAME target", value)?,
                     ttl: zone.ttl,
                 },
             ),
@@ -2114,6 +2125,11 @@ fn zone_name(what: &str, name: &str) -> Result<String> {
         return Err(format!("{what} '{name}' contains whitespace").into());
     }
     Ok(name.to_string())
+}
+
+fn canonical_zone_name(what: &str, name: &str) -> Result<String> {
+    let name = zone_name(what, name)?;
+    crate::buffer::canonical_name(&name).map_err(|e| format!("invalid {what} '{name}': {e}").into())
 }
 
 /// Room left in a response after the header, the longest possible question

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::time::Instant;
 
+use crate::buffer::canonical_name;
 use crate::question::QueryType;
 use crate::record::DnsRecord;
 use crate::Result;
@@ -67,13 +68,14 @@ impl OverrideStore {
         // Clean up expired entries on write
         self.entries.retain(|_, e| !e.is_expired());
 
-        let domain_lower = domain.to_lowercase();
-        let (qtype, record) = parse_target(&domain_lower, target, ttl)?;
+        let domain =
+            canonical_name(domain).map_err(|e| format!("invalid domain '{domain}': {e}"))?;
+        let (qtype, record) = parse_target(&domain, target, ttl)?;
 
         self.entries.insert(
-            domain_lower.clone(),
+            domain.clone(),
             OverrideEntry {
-                domain: domain_lower,
+                domain,
                 target: target.to_string(),
                 record,
                 query_type: qtype,
@@ -97,8 +99,7 @@ impl OverrideStore {
     }
 
     pub fn get(&self, domain: &str) -> Option<&OverrideEntry> {
-        let key = domain.to_lowercase();
-        let entry = self.entries.get(&key)?;
+        let entry = self.entries.get(&canonical_name(domain).ok()?)?;
         if entry.is_expired() {
             return None;
         }
@@ -106,7 +107,7 @@ impl OverrideStore {
     }
 
     pub fn remove(&mut self, domain: &str) -> bool {
-        self.entries.remove(&domain.to_lowercase()).is_some()
+        canonical_name(domain).is_ok_and(|key| self.entries.remove(&key).is_some())
     }
 
     pub fn list(&self) -> Vec<&OverrideEntry> {
@@ -165,7 +166,7 @@ fn parse_target(domain: &str, target: &str, ttl: u32) -> Result<(QueryType, DnsR
         QueryType::CNAME,
         DnsRecord::CNAME {
             domain: domain.to_string(),
-            host: target.to_string(),
+            host: canonical_name(target).map_err(|e| format!("invalid target '{target}': {e}"))?,
             ttl,
         },
     ))
@@ -181,5 +182,28 @@ mod tests {
         let empty = store.heap_bytes();
         store.insert("example.com", "1.2.3.4", 300, None).unwrap();
         assert!(store.heap_bytes() > empty);
+    }
+
+    #[test]
+    fn names_are_stored_as_the_wire_reads_them() {
+        let mut store = OverrideStore::new();
+        store.insert("NAS.lan.", "192.168.1.42", 60, None).unwrap();
+        store.insert("app.lan", "NAS.lan.", 60, None).unwrap();
+
+        assert!(store.lookup("nas.lan").is_some());
+        assert!(store.get("Nas.Lan.").is_some());
+        assert!(
+            matches!(store.lookup("app.lan"), Some(DnsRecord::CNAME { host, .. }) if host == "nas.lan")
+        );
+        assert!(store.remove("nas.lan."));
+    }
+
+    #[test]
+    fn unwritable_names_are_rejected() {
+        let mut store = OverrideStore::new();
+        let long_label = format!("{}.lan", "a".repeat(64));
+        assert!(store.insert("app.lan", &long_label, 60, None).is_err());
+        assert!(store.insert("app.lan", "x.ab\\", 60, None).is_err());
+        assert!(store.insert(&long_label, "192.168.1.42", 60, None).is_err());
     }
 }
