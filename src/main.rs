@@ -164,7 +164,11 @@ fn run() -> numa::Result<()> {
                 "dnssec" => ("dnssec", "DNSSEC validation"),
                 _ => unreachable!(),
             };
-            return set_config_bool(&config_path, section, "enabled", enabled, feature_name);
+            set_config_bool(&config_path, section, "enabled", enabled, feature_name)?;
+            if section == "dnssec" && enabled {
+                note_dnssec_needs_recursive(&config_path);
+            }
+            return Ok(());
         }
         "version" | "--version" | "-V" => {
             eprintln!("numa {}", numa::version());
@@ -362,6 +366,23 @@ fn print_toggle_status(feature: &str, enabled: bool, path: &str) {
     eprintln!("  Wrote {}", path);
     if enabled {
         eprintln!("  Restart Numa for changes to take effect");
+    }
+}
+
+fn note_dnssec_needs_recursive(config_path: &str) {
+    use numa::config::UpstreamMode;
+    let Ok(load) = numa::config::load_config_file(config_path) else {
+        return;
+    };
+    let mode = load.config.upstream.mode;
+    if matches!(mode, UpstreamMode::Forward | UpstreamMode::Odoh) {
+        let palette = numa::palette::get();
+        eprintln!(
+            "  {}No effect in {} mode: validation needs [upstream] mode = \"recursive\"{}",
+            palette.warning,
+            mode.as_str(),
+            palette.reset
+        );
     }
 }
 

@@ -345,7 +345,9 @@ enabled = false
 enabled = false
 "
 
-# Verify blocking is actually off
+# Verify blocking is actually off. [dnssec] is only for the checks below:
+# run_test_suite reads any `enabled = true` as blocking on.
+printf '\n[dnssec]\nenabled = true\n' >> "$CONFIG"
 RUST_LOG=info "$BINARY" "$CONFIG" > "$LOG" 2>&1 &
 NUMA_PID=$!
 sleep 3
@@ -358,6 +360,18 @@ if echo "$ADS_RESULT" | grep -q "0.0.0.0"; then
 else
     check "googlesyndication.com NOT blocked (blocking disabled)" "." "$ADS_RESULT"
 fi
+
+echo ""
+echo "=== [dnssec] enabled outside recursive mode ==="
+check "/stats reports DNSSEC off" \
+    '"dnssec":false' \
+    "$(curl -s http://127.0.0.1:$API_PORT/stats)"
+check "Startup log warns the flag has no effect" \
+    "^1$" \
+    "$(grep -cF '[dnssec] enabled has no effect' "$LOG" || true)"
+check "numa dnssec on names the mode it needs" \
+    'mode = "recursive"' \
+    "$("$BINARY" dnssec on "$CONFIG" 2>&1)"
 
 kill "$NUMA_PID" 2>/dev/null || true
 wait "$NUMA_PID" 2>/dev/null || true

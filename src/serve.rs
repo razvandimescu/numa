@@ -66,6 +66,14 @@ pub async fn run(load: ConfigLoad) -> crate::Result<()> {
 
     let (resolved_mode, upstream_auto, pool, upstream_label) =
         resolve_upstream_pool(&config, &system_dns, &root_hints, &bootstrap_resolver).await?;
+    let dnssec_enabled =
+        config.dnssec.enabled && resolved_mode == crate::config::UpstreamMode::Recursive;
+    if config.dnssec.enabled && !dnssec_enabled {
+        warn!(
+            "[dnssec] enabled has no effect in {} mode: validation needs [upstream] mode = \"recursive\"",
+            resolved_mode.as_str()
+        );
+    }
     let api_port = config.server.api_port;
 
     let mut blocklist = BlocklistStore::new(
@@ -127,7 +135,7 @@ pub async fn run(load: ConfigLoad) -> crate::Result<()> {
         config.dot.enabled,
         config.dot.port,
         config.mobile.port,
-        config.dnssec.enabled,
+        dnssec_enabled,
         resolved_mode == crate::config::UpstreamMode::Recursive,
         config.lan.enabled,
         config.blocking.enabled,
@@ -215,7 +223,7 @@ pub async fn run(load: ConfigLoad) -> crate::Result<()> {
         admission: crate::admission::ResolutionAdmission::new(
             config.server.max_concurrent_resolutions,
         ),
-        dnssec_enabled: config.dnssec.enabled,
+        dnssec_enabled,
         dnssec_strict: config.dnssec.strict,
         health_meta,
         ca_pem,
