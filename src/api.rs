@@ -339,8 +339,13 @@ async fn create_overrides(
     let parsed: Vec<_> = requests
         .into_iter()
         .map(|req| {
-            let domain_lower = req.domain.to_lowercase();
-            Ok((domain_lower, req.target, req.ttl, req.duration_secs))
+            let domain = crate::buffer::canonical_name(&req.domain).map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("invalid domain '{}': {e}", req.domain),
+                )
+            })?;
+            Ok((domain, req.target, req.ttl, req.duration_secs))
         })
         .collect::<Result<Vec<_>, (StatusCode, String)>>()?;
 

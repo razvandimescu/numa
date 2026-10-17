@@ -315,14 +315,7 @@ async fn resolve_with_cname_chase(
             return (resp, path, dnssec, ut);
         }
         match crate::recursive::follow_cname_links(&resp, &current_qname, &mut visited) {
-            Err(()) => {
-                return (
-                    DnsPacket::response_from(query, ResultCode::SERVFAIL),
-                    path,
-                    dnssec,
-                    ut,
-                )
-            }
+            Err(()) => break,
             Ok(None) => return (resp, path, dnssec, ut),
             Ok(Some(target)) => current_qname = target,
         }
@@ -334,12 +327,7 @@ async fn resolve_with_cname_chase(
                 None => {
                     let mut sub_buf = BytePacketBuffer::new();
                     if sub_query.write(&mut sub_buf).is_err() {
-                        return (
-                            DnsPacket::response_from(query, ResultCode::SERVFAIL),
-                            path,
-                            dnssec,
-                            ut,
-                        );
+                        break;
                     }
                     resolve_remote(
                         &sub_query,
@@ -373,6 +361,12 @@ async fn resolve_with_cname_chase(
         resp.header.rescode = sub_resp.header.rescode;
         ut = ut.or(sub_ut);
     }
+    (
+        DnsPacket::response_from(query, ResultCode::SERVFAIL),
+        path,
+        dnssec,
+        ut,
+    )
 }
 
 /// Local resolution pipeline: overrides, .localhost, zones, special-use, .numa

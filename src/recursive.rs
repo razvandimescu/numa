@@ -1111,25 +1111,15 @@ mod tests {
 
     #[test]
     fn cname_links_keep_names_as_the_wire_reads_them() {
-        let cases: [(&[(&str, &str)], &str); 2] = [
-            (
-                &[("q.example.com", "x.ab\\."), ("x.ab\\.", "y.test")],
-                "y.test",
-            ),
-            (&[("q.example.com", ".")], "."),
-        ];
-        for (links, end) in cases {
-            let mut pkt = DnsPacket::new();
-            for (domain, host) in links {
-                pkt.answers.push(DnsRecord::CNAME {
-                    domain: domain.to_string(),
-                    host: host.to_string(),
-                    ttl: 300,
-                });
-            }
-            let mut visited = HashSet::new();
+        use crate::testutil::{cname_record, noerror_response};
+        let escaped_dot = noerror_response(vec![
+            cname_record("q.example.com", "x.ab\\.", 300),
+            cname_record("x.ab\\.", "y.test", 300),
+        ]);
+        let root = noerror_response(vec![cname_record("q.example.com", ".", 300)]);
+        for (pkt, end) in [(escaped_dot, "y.test"), (root, ".")] {
             assert_eq!(
-                follow_cname_links(&pkt, "q.example.com", &mut visited),
+                follow_cname_links(&pkt, "q.example.com", &mut HashSet::new()),
                 Ok(Some(end.to_string()))
             );
         }

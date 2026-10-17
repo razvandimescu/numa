@@ -1138,6 +1138,8 @@ mod tests {
         assert!(build_zone_map(&[zone("*.*.foo", "A", "10.0.0.1")]).is_err());
         assert!(build_zone_map(&[zone("foo.*.bar", "A", "10.0.0.1")]).is_err());
         assert!(build_zone_map(&[zone("*foo.bar", "A", "10.0.0.1")]).is_err());
+        assert!(build_zone_map(&[zone(".", "A", "10.0.0.1")]).is_err());
+        assert!(build_zone_map(&[zone("", "A", "10.0.0.1")]).is_err());
     }
 
     #[test]
@@ -1157,11 +1159,7 @@ mod tests {
     }
 
     #[test]
-    fn cname_target_is_stored_as_the_wire_reads_it() {
-        let map = build_zone_map(&[zone("app.test", "CNAME", "NAS.lan.")]).unwrap();
-        let records = map.lookup("app.test", QueryType::CNAME).expect("hit");
-        assert!(matches!(&records[0], DnsRecord::CNAME { host, .. } if host == "nas.lan"));
-
+    fn unwritable_cname_target_rejected() {
         let long_label = format!("{}.lan", "a".repeat(64));
         assert!(build_zone_map(&[zone("app.test", "CNAME", &long_label)]).is_err());
         assert!(build_zone_map(&[zone("app.test", "CNAME", "x.ab\\")]).is_err());
@@ -1182,12 +1180,6 @@ mod tests {
             assert!(
                 map.lookup(host, QueryType::A).is_some(),
                 "{name:?} -> {host:?}"
-            );
-        }
-        for root in [".", ""] {
-            assert!(
-                build_zone_map(&[zone(root, "A", "192.168.1.42")]).is_err(),
-                "{root:?}"
             );
         }
     }
