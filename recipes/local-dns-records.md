@@ -22,7 +22,7 @@ ttl         = 300
 
 Any domain works, not just a local suffix. Zones are checked before the cache and before any upstream or recursive lookup, so a match never leaves the box.
 
-A name you list is answered by Numa for every record type. A type you did not list gets an empty answer, not the upstream one. This keeps IPv6 clients from going around an A record on a public name, the same as Unbound's default `transparent` local zone.
+Numa answers every record type for a name that you list. A type that you did not list gets an empty answer, not the upstream answer. This stops IPv6 clients from bypassing an A record on a public name.
 
 ## Reverse lookups
 
@@ -54,21 +54,20 @@ A TXT value is plain text, without zone-file quotes. Numa splits values longer t
 
 ## Many records
 
-A `[[zones]]` table takes four lines per record. For a long list, put the same records in an inline array, one record per line:
+For a long list, put the records in an inline array, one record per line:
 
 ```toml
 zones = [
-  { domain = "nas.home.lan",              record_type = "A",   value = "192.168.1.10", ttl = 3600 },
-  { domain = "*.dev.home.lan",            record_type = "A",   value = "192.168.1.20" },
-  { domain = "home.lan",                  record_type = "MX",  value = "10 mail.home.lan" },
-  { domain = "10.1.168.192.in-addr.arpa", record_type = "PTR", value = "nas.home.lan" },
+  { domain = "nas.home.lan", record_type = "A",   value = "192.168.1.10" },
+  { domain = "home.lan",     record_type = "MX",  value = "10 mail.home.lan" },
+  { domain = "home.lan",     record_type = "TXT", value = "v=spf1 mx -all" },
 ]
 
 [server]
 # ...
 ```
 
-Put the array before the first `[section]` header. After a header, TOML reads it as part of that section and Numa ignores the records. Use the array or `[[zones]]` tables, not both. TOML rejects the file with a duplicate key error.
+Put the array before the first `[section]` header. If the array comes after a header, TOML puts it in that section. Numa then ignores the records. Use the array or `[[zones]]` tables, not both. TOML rejects a file that has both with a duplicate key error.
 
 ## Cover a subtree with a wildcard
 
