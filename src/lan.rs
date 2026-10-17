@@ -487,9 +487,18 @@ fn parse_mdns_response(data: &[u8]) -> Vec<MdnsAnnouncement> {
                     }
                 }
             }
-            t if t == QueryType::SRV.to_num() && is_numa && rdlength > 6 => {
+            t if t == QueryType::SRV.to_num()
+                && is_numa
+                && rdlength > 6
+                && rdata_start + rdlength <= data.len() =>
+            {
                 let mut target = String::new();
-                if buf.seek(rdata_start + 6).is_ok() && buf.read_qname(&mut target).is_ok() {
+                // Pointers may jump anywhere earlier, but the target's own bytes
+                // must end inside the record.
+                if buf.seek(rdata_start + 6).is_ok()
+                    && buf.read_qname(&mut target).is_ok()
+                    && buf.pos() <= rdata_start + rdlength
+                {
                     srv_targets.push((name.clone(), target));
                 }
             }
@@ -541,7 +550,7 @@ fn parse_numa_txt(mut rdata: &[u8]) -> (Vec<(String, u16)>, Option<String>) {
         };
         // RFC 6763 §6.4: only the first occurrence of a key counts.
         let key = txt.split_once('=').map_or(txt, |(k, _)| k);
-        if seen_keys.iter().any(|k| k.eq_ignore_ascii_case(key)) {
+        if seen_keys.contains(&key) {
             continue;
         }
         seen_keys.push(key);
@@ -646,6 +655,17 @@ mod tests {
         assert_eq!(id.as_deref(), Some("x"));
     }
 
+    #[test]
+    fn parse_matches_txt_keys_by_exact_case() {
+        let mut buf = BytePacketBuffer::new();
+        for s in ["Services=a:1", "services=a:2", "ID=first", "id=second"] {
+            write_txt_string(&mut buf, s).unwrap();
+        }
+        let (services, id) = parse_numa_txt(buf.filled());
+        assert_eq!(services, [("a".to_string(), 2)]);
+        assert_eq!(id.as_deref(), Some("second"));
+    }
+
     fn response(
         answers: u16,
         authorities: u16,
@@ -745,5 +765,31 @@ mod tests {
             buf.write_bytes(b"services=x:1").unwrap();
         });
         assert!(parse_mdns_response(&data).is_empty());
+    }
+
+    #[test]
+    fn parse_reads_srv_target_only_inside_the_record() {
+        let packet = |rdlength: u16, target: &[u8]| {
+            response(3, 0, |buf| {
+                write_a(buf, "a.local", Ipv4Addr::new(192, 168, 1, 7));
+                write_txt(buf, "a._numa._tcp.local", &["services=a:1"]);
+                write_record_header(
+                    buf,
+                    "a._numa._tcp.local",
+                    QueryType::SRV.to_num(),
+                    1,
+                    MDNS_TTL,
+                )
+                .unwrap();
+                buf.write_u16(rdlength).unwrap();
+                buf.write_bytes(&[0; 6]).unwrap();
+                buf.write_bytes(target).unwrap();
+            })
+        };
+        let target = b"\x01a\x05local\x00";
+        assert_eq!(parse_mdns_response(&packet(15, target)).len(), 1);
+        // rdlength shorter than the target, then a packet that ends mid-target.
+        assert!(parse_mdns_response(&packet(7, target)).is_empty());
+        assert!(parse_mdns_response(&packet(15, &target[..8])).is_empty());
     }
 }
