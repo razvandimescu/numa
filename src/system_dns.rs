@@ -2277,13 +2277,6 @@ mod tests {
 
     #[test]
     #[cfg(not(windows))]
-    fn config_template_parses_as_config() {
-        let _: crate::config::Config = toml::from_str(DEFAULT_CONFIG_TEMPLATE)
-            .expect("embedded numa.toml template must parse as a valid Config");
-    }
-
-    #[test]
-    #[cfg(not(windows))]
     fn write_default_config_creates_when_absent() {
         let dir = std::env::temp_dir().join(format!("numa-tmpl-new-{}", std::process::id()));
         let path = dir.join("numa.toml");

@@ -930,6 +930,23 @@ mod tests {
     }
 
     #[test]
+    fn zones_after_a_section_header_is_reported_by_path() {
+        let (_, ignored) = parse_config("[proxy]\nzones = []\n").unwrap();
+        assert_eq!(ignored, ["proxy.zones"]);
+    }
+
+    #[test]
+    fn shipped_configs_have_no_unknown_keys() {
+        for text in [
+            include_str!("../numa.toml"),
+            include_str!("../packaging/client/numa.toml"),
+        ] {
+            let (_, ignored) = parse_config(text).unwrap();
+            assert!(ignored.is_empty(), "{ignored:?}");
+        }
+    }
+
+    #[test]
     fn resolution_ceiling_defaults_and_parses() {
         let default: Config = toml::from_str("").unwrap();
         assert_eq!(
@@ -1904,13 +1921,24 @@ fn read_config(path: &Path) -> Result<Option<ConfigLoad>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(std::io::Error::new(e.kind(), format!("{resolved}: {e}")).into()),
     };
-    let config = toml::from_str(&contents)
-        .map_err(|e| format!("{resolved}: {}", e.to_string().trim_end()))?;
+    let (config, ignored) =
+        parse_config(&contents).map_err(|e| format!("{resolved}: {}", e.to_string().trim_end()))?;
+    for key in ignored {
+        log::warn!("{resolved}: unknown key `{key}` is ignored");
+    }
     Ok(Some(ConfigLoad {
         config,
         path: resolved,
         found: true,
     }))
+}
+
+fn parse_config(contents: &str) -> Result<(Config, Vec<String>)> {
+    let mut ignored = Vec::new();
+    let config = serde_ignored::deserialize(toml::Deserializer::parse(contents)?, |path| {
+        ignored.push(path.to_string())
+    })?;
+    Ok((config, ignored))
 }
 
 pub fn load_config(path: &str) -> Result<ConfigLoad> {
