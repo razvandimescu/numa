@@ -410,10 +410,11 @@ fn services_txt_strings(services: &[(String, u16)]) -> Vec<String> {
     strings
 }
 
-fn services_value(txt: &str) -> Option<&str> {
-    let (key, value) = txt.split_once('=')?;
-    let batch = key.strip_prefix(TXT_SERVICES_KEY)?;
-    batch.bytes().all(|b| b.is_ascii_digit()).then_some(value)
+fn is_services_key(key: &str) -> bool {
+    key.split_at_checked(TXT_SERVICES_KEY.len())
+        .is_some_and(|(name, batch)| {
+            name.eq_ignore_ascii_case(TXT_SERVICES_KEY) && batch.bytes().all(|b| b.is_ascii_digit())
+        })
 }
 
 fn write_txt_string(buf: &mut BytePacketBuffer, s: &str) -> crate::Result<()> {
@@ -548,19 +549,24 @@ fn parse_numa_txt(mut rdata: &[u8]) -> (Vec<(String, u16)>, Option<String>) {
         let Ok(txt) = std::str::from_utf8(string) else {
             continue;
         };
-        // RFC 6763 §6.4: only the first occurrence of a key counts.
-        let key = txt.split_once('=').map_or(txt, |(k, _)| k);
-        if seen_keys.contains(&key) {
+        // RFC 6763 §6.4: keys ignore case, and only the first occurrence counts.
+        let (key, value) = txt
+            .split_once('=')
+            .map_or((txt, None), |(k, v)| (k, Some(v)));
+        if seen_keys.iter().any(|k| k.eq_ignore_ascii_case(key)) {
             continue;
         }
         seen_keys.push(key);
-        if let Some(val) = services_value(txt) {
-            services.extend(val.split(',').filter_map(|s| {
+        let Some(value) = value else {
+            continue;
+        };
+        if is_services_key(key) {
+            services.extend(value.split(',').filter_map(|s| {
                 let (name, port) = s.split_once(':')?;
                 Some((name.to_string(), port.parse().ok()?))
             }));
-        } else if let Some(v) = txt.strip_prefix(TXT_ID) {
-            id = Some(v.to_string());
+        } else if key.eq_ignore_ascii_case(TXT_ID.trim_end_matches('=')) {
+            id = Some(value.to_string());
         }
     }
     (services, id)
@@ -656,14 +662,20 @@ mod tests {
     }
 
     #[test]
-    fn parse_matches_txt_keys_by_exact_case() {
+    fn parse_matches_txt_keys_ignoring_case() {
         let mut buf = BytePacketBuffer::new();
-        for s in ["Services=a:1", "services=a:2", "ID=first", "id=second"] {
+        for s in [
+            "Services=a:1",
+            "services=a:2",
+            "SERVICES2=b:3",
+            "ID=First",
+            "id=second",
+        ] {
             write_txt_string(&mut buf, s).unwrap();
         }
         let (services, id) = parse_numa_txt(buf.filled());
-        assert_eq!(services, [("a".to_string(), 2)]);
-        assert_eq!(id.as_deref(), Some("second"));
+        assert_eq!(services, [("a".to_string(), 1), ("b".to_string(), 3)]);
+        assert_eq!(id.as_deref(), Some("First"));
     }
 
     fn response(
