@@ -9,7 +9,7 @@ use tokio::net::UdpSocket;
 use crate::blocklist::BlocklistStore;
 use crate::buffer::BytePacketBuffer;
 use crate::cache::DnsCache;
-use crate::config::{UpstreamMode, ZoneMap};
+use crate::config::{UpstreamMode, ZoneMap, ZoneRecord};
 use crate::ctx::ServerCtx;
 use crate::forward::{Upstream, UpstreamPool};
 use crate::header::ResultCode;
@@ -99,6 +99,15 @@ pub fn cname_record(domain: &str, host: &str, ttl: u32) -> DnsRecord {
         domain: domain.to_string(),
         host: host.to_string(),
         ttl,
+    }
+}
+
+pub fn zone(domain: &str, record_type: &str, value: &str) -> ZoneRecord {
+    ZoneRecord {
+        domain: domain.into(),
+        record_type: record_type.into(),
+        value: value.into(),
+        ttl: 300,
     }
 }
 

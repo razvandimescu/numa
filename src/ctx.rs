@@ -1062,6 +1062,7 @@ fn special_use_response(query: &DnsPacket, qname: &str, qtype: QueryType) -> Dns
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::zone;
     use std::collections::HashMap;
     use std::net::{Ipv4Addr, Ipv6Addr};
     use std::sync::{Arc, Mutex, RwLock};
@@ -1856,13 +1857,7 @@ mod tests {
     async fn pipeline_wildcard_zone_synthesizes_with_qname_owner() {
         use crate::config::build_zone_map;
         let mut ctx = crate::testutil::test_ctx().await;
-        ctx.zone_map = build_zone_map(&[crate::config::ZoneRecord {
-            domain: "*.pool.ntp.org".into(),
-            record_type: "A".into(),
-            value: "10.20.30.40".into(),
-            ttl: 300,
-        }])
-        .unwrap();
+        ctx.zone_map = build_zone_map(&[zone("*.pool.ntp.org", "A", "10.20.30.40")]).unwrap();
         let ctx = Arc::new(ctx);
 
         let (resp, path) = resolve_in_test(&ctx, "time2.pool.ntp.org", QueryType::A).await;
@@ -1884,13 +1879,7 @@ mod tests {
         // fall-through would SERVFAIL after timeout.
         use crate::config::build_zone_map;
         let mut ctx = crate::testutil::test_ctx().await;
-        ctx.zone_map = build_zone_map(&[crate::config::ZoneRecord {
-            domain: "*.foo".into(),
-            record_type: "A".into(),
-            value: "10.0.0.1".into(),
-            ttl: 300,
-        }])
-        .unwrap();
+        ctx.zone_map = build_zone_map(&[zone("*.foo", "A", "10.0.0.1")]).unwrap();
         let ctx = Arc::new(ctx);
 
         let (resp, path) = resolve_in_test(&ctx, "x.foo", QueryType::AAAA).await;
@@ -1903,13 +1892,7 @@ mod tests {
     async fn pipeline_zone_txt_parses_in_hickory() {
         let long = "a".repeat(300);
         let mut ctx = crate::testutil::test_ctx().await;
-        ctx.zone_map = crate::config::build_zone_map(&[crate::config::ZoneRecord {
-            domain: "home.lan".into(),
-            record_type: "TXT".into(),
-            value: long.clone(),
-            ttl: 300,
-        }])
-        .unwrap();
+        ctx.zone_map = crate::config::build_zone_map(&[zone("home.lan", "TXT", &long)]).unwrap();
         let ctx = Arc::new(ctx);
 
         let query = DnsPacket::query(0xBEEF, "home.lan", QueryType::TXT);
@@ -3222,18 +3205,8 @@ mod tests {
             ctx.upstream_pool =
                 Mutex::new(UpstreamPool::new(vec![Upstream::Udp(upstream)], vec![]));
             ctx.zone_map = crate::config::build_zone_map(&[
-                crate::config::ZoneRecord {
-                    domain: "zone.example.com".into(),
-                    record_type: "CNAME".into(),
-                    value: target.into(),
-                    ttl: 60,
-                },
-                crate::config::ZoneRecord {
-                    domain: "nas.lan".into(),
-                    record_type: "A".into(),
-                    value: nas.to_string(),
-                    ttl: 60,
-                },
+                zone("zone.example.com", "CNAME", target),
+                zone("nas.lan", "A", &nas.to_string()),
             ])
             .unwrap();
             ctx.overrides

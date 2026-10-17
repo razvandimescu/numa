@@ -871,6 +871,7 @@ fn default_mobile_bind_addr() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::zone;
 
     #[test]
     fn named_config_path_must_be_an_existing_file() {
@@ -972,12 +973,7 @@ mod tests {
 
     #[test]
     fn build_zone_map_accepts_ptr() {
-        let zones = vec![ZoneRecord {
-            domain: "1.0.168.192.in-addr.arpa".into(),
-            record_type: "PTR".into(),
-            value: "router.lan".into(),
-            ttl: 300,
-        }];
+        let zones = [zone("1.0.168.192.in-addr.arpa", "PTR", "router.lan")];
         let map = build_zone_map(&zones).expect("PTR must load");
         let records = map
             .lookup("1.0.168.192.in-addr.arpa", QueryType::PTR)
@@ -1006,11 +1002,9 @@ mod tests {
     }
 
     #[test]
-    fn txt_value_is_split_into_255_byte_strings() {
-        let long = "a".repeat(300);
+    fn txt_value_is_framed_as_character_strings() {
         let map = build_zone_map(&[
             zone("home.lan", "TXT", "v=spf1 -all"),
-            zone("long.home.lan", "TXT", &long),
             zone("empty.home.lan", "TXT", ""),
         ])
         .unwrap();
@@ -1022,11 +1016,6 @@ mod tests {
         };
 
         assert_eq!(rdata("home.lan"), b"\x0bv=spf1 -all");
-        let mut expected = vec![255];
-        expected.extend_from_slice(&long.as_bytes()[..255]);
-        expected.push(45);
-        expected.extend_from_slice(&long.as_bytes()[255..]);
-        assert_eq!(rdata("long.home.lan"), expected);
         assert_eq!(rdata("empty.home.lan"), [0]);
     }
 
@@ -1073,15 +1062,6 @@ mod tests {
             .map(|_| zone("many.home.lan", "TXT", &part))
             .collect();
         assert!(build_zone_map(&many).is_err(), "one RRset, 4.5 KB in total");
-    }
-
-    fn zone(domain: &str, record_type: &str, value: &str) -> ZoneRecord {
-        ZoneRecord {
-            domain: domain.into(),
-            record_type: record_type.into(),
-            value: value.into(),
-            ttl: 300,
-        }
     }
 
     #[test]
