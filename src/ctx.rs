@@ -118,50 +118,12 @@ pub async fn resolve_query(
     // Pipeline: overrides -> .localhost -> local zones -> special-use (unless forwarded)
     //        -> .tld proxy -> blocklist -> cache -> forwarding -> recursive/upstream
     // Each lock is scoped to avoid holding MutexGuard across await points.
-    let (mut response, path, mut dnssec, upstream_transport) =
+    let (mut response, path, dnssec, upstream_transport) =
         resolve_with_cname_chase(&query, raw_wire, src_addr, &qname, qtype, ctx, &mut charge).await;
 
-    // DNSSEC validation (recursive responses only). Its DS and DNSKEY walks
-    // are the tail of a resolution already admitted: refusing them here would
-    // discard the walk that just paid for them and make the next query redo
-    // it, which is the amplification the ceiling exists to prevent.
-    if ctx.dnssec_enabled && path == QueryPath::Recursive {
-        let (status, vstats) =
-            crate::dnssec::validate_response(&response, &ctx.cache, &ctx.root_hints, &ctx.srtt)
-                .await;
-
-        debug!(
-            "DNSSEC | {} | {:?} | {}ms | dnskey_hit={} dnskey_fetch={} ds_hit={} ds_fetch={} sig_checks={} upstream_q={}",
-            qname,
-            status,
-            vstats.elapsed_ms,
-            vstats.dnskey_cache_hits,
-            vstats.dnskey_fetches,
-            vstats.ds_cache_hits,
-            vstats.ds_fetches,
-            vstats.signature_checks,
-            vstats.upstream_queries,
-        );
-
-        dnssec = status;
-
-        if status == DnssecStatus::Secure {
-            response.header.authed_data = true;
-        }
-
-        if status == DnssecStatus::Bogus && ctx.dnssec_strict {
-            response = DnsPacket::response_from(&query, ResultCode::SERVFAIL);
-        }
-
-        ctx.cache
-            .write()
-            .unwrap()
-            .insert_with_status(&qname, qtype, &response, status);
-    }
-
-    // Runs after DNSSEC validation + the unfiltered cache insert above (so the
-    // cache keeps the true record), before shaping. UpstreamError carries no
-    // answers, so it's a no-op.
+    // Runs after resolution cached the unfiltered answer (so the cache keeps
+    // the true record), before shaping. UpstreamError carries no answers, so
+    // it's a no-op.
     let rebind_stripped = !path.returns_trusted_local_data() && {
         let stripped = ctx.rebind.read().unwrap().apply(&qname, &mut response);
         if stripped > 0 {
@@ -575,6 +537,8 @@ async fn resolve_remote(
         // tag as Udp so the dashboard can aggregate plaintext-wire
         // egress honestly. Only mark on success — errors stay None.
         let key = (qname.to_string(), qtype);
+        let mut dnssec = DnssecStatus::Indeterminate;
+        let leader_dnssec = &mut dnssec;
         let (resp, path, err) = resolve_coalesced(
             &ctx.inflight,
             &ctx.admission,
@@ -582,22 +546,17 @@ async fn resolve_remote(
             key,
             query,
             QueryPath::Recursive,
-            || {
-                crate::recursive::resolve_recursive(
-                    qname,
-                    qtype,
-                    &ctx.cache,
-                    query,
-                    &ctx.root_hints,
-                    &ctx.srtt,
-                )
+            move || async move {
+                let (resp, status) = resolve_recursive_validated(ctx, query, qname, qtype).await?;
+                *leader_dnssec = status;
+                Ok(resp)
             },
         )
         .await;
         log_coalesced_outcome(src_addr, qtype, qname, path, err.as_deref(), "RECURSIVE");
         let upstream_transport =
             (path == QueryPath::Recursive).then_some(crate::stats::UpstreamTransport::Udp);
-        return (resp, path, DnssecStatus::Indeterminate, upstream_transport);
+        return (resp, path, dnssec, upstream_transport);
     }
 
     let pool = ctx.upstream_pool.lock().unwrap().clone();
@@ -622,6 +581,61 @@ async fn resolve_remote(
         .then(|| pool.preferred().map(|u| u.transport()))
         .flatten();
     (resp, path, DnssecStatus::Indeterminate, upstream_transport)
+}
+
+/// Validates before anything else sees the answer: coalesced followers get
+/// what this returns, and the cache gets it with its verdict. The DS and
+/// DNSKEY walks ride the permit the resolution already took; refusing them
+/// would discard the walk that paid for them and make the next query redo it,
+/// which is the amplification the ceiling exists to prevent.
+async fn resolve_recursive_validated(
+    ctx: &ServerCtx,
+    query: &DnsPacket,
+    qname: &str,
+    qtype: QueryType,
+) -> crate::Result<(DnsPacket, DnssecStatus)> {
+    let mut response = crate::recursive::resolve_recursive(
+        qname,
+        qtype,
+        &ctx.cache,
+        query,
+        &ctx.root_hints,
+        &ctx.srtt,
+    )
+    .await?;
+
+    if !ctx.dnssec_enabled {
+        if crate::recursive::is_cacheable(&response) {
+            ctx.cache.write().unwrap().insert(qname, qtype, &response);
+        }
+        return Ok((response, DnssecStatus::Indeterminate));
+    }
+
+    let (status, vstats) =
+        crate::dnssec::validate_response(&response, &ctx.cache, &ctx.root_hints, &ctx.srtt).await;
+    debug!(
+        "DNSSEC | {} | {:?} | {}ms | dnskey_hit={} dnskey_fetch={} ds_hit={} ds_fetch={} sig_checks={} upstream_q={}",
+        qname,
+        status,
+        vstats.elapsed_ms,
+        vstats.dnskey_cache_hits,
+        vstats.dnskey_fetches,
+        vstats.ds_cache_hits,
+        vstats.ds_fetches,
+        vstats.signature_checks,
+        vstats.upstream_queries,
+    );
+    if status == DnssecStatus::Secure {
+        response.header.authed_data = true;
+    }
+    if status == DnssecStatus::Bogus && ctx.dnssec_strict {
+        response = DnsPacket::response_from(query, ResultCode::SERVFAIL);
+    }
+    ctx.cache
+        .write()
+        .unwrap()
+        .insert_with_status(qname, qtype, &response, status);
+    Ok((response, status))
 }
 
 fn cache_and_parse(
@@ -680,18 +694,8 @@ pub async fn refresh_entry(ctx: &ServerCtx, qname: &str, qtype: QueryType) {
     }
 
     if ctx.upstream_mode == UpstreamMode::Recursive {
-        if let Ok(resp) = crate::recursive::resolve_recursive(
-            qname,
-            qtype,
-            &ctx.cache,
-            &query,
-            &ctx.root_hints,
-            &ctx.srtt,
-        )
-        .await
-        {
-            ctx.cache.write().unwrap().insert(qname, qtype, &resp);
-        }
+        // On failure the cached entry stays and keeps being served stale.
+        let _ = resolve_recursive_validated(ctx, &query, qname, qtype).await;
     } else {
         let mut buf = BytePacketBuffer::new();
         if query.write(&mut buf).is_ok() {
@@ -2626,6 +2630,120 @@ mod tests {
             DnsRecord::A { addr, .. } => assert_eq!(*addr, Ipv4Addr::new(10, 0, 0, 7)),
             other => panic!("expected A record, got {:?}", other),
         }
+    }
+
+    /// Authoritative for the single-label name `bogus`, so the walk asks it
+    /// directly. Its A answer carries a signature no key verifies; every other
+    /// question (the validator's DNSKEY and DS fetches) gets an empty NOERROR.
+    async fn bogus_authority(delay: Duration) -> SocketAddr {
+        let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = sock.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 1232];
+            while let Ok((n, src)) = sock.recv_from(&mut buf).await {
+                let Ok(query) =
+                    DnsPacket::from_buffer(&mut BytePacketBuffer::from_bytes(&buf[..n]))
+                else {
+                    continue;
+                };
+                let mut resp = DnsPacket::response_from(&query, ResultCode::NOERROR);
+                let asks_for_the_answer = query.questions.first().is_some_and(|q| {
+                    q.name.eq_ignore_ascii_case("bogus") && q.qtype == QueryType::A
+                });
+                if asks_for_the_answer {
+                    tokio::time::sleep(delay).await;
+                    resp.answers.push(DnsRecord::A {
+                        domain: "bogus".into(),
+                        addr: Ipv4Addr::new(10, 6, 6, 6),
+                        ttl: 300,
+                    });
+                    resp.answers.push(DnsRecord::RRSIG {
+                        domain: "bogus".into(),
+                        type_covered: QueryType::A.to_num(),
+                        algorithm: 13,
+                        labels: 1,
+                        original_ttl: 300,
+                        expiration: u32::MAX,
+                        inception: 0,
+                        key_tag: 1,
+                        signer_name: "bogus".into(),
+                        signature: vec![0; 64],
+                        ttl: 300,
+                    });
+                }
+                let mut out = BytePacketBuffer::new();
+                if resp.write(&mut out).is_ok() {
+                    let _ = sock.send_to(out.filled(), src).await;
+                }
+            }
+        });
+        addr
+    }
+
+    async fn strict_recursive_ctx(authority: SocketAddr) -> ServerCtx {
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.upstream_mode = UpstreamMode::Recursive;
+        ctx.root_hints = vec![authority];
+        ctx.dnssec_enabled = true;
+        ctx.dnssec_strict = true;
+        ctx
+    }
+
+    #[tokio::test]
+    async fn coalesced_followers_get_the_validated_answer() {
+        let _guard = crate::recursive::UDP_STATE_LOCK.lock().unwrap();
+        crate::recursive::reset_udp_state();
+        let authority = bogus_authority(Duration::from_millis(100)).await;
+        let ctx = Arc::new(strict_recursive_ctx(authority).await);
+
+        let queries = (0..4).map(|_| {
+            let ctx = Arc::clone(&ctx);
+            tokio::spawn(async move { resolve_in_test(&ctx, "bogus", QueryType::A).await })
+        });
+        let mut paths = Vec::new();
+        for result in futures::future::join_all(queries).await {
+            let (resp, path) = result.unwrap();
+            assert_eq!(
+                resp.header.rescode,
+                ResultCode::SERVFAIL,
+                "{path:?} served an answer strict validation rejects"
+            );
+            paths.push(path);
+        }
+        assert!(
+            paths.contains(&QueryPath::Coalesced),
+            "no query joined the leader: {paths:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_entry_resolves_again_and_validates() {
+        let _guard = crate::recursive::UDP_STATE_LOCK.lock().unwrap();
+        crate::recursive::reset_udp_state();
+        let authority = bogus_authority(Duration::ZERO).await;
+        let ctx = Arc::new(strict_recursive_ctx(authority).await);
+        let earlier = crate::testutil::a_record_response("bogus", Ipv4Addr::new(10, 0, 0, 1), 300);
+        ctx.cache.write().unwrap().insert_with_status(
+            "bogus",
+            QueryType::A,
+            &earlier,
+            DnssecStatus::Secure,
+        );
+
+        refresh_entry(&ctx, "bogus", QueryType::A).await;
+
+        let (resp, status, _) = ctx
+            .cache
+            .read()
+            .unwrap()
+            .lookup_with_status("bogus", QueryType::A)
+            .unwrap();
+        assert_eq!(
+            status,
+            DnssecStatus::Bogus,
+            "the refresh must walk again and validate what it gets"
+        );
+        assert_eq!(resp.header.rescode, ResultCode::SERVFAIL);
     }
 
     #[test]

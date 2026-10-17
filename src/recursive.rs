@@ -218,7 +218,9 @@ pub async fn resolve_recursive(
 ) -> crate::Result<DnsPacket> {
     // `budget` caps the total upstream queries this one client resolution may spend.
     let budget = AtomicUsize::new(0);
-    let mut resp = resolve_iterative(qname, qtype, cache, root_hints, srtt, 0, 0, &budget).await?;
+    // Neither reads nor writes the cache for qname: a refresh must get a new
+    // answer, and the caller caches it only once it is validated.
+    let mut resp = walk(qname, qtype, cache, root_hints, srtt, 0, 0, &budget).await?;
 
     resp.header.id = original_query.header.id;
     resp.header.recursion_available = true;
@@ -247,120 +249,80 @@ pub(crate) fn resolve_iterative<'a>(
             return Ok(cached);
         }
 
-        let (mut current_zone, mut ns_addrs) = find_closest_ns(qname, qtype, cache, root_hints);
-        srtt.read().unwrap().sort_by_udp_rtt(&mut ns_addrs);
-        let mut ns_idx = 0;
+        let response = walk(
+            qname,
+            qtype,
+            cache,
+            root_hints,
+            srtt,
+            referral_depth,
+            cname_depth,
+            budget,
+        )
+        .await?;
+        if is_cacheable(&response) {
+            cache.write().unwrap().insert(qname, qtype, &response);
+        }
+        Ok(response)
+    })
+}
 
-        for _ in 0..MAX_REFERRAL_DEPTH {
-            if ns_idx >= ns_addrs.len() {
-                return Err("no nameserver available".into());
-            }
+pub(crate) fn is_cacheable(response: &DnsPacket) -> bool {
+    !response.answers.is_empty()
+        || matches!(
+            response.header.rescode,
+            ResultCode::NXDOMAIN | ResultCode::REFUSED
+        )
+}
 
-            let (q_name, q_type) = minimize_query(qname, qtype, &current_zone);
+#[allow(clippy::too_many_arguments)]
+async fn walk(
+    qname: &str,
+    qtype: QueryType,
+    cache: &RwLock<DnsCache>,
+    root_hints: &[SocketAddr],
+    srtt: &RwLock<SrttCache>,
+    referral_depth: u8,
+    cname_depth: u8,
+    budget: &AtomicUsize,
+) -> crate::Result<DnsPacket> {
+    let (mut current_zone, mut ns_addrs) = find_closest_ns(qname, qtype, cache, root_hints);
+    srtt.read().unwrap().sort_by_udp_rtt(&mut ns_addrs);
+    let mut ns_idx = 0;
 
-            debug!(
-                "recursive: querying {} (+ hedge) for {:?} {} (zone: {}, depth {})",
-                ns_addrs[ns_idx], q_type, q_name, current_zone, referral_depth
-            );
+    for _ in 0..MAX_REFERRAL_DEPTH {
+        if ns_idx >= ns_addrs.len() {
+            return Err("no nameserver available".into());
+        }
 
-            let response =
-                match send_query_hedged(q_name, q_type, &ns_addrs[ns_idx..], srtt, budget).await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        debug!("recursive: NS query failed: {}", e);
-                        let remaining = ns_addrs.len().saturating_sub(ns_idx);
-                        ns_idx += remaining.min(2);
-                        continue;
-                    }
-                };
+        let (q_name, q_type) = minimize_query(qname, qtype, &current_zone);
 
-            // The zone we queried, captured before a referral moves current_zone
-            // to the child: glue/DS trust is judged against the server's zone,
-            // not the child's, so root-supplied gTLD glue stays valid.
-            let server_zone = current_zone.clone();
+        debug!(
+            "recursive: querying {} (+ hedge) for {:?} {} (zone: {}, depth {})",
+            ns_addrs[ns_idx], q_type, q_name, current_zone, referral_depth
+        );
 
-            if (q_type != qtype || !q_name.eq_ignore_ascii_case(qname))
-                && (!response.authorities.is_empty() || !response.answers.is_empty())
-            {
-                match referral_zone(&response) {
-                    Some(zone) if !zone_in_bailiwick(&zone, &current_zone) => {
-                        debug!(
-                            "recursive: rejecting out-of-bailiwick referral to {} from zone {}",
-                            zone, current_zone
-                        );
-                        ns_idx += 1;
-                        continue;
-                    }
-                    Some(zone) => {
-                        current_zone = zone;
-                        let mut cache_w = cache.write().unwrap();
-                        cache_ns_delegation(&mut cache_w, &current_zone, &response);
-                        drop(cache_w);
-                    }
-                    None => {}
-                }
-                let mut all_ns = extract_ns_from_records(&response.answers);
-                if all_ns.is_empty() {
-                    all_ns = extract_ns_names(&response);
-                }
-                let mut new_addrs =
-                    resolve_ns_addrs_from_glue(&response, &all_ns, &server_zone, cache);
-                if !new_addrs.is_empty() {
-                    srtt.read().unwrap().sort_by_udp_rtt(&mut new_addrs);
-                    ns_addrs = new_addrs;
-                    ns_idx = 0;
+        let response =
+            match send_query_hedged(q_name, q_type, &ns_addrs[ns_idx..], srtt, budget).await {
+                Ok(r) => r,
+                Err(e) => {
+                    debug!("recursive: NS query failed: {}", e);
+                    let remaining = ns_addrs.len().saturating_sub(ns_idx);
+                    ns_idx += remaining.min(2);
                     continue;
                 }
-                ns_idx += 1;
-                continue;
-            }
+            };
 
-            if !response.answers.is_empty() {
-                if response.has_answer_of_type(qtype) || qtype == QueryType::CNAME {
-                    cache.write().unwrap().insert(qname, qtype, &response);
-                    return Ok(response);
-                }
+        // The zone we queried, captured before a referral moves current_zone
+        // to the child: glue/DS trust is judged against the server's zone,
+        // not the child's, so root-supplied gTLD glue stays valid.
+        let server_zone = current_zone.clone();
 
-                let mut visited = HashSet::from([qname.to_ascii_lowercase()]);
-                if let Some(cname_target) = follow_cname_links(&response, qname, &mut visited)
-                    .map_err(|()| "CNAME loop in response")?
-                {
-                    if cname_depth >= MAX_CNAME_DEPTH {
-                        return Err("max CNAME depth exceeded".into());
-                    }
-                    debug!("recursive: chasing CNAME {} -> {}", qname, cname_target);
-                    let final_resp = resolve_iterative(
-                        &cname_target,
-                        qtype,
-                        cache,
-                        root_hints,
-                        srtt,
-                        0,
-                        cname_depth + 1,
-                        budget,
-                    )
-                    .await?;
-
-                    let mut combined = response;
-                    combined.answers.extend(final_resp.answers);
-                    combined.header.rescode = final_resp.header.rescode;
-                    cache.write().unwrap().insert(qname, qtype, &combined);
-                    return Ok(combined);
-                }
-
-                cache.write().unwrap().insert(qname, qtype, &response);
-                return Ok(response);
-            }
-
-            if response.header.rescode == ResultCode::NXDOMAIN
-                || response.header.rescode == ResultCode::REFUSED
-            {
-                cache.write().unwrap().insert(qname, qtype, &response);
-                return Ok(response);
-            }
-
-            if let Some(zone) = referral_zone(&response) {
-                if !zone_in_bailiwick(&zone, &current_zone) {
+        if (q_type != qtype || !q_name.eq_ignore_ascii_case(qname))
+            && (!response.authorities.is_empty() || !response.answers.is_empty())
+        {
+            match referral_zone(&response) {
+                Some(zone) if !zone_in_bailiwick(&zone, &current_zone) => {
                     debug!(
                         "recursive: rejecting out-of-bailiwick referral to {} from zone {}",
                         zone, current_zone
@@ -368,64 +330,128 @@ pub(crate) fn resolve_iterative<'a>(
                     ns_idx += 1;
                     continue;
                 }
-                current_zone = zone;
+                Some(zone) => {
+                    current_zone = zone;
+                    let mut cache_w = cache.write().unwrap();
+                    cache_ns_delegation(&mut cache_w, &current_zone, &response);
+                    drop(cache_w);
+                }
+                None => {}
             }
-            let ns_names = extract_ns_names(&response);
-            if ns_names.is_empty() {
+            let mut all_ns = extract_ns_from_records(&response.answers);
+            if all_ns.is_empty() {
+                all_ns = extract_ns_names(&response);
+            }
+            let mut new_addrs = resolve_ns_addrs_from_glue(&response, &all_ns, &server_zone, cache);
+            if !new_addrs.is_empty() {
+                srtt.read().unwrap().sort_by_udp_rtt(&mut new_addrs);
+                ns_addrs = new_addrs;
+                ns_idx = 0;
+                continue;
+            }
+            ns_idx += 1;
+            continue;
+        }
+
+        if !response.answers.is_empty() {
+            if response.has_answer_of_type(qtype) || qtype == QueryType::CNAME {
                 return Ok(response);
             }
 
+            let mut visited = HashSet::from([qname.to_ascii_lowercase()]);
+            if let Some(cname_target) = follow_cname_links(&response, qname, &mut visited)
+                .map_err(|()| "CNAME loop in response")?
             {
-                let mut cache_w = cache.write().unwrap();
-                cache_ns_delegation(&mut cache_w, &current_zone, &response);
-                cache_ds_from_authority(&mut cache_w, &response, &server_zone);
+                if cname_depth >= MAX_CNAME_DEPTH {
+                    return Err("max CNAME depth exceeded".into());
+                }
+                debug!("recursive: chasing CNAME {} -> {}", qname, cname_target);
+                let final_resp = resolve_iterative(
+                    &cname_target,
+                    qtype,
+                    cache,
+                    root_hints,
+                    srtt,
+                    0,
+                    cname_depth + 1,
+                    budget,
+                )
+                .await?;
+
+                let mut combined = response;
+                combined.answers.extend(final_resp.answers);
+                combined.header.rescode = final_resp.header.rescode;
+                return Ok(combined);
             }
-            let mut new_ns_addrs =
-                resolve_ns_addrs_from_glue(&response, &ns_names, &server_zone, cache);
 
-            if new_ns_addrs.is_empty() {
-                for ns_name in ns_names.iter().take(MAX_NS_FETCH) {
-                    if referral_depth < MAX_REFERRAL_DEPTH {
-                        debug!("recursive: resolving glue-less NS {}", ns_name);
-                        for qt in [QueryType::A, QueryType::AAAA] {
-                            if let Ok(ns_resp) = resolve_iterative(
-                                ns_name,
-                                qt,
-                                cache,
-                                root_hints,
-                                srtt,
-                                referral_depth + 1,
-                                cname_depth,
-                                budget,
-                            )
-                            .await
-                            {
-                                new_ns_addrs
-                                    .extend(ns_resp.answers.iter().filter_map(record_to_addr));
-                            }
-                            if !new_ns_addrs.is_empty() {
-                                break;
-                            }
-                        }
+            return Ok(response);
+        }
+
+        if response.header.rescode == ResultCode::NXDOMAIN
+            || response.header.rescode == ResultCode::REFUSED
+        {
+            return Ok(response);
+        }
+
+        if let Some(zone) = referral_zone(&response) {
+            if !zone_in_bailiwick(&zone, &current_zone) {
+                debug!(
+                    "recursive: rejecting out-of-bailiwick referral to {} from zone {}",
+                    zone, current_zone
+                );
+                ns_idx += 1;
+                continue;
+            }
+            current_zone = zone;
+        }
+        let ns_names = extract_ns_names(&response);
+        if ns_names.is_empty() {
+            return Ok(response);
+        }
+
+        {
+            let mut cache_w = cache.write().unwrap();
+            cache_ns_delegation(&mut cache_w, &current_zone, &response);
+            cache_ds_from_authority(&mut cache_w, &response, &server_zone);
+        }
+        let mut new_ns_addrs =
+            resolve_ns_addrs_from_glue(&response, &ns_names, &server_zone, cache);
+
+        if new_ns_addrs.is_empty() && referral_depth < MAX_REFERRAL_DEPTH {
+            'names: for ns_name in ns_names.iter().take(MAX_NS_FETCH) {
+                debug!("recursive: resolving glue-less NS {}", ns_name);
+                for qt in [QueryType::A, QueryType::AAAA] {
+                    if let Ok(ns_resp) = resolve_iterative(
+                        ns_name,
+                        qt,
+                        cache,
+                        root_hints,
+                        srtt,
+                        referral_depth + 1,
+                        cname_depth,
+                        budget,
+                    )
+                    .await
+                    {
+                        new_ns_addrs.extend(ns_resp.answers.iter().filter_map(record_to_addr));
                     }
-
                     if !new_ns_addrs.is_empty() {
-                        break;
+                        break 'names;
                     }
                 }
             }
-
-            if new_ns_addrs.is_empty() {
-                return Err(format!("could not resolve any NS for {}", qname).into());
-            }
-
-            srtt.read().unwrap().sort_by_udp_rtt(&mut new_ns_addrs);
-            ns_addrs = new_ns_addrs;
-            ns_idx = 0;
         }
 
-        Err(format!("recursive resolution exhausted for {}", qname).into())
-    })
+        if new_ns_addrs.is_empty() {
+            return Err(format!("could not resolve any NS for {}", qname).into());
+        }
+
+        srtt.read().unwrap().sort_by_udp_rtt(&mut new_ns_addrs);
+        ns_addrs = new_ns_addrs;
+        ns_idx = 0;
+    }
+
+    Err(format!("recursive resolution exhausted for {}", qname).into())
 }
 
 /// Find the closest cached NS zone and its resolved addresses.
@@ -845,7 +871,21 @@ async fn send_query_hedged(
     }
 }
 
+/// Every nameserver reply comes through here. Its AD bit vouches for nothing:
+/// only our own validation sets AD.
 async fn send_query(
+    qname: &str,
+    qtype: QueryType,
+    server: SocketAddr,
+    srtt: &RwLock<SrttCache>,
+    budget: &AtomicUsize,
+) -> crate::Result<DnsPacket> {
+    let mut resp = query_server(qname, qtype, server, srtt, budget).await?;
+    resp.header.authed_data = false;
+    Ok(resp)
+}
+
+async fn query_server(
     qname: &str,
     qtype: QueryType,
     server: SocketAddr,
@@ -960,14 +1000,15 @@ pub fn parse_root_hints(hints: &[String]) -> Vec<SocketAddr> {
         .collect()
 }
 
+/// Tests that mutate the global UDP_DISABLED / UDP_FAILURES flags, or need UDP
+/// to reach a mock nameserver, must hold this lock under `cargo test` parallelism.
+#[cfg(test)]
+pub(crate) static UDP_STATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::net::{Ipv4Addr, Ipv6Addr};
-
-    /// Tests that mutate the global UDP_DISABLED / UDP_FAILURES flags must hold
-    /// this lock to avoid racing with each other under `cargo test` parallelism.
-    static UDP_STATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn extract_ns_from_authority() {
@@ -1555,6 +1596,70 @@ mod tests {
             }
         });
         addr
+    }
+
+    #[tokio::test]
+    async fn send_query_drops_the_servers_ad_bit() {
+        let _guard = UDP_STATE_LOCK.lock().unwrap();
+        reset_udp_state();
+        let server = spawn_udp_dns_server(|query| {
+            let mut resp = DnsPacket::response_from(query, ResultCode::NOERROR);
+            resp.header.authed_data = true;
+            resp
+        })
+        .await;
+
+        let srtt = RwLock::new(SrttCache::new(true));
+        let resp = send_query("ad.test", QueryType::A, server, &srtt, &AtomicUsize::new(0))
+            .await
+            .unwrap();
+        assert!(
+            !resp.header.authed_data,
+            "only our own validation may set AD"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_recursive_walks_past_the_cache_and_leaves_it_alone() {
+        let _guard = UDP_STATE_LOCK.lock().unwrap();
+        reset_udp_state();
+        let a_record = |addr| DnsRecord::A {
+            domain: "fresh".into(),
+            addr,
+            ttl: 300,
+        };
+        let server = spawn_udp_dns_server(move |query| {
+            let mut resp = DnsPacket::response_from(query, ResultCode::NOERROR);
+            resp.answers.push(a_record(Ipv4Addr::new(10, 0, 0, 2)));
+            resp
+        })
+        .await;
+        let query = DnsPacket::query(0x77, "fresh", QueryType::A);
+        let mut old = DnsPacket::response_from(&query, ResultCode::NOERROR);
+        old.answers.push(a_record(Ipv4Addr::new(10, 0, 0, 1)));
+        let cache = RwLock::new(DnsCache::new(100, 60, 86400));
+        cache.write().unwrap().insert("fresh", QueryType::A, &old);
+        let srtt = RwLock::new(SrttCache::new(true));
+
+        let resp = resolve_recursive("fresh", QueryType::A, &cache, &query, &[server], &srtt)
+            .await
+            .unwrap();
+
+        let cached = cache.read().unwrap().lookup("fresh", QueryType::A).unwrap();
+        let addr = |pkt: &DnsPacket| match pkt.answers.first() {
+            Some(DnsRecord::A { addr, .. }) => *addr,
+            other => panic!("expected an A record, got {other:?}"),
+        };
+        assert_eq!(
+            addr(&resp),
+            Ipv4Addr::new(10, 0, 0, 2),
+            "a refresh must not get its own cached answer back"
+        );
+        assert_eq!(
+            addr(&cached),
+            Ipv4Addr::new(10, 0, 0, 1),
+            "the caller caches the answer once it is validated"
+        );
     }
 
     /// #386: priming asks the roots for `.` over UDP. If those replies are
