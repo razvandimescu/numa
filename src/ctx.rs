@@ -1062,6 +1062,7 @@ fn special_use_response(query: &DnsPacket, qname: &str, qtype: QueryType) -> Dns
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::override_store::OverrideEntry;
     use crate::testutil::zone;
     use std::collections::HashMap;
     use std::net::{Ipv4Addr, Ipv6Addr};
@@ -1728,8 +1729,7 @@ mod tests {
         ctx.overrides
             .write()
             .unwrap()
-            .insert("nas.local", "192.168.1.50", 60, None)
-            .unwrap();
+            .insert(OverrideEntry::new("nas.local", "192.168.1.50", 60, None).unwrap());
         let ctx = Arc::new(ctx);
 
         let (resp, path) = resolve_in_test(&ctx, "nas.local", QueryType::A).await;
@@ -1798,8 +1798,7 @@ mod tests {
         ctx.overrides
             .write()
             .unwrap()
-            .insert("override.test", "1.2.3.4", 60, None)
-            .unwrap();
+            .insert(OverrideEntry::new("override.test", "1.2.3.4", 60, None).unwrap());
         let ctx = Arc::new(ctx);
 
         let (resp, path) = resolve_in_test(&ctx, "override.test", QueryType::A).await;
@@ -2038,8 +2037,7 @@ mod tests {
         ctx.overrides
             .write()
             .unwrap()
-            .insert("v6.test", "2001:db8::1", 60, None)
-            .unwrap();
+            .insert(OverrideEntry::new("v6.test", "2001:db8::1", 60, None).unwrap());
         let ctx = Arc::new(ctx);
 
         let (resp, path) = resolve_in_test(&ctx, "v6.test", QueryType::AAAA).await;
@@ -3212,8 +3210,7 @@ mod tests {
             ctx.overrides
                 .write()
                 .unwrap()
-                .insert("override.example.com", target, 60, None)
-                .unwrap();
+                .insert(OverrideEntry::new("override.example.com", target, 60, None).unwrap());
             let ctx = Arc::new(ctx);
 
             for qname in ["zone.example.com", "override.example.com"] {

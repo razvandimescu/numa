@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ctx::ServerCtx;
 use crate::forward::{forward_query, Upstream};
+use crate::override_store::OverrideEntry;
 use crate::query_log::QueryLogFilter;
 use crate::question::QueryType;
 use crate::stats::QueryPath;
@@ -134,8 +135,8 @@ struct OverrideResponse {
     remaining_secs: Option<u64>,
 }
 
-impl From<&crate::override_store::OverrideEntry> for OverrideResponse {
-    fn from(e: &crate::override_store::OverrideEntry) -> Self {
+impl From<&OverrideEntry> for OverrideResponse {
+    fn from(e: &OverrideEntry) -> Self {
         OverrideResponse {
             domain: e.domain.clone(),
             target: e.target.clone(),
@@ -335,38 +336,38 @@ async fn create_overrides(
         vec![single]
     };
 
-    // Parse and validate all requests before acquiring the lock
-    let parsed: Vec<_> = requests
-        .into_iter()
-        .map(|req| {
-            let domain = crate::buffer::canonical_name(&req.domain).map_err(|e| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    format!("invalid domain '{}': {e}", req.domain),
-                )
-            })?;
-            Ok((domain, req.target, req.ttl, req.duration_secs))
+    let entries = parse_overrides(&requests, None)?;
+    let responses = entries
+        .iter()
+        .map(|e| OverrideResponse {
+            remaining_secs: e.duration_secs,
+            ..OverrideResponse::from(e)
         })
-        .collect::<Result<Vec<_>, (StatusCode, String)>>()?;
-
-    let mut store = ctx.overrides.write().unwrap();
-    let mut responses = Vec::with_capacity(parsed.len());
-
-    for (domain, target, ttl, duration_secs) in parsed {
-        let qtype = store
-            .insert(&domain, &target, ttl, duration_secs)
-            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-
-        responses.push(OverrideResponse {
-            domain,
-            target,
-            record_type: qtype.as_str().to_string(),
-            ttl,
-            remaining_secs: duration_secs,
-        });
-    }
-
+        .collect();
+    store_overrides(&ctx, entries);
     Ok((StatusCode::CREATED, Json(responses)))
+}
+
+/// Validates the whole batch up front, so a bad item stores none of it.
+fn parse_overrides(
+    requests: &[CreateOverrideRequest],
+    default_duration: Option<u64>,
+) -> Result<Vec<OverrideEntry>, (StatusCode, String)> {
+    requests
+        .iter()
+        .map(|r| {
+            let duration = r.duration_secs.or(default_duration);
+            OverrideEntry::new(&r.domain, &r.target, r.ttl, duration)
+        })
+        .collect::<crate::Result<_>>()
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
+}
+
+fn store_overrides(ctx: &ServerCtx, entries: Vec<OverrideEntry>) {
+    let mut store = ctx.overrides.write().unwrap();
+    for entry in entries {
+        store.insert(entry);
+    }
 }
 
 async fn list_overrides(State(ctx): State<Arc<ServerCtx>>) -> Json<Vec<OverrideResponse>> {
@@ -409,21 +410,10 @@ async fn load_environment(
     State(ctx): State<Arc<ServerCtx>>,
     Json(req): Json<EnvironmentRequest>,
 ) -> Result<(StatusCode, Json<EnvironmentResponse>), (StatusCode, String)> {
-    let mut store = ctx.overrides.write().unwrap();
-
-    for entry in &req.overrides {
-        let duration = entry.duration_secs.or(req.duration_secs);
-        store
-            .insert(&entry.domain, &entry.target, entry.ttl, duration)
-            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    }
-
-    Ok((
-        StatusCode::CREATED,
-        Json(EnvironmentResponse {
-            created: req.overrides.len(),
-        }),
-    ))
+    let entries = parse_overrides(&req.overrides, req.duration_secs)?;
+    let created = entries.len();
+    store_overrides(&ctx, entries);
+    Ok((StatusCode::CREATED, Json(EnvironmentResponse { created })))
 }
 
 async fn diagnose(
@@ -1340,6 +1330,31 @@ mod tests {
             .status()
             .is_success());
         assert_eq!(get_req(&a, "/overrides/test.dev").await.status(), 404);
+    }
+
+    #[tokio::test]
+    async fn override_batch_with_a_bad_item_stores_nothing() {
+        let long = format!("{}.dev", "a".repeat(64));
+        let good = r#"{"domain":"good.dev","target":"1.2.3.4"}"#;
+        let bad_target = format!(r#"{{"domain":"bad.dev","target":"{long}"}}"#);
+        let bad_domain = format!(r#"{{"domain":"{long}","target":"1.2.3.4"}}"#);
+        for bad in [bad_target, bad_domain] {
+            for (path, body) in [
+                ("/overrides", format!("[{good},{bad}]")),
+                (
+                    "/overrides/environment",
+                    format!(r#"{{"overrides":[{good},{bad}]}}"#),
+                ),
+            ] {
+                let ctx = test_ctx().await;
+                let resp = post_json(&router(ctx.clone()), path, &body).await;
+                assert_eq!(resp.status(), 400, "{path} {body}");
+                assert!(
+                    ctx.overrides.read().unwrap().list().is_empty(),
+                    "{path} {body}"
+                );
+            }
+        }
     }
 
     #[tokio::test]

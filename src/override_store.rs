@@ -18,6 +18,21 @@ pub struct OverrideEntry {
 }
 
 impl OverrideEntry {
+    pub fn new(domain: &str, target: &str, ttl: u32, duration_secs: Option<u64>) -> Result<Self> {
+        let domain =
+            canonical_name(domain).map_err(|e| format!("invalid domain '{domain}': {e}"))?;
+        let (query_type, record) = parse_target(&domain, target, ttl)?;
+        Ok(OverrideEntry {
+            domain,
+            target: target.to_string(),
+            record,
+            query_type,
+            ttl,
+            created_at: Instant::now(),
+            duration_secs,
+        })
+    }
+
     pub fn expires_at(&self) -> Option<Instant> {
         self.duration_secs
             .map(|d| self.created_at + std::time::Duration::from_secs(d))
@@ -58,34 +73,10 @@ impl OverrideStore {
         }
     }
 
-    pub fn insert(
-        &mut self,
-        domain: &str,
-        target: &str,
-        ttl: u32,
-        duration_secs: Option<u64>,
-    ) -> Result<QueryType> {
+    pub fn insert(&mut self, entry: OverrideEntry) {
         // Clean up expired entries on write
         self.entries.retain(|_, e| !e.is_expired());
-
-        let domain =
-            canonical_name(domain).map_err(|e| format!("invalid domain '{domain}': {e}"))?;
-        let (qtype, record) = parse_target(&domain, target, ttl)?;
-
-        self.entries.insert(
-            domain.clone(),
-            OverrideEntry {
-                domain,
-                target: target.to_string(),
-                record,
-                query_type: qtype,
-                ttl,
-                created_at: Instant::now(),
-                duration_secs,
-            },
-        );
-
-        Ok(qtype)
+        self.entries.insert(entry.domain.clone(), entry);
     }
 
     /// Hot path: assumes `domain` is already lowercased (the parser does this).
@@ -176,19 +167,23 @@ fn parse_target(domain: &str, target: &str, ttl: u32) -> Result<(QueryType, DnsR
 mod tests {
     use super::*;
 
+    fn entry(domain: &str, target: &str) -> OverrideEntry {
+        OverrideEntry::new(domain, target, 60, None).unwrap()
+    }
+
     #[test]
     fn heap_bytes_grows_with_entries() {
         let mut store = OverrideStore::new();
         let empty = store.heap_bytes();
-        store.insert("example.com", "1.2.3.4", 300, None).unwrap();
+        store.insert(entry("example.com", "1.2.3.4"));
         assert!(store.heap_bytes() > empty);
     }
 
     #[test]
     fn names_are_stored_as_the_wire_reads_them() {
         let mut store = OverrideStore::new();
-        store.insert("NAS.lan.", "192.168.1.42", 60, None).unwrap();
-        store.insert("app.lan", "NAS.lan.", 60, None).unwrap();
+        store.insert(entry("NAS.lan.", "192.168.1.42"));
+        store.insert(entry("app.lan", "NAS.lan."));
 
         assert!(store.lookup("nas.lan").is_some());
         assert!(store.get("Nas.Lan.").is_some());
@@ -200,10 +195,9 @@ mod tests {
 
     #[test]
     fn unwritable_names_are_rejected() {
-        let mut store = OverrideStore::new();
         let long_label = format!("{}.lan", "a".repeat(64));
-        assert!(store.insert("app.lan", &long_label, 60, None).is_err());
-        assert!(store.insert("app.lan", "x.ab\\", 60, None).is_err());
-        assert!(store.insert(&long_label, "192.168.1.42", 60, None).is_err());
+        assert!(OverrideEntry::new("app.lan", &long_label, 60, None).is_err());
+        assert!(OverrideEntry::new("app.lan", "x.ab\\", 60, None).is_err());
+        assert!(OverrideEntry::new(&long_label, "192.168.1.42", 60, None).is_err());
     }
 }
