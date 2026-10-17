@@ -912,12 +912,16 @@ mod tests {
 
     #[test]
     fn read_error_names_the_file_and_keeps_its_kind() {
-        let dir = std::env::temp_dir();
-        let Err(err) = read_config(&dir) else {
-            panic!("a directory must not read as a config");
+        let path = std::env::temp_dir().join(format!("numa-not-utf8-{}.toml", std::process::id()));
+        std::fs::write(&path, [0xff, 0xfe]).unwrap();
+        let resolved = resolve_path(&path.to_string_lossy());
+        let result = read_config(&path);
+        let _ = std::fs::remove_file(&path);
+        let Err(err) = result else {
+            panic!("invalid UTF-8 must not read as a config");
         };
-        assert!(err.downcast_ref::<std::io::Error>().is_some(), "{err}");
-        let resolved = resolve_path(&dir.to_string_lossy());
+        let kind = err.downcast_ref::<std::io::Error>().map(|e| e.kind());
+        assert_eq!(kind, Some(std::io::ErrorKind::InvalidData), "{err}");
         assert!(
             err.to_string().starts_with(&format!("{resolved}: ")),
             "{err}"
