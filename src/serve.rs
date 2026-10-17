@@ -307,9 +307,10 @@ fn spawn_background_services(
         let bl_ctx = Arc::clone(ctx);
         let bl_resolver = bootstrap_resolver.clone();
         tokio::spawn(async move {
-            let mut loaded =
-                load_blocklists_purging(&bl_ctx, &blocklist_lists, Some(bl_resolver.clone())).await;
             loop {
+                let loaded =
+                    load_blocklists_purging(&bl_ctx, &blocklist_lists, Some(bl_resolver.clone()))
+                        .await;
                 // A refresh that left us with nothing is not blocking at all, so
                 // waiting the full cycle to try again turns a brief upstream
                 // outage into a day without blocking (issue #336). The config
@@ -321,9 +322,6 @@ fn spawn_background_services(
                 };
                 tokio::time::sleep(Duration::from_secs(wait)).await;
                 info!("refreshing blocklists...");
-                loaded =
-                    load_blocklists_purging(&bl_ctx, &blocklist_lists, Some(bl_resolver.clone()))
-                        .await;
             }
         });
     }
