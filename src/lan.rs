@@ -11,6 +11,7 @@ use crate::ctx::ServerCtx;
 use crate::header::DnsHeader;
 use crate::health::HealthMeta;
 use crate::question::{DnsQuestion, QueryType};
+use crate::record::TXT_STRING_MAX;
 
 // --- Constants ---
 
@@ -23,13 +24,15 @@ const MDNS_TTL: u32 = 120;
 // the sender (`build_announcement`) and the receiver (`parse_mdns_response`)
 // to prevent drift — both sides match on the same literal, not on two
 // independent string constants that could diverge.
-const TXT_SERVICES: &str = "services=";
 const TXT_ID: &str = "id=";
 const TXT_VERSION: &str = "version=";
 const TXT_API_PORT: &str = "api_port=";
 const TXT_PROTO: &str = "proto=";
 const TXT_DOT_PORT: &str = "dot_port=";
 const TXT_CA_FP: &str = "ca_fp=";
+// The services list is split into `services=`, `services2=`, `services3=`, ...
+// RFC 6763 §6.4 lets a key appear once, and older peers read only `services=`.
+const TXT_SERVICES_KEY: &str = "services";
 
 // --- Peer Store ---
 
@@ -383,26 +386,31 @@ fn patch_rdlen(
     buf.set_u16(rdlen_pos, rdlen)
 }
 
-/// One `services=` string per batch of whole entries: a TXT string holds at
-/// most 255 bytes and peers parse each string on its own.
+/// One TXT string per batch of whole entries, since peers parse each string on
+/// its own. An entry too long for any string is left out.
 fn services_txt_strings(services: &[(String, u16)]) -> Vec<String> {
-    let mut strings = vec![TXT_SERVICES.to_string()];
+    let mut strings = vec![format!("{TXT_SERVICES_KEY}=")];
     for (name, port) in services {
         let entry = format!("{name}:{port}");
         let last = strings.last_mut().expect("starts with one string");
-        let sep = if last.len() > TXT_SERVICES.len() {
-            ","
-        } else {
-            ""
-        };
-        if last.len() + sep.len() + entry.len() > 255 {
-            strings.push(format!("{TXT_SERVICES}{entry}"));
-        } else {
+        let sep = if last.ends_with('=') { "" } else { "," };
+        if last.len() + sep.len() + entry.len() <= TXT_STRING_MAX {
             last.push_str(sep);
             last.push_str(&entry);
+            continue;
+        }
+        let next = format!("{TXT_SERVICES_KEY}{}={entry}", strings.len() + 1);
+        if next.len() <= TXT_STRING_MAX {
+            strings.push(next);
         }
     }
     strings
+}
+
+fn services_value(txt: &str) -> Option<&str> {
+    let (key, value) = txt.split_once('=')?;
+    let batch = key.strip_prefix(TXT_SERVICES_KEY)?;
+    batch.bytes().all(|b| b.is_ascii_digit()).then_some(value)
 }
 
 fn write_txt_string(buf: &mut BytePacketBuffer, s: &str) -> crate::Result<()> {
@@ -438,7 +446,9 @@ fn parse_mdns_response(data: &[u8]) -> Option<MdnsAnnouncement> {
         q.read(&mut buf).ok()?;
     }
 
-    let total = header.answers + header.authoritative_entries + header.resource_entries;
+    let total = u32::from(header.answers)
+        + u32::from(header.authoritative_entries)
+        + u32::from(header.resource_entries);
     let mut txt_services: Option<Vec<(String, u16)>> = None;
     let mut peer_instance_id: Option<String> = None;
     let mut a_ip: Option<IpAddr> = None;
@@ -462,32 +472,14 @@ fn parse_mdns_response(data: &[u8]) -> Option<MdnsAnnouncement> {
 
         match rtype {
             t if t == QueryType::TXT.to_num() && name.contains("_numa._tcp") => {
-                let mut pos = rdata_start;
-                while pos < rdata_start + rdlength && pos < data.len() {
-                    let txt_len = data[pos] as usize;
-                    pos += 1;
-                    if pos + txt_len > data.len() {
-                        break;
+                if let Some(rdata) = data.get(rdata_start..rdata_start + rdlength) {
+                    let (svcs, id) = parse_numa_txt(rdata);
+                    if !svcs.is_empty() {
+                        txt_services = Some(svcs);
                     }
-                    if let Ok(txt) = std::str::from_utf8(&data[pos..pos + txt_len]) {
-                        if let Some(val) = txt.strip_prefix(TXT_SERVICES) {
-                            let svcs: Vec<(String, u16)> = val
-                                .split(',')
-                                .filter_map(|s| {
-                                    let mut parts = s.splitn(2, ':');
-                                    let svc_name = parts.next()?.to_string();
-                                    let port = parts.next()?.parse().ok()?;
-                                    Some((svc_name, port))
-                                })
-                                .collect();
-                            if !svcs.is_empty() {
-                                txt_services.get_or_insert_with(Vec::new).extend(svcs);
-                            }
-                        } else if let Some(id) = txt.strip_prefix(TXT_ID) {
-                            peer_instance_id = Some(id.to_string());
-                        }
+                    if id.is_some() {
+                        peer_instance_id = id;
                     }
-                    pos += txt_len;
                 }
             }
             t if t == QueryType::A.to_num() && rdlength == 4 && rdata_start + 4 <= data.len() => {
@@ -513,6 +505,31 @@ fn parse_mdns_response(data: &[u8]) -> Option<MdnsAnnouncement> {
         peer_ip,
         instance_id: peer_instance_id,
     })
+}
+
+/// Services and instance id from one TXT record. Services from different
+/// records are never merged: they may belong to different hosts.
+fn parse_numa_txt(mut rdata: &[u8]) -> (Vec<(String, u16)>, Option<String>) {
+    let mut services = Vec::new();
+    let mut id = None;
+    while let Some((&len, rest)) = rdata.split_first() {
+        let Some((string, rest)) = rest.split_at_checked(len as usize) else {
+            break;
+        };
+        rdata = rest;
+        let Ok(txt) = std::str::from_utf8(string) else {
+            continue;
+        };
+        if let Some(val) = services_value(txt) {
+            services.extend(val.split(',').filter_map(|s| {
+                let (name, port) = s.split_once(':')?;
+                Some((name.to_string(), port.parse().ok()?))
+            }));
+        } else if let Some(v) = txt.strip_prefix(TXT_ID) {
+            id = Some(v.to_string());
+        }
+    }
+    (services, id)
 }
 
 fn create_mdns_socket() -> std::io::Result<std::net::UdpSocket> {
@@ -560,5 +577,96 @@ mod tests {
 
         let parsed = parse_mdns_response(buf.filled()).expect("announcement parses");
         assert_eq!(parsed.services, services);
+    }
+
+    #[test]
+    fn services_batches_fit_one_string_with_distinct_keys() {
+        let services: Vec<(String, u16)> = (0..30)
+            .map(|i| (format!("service-{i}"), 3000 + i))
+            .collect();
+        let strings = services_txt_strings(&services);
+
+        let keys: Vec<&str> = strings
+            .iter()
+            .map(|s| s.split_once('=').unwrap().0)
+            .collect();
+        assert_eq!(keys, ["services", "services2"]);
+        assert!(strings.iter().all(|s| s.len() <= TXT_STRING_MAX));
+        // Older peers read only `services=`, so it keeps the head of the list.
+        assert!(strings[0].starts_with("services=service-0:3000,"));
+    }
+
+    #[test]
+    fn services_entry_too_long_for_one_string_is_skipped() {
+        let services = vec![("a".repeat(250), 1), ("b".to_string(), 2)];
+        assert_eq!(services_txt_strings(&services), ["services=b:2"]);
+    }
+
+    fn response(
+        answers: u16,
+        authorities: u16,
+        records: impl FnOnce(&mut BytePacketBuffer),
+    ) -> Vec<u8> {
+        let mut buf = BytePacketBuffer::new();
+        let mut header = DnsHeader::new();
+        header.response = true;
+        header.answers = answers;
+        header.authoritative_entries = authorities;
+        header.write(&mut buf).unwrap();
+        records(&mut buf);
+        buf.filled().to_vec()
+    }
+
+    fn write_txt(buf: &mut BytePacketBuffer, owner: &str, strings: &[&str]) {
+        write_record_header(buf, owner, QueryType::TXT.to_num(), 1, MDNS_TTL).unwrap();
+        let rdlen_pos = buf.pos();
+        buf.write_u16(0).unwrap();
+        let rdata_start = buf.pos();
+        for s in strings {
+            write_txt_string(buf, s).unwrap();
+        }
+        patch_rdlen(buf, rdlen_pos, rdata_start).unwrap();
+    }
+
+    fn write_a(buf: &mut BytePacketBuffer, host: &str, ip: Ipv4Addr) {
+        write_record_header(buf, host, QueryType::A.to_num(), 1, MDNS_TTL).unwrap();
+        buf.write_u16(4).unwrap();
+        buf.write_bytes(&ip.octets()).unwrap();
+    }
+
+    #[test]
+    fn parse_takes_services_from_one_txt_record() {
+        let data = response(3, 0, |buf| {
+            write_txt(buf, "a._numa._tcp.local", &["services=a:1"]);
+            write_txt(buf, "b._numa._tcp.local", &["services=b:2"]);
+            write_a(buf, "b.local", Ipv4Addr::new(192, 168, 1, 8));
+        });
+        let parsed = parse_mdns_response(&data).expect("announcement parses");
+        assert_eq!(parsed.services, [("b".to_string(), 2)]);
+    }
+
+    #[test]
+    fn parse_tolerates_record_counts_past_u16() {
+        let data = response(u16::MAX, 1, |_| {});
+        assert!(parse_mdns_response(&data).is_none());
+    }
+
+    #[test]
+    fn parse_reads_txt_strings_only_inside_the_record() {
+        let data = response(2, 0, |buf| {
+            write_a(buf, "a.local", Ipv4Addr::new(192, 168, 1, 7));
+            write_record_header(
+                buf,
+                "a._numa._tcp.local",
+                QueryType::TXT.to_num(),
+                1,
+                MDNS_TTL,
+            )
+            .unwrap();
+            buf.write_u16(1).unwrap();
+            buf.write_u8(12).unwrap();
+            buf.write_bytes(b"services=x:1").unwrap();
+        });
+        assert!(parse_mdns_response(&data).is_none());
     }
 }
