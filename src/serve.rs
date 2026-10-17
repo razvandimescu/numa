@@ -66,6 +66,7 @@ pub async fn run(load: ConfigLoad) -> crate::Result<()> {
 
     let (resolved_mode, upstream_auto, pool, upstream_label) =
         resolve_upstream_pool(&config, &system_dns, &root_hints, &bootstrap_resolver).await?;
+    let dnssec_enabled = effective_dnssec(&config, resolved_mode);
     let api_port = config.server.api_port;
 
     let mut blocklist = BlocklistStore::new(
@@ -127,7 +128,7 @@ pub async fn run(load: ConfigLoad) -> crate::Result<()> {
         config.dot.enabled,
         config.dot.port,
         config.mobile.port,
-        config.dnssec.enabled,
+        dnssec_enabled,
         resolved_mode == crate::config::UpstreamMode::Recursive,
         config.lan.enabled,
         config.blocking.enabled,
@@ -215,7 +216,7 @@ pub async fn run(load: ConfigLoad) -> crate::Result<()> {
         admission: crate::admission::ResolutionAdmission::new(
             config.server.max_concurrent_resolutions,
         ),
-        dnssec_enabled: config.dnssec.enabled,
+        dnssec_enabled,
         dnssec_strict: config.dnssec.strict,
         health_meta,
         ca_pem,
@@ -661,6 +662,25 @@ fn print_banner(
     eprintln!("{o}  ╚{bar_top}╝{r}\n");
 }
 
+fn effective_dnssec(
+    config: &crate::config::Config,
+    resolved_mode: crate::config::UpstreamMode,
+) -> bool {
+    let validates = resolved_mode.validates_dnssec() == Some(true);
+    if config.dnssec.enabled && !validates {
+        if config.upstream.mode == crate::config::UpstreamMode::Auto {
+            warn!("[dnssec] enabled has no effect: the auto probe fell back to forward mode, a restart probes again");
+        } else {
+            warn!(
+                "[dnssec] enabled has no effect in {} mode. {}",
+                resolved_mode.as_str(),
+                crate::config::DNSSEC_NEEDS_RECURSIVE
+            );
+        }
+    }
+    config.dnssec.enabled && validates
+}
+
 async fn resolve_upstream_pool(
     config: &crate::config::Config,
     system_dns: &crate::system_dns::SystemDnsInfo,
@@ -1036,6 +1056,26 @@ async fn bind_api(addr: SocketAddr, retry: Duration) -> tokio::net::TcpListener 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dnssec_counts_only_when_numa_resolves_recursively() {
+        use crate::config::UpstreamMode::{Forward, Odoh, Recursive};
+        let dnssec_on = |mode: &str| -> crate::config::Config {
+            toml::from_str(&format!(
+                "[upstream]\nmode = \"{mode}\"\n\n[dnssec]\nenabled = true\n"
+            ))
+            .unwrap()
+        };
+        assert!(effective_dnssec(&dnssec_on("recursive"), Recursive));
+        assert!(effective_dnssec(&dnssec_on("auto"), Recursive));
+        assert!(!effective_dnssec(&dnssec_on("auto"), Forward));
+        assert!(!effective_dnssec(&dnssec_on("forward"), Forward));
+        assert!(!effective_dnssec(&dnssec_on("odoh"), Odoh));
+        assert!(!effective_dnssec(
+            &crate::config::Config::default(),
+            Recursive
+        ));
+    }
 
     #[test]
     fn merge_into_keeps_the_larger_table_in_either_order() {

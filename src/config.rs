@@ -237,7 +237,19 @@ impl UpstreamMode {
             _ => Duration::from_millis(hedge_ms),
         }
     }
+
+    /// DNSSEC validation runs on recursive answers only. `None` for auto,
+    /// which settles on recursive or forward at startup.
+    pub fn validates_dnssec(self) -> Option<bool> {
+        match self {
+            UpstreamMode::Recursive => Some(true),
+            UpstreamMode::Forward | UpstreamMode::Odoh => Some(false),
+            UpstreamMode::Auto => None,
+        }
+    }
 }
+
+pub const DNSSEC_NEEDS_RECURSIVE: &str = "DNSSEC validation needs [upstream] mode = \"recursive\"";
 
 #[derive(Deserialize)]
 pub struct UpstreamConfig {
