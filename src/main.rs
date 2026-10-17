@@ -22,7 +22,7 @@ fn main() -> std::process::ExitCode {
     match run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("Error: {e}");
+            eprintln!("Error: {}", numa::format_error_chain(&*e));
             std::process::ExitCode::FAILURE
         }
     }

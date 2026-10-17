@@ -885,26 +885,43 @@ mod tests {
     fn load_config_file_reads_the_named_file() {
         let path = std::env::temp_dir().join(format!("numa-named-{}.toml", std::process::id()));
         std::fs::write(&path, "[server]\napi_port = 5382\n").unwrap();
-        let load = load_config_file(&path.to_string_lossy()).unwrap();
+        let load = load_config_file(&path.to_string_lossy());
         let _ = std::fs::remove_file(&path);
+        let load = load.unwrap();
         assert!(load.found);
         assert_eq!(load.config.server.api_port, 5382);
     }
 
     #[test]
-    fn parse_error_names_the_file_and_line() {
-        let path = std::env::temp_dir().join(format!("numa-bad-{}.toml", std::process::id()));
+    fn parse_error_names_the_resolved_file_and_line() {
+        let path = std::env::temp_dir()
+            .join(".")
+            .join(format!("numa-bad-{}.toml", std::process::id()));
         std::fs::write(&path, "[[zones]]\nvalue = 192.168.1.10\n").unwrap();
-        let Err(err) = load_config_file(&path.to_string_lossy()) else {
+        let resolved = resolve_path(&path.to_string_lossy());
+        let result = read_config(&path);
+        let _ = std::fs::remove_file(&path);
+        let Err(err) = result else {
             panic!("a bare IP must not parse");
         };
-        let _ = std::fs::remove_file(&path);
         let err = err.to_string();
+        assert!(err.starts_with(&format!("{resolved}: ")), "{err}");
+        assert!(err.contains("line 2"), "{err}");
+        assert_eq!(err, err.trim_end());
+    }
+
+    #[test]
+    fn read_error_names_the_file_and_keeps_its_kind() {
+        let dir = std::env::temp_dir();
+        let Err(err) = read_config(&dir) else {
+            panic!("a directory must not read as a config");
+        };
+        assert!(err.downcast_ref::<std::io::Error>().is_some(), "{err}");
+        let resolved = resolve_path(&dir.to_string_lossy());
         assert!(
-            err.contains(&format!("numa-bad-{}.toml", std::process::id())),
+            err.to_string().starts_with(&format!("{resolved}: ")),
             "{err}"
         );
-        assert!(err.contains("line 2"), "{err}");
     }
 
     #[test]
@@ -1848,15 +1865,19 @@ pub fn load_config_file(path: &str) -> Result<ConfigLoad> {
 }
 
 fn read_config(path: &Path) -> Result<Option<ConfigLoad>> {
-    match std::fs::read_to_string(path) {
-        Ok(contents) => Ok(Some(ConfigLoad {
-            config: toml::from_str(&contents).map_err(|e| format!("{}: {e}", path.display()))?,
-            path: resolve_path(&path.to_string_lossy()),
-            found: true,
-        })),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e.into()),
-    }
+    let resolved = resolve_path(&path.to_string_lossy());
+    let contents = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(std::io::Error::new(e.kind(), format!("{resolved}: {e}")).into()),
+    };
+    let config = toml::from_str(&contents)
+        .map_err(|e| format!("{resolved}: {}", e.to_string().trim_end()))?;
+    Ok(Some(ConfigLoad {
+        config,
+        path: resolved,
+        found: true,
+    }))
 }
 
 pub fn load_config(path: &str) -> Result<ConfigLoad> {

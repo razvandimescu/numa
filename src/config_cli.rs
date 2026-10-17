@@ -123,7 +123,7 @@ fn unreadable(path: &str, error: &crate::Error) -> String {
         Some(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
             format!("cannot read {path}: run with {ELEVATE}")
         }
-        _ => format!("cannot read {path}: {error}"),
+        _ => error.to_string(),
     }
 }
 
@@ -351,6 +351,21 @@ mod tests {
             message.ends_with(&format!(": run with {ELEVATE}")),
             "{message}"
         );
+    }
+
+    #[test]
+    fn unreadable_config_names_the_file_once() {
+        let file = format!("numa-token-bad-{}.toml", std::process::id());
+        let path = std::env::temp_dir().join(&file);
+        std::fs::write(&path, "[server\n").unwrap();
+        let path = path.to_string_lossy().to_string();
+        let result = crate::config::load_config(&path);
+        let _ = std::fs::remove_file(&path);
+        let Err(error) = result else {
+            panic!("an unclosed table must not parse");
+        };
+        let message = unreadable(&path, &error);
+        assert_eq!(message.matches(&file).count(), 1, "{message}");
     }
 
     #[test]
