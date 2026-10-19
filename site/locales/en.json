@@ -144,6 +144,7 @@
   "blocking.never_updated": "never updated",
   "blocking.sources": "Sources · {n} domains",
   "blocking.no_sources": "No blocklists configured",
+  "blocking.src_allow": "allow",
   "blocking.allowlist": "Allowlist",
   "blocking.allowlist_n": "Allowlist ({n})",
   "blocking.no_exceptions": "No exceptions",

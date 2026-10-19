@@ -632,6 +632,25 @@ impl Default for BlockingConfig {
     }
 }
 
+impl BlockingConfig {
+    /// URLs and paths in `allowlist`, fetched and refreshed like `lists`.
+    pub fn allowlist_sources(&self) -> Vec<String> {
+        self.allowlist
+            .iter()
+            .filter(|entry| crate::blocklist::is_list_source(entry))
+            .cloned()
+            .collect()
+    }
+
+    pub fn allowlist_domains(&self) -> Vec<String> {
+        self.allowlist
+            .iter()
+            .filter(|entry| !crate::blocklist::is_list_source(entry))
+            .cloned()
+            .collect()
+    }
+}
+
 fn default_blocking_enabled() -> bool {
     true
 }
@@ -1307,6 +1326,24 @@ key_path = "/etc/numa/proxy/key.pem"
     fn lan_enabled_parses() {
         let config: Config = toml::from_str("[lan]\nenabled = true").unwrap();
         assert!(config.lan.enabled);
+    }
+
+    /// A scheme-less URL is not a list source, so it stays a domain.
+    #[test]
+    fn allowlist_splits_list_sources_from_domains() {
+        let referral = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/whitelist-referral-onlydomains.txt";
+        let toml = format!(
+            "[blocking]\nallowlist = [\"example.com\", \"{referral}\", \"file:///etc/numa/allow.txt\", \"raw.githubusercontent.com/list.txt\"]\n"
+        );
+        let blocking = toml::from_str::<Config>(&toml).unwrap().blocking;
+        assert_eq!(
+            blocking.allowlist_sources(),
+            [referral, "file:///etc/numa/allow.txt"]
+        );
+        assert_eq!(
+            blocking.allowlist_domains(),
+            ["example.com", "raw.githubusercontent.com/list.txt"]
+        );
     }
 
     /// `refresh_hours = 0` would spin the refresh loop with a zero sleep.

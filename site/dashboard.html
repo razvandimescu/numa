@@ -1658,6 +1658,7 @@ function renderBlockingInfo(info) {
     ${sources.map(s => `
       <div style="padding:0.3rem 0;font-family:var(--font-mono);font-size:0.72rem;">
         <a href="${h(s.url)}" target="_blank" rel="noopener" style="color:var(--text-secondary);text-decoration:none;" title="${h(s.url)}">${h(shortenUrl(s.url))}</a>
+        ${s.kind === 'allow' ? `<span style="color:var(--emerald);margin-left:0.5rem;">${t('blocking.src_allow')}</span>` : ''}
         ${sourceNote(s)}
       </div>
     `).join('')}

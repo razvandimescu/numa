@@ -8,6 +8,7 @@ use crate::domain_list::PersistedDomainList;
 #[derive(Debug)]
 pub struct BlocklistStore {
     domains: HashSet<String>,
+    allow_domains: HashSet<String>, // from allowlist sources; replaced each refresh
     allowlist: PersistedDomainList,
     manual: PersistedDomainList, // UI/API-blocked domains; survives list refresh
     enabled: bool,
@@ -31,10 +32,36 @@ enum SourceOutcome {
 #[derive(Debug)]
 struct SourceState {
     url: String,
+    kind: SourceKind,
     outcome: SourceOutcome,
     /// Wall clock, not `Instant`, because it has to survive a restart to say
     /// anything useful about a cached copy.
     last_ok_unix: Option<u64>,
+}
+
+impl SourceState {
+    fn record(&mut self, result: &SourceResult) {
+        match result {
+            SourceResult::Loaded => {
+                self.outcome = SourceOutcome::Ok;
+                self.last_ok_unix = Some(crate::blocklist_cache::now_unix());
+            }
+            SourceResult::Cached {
+                error,
+                fetched_unix,
+            } => {
+                self.outcome = SourceOutcome::Stale(error.clone());
+                self.last_ok_unix = Some(*fetched_unix);
+            }
+            SourceResult::Failed(e) => self.outcome = SourceOutcome::Failed(e.clone()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SourceKind {
+    Block,
+    Allow,
 }
 
 /// What a single source did on the last refresh.
@@ -47,6 +74,8 @@ pub enum SourceResult {
 #[derive(serde::Serialize)]
 pub struct SourceStatus {
     pub url: String,
+    /// `block` | `allow`.
+    pub kind: &'static str,
     /// `pending` | `ok` | `stale` | `failed`. One field rather than a pair of
     /// booleans, so a not-yet-fetched source cannot read as a failed one.
     pub status: &'static str,
@@ -62,17 +91,17 @@ pub struct BlockCheckResult {
 }
 
 impl BlockCheckResult {
-    fn blocked(rule: &str, reason: &str) -> Self {
+    fn blocked(rule: &str, reason: impl Into<String>) -> Self {
         Self {
             blocked: true,
-            reason: reason.to_string(),
+            reason: reason.into(),
             matched_rule: Some(rule.to_string()),
         }
     }
-    fn allowed(rule: &str, reason: &str) -> Self {
+    fn allowed(rule: &str, reason: impl Into<String>) -> Self {
         Self {
             blocked: false,
-            reason: reason.to_string(),
+            reason: reason.into(),
             matched_rule: Some(rule.to_string()),
         }
     }
@@ -108,6 +137,7 @@ impl BlocklistStore {
     pub fn new(allowlist: PersistedDomainList, manual: PersistedDomainList) -> Self {
         BlocklistStore {
             domains: HashSet::new(),
+            allow_domains: HashSet::new(),
             allowlist,
             manual,
             enabled: true,
@@ -127,11 +157,12 @@ impl BlocklistStore {
             }
         }
         let domain = normalize(domain);
-        if self.allowlist.find_normalized(&domain).is_some() {
-            return false;
-        }
-        self.manual.find_normalized(&domain).is_some()
-            || find_in_set(&domain, &self.domains).is_some()
+        // Allow lookups only after a hit: most queries are not blocked. An
+        // allowlist source is someone else's list, so it can't undo a manual block.
+        let blocked = self.manual.find_normalized(&domain).is_some()
+            || (find_in_set(&domain, &self.domains).is_some()
+                && find_in_set(&domain, &self.allow_domains).is_none());
+        blocked && self.allowlist.find_normalized(&domain).is_none()
     }
 
     pub fn check(&self, domain: &str) -> BlockCheckResult {
@@ -148,25 +179,20 @@ impl BlocklistStore {
         let domain = normalize(domain);
 
         if let Some(matched) = self.allowlist.find_normalized(&domain) {
-            let reason = if matched == domain {
-                "exact match in allowlist"
-            } else {
-                "parent domain in allowlist"
-            };
-            return BlockCheckResult::allowed(matched, reason);
+            return BlockCheckResult::allowed(matched, match_reason(matched, &domain, "allowlist"));
         }
 
         if let Some(matched) = self.manual.find_normalized(&domain) {
             return BlockCheckResult::blocked(matched, "manually blocked");
         }
 
+        if let Some(matched) = find_in_set(&domain, &self.allow_domains) {
+            let reason = match_reason(matched, &domain, "allowlist source");
+            return BlockCheckResult::allowed(matched, reason);
+        }
+
         if let Some(matched) = find_in_set(&domain, &self.domains) {
-            let reason = if matched == domain {
-                "exact match in blocklist"
-            } else {
-                "parent domain in blocklist"
-            };
-            return BlockCheckResult::blocked(matched, reason);
+            return BlockCheckResult::blocked(matched, match_reason(matched, &domain, "blocklist"));
         }
 
         BlockCheckResult::not_blocked()
@@ -179,42 +205,42 @@ impl BlocklistStore {
         self.last_refresh = Some(Instant::now());
     }
 
+    pub fn swap_allow_domains(&mut self, domains: HashSet<String>) {
+        self.allow_domains = domains;
+    }
+
+    pub fn allow_domains_loaded(&self) -> usize {
+        self.allow_domains.len()
+    }
+
     /// Seed the configured sources before the first fetch, so an empty source
     /// list means "none configured" rather than "none has loaded yet".
-    ///
-    /// Deduplicated: `record_outcomes` matches by URL, so a repeated entry
-    /// would leave a second state stuck `Pending` and health stuck `loading`.
     pub fn set_sources(&mut self, urls: &[String]) {
-        self.sources = dedup_sources(urls)
-            .iter()
-            .map(|url| SourceState {
-                url: url.clone(),
+        self.seed_sources(SourceKind::Block, urls);
+    }
+
+    pub fn set_allow_sources(&mut self, urls: &[String]) {
+        self.seed_sources(SourceKind::Allow, urls);
+    }
+
+    fn seed_sources(&mut self, kind: SourceKind, urls: &[String]) {
+        self.sources.retain(|s| s.kind != kind);
+        self.sources
+            .extend(dedup_sources(urls).into_iter().map(|url| SourceState {
+                url,
+                kind,
                 outcome: SourceOutcome::Pending,
                 last_ok_unix: None,
-            })
-            .collect();
+            }));
     }
 
     /// Recorded whether or not the domains were swapped in, because a refresh
-    /// that keeps the live list still has to say why it kept it.
+    /// that keeps the live list still has to say why it kept it. A URL listed
+    /// as both kinds is one fetch, so both states take its outcome.
     pub fn record_outcomes(&mut self, outcomes: &[(String, SourceResult)]) {
         for (url, result) in outcomes {
-            let Some(state) = self.sources.iter_mut().find(|s| &s.url == url) else {
-                continue;
-            };
-            match result {
-                SourceResult::Loaded => {
-                    state.outcome = SourceOutcome::Ok;
-                    state.last_ok_unix = Some(crate::blocklist_cache::now_unix());
-                }
-                SourceResult::Cached {
-                    error,
-                    fetched_unix,
-                } => {
-                    state.outcome = SourceOutcome::Stale(error.clone());
-                    state.last_ok_unix = Some(*fetched_unix);
-                }
-                SourceResult::Failed(e) => state.outcome = SourceOutcome::Failed(e.clone()),
+            for state in self.sources.iter_mut().filter(|s| &s.url == url) {
+                state.record(result);
             }
         }
     }
@@ -226,7 +252,8 @@ impl BlocklistStore {
         if !self.enabled {
             return "off";
         }
-        if self.sources.is_empty() {
+        // Allow sources alone have nothing to unblock.
+        if !self.sources.iter().any(|s| s.kind == SourceKind::Block) {
             return "unconfigured";
         }
         if self
@@ -317,10 +344,10 @@ impl BlocklistStore {
     }
 
     pub fn heap_bytes(&self) -> usize {
-        let per_slot_overhead = std::mem::size_of::<u64>() + std::mem::size_of::<String>() + 1;
-        let domains_table = self.domains.capacity() * per_slot_overhead;
-        let domains_heap: usize = self.domains.iter().map(|d| d.capacity()).sum();
-        domains_table + domains_heap + self.allowlist.heap_bytes() + self.manual.heap_bytes()
+        set_heap_bytes(&self.domains)
+            + set_heap_bytes(&self.allow_domains)
+            + self.allowlist.heap_bytes()
+            + self.manual.heap_bytes()
     }
 
     pub fn stats(&self) -> BlocklistStats {
@@ -335,6 +362,10 @@ impl BlocklistStore {
                 .iter()
                 .map(|s| SourceStatus {
                     url: s.url.clone(),
+                    kind: match s.kind {
+                        SourceKind::Block => "block",
+                        SourceKind::Allow => "allow",
+                    },
                     status: match s.outcome {
                         SourceOutcome::Pending => "pending",
                         SourceOutcome::Ok => "ok",
@@ -355,8 +386,17 @@ impl BlocklistStore {
     }
 }
 
+fn match_reason(matched: &str, domain: &str, list: &str) -> String {
+    let how = if matched == domain {
+        "exact match"
+    } else {
+        "parent domain"
+    };
+    format!("{how} in {list}")
+}
+
 /// First occurrence of each URL wins, order preserved. Fetching the same list
-/// twice is pure waste, and a repeat also strands a source in `Pending`.
+/// twice is pure waste.
 pub fn dedup_sources(lists: &[String]) -> Vec<String> {
     let mut seen = HashSet::new();
     lists
@@ -368,8 +408,20 @@ pub fn dedup_sources(lists: &[String]) -> Vec<String> {
 
 pub struct ParsedList {
     pub domains: HashSet<String>,
+    /// Adblock `@@` lines, which unblock rather than block.
+    pub exceptions: HashSet<String>,
     entry_lines: usize,
     parsed_lines: usize,
+}
+
+impl ParsedList {
+    /// What an allowlist source contributes: in a list meant to allow, every
+    /// entry allows, marked `@@` or not.
+    pub fn allowed(self) -> HashSet<String> {
+        let mut allowed = self.domains;
+        merge_into(&mut allowed, self.exceptions);
+        allowed
+    }
 }
 
 /// Parse a blocklist text file into a set of domains.
@@ -383,6 +435,7 @@ pub fn parse_blocklist(text: &str) -> HashSet<String> {
 /// file names every domain on both a `0.0.0.0` and a `::` line, and both count.
 pub(crate) fn parse_blocklist_counted(text: &str) -> ParsedList {
     let mut domains = HashSet::new();
+    let mut exceptions = HashSet::new();
     let mut entry_lines = 0;
     let mut parsed_lines = 0;
     for line in text.lines() {
@@ -407,13 +460,18 @@ pub(crate) fn parse_blocklist_counted(text: &str) -> ParsedList {
             continue;
         }
 
-        // Plain domain or adblock filter syntax.
-        let d = line.trim_start_matches("*.").trim_start_matches("||");
+        // Plain domain or adblock filter syntax; `@@` marks an exception.
+        let (rule, target) = match line.strip_prefix("@@") {
+            Some(rule) => (rule, &mut exceptions),
+            None => (line, &mut domains),
+        };
+        let d = rule.trim_start_matches("*.").trim_start_matches("||");
         let d = d.split('$').next().unwrap_or(d); // strip adblock $options
-        parsed_lines += usize::from(insert_if_valid(&mut domains, d.trim_end_matches('^')));
+        parsed_lines += usize::from(insert_if_valid(target, d.trim_end_matches('^')));
     }
     ParsedList {
         domains,
+        exceptions,
         entry_lines,
         parsed_lines,
     }
@@ -465,6 +523,19 @@ pub(crate) fn find_in_set<'a>(domain: &'a str, set: &HashSet<String>) -> Option<
         }
     }
     None
+}
+
+/// Extends the larger set with the smaller, so the bigger table is never rehashed.
+pub(crate) fn merge_into(acc: &mut HashSet<String>, mut set: HashSet<String>) {
+    if acc.len() < set.len() {
+        std::mem::swap(acc, &mut set);
+    }
+    acc.extend(set);
+}
+
+pub(crate) fn set_heap_bytes(set: &HashSet<String>) -> usize {
+    let per_slot_overhead = std::mem::size_of::<u64>() + std::mem::size_of::<String>() + 1;
+    set.capacity() * per_slot_overhead + set.iter().map(|d| d.capacity()).sum::<usize>()
 }
 
 fn insert_if_valid(set: &mut HashSet<String>, raw: &str) -> bool {
@@ -775,6 +846,90 @@ mod tests {
     }
 
     #[test]
+    fn merge_into_keeps_the_larger_table_in_either_order() {
+        let small: HashSet<String> = ["a.com", "shared.com"].map(String::from).into();
+        let large_ptr = |s: &HashSet<String>| s.get("d0.com").unwrap() as *const String;
+
+        for large_first in [false, true] {
+            let large: HashSet<String> = (0..1_000).map(|i| format!("d{i}.com")).collect();
+            let kept = large_ptr(&large);
+            let (first, second) = if large_first {
+                (large, small.clone())
+            } else {
+                (small.clone(), large)
+            };
+            let mut acc = HashSet::new();
+            merge_into(&mut acc, first);
+            merge_into(&mut acc, second);
+            assert_eq!(acc.len(), 1_002);
+            assert!(acc.contains("a.com") && acc.contains("d999.com"));
+            assert_eq!(large_ptr(&acc), kept, "large set was rehashed, not kept");
+        }
+    }
+
+    #[test]
+    fn allow_source_unblocks_child_of_blocked_parent() {
+        let mut store = store_with(&["example.com"], &[]);
+        store.swap_allow_domains(["go.example.com".to_string()].into());
+        assert!(!store.is_blocked("www.go.example.com"));
+        assert!(store.is_blocked("ads.example.com"));
+        let check = store.check("www.go.example.com");
+        assert!(!check.blocked);
+        assert_eq!(check.reason, "parent domain in allowlist source");
+    }
+
+    #[test]
+    fn manual_block_beats_allow_source() {
+        let mut store = empty_store();
+        store.add_to_blocklist("tracker.example.com");
+        store.swap_allow_domains(["example.com".to_string()].into());
+        assert!(
+            store.is_blocked("tracker.example.com"),
+            "a list someone else keeps must not undo a local block"
+        );
+        assert_eq!(
+            store.check("tracker.example.com").reason,
+            "manually blocked"
+        );
+    }
+
+    #[test]
+    fn adblock_exceptions_are_kept_apart_from_blocks() {
+        let parsed = parse_blocklist_counted("@@||go.example.com^\n||ads.example.com^\n");
+        assert_eq!(
+            parsed.domains,
+            HashSet::from(["ads.example.com".to_string()])
+        );
+        assert_eq!(
+            parsed.exceptions,
+            HashSet::from(["go.example.com".to_string()])
+        );
+    }
+
+    #[test]
+    fn sources_of_each_kind_are_seeded_and_reported_apart() {
+        let mut store = empty_store();
+        store.set_allow_sources(&["https://b.example/allow.txt".to_string()]);
+        assert_eq!(
+            store.health(),
+            "unconfigured",
+            "allow sources alone block nothing"
+        );
+        store.set_sources(&["https://a.example/l.txt".to_string()]);
+        let kinds: Vec<&str> = store.stats().list_sources.iter().map(|s| s.kind).collect();
+        assert_eq!(kinds, ["allow", "block"]);
+    }
+
+    /// The dashboard's "refreshed" is the block set's age, so a refresh that
+    /// kept a dead block side must not read as fresh.
+    #[test]
+    fn allow_swap_alone_is_not_a_refresh() {
+        let mut store = empty_store();
+        store.swap_allow_domains(["go.example.com".to_string()].into());
+        assert_eq!(store.stats().last_refresh_secs_ago, None);
+    }
+
+    #[test]
     fn health_walks_from_unconfigured_to_failed() {
         let mut store = empty_store();
         assert_eq!(store.health(), "unconfigured");
@@ -939,12 +1094,12 @@ pub async fn download_blocklists(
             let text = if let Some(path) = local_path(source) {
                 match tokio::fs::read_to_string(&path).await {
                     Ok(t) => {
-                        info!("loaded local blocklist: {} ({} bytes)", source, t.len());
+                        info!("loaded local list: {} ({} bytes)", source, t.len());
                         Ok(t)
                     }
                     Err(e) => {
                         warn!(
-                            "blocklist {} unreadable: {} — skipping",
+                            "list {} unreadable: {} — skipping",
                             source,
                             crate::format_error_chain(&e)
                         );
@@ -954,7 +1109,7 @@ pub async fn download_blocklists(
             } else {
                 match fetch_with_retry(client, source).await {
                     Ok(t) => {
-                        info!("downloaded blocklist: {} ({} bytes)", source, t.len());
+                        info!("downloaded list: {} ({} bytes)", source, t.len());
                         Ok(t)
                     }
                     Err(e) => Err(e),
@@ -967,6 +1122,11 @@ pub async fn download_blocklists(
         .await
         .into_iter()
         .collect()
+}
+
+/// The rule `lists` uses, shared with `allowlist`, which holds domains too.
+pub(crate) fn is_list_source(entry: &str) -> bool {
+    crate::blocklist_cache::is_remote(entry) || local_path(entry).is_some()
 }
 
 fn local_path(source: &str) -> Option<std::path::PathBuf> {
@@ -996,7 +1156,7 @@ async fn fetch_with_retry_delays(
             Err(e) if attempt < total => {
                 let delay = delays[attempt - 1];
                 warn!(
-                    "blocklist {} attempt {}/{} failed: {} — retrying in {}s",
+                    "list {} attempt {}/{} failed: {} — retrying in {}s",
                     url, attempt, total, e.detail, delay
                 );
                 last = e.short;
@@ -1004,7 +1164,7 @@ async fn fetch_with_retry_delays(
             }
             Err(e) => {
                 warn!(
-                    "blocklist {} attempt {}/{} failed: {} — giving up",
+                    "list {} attempt {}/{} failed: {} — giving up",
                     url, attempt, total, e.detail
                 );
                 last = e.short;

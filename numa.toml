@@ -157,7 +157,11 @@ api_port = 5380
 # ]
 # Where raw.githubusercontent.com is unreachable, the jsDelivr mirror of the
 # same file works: https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/wildcard/pro-onlydomains.txt
-# allowlist = ["example.com"]  # domains to never block
+# allowlist = [                # never blocked by the lists above, subdomains included
+#     "example.com",
+#     "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/whitelist-referral-onlydomains.txt",
+#     "/etc/numa/allow.txt",   # URLs and paths refresh like the lists above
+# ]
 
 # ── Per-client domain policies ─────────────────────────────────────
 # Block or allow specific domains for specific clients, on top of the

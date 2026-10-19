@@ -97,7 +97,7 @@ impl BlocklistCache {
 }
 
 /// Only remote lists are cached; a local path is already the user's own copy.
-fn is_remote(source: &str) -> bool {
+pub(crate) fn is_remote(source: &str) -> bool {
     source.starts_with("http://") || source.starts_with("https://")
 }
 

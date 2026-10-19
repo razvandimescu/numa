@@ -8,7 +8,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use crate::blocklist::{find_in_set, normalize};
+use crate::blocklist::{find_in_set, normalize, set_heap_bytes};
 use crate::persist::{load_json_vec, save_json};
 
 #[derive(Debug)]
@@ -105,17 +105,8 @@ impl PersistedDomainList {
         self.config.is_empty() && self.user.is_empty()
     }
 
-    /// Estimated heap usage, mirroring `BlocklistStore::heap_bytes`.
     pub fn heap_bytes(&self) -> usize {
-        let per_slot_overhead = std::mem::size_of::<u64>() + std::mem::size_of::<String>() + 1;
-        let table = (self.config.capacity() + self.user.capacity()) * per_slot_overhead;
-        let strings: usize = self
-            .config
-            .iter()
-            .chain(self.user.iter())
-            .map(|d| d.capacity())
-            .sum();
-        table + strings
+        set_heap_bytes(&self.config) + set_heap_bytes(&self.user)
     }
 
     fn load_persisted(&mut self) {
