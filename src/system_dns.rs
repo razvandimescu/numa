@@ -792,7 +792,7 @@ fn register_service_scm(exe: &std::path::Path) -> Result<(), String> {
         "Self-sovereign DNS resolver (ad blocking, DoH/DoT, local zones).",
     ]);
 
-    // Restart on crash: 5s, 5s, 10s; reset failure counter after 60s.
+    // Restart on failure: 5s, 5s, then every 10s; reset failure counter after 60s.
     let _ = run_sc(&[
         "failure",
         name,
@@ -801,6 +801,9 @@ fn register_service_scm(exe: &std::path::Path) -> Result<(), String> {
         "actions=",
         "restart/5000/restart/5000/restart/10000",
     ]);
+    // Without this flag the SCM runs the actions only on a crash, not when
+    // the service reports Stopped with a non-zero exit code.
+    let _ = run_sc(&["failureflag", name, "1"]);
 
     eprintln!("  Registered service '{}' (boot-time).", name);
     Ok(())

@@ -84,15 +84,17 @@ fn run_service() -> windows_service::Result<()> {
         let _ = server_done_tx.send(());
     });
 
-    // Wait for either SCM stop or server termination.
-    loop {
+    // A server that stops without an SCM request has failed. Report it with a
+    // non-zero exit code, or the SCM takes it as a clean stop and never runs
+    // the restart policy.
+    let exit_code = loop {
         if shutdown_rx.recv_timeout(Duration::from_millis(500)).is_ok() {
-            break;
+            break ServiceExitCode::NO_ERROR;
         }
         if server_done_rx.try_recv().is_ok() {
-            break;
+            break ServiceExitCode::ServiceSpecific(1);
         }
-    }
+    };
 
     // The server's tokio runtime runs detached inside server_thread. Abandon
     // it — the process is about to report Stopped and the SCM will terminate
@@ -104,7 +106,7 @@ fn run_service() -> windows_service::Result<()> {
         service_type: ServiceType::OWN_PROCESS,
         current_state: ServiceState::Stopped,
         controls_accepted: ServiceControlAccept::empty(),
-        exit_code: ServiceExitCode::Win32(0),
+        exit_code,
         checkpoint: 0,
         wait_hint: Duration::default(),
         process_id: None,
