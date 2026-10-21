@@ -237,7 +237,19 @@ impl UpstreamMode {
             _ => Duration::from_millis(hedge_ms),
         }
     }
+
+    /// DNSSEC validation runs on recursive answers only. `None` for auto,
+    /// which settles on recursive or forward at startup.
+    pub fn validates_dnssec(self) -> Option<bool> {
+        match self {
+            UpstreamMode::Recursive => Some(true),
+            UpstreamMode::Forward | UpstreamMode::Odoh => Some(false),
+            UpstreamMode::Auto => None,
+        }
+    }
 }
+
+pub const DNSSEC_NEEDS_RECURSIVE: &str = "DNSSEC validation needs [upstream] mode = \"recursive\"";
 
 #[derive(Deserialize)]
 pub struct UpstreamConfig {
@@ -1156,10 +1168,19 @@ mod tests {
     }
 
     #[test]
-    fn unwritable_cname_target_rejected() {
+    fn unwritable_host_rejected() {
         let long_label = format!("{}.lan", "a".repeat(64));
-        assert!(build_zone_map(&[zone("app.test", "CNAME", &long_label)]).is_err());
-        assert!(build_zone_map(&[zone("app.test", "CNAME", "x.ab\\")]).is_err());
+        for host in [long_label.as_str(), "x.ab\\"] {
+            for (record_type, value) in [
+                ("CNAME", host.to_string()),
+                ("PTR", host.to_string()),
+                ("NS", host.to_string()),
+                ("MX", format!("10 {host}")),
+            ] {
+                let zones = [zone("app.test", record_type, &value)];
+                assert!(build_zone_map(&zones).is_err(), "{record_type} {value}");
+            }
+        }
     }
 
     #[test]
@@ -2085,7 +2106,7 @@ pub fn build_zone_map(zones: &[ZoneRecord]) -> Result<ZoneMap> {
                 QueryType::PTR,
                 DnsRecord::PTR {
                     domain: domain.clone(),
-                    host: zone_name("PTR target", value)?,
+                    host: canonical_zone_name("PTR target", value)?,
                     ttl: zone.ttl,
                 },
             ),
@@ -2093,7 +2114,7 @@ pub fn build_zone_map(zones: &[ZoneRecord]) -> Result<ZoneMap> {
                 QueryType::NS,
                 DnsRecord::NS {
                     domain: domain.clone(),
-                    host: zone_name("NS host", value)?,
+                    host: canonical_zone_name("NS host", value)?,
                     ttl: zone.ttl,
                 },
             ),
@@ -2111,7 +2132,7 @@ pub fn build_zone_map(zones: &[ZoneRecord]) -> Result<ZoneMap> {
                     DnsRecord::MX {
                         domain: domain.clone(),
                         priority,
-                        host: host.to_string(),
+                        host: canonical_zone_name("MX host", host)?,
                         ttl: zone.ttl,
                     },
                 )
@@ -2145,16 +2166,11 @@ pub fn build_zone_map(zones: &[ZoneRecord]) -> Result<ZoneMap> {
     Ok(map)
 }
 
-fn zone_name(what: &str, name: &str) -> Result<String> {
+fn canonical_zone_name(what: &str, name: &str) -> Result<String> {
     if name.contains(char::is_whitespace) {
         return Err(format!("{what} '{name}' contains whitespace").into());
     }
-    Ok(name.to_string())
-}
-
-fn canonical_zone_name(what: &str, name: &str) -> Result<String> {
-    let name = zone_name(what, name)?;
-    canonical_name(&name).map_err(|e| format!("invalid {what} '{name}': {e}").into())
+    canonical_name(name).map_err(|e| format!("invalid {what} '{name}': {e}").into())
 }
 
 /// Room left in a response after the header, the longest possible question
