@@ -15,6 +15,13 @@ fn main() {
 
     println!("cargo:rerun-if-changed=.git/HEAD");
     embed_locales();
+
+    // LOAD_LIBRARY_SEARCH_SYSTEM32: resolve the exe's own imports from
+    // System32 only, never from the folder it runs from (Downloads during
+    // `numa install`). Only link.exe knows the flag.
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        println!("cargo:rustc-link-arg-bins=/DEPENDENTLOADFLAG:0x800");
+    }
 }
 
 /// Emit a `(code, contents)` slice for every `site/locales/*.json`, so adding a

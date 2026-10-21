@@ -523,7 +523,10 @@ fn detect_dhcp_dns_macos() -> Option<String> {
 fn discover_windows() -> SystemDnsInfo {
     use log::{debug, warn};
 
-    let output = match std::process::Command::new("ipconfig").arg("/all").output() {
+    let output = match std::process::Command::new(crate::system32("ipconfig.exe"))
+        .arg("/all")
+        .output()
+    {
         Ok(o) => o,
         Err(e) => {
             warn!("failed to run ipconfig /all: {}", e);
@@ -568,26 +571,35 @@ fn discover_windows() -> SystemDnsInfo {
 }
 
 #[cfg(windows)]
-fn run_powershell(script: &str, what: &str) -> Result<(), String> {
-    let out = std::process::Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            script,
-        ])
+fn run_checked(cmd: &mut std::process::Command, what: &str) -> Result<(), String> {
+    let out = cmd
         .output()
-        .map_err(|e| format!("failed to run powershell for {}: {}", what, e))?;
+        .map_err(|e| format!("failed to run {}: {}", what, e))?;
     if !out.status.success() {
-        return Err(format!(
-            "{} failed: {}",
-            what,
+        let detail = format!(
+            "{} {}",
+            String::from_utf8_lossy(&out.stdout).trim(),
             String::from_utf8_lossy(&out.stderr).trim()
-        ));
+        );
+        return Err(format!("{} failed: {}", what, detail.trim()));
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn run_powershell(script: &str, what: &str) -> Result<(), String> {
+    run_checked(
+        std::process::Command::new(crate::system32("WindowsPowerShell\\v1.0\\powershell.exe"))
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script,
+            ]),
+        what,
+    )
 }
 
 /// Idempotent: any prior rule pointing at our loopback IP is removed first.
@@ -635,7 +647,7 @@ fn unwind_legacy_install_if_present() {
 
     // Re-enable Dnscache (registry Start=2 = auto) before anything else —
     // the Wlansvc/Wcmsvc cascade can't recover until Dnscache is startable.
-    let _ = std::process::Command::new("reg")
+    let _ = std::process::Command::new(crate::system32("reg.exe"))
         .args([
             "add",
             "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Dnscache",
@@ -653,7 +665,7 @@ fn unwind_legacy_install_if_present() {
     if let Ok(serde_json::Value::Object(obj)) = serde_json::from_str(&json) {
         for name in obj.keys() {
             let name_arg = format!("name={}", name);
-            let _ = std::process::Command::new("netsh")
+            let _ = std::process::Command::new(crate::system32("netsh.exe"))
                 .args([
                     "interface",
                     "ipv4",
@@ -680,6 +692,7 @@ fn install_windows(skip_system_dns: bool) -> Result<(), String> {
 
     unwind_legacy_install_if_present();
 
+    restrict_data_dir()?;
     let service_exe = install_service_binary()?;
     register_service_scm(&service_exe)?;
 
@@ -715,11 +728,41 @@ fn windows_service_exe_path() -> std::path::PathBuf {
 /// caller reads stdout to format a useful error.
 #[cfg(windows)]
 fn run_sc(args: &[&str]) -> Result<std::process::Output, String> {
-    let out = std::process::Command::new("sc")
+    let out = std::process::Command::new(crate::system32("sc.exe"))
         .args(args)
         .output()
         .map_err(|e| format!("failed to run sc {}: {}", args.first().unwrap_or(&""), e))?;
     Ok(out)
+}
+
+/// Only SYSTEM and Administrators get into the data dir. ProgramData lets any
+/// user add files, while the SYSTEM service runs from `bin\` (the loader and
+/// `Command::new` search there first) and keeps ca.key and api_token here.
+/// The owner goes first because an owner keeps WRITE_DAC whatever the DACL
+/// says, and the reset drops ACEs someone set on a child before install.
+#[cfg(windows)]
+fn restrict_data_dir() -> Result<(), String> {
+    let dir = crate::data_dir();
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("failed to create {}: {}", dir.display(), e))?;
+    let icacls = |args: &[&str]| {
+        run_checked(
+            std::process::Command::new(crate::system32("icacls.exe"))
+                .arg(&dir)
+                .args(args),
+            &format!("icacls {} {}", dir.display(), args.join(" ")),
+        )
+    };
+    // SIDs, since account names are localized: S-1-5-18 SYSTEM, S-1-5-32-544 Administrators
+    icacls(&["/setowner", "*S-1-5-32-544", "/T", "/C", "/Q"])?;
+    icacls(&["/reset", "/T", "/C", "/Q"])?;
+    icacls(&[
+        "/inheritance:r",
+        "/grant:r",
+        "*S-1-5-18:(OI)(CI)F",
+        "*S-1-5-32-544:(OI)(CI)F",
+        "/Q",
+    ])
 }
 
 /// Copy the currently-running binary to the service install location. SCM
@@ -2084,7 +2127,7 @@ fn run_refresh(store_name: &str, argv: &[&str]) -> Result<(), String> {
 
 #[cfg(windows)]
 fn trust_ca_windows(ca_path: &std::path::Path) -> Result<(), String> {
-    let status = std::process::Command::new("certutil")
+    let status = std::process::Command::new(crate::system32("certutil.exe"))
         .args(["-addstore", "-f", "Root"])
         .arg(ca_path)
         .status()
@@ -2098,7 +2141,7 @@ fn trust_ca_windows(ca_path: &std::path::Path) -> Result<(), String> {
 
 #[cfg(windows)]
 fn untrust_ca_windows() -> Result<(), String> {
-    let _ = std::process::Command::new("certutil")
+    let _ = std::process::Command::new(crate::system32("certutil.exe"))
         .args(["-delstore", "Root", crate::tls::CA_COMMON_NAME])
         .status();
     eprintln!("  Removed Numa CA from Windows Root store");

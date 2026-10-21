@@ -82,7 +82,11 @@ pub fn version() -> &'static str {
 /// fails. Call sites that need the short form (e.g., mDNS instance
 /// names) should truncate at the first `.`.
 pub fn hostname() -> String {
-    std::process::Command::new("hostname")
+    #[cfg(windows)]
+    let program = system32("hostname.exe");
+    #[cfg(not(windows))]
+    let program = "hostname";
+    std::process::Command::new(program)
         .output()
         .ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())
@@ -181,6 +185,15 @@ pub fn cli_config_path() -> String {
     {
         "numa.toml".to_string()
     }
+}
+
+/// Windows tools by full path: `Command::new("sc")` searches the running
+/// exe's folder first, which is Downloads when `numa install` runs from there.
+#[cfg(windows)]
+pub(crate) fn system32(tool: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into()))
+        .join("System32")
+        .join(tool)
 }
 
 /// Default system-wide data directory for TLS certs. Overridable via

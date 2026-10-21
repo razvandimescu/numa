@@ -302,12 +302,26 @@ fn not_writable_message(path: &Path) -> String {
 }
 
 fn configured_editor() -> (String, Vec<String>) {
-    let value = ["VISUAL", "EDITOR"]
+    ["VISUAL", "EDITOR"]
         .iter()
         .filter_map(|name| std::env::var(name).ok())
         .find(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| if cfg!(windows) { "notepad" } else { "vi" }.to_string());
-    split_editor(&value)
+        .map_or_else(
+            || (default_editor(), Vec::new()),
+            |value| split_editor(&value),
+        )
+}
+
+#[cfg(windows)]
+fn default_editor() -> String {
+    crate::system32("notepad.exe")
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[cfg(not(windows))]
+fn default_editor() -> String {
+    "vi".to_string()
 }
 
 fn split_editor(value: &str) -> (String, Vec<String>) {
