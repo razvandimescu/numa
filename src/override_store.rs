@@ -73,10 +73,11 @@ impl OverrideStore {
         }
     }
 
-    pub fn insert(&mut self, entry: OverrideEntry) {
+    pub fn insert_all(&mut self, entries: impl IntoIterator<Item = OverrideEntry>) {
         // Clean up expired entries on write
         self.entries.retain(|_, e| !e.is_expired());
-        self.entries.insert(entry.domain.clone(), entry);
+        self.entries
+            .extend(entries.into_iter().map(|e| (e.domain.clone(), e)));
     }
 
     /// Hot path: assumes `domain` is already lowercased (the parser does this).
@@ -175,15 +176,17 @@ mod tests {
     fn heap_bytes_grows_with_entries() {
         let mut store = OverrideStore::new();
         let empty = store.heap_bytes();
-        store.insert(entry("example.com", "1.2.3.4"));
+        store.insert_all([entry("example.com", "1.2.3.4")]);
         assert!(store.heap_bytes() > empty);
     }
 
     #[test]
     fn names_are_stored_as_the_wire_reads_them() {
         let mut store = OverrideStore::new();
-        store.insert(entry("NAS.lan.", "192.168.1.42"));
-        store.insert(entry("app.lan", "NAS.lan."));
+        store.insert_all([
+            entry("NAS.lan.", "192.168.1.42"),
+            entry("app.lan", "NAS.lan."),
+        ]);
 
         assert!(store.lookup("nas.lan").is_some());
         assert!(store.get("Nas.Lan.").is_some());

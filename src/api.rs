@@ -344,7 +344,7 @@ async fn create_overrides(
             ..OverrideResponse::from(e)
         })
         .collect();
-    store_overrides(&ctx, entries);
+    ctx.overrides.write().unwrap().insert_all(entries);
     Ok((StatusCode::CREATED, Json(responses)))
 }
 
@@ -361,13 +361,6 @@ fn parse_overrides(
         })
         .collect::<crate::Result<_>>()
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
-}
-
-fn store_overrides(ctx: &ServerCtx, entries: Vec<OverrideEntry>) {
-    let mut store = ctx.overrides.write().unwrap();
-    for entry in entries {
-        store.insert(entry);
-    }
 }
 
 async fn list_overrides(State(ctx): State<Arc<ServerCtx>>) -> Json<Vec<OverrideResponse>> {
@@ -412,7 +405,7 @@ async fn load_environment(
 ) -> Result<(StatusCode, Json<EnvironmentResponse>), (StatusCode, String)> {
     let entries = parse_overrides(&req.overrides, req.duration_secs)?;
     let created = entries.len();
-    store_overrides(&ctx, entries);
+    ctx.overrides.write().unwrap().insert_all(entries);
     Ok((StatusCode::CREATED, Json(EnvironmentResponse { created })))
 }
 

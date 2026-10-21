@@ -1729,7 +1729,7 @@ mod tests {
         ctx.overrides
             .write()
             .unwrap()
-            .insert(OverrideEntry::new("nas.local", "192.168.1.50", 60, None).unwrap());
+            .insert_all([OverrideEntry::new("nas.local", "192.168.1.50", 60, None).unwrap()]);
         let ctx = Arc::new(ctx);
 
         let (resp, path) = resolve_in_test(&ctx, "nas.local", QueryType::A).await;
@@ -1798,7 +1798,7 @@ mod tests {
         ctx.overrides
             .write()
             .unwrap()
-            .insert(OverrideEntry::new("override.test", "1.2.3.4", 60, None).unwrap());
+            .insert_all([OverrideEntry::new("override.test", "1.2.3.4", 60, None).unwrap()]);
         let ctx = Arc::new(ctx);
 
         let (resp, path) = resolve_in_test(&ctx, "override.test", QueryType::A).await;
@@ -2037,7 +2037,7 @@ mod tests {
         ctx.overrides
             .write()
             .unwrap()
-            .insert(OverrideEntry::new("v6.test", "2001:db8::1", 60, None).unwrap());
+            .insert_all([OverrideEntry::new("v6.test", "2001:db8::1", 60, None).unwrap()]);
         let ctx = Arc::new(ctx);
 
         let (resp, path) = resolve_in_test(&ctx, "v6.test", QueryType::AAAA).await;
@@ -3210,7 +3210,9 @@ mod tests {
             ctx.overrides
                 .write()
                 .unwrap()
-                .insert(OverrideEntry::new("override.example.com", target, 60, None).unwrap());
+                .insert_all(
+                    [OverrideEntry::new("override.example.com", target, 60, None).unwrap()],
+                );
             let ctx = Arc::new(ctx);
 
             for qname in ["zone.example.com", "override.example.com"] {
