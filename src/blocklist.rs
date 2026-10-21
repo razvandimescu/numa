@@ -59,7 +59,7 @@ impl SourceState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum SourceKind {
+pub(crate) enum SourceKind {
     Block,
     Allow,
 }
@@ -408,34 +408,21 @@ pub fn dedup_sources(lists: &[String]) -> Vec<String> {
 
 pub struct ParsedList {
     pub domains: HashSet<String>,
-    /// Adblock `@@` lines, which unblock rather than block.
-    pub exceptions: HashSet<String>,
     entry_lines: usize,
     parsed_lines: usize,
 }
 
-impl ParsedList {
-    /// What an allowlist source contributes: in a list meant to allow, every
-    /// entry allows, marked `@@` or not.
-    pub fn allowed(self) -> HashSet<String> {
-        let mut allowed = self.domains;
-        merge_into(&mut allowed, self.exceptions);
-        allowed
-    }
-}
-
 /// Parse a blocklist text file into a set of domains.
 pub fn parse_blocklist(text: &str) -> HashSet<String> {
-    parse_blocklist_counted(text).domains
+    parse_blocklist_counted(text, SourceKind::Block).domains
 }
 
 /// One walk that also counts how many entry lines yielded a domain, so
 /// `source_defect` never re-derives that from a second pass with a filter that
 /// could drift. Lines are judged for validity, not novelty: a dual-stack hosts
 /// file names every domain on both a `0.0.0.0` and a `::` line, and both count.
-pub(crate) fn parse_blocklist_counted(text: &str) -> ParsedList {
+pub(crate) fn parse_blocklist_counted(text: &str, kind: SourceKind) -> ParsedList {
     let mut domains = HashSet::new();
-    let mut exceptions = HashSet::new();
     let mut entry_lines = 0;
     let mut parsed_lines = 0;
     for line in text.lines() {
@@ -460,18 +447,22 @@ pub(crate) fn parse_blocklist_counted(text: &str) -> ParsedList {
             continue;
         }
 
-        // Plain domain or adblock filter syntax; `@@` marks an exception.
-        let (rule, target) = match line.strip_prefix("@@") {
-            Some(rule) => (rule, &mut exceptions),
-            None => (line, &mut domains),
+        // Plain domain or adblock filter syntax. An `@@` exception unblocks, so a
+        // block list drops it and an allow list keeps it like any other entry.
+        let rule = match line.strip_prefix("@@") {
+            Some(_) if kind == SourceKind::Block => {
+                parsed_lines += 1;
+                continue;
+            }
+            Some(rule) => rule,
+            None => line,
         };
         let d = rule.trim_start_matches("*.").trim_start_matches("||");
         let d = d.split('$').next().unwrap_or(d); // strip adblock $options
-        parsed_lines += usize::from(insert_if_valid(target, d.trim_end_matches('^')));
+        parsed_lines += usize::from(insert_if_valid(&mut domains, d.trim_end_matches('^')));
     }
     ParsedList {
         domains,
-        exceptions,
         entry_lines,
         parsed_lines,
     }
@@ -523,14 +514,6 @@ pub(crate) fn find_in_set<'a>(domain: &'a str, set: &HashSet<String>) -> Option<
         }
     }
     None
-}
-
-/// Extends the larger set with the smaller, so the bigger table is never rehashed.
-pub(crate) fn merge_into(acc: &mut HashSet<String>, mut set: HashSet<String>) {
-    if acc.len() < set.len() {
-        std::mem::swap(acc, &mut set);
-    }
-    acc.extend(set);
 }
 
 pub(crate) fn set_heap_bytes(set: &HashSet<String>) -> usize {
@@ -743,7 +726,7 @@ mod tests {
     }
 
     fn defect(source: &str, text: &str) -> Option<String> {
-        source_defect(source, &parse_blocklist_counted(text))
+        source_defect(source, &parse_blocklist_counted(text, SourceKind::Block))
     }
 
     /// A soft-error page small enough to yield one domain-shaped token still
@@ -846,28 +829,6 @@ mod tests {
     }
 
     #[test]
-    fn merge_into_keeps_the_larger_table_in_either_order() {
-        let small: HashSet<String> = ["a.com", "shared.com"].map(String::from).into();
-        let large_ptr = |s: &HashSet<String>| s.get("d0.com").unwrap() as *const String;
-
-        for large_first in [false, true] {
-            let large: HashSet<String> = (0..1_000).map(|i| format!("d{i}.com")).collect();
-            let kept = large_ptr(&large);
-            let (first, second) = if large_first {
-                (large, small.clone())
-            } else {
-                (small.clone(), large)
-            };
-            let mut acc = HashSet::new();
-            merge_into(&mut acc, first);
-            merge_into(&mut acc, second);
-            assert_eq!(acc.len(), 1_002);
-            assert!(acc.contains("a.com") && acc.contains("d999.com"));
-            assert_eq!(large_ptr(&acc), kept, "large set was rehashed, not kept");
-        }
-    }
-
-    #[test]
     fn allow_source_unblocks_child_of_blocked_parent() {
         let mut store = store_with(&["example.com"], &[]);
         store.swap_allow_domains(["go.example.com".to_string()].into());
@@ -894,15 +855,15 @@ mod tests {
     }
 
     #[test]
-    fn adblock_exceptions_are_kept_apart_from_blocks() {
-        let parsed = parse_blocklist_counted("@@||go.example.com^\n||ads.example.com^\n");
+    fn only_allow_lists_keep_adblock_exceptions() {
+        let text = "@@||go.example.com^\n||ads.example.com^\n";
+        let blocks = parse_blocklist_counted(text, SourceKind::Block);
+        assert_eq!(blocks.domains, HashSet::from(["ads.example.com".into()]));
+        assert_eq!(blocks.parsed_lines, 2, "a dropped exception still parsed");
+        let allows = parse_blocklist_counted(text, SourceKind::Allow);
         assert_eq!(
-            parsed.domains,
-            HashSet::from(["ads.example.com".to_string()])
-        );
-        assert_eq!(
-            parsed.exceptions,
-            HashSet::from(["go.example.com".to_string()])
+            allows.domains,
+            HashSet::from(["go.example.com".into(), "ads.example.com".into()])
         );
     }
 

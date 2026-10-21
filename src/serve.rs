@@ -12,8 +12,8 @@ use std::time::Duration;
 use log::{debug, error, info, warn};
 
 use crate::blocklist::{
-    download_blocklists, merge_into, parse_blocklist_counted, source_defect, BlocklistStore,
-    ParsedList, SourceResult,
+    download_blocklists, parse_blocklist_counted, source_defect, BlocklistStore, SourceKind,
+    SourceResult,
 };
 use crate::blocklist_cache::BlocklistCache;
 use crate::bootstrap_resolver::NumaResolver;
@@ -69,11 +69,9 @@ pub async fn run(load: ConfigLoad) -> crate::Result<()> {
     let dnssec_enabled = effective_dnssec(&config, resolved_mode);
     let api_port = config.server.api_port;
 
+    let (allow_sources, allow_domains) = config.blocking.split_allowlist();
     let mut blocklist = BlocklistStore::new(
-        crate::domain_list::PersistedDomainList::new(
-            "blocking-allow.json",
-            &config.blocking.allowlist_domains(),
-        ),
+        crate::domain_list::PersistedDomainList::new("blocking-allow.json", &allow_domains),
         crate::domain_list::PersistedDomainList::new("blocking-block.json", &[]),
     );
     // Seeded before the first fetch so the dashboard can tell a source that has
@@ -81,7 +79,7 @@ pub async fn run(load: ConfigLoad) -> crate::Result<()> {
     // blocking is off, or a disabled box reports its configured lists as though
     // it had none; `health` reports the switch separately.
     blocklist.set_sources(&config.blocking.lists);
-    blocklist.set_allow_sources(&config.blocking.allowlist_sources());
+    blocklist.set_allow_sources(&allow_sources);
     if !config.blocking.enabled {
         blocklist.set_enabled(false);
     }
@@ -304,7 +302,7 @@ fn spawn_background_services(
     api_port: u16,
 ) -> crate::Result<()> {
     let blocklist_lists = config.blocking.lists.clone();
-    let allow_lists = config.blocking.allowlist_sources();
+    let (allow_lists, _) = config.blocking.split_allowlist();
     let refresh_hours = config.blocking.refresh_hours;
     if config.blocking.enabled && !blocklist_lists.is_empty() {
         let bl_ctx = Arc::clone(ctx);
@@ -855,22 +853,29 @@ async fn network_watch_loop(ctx: Arc<ServerCtx>) {
     }
 }
 
+/// Extends the larger set with the smaller, so the bigger table is never rehashed.
+fn merge_into(acc: &mut HashSet<String>, mut set: HashSet<String>) {
+    if acc.len() < set.len() {
+        std::mem::swap(acc, &mut set);
+    }
+    acc.extend(set);
+}
+
 fn live_domains(
     source: &str,
     fetched: &Result<String, String>,
     cache: &BlocklistCache,
-    entries: fn(ParsedList) -> HashSet<String>,
+    kind: SourceKind,
 ) -> Result<HashSet<String>, String> {
     let text = fetched.as_ref().map_err(Clone::clone)?;
-    let parsed = parse_blocklist_counted(text);
+    let parsed = parse_blocklist_counted(text, kind);
     if let Some(why) = source_defect(source, &parsed) {
         error!("list source failed: {source} — {why}");
         return Err("not a domain list".to_string());
     }
-    let domains = entries(parsed);
-    info!("list: {} domains from {source}", domains.len());
+    info!("list: {} domains from {source}", parsed.domains.len());
     cache.store(source, text);
-    Ok(domains)
+    Ok(parsed.domains)
 }
 
 // Index in the v2 and v3 headers of the pinned libmimalloc-sys 0.1.49, which does not export it.
@@ -916,7 +921,6 @@ async fn load_blocklists(
 /// What the sources of one kind parsed to on this refresh.
 struct ParsedSources {
     domains: HashSet<String>,
-    total: usize,
     outcomes: Vec<(String, SourceResult)>,
     failed: usize,
     stale: usize,
@@ -927,7 +931,7 @@ impl ParsedSources {
     /// sources that all loaded and parsed to nothing are a deliberately emptied
     /// list and must be allowed to clear the old one.
     fn broke(&self) -> bool {
-        self.total == 0 && self.failed > 0
+        self.domains.is_empty() && self.failed > 0
     }
 }
 
@@ -935,17 +939,16 @@ fn parse_sources(
     sources: &[String],
     downloaded: &[(String, Result<String, String>)],
     cache: &BlocklistCache,
-    entries: fn(ParsedList) -> HashSet<String>,
+    kind: SourceKind,
 ) -> ParsedSources {
     let mut parsed = ParsedSources {
         domains: HashSet::new(),
-        total: 0,
         outcomes: Vec::with_capacity(sources.len()),
         failed: 0,
         stale: 0,
     };
     for (source, fetched) in downloaded.iter().filter(|(s, _)| sources.contains(s)) {
-        let result = match live_domains(source, fetched, cache, entries) {
+        let result = match live_domains(source, fetched, cache, kind) {
             Ok(domains) => {
                 merge_into(&mut parsed.domains, domains);
                 SourceResult::Loaded
@@ -955,7 +958,7 @@ fn parse_sources(
             Err(error) => match cache.load(source) {
                 Some(cached) => {
                     parsed.stale += 1;
-                    let domains = entries(parse_blocklist_counted(&cached.text));
+                    let domains = parse_blocklist_counted(&cached.text, kind).domains;
                     merge_into(&mut parsed.domains, domains);
                     SourceResult::Cached {
                         error,
@@ -970,7 +973,6 @@ fn parse_sources(
         };
         parsed.outcomes.push((source.clone(), result));
     }
-    parsed.total = parsed.domains.len();
     parsed
 }
 
@@ -984,45 +986,40 @@ fn apply_downloads(
 ) -> bool {
     // Parse outside the lock to avoid blocking DNS queries during parse (~100ms)
     let cache = BlocklistCache::new(&ctx.data_dir);
-    let mut blocks = parse_sources(block, downloaded, &cache, |list| list.domains);
-    let mut allows = parse_sources(allow, downloaded, &cache, ParsedList::allowed);
+    let mut blocks = parse_sources(block, downloaded, &cache, SourceKind::Block);
+    let mut allows = parse_sources(allow, downloaded, &cache, SourceKind::Allow);
     cache.prune(&[block, allow].concat());
 
     // Lock work stays sub-microsecond: record, then swap or keep.
     let mut store = ctx.blocklist.write().unwrap();
     store.record_outcomes(&blocks.outcomes);
     store.record_outcomes(&allows.outcomes);
-    let kept_blocks = blocks.broke().then(|| store.domains_loaded());
-    let kept_allows = allows.broke().then(|| store.allow_domains_loaded());
-    if kept_blocks.is_none() {
+    let (blocks_broke, allows_broke) = (blocks.broke(), allows.broke());
+    if !blocks_broke {
         store.swap_domains(std::mem::take(&mut blocks.domains));
     }
-    if kept_allows.is_none() {
+    if !allows_broke {
         store.swap_allow_domains(std::mem::take(&mut allows.domains));
     }
+    let (block_total, allow_total) = (store.domains_loaded(), store.allow_domains_loaded());
     drop(store);
 
-    let blocks_ok = log_refresh("blocking", &blocks, kept_blocks);
+    log_refresh("blocking", &blocks, blocks_broke, block_total);
     if !allow.is_empty() {
-        log_refresh("allowlist", &allows, kept_allows);
+        log_refresh("allowlist", &allows, allows_broke, allow_total);
     }
     // A retry re-downloads every block list, so only blocking earns one.
-    blocks_ok
+    !blocks_broke || block_total > 0
 }
 
-/// Returns whether the kind is left with anything loaded.
-fn log_refresh(label: &str, parsed: &ParsedSources, kept: Option<usize>) -> bool {
-    let (total, lists, failed, stale) = (
-        parsed.total,
-        parsed.outcomes.len(),
-        parsed.failed,
-        parsed.stale,
-    );
-    if let Some(kept) = kept {
+/// `total` is what is live after the refresh, whether kept or swapped in.
+fn log_refresh(label: &str, parsed: &ParsedSources, broke: bool, total: usize) {
+    let (lists, failed, stale) = (parsed.outcomes.len(), parsed.failed, parsed.stale);
+    if broke {
         error!(
-            "{label} refresh failed for {failed} of {lists} lists — keeping {kept} domains already loaded"
+            "{label} refresh failed for {failed} of {lists} lists — keeping {total} domains already loaded"
         );
-        return kept > 0;
+        return;
     }
     // Live only. A cached source is contributing domains but is not evidence
     // its upstream works, and counting it as loaded is the overstatement this
@@ -1039,7 +1036,6 @@ fn log_refresh(label: &str, parsed: &ParsedSources, kept: Option<usize>) -> bool
     } else {
         info!("{label} enabled: {total} unique domains from {loaded} lists");
     }
-    true
 }
 
 async fn warm_domain(ctx: &ServerCtx, domain: &str) {
@@ -1126,6 +1122,28 @@ mod tests {
             &crate::config::Config::default(),
             Recursive
         ));
+    }
+
+    #[test]
+    fn merge_into_keeps_the_larger_table_in_either_order() {
+        let small: HashSet<String> = ["a.com", "shared.com"].map(String::from).into();
+        let large_ptr = |s: &HashSet<String>| s.get("d0.com").unwrap() as *const String;
+
+        for large_first in [false, true] {
+            let large: HashSet<String> = (0..1_000).map(|i| format!("d{i}.com")).collect();
+            let kept = large_ptr(&large);
+            let (first, second) = if large_first {
+                (large, small.clone())
+            } else {
+                (small.clone(), large)
+            };
+            let mut acc = HashSet::new();
+            merge_into(&mut acc, first);
+            merge_into(&mut acc, second);
+            assert_eq!(acc.len(), 1_002);
+            assert!(acc.contains("a.com") && acc.contains("d999.com"));
+            assert_eq!(large_ptr(&acc), kept, "large set was rehashed, not kept");
+        }
     }
 
     #[tokio::test]

@@ -633,21 +633,12 @@ impl Default for BlockingConfig {
 }
 
 impl BlockingConfig {
-    /// URLs and paths in `allowlist`, fetched and refreshed like `lists`.
-    pub fn allowlist_sources(&self) -> Vec<String> {
+    /// `(sources, domains)`: URLs and paths are fetched and refreshed like `lists`.
+    pub fn split_allowlist(&self) -> (Vec<String>, Vec<String>) {
         self.allowlist
             .iter()
-            .filter(|entry| crate::blocklist::is_list_source(entry))
             .cloned()
-            .collect()
-    }
-
-    pub fn allowlist_domains(&self) -> Vec<String> {
-        self.allowlist
-            .iter()
-            .filter(|entry| !crate::blocklist::is_list_source(entry))
-            .cloned()
-            .collect()
+            .partition(|entry| crate::blocklist::is_list_source(entry))
     }
 }
 
@@ -1335,13 +1326,13 @@ key_path = "/etc/numa/proxy/key.pem"
         let toml = format!(
             "[blocking]\nallowlist = [\"example.com\", \"{referral}\", \"file:///etc/numa/allow.txt\", \"raw.githubusercontent.com/list.txt\"]\n"
         );
-        let blocking = toml::from_str::<Config>(&toml).unwrap().blocking;
+        let (sources, domains) = toml::from_str::<Config>(&toml)
+            .unwrap()
+            .blocking
+            .split_allowlist();
+        assert_eq!(sources, [referral, "file:///etc/numa/allow.txt"]);
         assert_eq!(
-            blocking.allowlist_sources(),
-            [referral, "file:///etc/numa/allow.txt"]
-        );
-        assert_eq!(
-            blocking.allowlist_domains(),
+            domains,
             ["example.com", "raw.githubusercontent.com/list.txt"]
         );
     }
