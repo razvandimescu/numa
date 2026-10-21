@@ -1473,7 +1473,7 @@ async function refresh() {
     renderCache(cache);
     renderServices(services);
     renderBlockingInfo(blockingInfo);
-    renderAllowlist(allowlist, manualBlocks);
+    renderAllowlist(allowlist, manualBlocks, (blockingInfo.list_sources || []).some(s => s.kind === 'allow'));
     renderMemory(stats.memory, stats);
 
   } catch (err) {
@@ -1665,7 +1665,7 @@ function renderBlockingInfo(info) {
   `;
 }
 
-function renderAllowlist(entries, manualBlocks) {
+function renderAllowlist(entries, manualBlocks, hasAllowSources) {
   const focused = document.activeElement && document.activeElement.id;
   if (focused === 'allowDomainInput' || focused === 'blockDomainInput') return;
   const el = document.getElementById('blockingAllowlist');
@@ -1678,7 +1678,7 @@ function renderAllowlist(entries, manualBlocks) {
         <span style="font-family:var(--font-mono);font-size:0.75rem;color:var(--emerald);">${h(d)}</span>
         <button class="btn-delete" data-domain="${h(d)}" onclick="deleteDomain('/blocking/allowlist', this.dataset.domain)">&times;</button>
       </div>
-    `).join('') : `<div class="empty-state">${t('blocking.no_exceptions')}</div>`}
+    `).join('') : `<div class="empty-state">${t(hasAllowSources ? 'blocking.allow_lists_only' : 'blocking.no_exceptions')}</div>`}
     <form onsubmit="return addDomain(event, '/blocking/allowlist')" style="display:flex;gap:0.4rem;margin-top:0.4rem;">
       <input type="text" id="allowDomainInput" placeholder="${t('blocking.allow_ph')}" required style="flex:1;font-family:var(--font-mono);font-size:0.75rem;padding:0.35rem 0.5rem;border:1px solid var(--border);border-radius:4px;background:var(--bg-surface);color:var(--text-primary);outline:none;">
       <button type="submit" class="btn" style="background:var(--emerald);color:var(--text-on-btn);flex-shrink:0;">${t('blocking.allow_btn')}</button>

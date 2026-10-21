@@ -148,6 +148,7 @@
   "blocking.allowlist": "Allowlist",
   "blocking.allowlist_n": "Allowlist ({n})",
   "blocking.no_exceptions": "No exceptions",
+  "blocking.allow_lists_only": "Only the allow lists above",
   "blocking.allow_ph": "domain to allow",
   "blocking.allow_btn": "Allow",
   "blocking.manually_blocked": "Manually blocked",
