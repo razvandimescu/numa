@@ -476,10 +476,7 @@ async fn udp_serve_loop(
         let mut buffer = BytePacketBuffer::new();
         let (len, peer, local_dst) = match socket.recv_from(&mut buffer.buf).await {
             Ok(r) => r,
-            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {
-                // Windows delivers ICMP port-unreachable as ConnectionReset on UDP sockets
-                continue;
-            }
+            Err(e) if recv_error_is_per_datagram(&e) => continue,
             Err(e) => return Err(e.into()),
         };
         let pp = crate::pp2_udp::parse_if_trusted(&buffer.buf[..len], peer, udp_pp, ctx);
@@ -514,6 +511,16 @@ async fn udp_serve_loop(
             }
         });
     }
+}
+
+/// Winsock reports these on one datagram and drops it: ICMP port-unreachable
+/// (ConnectionReset), a datagram over the buffer (WSAEMSGSIZE) and ICMP time
+/// exceeded (WSAENETRESET). Unix truncates instead and never raises them.
+fn recv_error_is_per_datagram(e: &std::io::Error) -> bool {
+    const WSAEMSGSIZE: i32 = 10040;
+    const WSAENETRESET: i32 = 10052;
+    e.kind() == std::io::ErrorKind::ConnectionReset
+        || matches!(e.raw_os_error(), Some(WSAEMSGSIZE | WSAENETRESET))
 }
 
 fn print_banner(
@@ -1103,6 +1110,20 @@ async fn bind_api(addr: SocketAddr, retry: Duration) -> tokio::net::TcpListener 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn per_datagram_recv_errors_do_not_stop_the_udp_loop() {
+        for code in [10040, 10052] {
+            let e = std::io::Error::from_raw_os_error(code);
+            assert!(recv_error_is_per_datagram(&e), "{code}");
+        }
+        assert!(recv_error_is_per_datagram(
+            &std::io::ErrorKind::ConnectionReset.into()
+        ));
+        assert!(!recv_error_is_per_datagram(
+            &std::io::ErrorKind::NotConnected.into()
+        ));
+    }
 
     #[test]
     fn dnssec_counts_only_when_numa_resolves_recursively() {
