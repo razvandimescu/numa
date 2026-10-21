@@ -454,6 +454,10 @@ pub(crate) fn normalize(domain: &str) -> String {
 /// never `evilexample.com`. `domain` must already be normalized. Shared by the
 /// blocklist and rebind allowlist.
 pub(crate) fn find_in_set<'a>(domain: &'a str, set: &HashSet<String>) -> Option<&'a str> {
+    // Most of these sets are empty; don't walk the labels for nothing.
+    if set.is_empty() {
+        return None;
+    }
     if set.contains(domain) {
         return Some(domain);
     }
