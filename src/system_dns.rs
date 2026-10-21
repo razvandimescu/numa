@@ -755,7 +755,7 @@ fn remove_service_binary() {
 }
 
 /// Register numa with the Service Control Manager, boot-time auto-start,
-/// LocalSystem context, with a failure policy of restart-after-5s.
+/// LocalSystem context, and a restart-on-failure policy.
 #[cfg(windows)]
 fn register_service_scm(exe: &std::path::Path) -> Result<(), String> {
     let bin_path = format!("\"{}\" --service", exe.display());

@@ -51,7 +51,7 @@ fn run_service() -> windows_service::Result<()> {
         service_type: ServiceType::OWN_PROCESS,
         current_state: ServiceState::Running,
         controls_accepted: ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
-        exit_code: ServiceExitCode::Win32(0),
+        exit_code: ServiceExitCode::NO_ERROR,
         checkpoint: 0,
         wait_hint: Duration::default(),
         process_id: None,
@@ -86,12 +86,13 @@ fn run_service() -> windows_service::Result<()> {
 
     // A server that stops without an SCM request has failed. Report it with a
     // non-zero exit code, or the SCM takes it as a clean stop and never runs
-    // the restart policy.
+    // the restart policy. A panic on the server thread drops the sender without
+    // a message, so anything but Empty means the server stopped.
     let exit_code = loop {
         if shutdown_rx.recv_timeout(Duration::from_millis(500)).is_ok() {
             break ServiceExitCode::NO_ERROR;
         }
-        if server_done_rx.try_recv().is_ok() {
+        if !matches!(server_done_rx.try_recv(), Err(mpsc::TryRecvError::Empty)) {
             break ServiceExitCode::ServiceSpecific(1);
         }
     };
