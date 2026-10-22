@@ -51,7 +51,8 @@ impl ApiAuth {
 
     /// A rebound page can't forge Host: it carries the attacker's domain, never
     /// an IP literal, a `localhost` name (RFC 6761: resolved by the browser
-    /// itself), or a `.numa` name the proxy answers for.
+    /// itself), or `numa.<tld>`, which numa answers ahead of LAN peers and
+    /// public DNS. Other names under the tld can come from either.
     fn names_this_host(&self, headers: &HeaderMap) -> bool {
         let Some(host) = headers.get(header::HOST) else {
             return true;
@@ -60,7 +61,8 @@ impl ApiAuth {
             name == "localhost"
                 || name.ends_with(".localhost")
                 || name.parse::<IpAddr>().is_ok()
-                || (!self.proxy_tld_suffix.is_empty() && name.ends_with(&self.proxy_tld_suffix))
+                || (!self.proxy_tld_suffix.is_empty()
+                    && name.strip_suffix(&self.proxy_tld_suffix) == Some("numa"))
         })
     }
 }
@@ -296,6 +298,19 @@ mod tests {
             "[::1]:5380",
             "numa.numa",
         ] {
+            assert!(a.permits(ip("127.0.0.1"), &with_host(host)), "{host}");
+        }
+    }
+
+    /// LAN peers and public DNS answer other names under the tld, so a
+    /// rebound page can carry one of them.
+    #[test]
+    fn only_the_dashboard_name_under_the_tld_skips_the_token() {
+        let a = auth("secret");
+        for host in ["kiosk.numa", "tinyauth.numa:5380", "numa"] {
+            assert!(!a.permits(ip("127.0.0.1"), &with_host(host)), "{host}");
+        }
+        for host in ["numa.numa", "NUMA.numa:5380"] {
             assert!(a.permits(ip("127.0.0.1"), &with_host(host)), "{host}");
         }
     }
