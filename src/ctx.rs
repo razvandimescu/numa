@@ -55,6 +55,7 @@ pub struct ServerCtx {
     pub hedge_delay: Duration,
     pub proxy_tld: String,
     pub proxy_tld_suffix: String, // pre-computed ".{tld}" to avoid per-query allocation
+    pub proxy_authoritative: bool,
     pub lan_enabled: bool,
     pub config_path: String,
     pub config_found: bool,
@@ -116,7 +117,8 @@ pub async fn resolve_query(
     let mut charge = QueryAdmission::default();
 
     // Pipeline: overrides -> .localhost -> local zones -> special-use (unless forwarded)
-    //        -> .tld proxy -> blocklist -> cache -> forwarding -> recursive/upstream
+    //        -> .tld services -> .tld peers/NXDOMAIN (unless not authoritative)
+    //        -> blocklist -> cache -> forwarding -> recursive/upstream
     // Each lock is scoped to avoid holding MutexGuard across await points.
     let (mut response, path, mut dnssec, upstream_transport) =
         resolve_with_cname_chase(&query, raw_wire, src_addr, &qname, qtype, ctx, &mut charge).await;
@@ -424,7 +426,9 @@ fn resolve_local(
     if !ctx.proxy_tld_suffix.is_empty()
         && (qname.ends_with(&ctx.proxy_tld_suffix) || qname == ctx.proxy_tld)
     {
-        return Some(resolve_proxy_tld(query, src_addr, qname, qtype, ctx));
+        if let Some(answer) = resolve_proxy_tld(query, src_addr, qname, qtype, ctx) {
+            return Some(answer);
+        }
     }
     let mut policy_allow = false;
     if ctx.client_policy.is_enabled() {
@@ -454,6 +458,8 @@ fn resolve_local(
 /// Resolve `.numa` queries:
 ///   - locally-registered service → loopback locally, else the egress IP toward
 ///     the client (so LAN and tailnet peers each get a reachable proxy address)
+///   - any other name when `[proxy] authoritative = false` → `None`, so it
+///     resolves like any other and an mDNS peer can't shadow a public name
 ///   - LAN peer learned via discovery → that peer's actual IP (v4 or v6 native)
 ///   - unknown name → NXDOMAIN (never silently sinkhole to loopback)
 fn resolve_proxy_tld(
@@ -462,7 +468,7 @@ fn resolve_proxy_tld(
     qname: &str,
     qtype: QueryType,
     ctx: &ServerCtx,
-) -> (DnsPacket, QueryPath, DnssecStatus) {
+) -> Option<(DnsPacket, QueryPath, DnssecStatus)> {
     let service_name = qname.strip_suffix(&ctx.proxy_tld_suffix).unwrap_or(qname);
     let is_remote = !src_addr.ip().is_loopback();
 
@@ -481,7 +487,11 @@ fn resolve_proxy_tld(
         let mut resp = DnsPacket::response_from(query, ResultCode::NOERROR);
         resp.answers
             .extend(answer_record(qname, qtype, Some(v4), Some(v6), 300));
-        return (resp, QueryPath::Local, DnssecStatus::Indeterminate);
+        return Some((resp, QueryPath::Local, DnssecStatus::Indeterminate));
+    }
+
+    if !ctx.proxy_authoritative {
+        return None;
     }
 
     if let Some((ip, _)) = ctx.lan_peers.lock().unwrap().lookup(service_name) {
@@ -493,11 +503,11 @@ fn resolve_proxy_tld(
         let mut resp = DnsPacket::response_from(query, ResultCode::NOERROR);
         resp.answers
             .extend(answer_record(qname, qtype, v4, v6, 300));
-        return (resp, QueryPath::Local, DnssecStatus::Indeterminate);
+        return Some((resp, QueryPath::Local, DnssecStatus::Indeterminate));
     }
 
     let resp = DnsPacket::response_from(query, ResultCode::NXDOMAIN);
-    (resp, QueryPath::Local, DnssecStatus::Indeterminate)
+    Some((resp, QueryPath::Local, DnssecStatus::Indeterminate))
 }
 
 /// Remote resolution: cache → conditional forwarding → recursive/upstream.
@@ -1943,6 +1953,151 @@ mod tests {
         assert_eq!(path_aaaa, QueryPath::Local);
         assert_eq!(resp_aaaa.header.rescode, ResultCode::NXDOMAIN);
         assert!(resp_aaaa.answers.is_empty());
+    }
+
+    /// `home.example` as the proxy TLD, with `rule_suffix` forwarded to an
+    /// upstream that answers `tinyauth.home.example` with 203.0.113.7.
+    async fn custom_tld_ctx(rule_suffix: &str) -> ServerCtx {
+        let upstream_addr = crate::testutil::mock_upstream(crate::testutil::a_record_response(
+            "tinyauth.home.example",
+            Ipv4Addr::new(203, 0, 113, 7),
+            300,
+        ))
+        .await;
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.proxy_tld = "home.example".to_string();
+        ctx.proxy_tld_suffix = ".home.example".to_string();
+        ctx.forwarding_rules = vec![ForwardingRule::new(
+            rule_suffix.to_string(),
+            UpstreamPool::new(vec![Upstream::Udp(upstream_addr)], vec![]),
+        )];
+        ctx
+    }
+
+    /// Only the config can say a tld is a real domain: a made-up one like `lab`
+    /// must not send typos upstream or get back a cacheable NXDOMAIN.
+    #[tokio::test]
+    async fn pipeline_custom_tld_is_authoritative_by_default() {
+        let ctx = Arc::new(custom_tld_ctx("home.example").await);
+
+        let (resp, path) = resolve_in_test(&ctx, "tinyauth.home.example", QueryType::A).await;
+        assert_eq!(path, QueryPath::Local);
+        assert_eq!(resp.header.rescode, ResultCode::NXDOMAIN);
+    }
+
+    /// A tld that is a real domain: registered services stay local, and a
+    /// forwarding rule answers the rest ahead of the default upstream.
+    #[tokio::test]
+    async fn pipeline_tld_proxy_unknown_name_honors_forwarding_rule() {
+        let mut ctx = custom_tld_ctx("home.example").await;
+        ctx.proxy_authoritative = false;
+        ctx.services
+            .lock()
+            .unwrap()
+            .insert_from_config("grafana", 3000, None, Vec::new());
+        let ctx = Arc::new(ctx);
+
+        let (resp, path) = resolve_in_test(&ctx, "grafana.home.example", QueryType::A).await;
+        assert_eq!(path, QueryPath::Local, "registered service must stay local");
+        match &resp.answers[0] {
+            DnsRecord::A { addr, .. } => assert_eq!(*addr, Ipv4Addr::LOCALHOST),
+            other => panic!("expected A record, got {:?}", other),
+        }
+
+        let (resp, path) = resolve_in_test(&ctx, "tinyauth.home.example", QueryType::A).await;
+        assert_eq!(path, QueryPath::Forwarded);
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+        match &resp.answers[0] {
+            DnsRecord::A { addr, .. } => assert_eq!(*addr, Ipv4Addr::new(203, 0, 113, 7)),
+            other => panic!("expected A record, got {:?}", other),
+        }
+    }
+
+    /// A tld that is a real domain: numa answers only the names it registered,
+    /// and the rest, apex included, resolves like any other name.
+    #[tokio::test]
+    async fn pipeline_non_authoritative_tld_unknown_name_resolves_upstream() {
+        let upstream_addr = crate::testutil::mock_upstream_by_qname(vec![
+            (
+                "tinyauth.home.example",
+                crate::testutil::a_record_response(
+                    "tinyauth.home.example",
+                    Ipv4Addr::new(203, 0, 113, 7),
+                    300,
+                ),
+            ),
+            (
+                "home.example",
+                crate::testutil::a_record_response(
+                    "home.example",
+                    Ipv4Addr::new(203, 0, 113, 8),
+                    300,
+                ),
+            ),
+        ])
+        .await;
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.proxy_tld = "home.example".to_string();
+        ctx.proxy_tld_suffix = ".home.example".to_string();
+        ctx.proxy_authoritative = false;
+        *ctx.upstream_pool.lock().unwrap() =
+            UpstreamPool::new(vec![Upstream::Udp(upstream_addr)], vec![]);
+        let ctx = Arc::new(ctx);
+
+        for (name, want) in [
+            ("tinyauth.home.example", Ipv4Addr::new(203, 0, 113, 7)),
+            ("home.example", Ipv4Addr::new(203, 0, 113, 8)),
+        ] {
+            let (resp, path) = resolve_in_test(&ctx, name, QueryType::A).await;
+            assert_eq!(path, QueryPath::Upstream, "{name}");
+            match resp.answers.first() {
+                Some(DnsRecord::A { addr, .. }) => assert_eq!(*addr, want, "{name}"),
+                other => panic!("{name}: expected A record, got {:?}", other),
+            }
+        }
+    }
+
+    /// mDNS announcements are unauthenticated, so a LAN peer must not shadow a
+    /// public name under a tld that is a real domain.
+    #[tokio::test]
+    async fn pipeline_non_authoritative_tld_skips_lan_peers() {
+        let mut ctx = custom_tld_ctx("tinyauth.home.example").await;
+        ctx.proxy_authoritative = false;
+        ctx.lan_peers
+            .lock()
+            .unwrap()
+            .update("10.0.0.5".parse().unwrap(), &[("tinyauth".into(), 443)]);
+        let ctx = Arc::new(ctx);
+
+        let (resp, path) = resolve_in_test(&ctx, "tinyauth.home.example", QueryType::A).await;
+        assert_eq!(path, QueryPath::Forwarded);
+        match &resp.answers[0] {
+            DnsRecord::A { addr, .. } => assert_eq!(*addr, Ipv4Addr::new(203, 0, 113, 7)),
+            other => panic!("expected A record, got {:?}", other),
+        }
+    }
+
+    /// The API skips its token for `numa.<tld>` from loopback, so a LAN peer
+    /// announcing `numa` must not take that name.
+    #[tokio::test]
+    async fn pipeline_tld_proxy_dashboard_name_beats_lan_peer() {
+        let ctx = crate::testutil::test_ctx().await;
+        ctx.services
+            .lock()
+            .unwrap()
+            .insert_from_config("numa", 5380, None, Vec::new());
+        ctx.lan_peers
+            .lock()
+            .unwrap()
+            .update("10.0.0.5".parse().unwrap(), &[("numa".into(), 5380)]);
+        let ctx = Arc::new(ctx);
+
+        let (resp, path) = resolve_in_test(&ctx, "numa.numa", QueryType::A).await;
+        assert_eq!(path, QueryPath::Local);
+        match &resp.answers[0] {
+            DnsRecord::A { addr, .. } => assert_eq!(*addr, Ipv4Addr::LOCALHOST),
+            other => panic!("expected A record, got {:?}", other),
+        }
     }
 
     /// LAN peer with an IPv4 address: A → native v4, AAAA → v4-mapped v6.

@@ -50,6 +50,7 @@ pub async fn test_ctx() -> ServerCtx {
         hedge_delay: Duration::ZERO,
         proxy_tld: "numa".to_string(),
         proxy_tld_suffix: ".numa".to_string(),
+        proxy_authoritative: true,
         lan_enabled: false,
         config_path: "/tmp/test-numa.toml".to_string(),
         config_found: false,

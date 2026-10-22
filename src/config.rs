@@ -677,6 +677,8 @@ pub struct ProxyConfig {
     pub tls_port: u16,
     #[serde(default = "default_proxy_tld")]
     pub tld: String,
+    #[serde(default = "default_true")]
+    pub authoritative: bool,
     #[serde(default = "default_proxy_bind_addr")]
     pub bind_addr: String,
     #[serde(default)]
@@ -694,6 +696,7 @@ impl Default for ProxyConfig {
             port: default_proxy_port(),
             tls_port: default_proxy_tls_port(),
             tld: default_proxy_tld(),
+            authoritative: default_true(),
             bind_addr: default_proxy_bind_addr(),
             cert_path: None,
             key_path: None,

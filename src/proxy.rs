@@ -417,7 +417,10 @@ async fn proxy_handler(
             (host, port, path)
         } else {
             let mut peers = state.ctx.lan_peers.lock().unwrap();
-            match peers.lookup(&service_name) {
+            match peers
+                .lookup(&service_name)
+                .filter(|_| state.ctx.proxy_authoritative)
+            {
                 Some((ip, port)) => (ip.to_string(), port, request_path.clone()),
                 None => {
                     let body = format!(
@@ -946,6 +949,35 @@ mod tests {
             let status = app.clone().oneshot(req).await.unwrap().status();
             assert_eq!(status, want, "peer {peer}");
         }
+    }
+
+    /// Under a tld that is a real domain, a name without a registered service
+    /// reached the proxy through public DNS, so an mDNS peer must not get it.
+    #[tokio::test]
+    async fn non_authoritative_tld_is_not_proxied_to_lan_peers() {
+        use tower::ServiceExt;
+
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.proxy_tld_suffix = ".home.example".to_string();
+        ctx.proxy_authoritative = false;
+        ctx.lan_peers
+            .lock()
+            .unwrap()
+            .update("127.0.0.1".parse().unwrap(), &[("tinyauth".into(), 1)]);
+        let state = ProxyState {
+            ctx: Arc::new(ctx),
+            client: Client::builder(TokioExecutor::new()).build_http(),
+        };
+        let app = Router::new().fallback(any(proxy_handler)).with_state(state);
+
+        let mut req = Request::builder()
+            .header("host", "tinyauth.home.example")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 5000))));
+        let status = app.oneshot(req).await.unwrap().status();
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     /// The gated address is the proxied source in the PROXY header (not the

@@ -201,6 +201,7 @@ pub async fn run(load: ConfigLoad) -> crate::Result<()> {
             format!(".{}", config.proxy.tld)
         },
         proxy_tld: config.proxy.tld.clone(),
+        proxy_authoritative: config.proxy.authoritative,
         lan_enabled: config.lan.enabled,
         config_path: resolved_config_path,
         config_found,

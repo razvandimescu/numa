@@ -192,6 +192,7 @@ enabled = true
 port = 80
 tls_port = 443
 tld = "numa"
+# authoritative = true  # false when tld is a real domain: other names under it resolve as usual
 # bind_addr = "127.0.0.1"  # default; set to "0.0.0.0" for LAN access to .numa services
 
 # ── Bring-your-own TLS cert ────────────────────────────────────────
