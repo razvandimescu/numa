@@ -32,8 +32,20 @@ use crate::stats::{ServerStats, Transport};
 use crate::system_dns::discover_system_dns;
 use crate::udp_listener::UdpListener;
 
-const DOH_FALLBACK: &str = "https://9.9.9.9/dns-query";
+// Two operators, so one leaving a jurisdiction can't strand numa. DoH carries
+// no SRTT, so failover keeps this order and Cloudflare only sees Quad9 misses.
+const DOH_FALLBACK: [&str; 2] = ["https://9.9.9.9/dns-query", "https://1.1.1.1/dns-query"];
 const BLOCKLIST_RETRY_SECS: u64 = 3600;
+
+fn doh_fallback(client: reqwest::Client) -> Vec<Upstream> {
+    DOH_FALLBACK
+        .iter()
+        .map(|url| Upstream::Doh {
+            url: url.to_string(),
+            client: client.clone(),
+        })
+        .collect()
+}
 
 /// Boot the DNS server and run until the UDP listener errors out.
 pub async fn run(load: ConfigLoad) -> crate::Result<()> {
@@ -710,11 +722,10 @@ async fn resolve_upstream_pool(
                 let (pool, label) = recursive_pool();
                 (crate::config::UpstreamMode::Recursive, false, pool, label)
             } else {
-                log::warn!("recursive probe failed — falling back to Quad9 DoH");
+                log::warn!("recursive probe failed — falling back to Quad9/Cloudflare DoH");
                 let client = build_https_client_with_resolver(1, Some(bootstrap_resolver.clone()));
-                let url = DOH_FALLBACK.to_string();
-                let label = url.clone();
-                let pool = UpstreamPool::new(vec![Upstream::Doh { url, client }], vec![]);
+                let pool = UpstreamPool::new(doh_fallback(client), vec![]);
+                let label = pool.label();
                 (crate::config::UpstreamMode::Forward, false, pool, label)
             }
         }
@@ -724,15 +735,17 @@ async fn resolve_upstream_pool(
         }
         crate::config::UpstreamMode::Forward => {
             let addrs = if config.upstream.address.is_empty() {
-                let detected = system_dns
+                match system_dns
                     .default_upstream
                     .clone()
                     .or_else(crate::system_dns::detect_dhcp_dns)
-                    .unwrap_or_else(|| {
-                        info!("could not detect system DNS, falling back to Quad9 DoH");
-                        DOH_FALLBACK.to_string()
-                    });
-                vec![detected]
+                {
+                    Some(detected) => vec![detected],
+                    None => {
+                        info!("could not detect system DNS, falling back to Quad9/Cloudflare DoH");
+                        DOH_FALLBACK.map(String::from).to_vec()
+                    }
+                }
             } else {
                 config.upstream.address.clone()
             };
@@ -801,12 +814,9 @@ async fn resolve_upstream_pool(
 async fn network_watch_loop(ctx: Arc<ServerCtx>) {
     let mut tick: u64 = 0;
 
-    // Built once. The URL is an IP literal, so it needs no resolver and can't
+    // Built once. The URLs are IP literals, so they need no resolver and can't
     // loop back through numa.
-    let doh_fallback = Upstream::Doh {
-        url: DOH_FALLBACK.to_string(),
-        client: build_https_client_with_resolver(1, None),
-    };
+    let defaults = doh_fallback(build_https_client_with_resolver(1, None));
 
     let mut interval = tokio::time::interval(Duration::from_secs(5));
     interval.tick().await; // skip immediate tick
@@ -834,13 +844,13 @@ async fn network_watch_loop(ctx: Arc<ServerCtx>) {
                 .default_upstream
                 .or_else(crate::system_dns::detect_dhcp_dns);
             let mut pool = ctx.upstream_pool.lock().unwrap();
-            // Undetectable system DNS resolves to Quad9 DoH here exactly as it
-            // does at startup. Synthesising a bare UDP Quad9 instead silently
+            // Undetectable system DNS resolves to the DoH fallback here exactly
+            // as it does at startup. Synthesising a bare UDP Quad9 instead silently
             // downgraded the transport 30s in, stranding every client where
             // outbound UDP:53 is blocked (#169).
             let updated = match detected {
                 Some(addr) => pool.maybe_update_primary(&addr, ctx.upstream_port),
-                None => pool.maybe_replace_primary(doh_fallback.clone()),
+                None => pool.maybe_replace_primary(defaults.clone()),
             };
             if updated {
                 info!("upstream changed → {}", pool.label());
@@ -1111,6 +1121,20 @@ async fn bind_api(addr: SocketAddr, retry: Duration) -> tokio::net::TcpListener 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // One operator leaving a jurisdiction (Quad9 exits France 2026-11-24)
+    // must not leave numa without an upstream. Quad9 stays first.
+    #[test]
+    fn doh_fallback_spans_two_operators() {
+        let urls: Vec<String> = doh_fallback(crate::forward::default_client())
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(
+            urls,
+            ["https://9.9.9.9/dns-query", "https://1.1.1.1/dns-query"]
+        );
+    }
 
     #[test]
     fn per_datagram_recv_errors_do_not_stop_the_udp_loop() {

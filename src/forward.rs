@@ -283,15 +283,15 @@ impl UpstreamPool {
         self.primary = primary;
     }
 
-    /// Replace the primary with `new` if it differs from the current preferred.
-    /// Returns `true` if the pool changed.
+    /// Replace the primaries with `new` if they differ. Returns `true` if the
+    /// pool changed.
     ///
     /// Keeps the TCP sibling in step with the primary. The sibling exists so
     /// Forward mode survives carriers that drop outbound UDP:53, but failover
     /// chains `fallback` *after* the primaries, so a sibling left over from the
     /// previous network is retried before anything reachable (#169).
-    pub fn maybe_replace_primary(&mut self, new: Upstream) -> bool {
-        if self.preferred() == Some(&new) {
+    pub fn maybe_replace_primary(&mut self, new: Vec<Upstream>) -> bool {
+        if self.primary == new {
             return false;
         }
         let stale_sibling = match self.primary.first() {
@@ -301,13 +301,15 @@ impl UpstreamPool {
         if let Some(stale) = stale_sibling {
             self.fallback.retain(|u| *u != stale);
         }
-        if let Upstream::Udp(addr) = new {
-            let sibling = Upstream::Tcp(addr);
-            if !self.fallback.contains(&sibling) {
-                self.fallback.push(sibling);
+        for u in &new {
+            if let Upstream::Udp(addr) = u {
+                let sibling = Upstream::Tcp(*addr);
+                if !self.fallback.contains(&sibling) {
+                    self.fallback.push(sibling);
+                }
             }
         }
-        self.primary = vec![new];
+        self.primary = new;
         true
     }
 
@@ -317,7 +319,7 @@ impl UpstreamPool {
         let Ok(new_sock) = format!("{}:{}", new_addr, port).parse::<SocketAddr>() else {
             return false;
         };
-        self.maybe_replace_primary(Upstream::Udp(new_sock))
+        self.maybe_replace_primary(vec![Upstream::Udp(new_sock)])
     }
 
     pub fn label(&self) -> String {
@@ -1480,12 +1482,62 @@ mod tests {
             url: "https://9.9.9.9/dns-query".to_string(),
             client: crate::forward::default_client(),
         };
-        assert!(pool.maybe_replace_primary(doh.clone()));
+        assert!(pool.maybe_replace_primary(vec![doh.clone()]));
         assert_eq!(
             pool.preferred().unwrap().to_string(),
             "https://9.9.9.9/dns-query"
         );
-        assert!(!pool.maybe_replace_primary(doh), "already on the fallback");
+        assert!(
+            !pool.maybe_replace_primary(vec![doh]),
+            "already on the fallback"
+        );
+    }
+
+    // The built-in DoH set spans two operators, so the rescan adopts all of it
+    // and strips the TCP sibling the previous network left behind.
+    #[test]
+    fn maybe_replace_primary_adopts_the_whole_set() {
+        let mut pool = UpstreamPool::new(
+            vec![Upstream::Udp("192.168.1.1:53".parse().unwrap())],
+            vec![Upstream::Tcp("192.168.1.1:53".parse().unwrap())],
+        );
+        let doh = |url: &str| Upstream::Doh {
+            url: url.to_string(),
+            client: crate::forward::default_client(),
+        };
+        let set = vec![
+            doh("https://9.9.9.9/dns-query"),
+            doh("https://1.1.1.1/dns-query"),
+        ];
+        assert!(pool.maybe_replace_primary(set.clone()));
+        assert_eq!(pool.primary, set);
+        assert!(pool.fallback.is_empty());
+        assert!(!pool.maybe_replace_primary(set), "already on the set");
+    }
+
+    // DoH carries no SRTT, so the second operator in the built-in set sees no
+    // queries while the first answers.
+    #[tokio::test]
+    async fn second_doh_primary_idle_while_first_answers() {
+        let query = make_query();
+        let response = to_wire(&make_response(&query));
+        let (first, mut first_rx) = doh_upstream(response.clone()).await;
+        let (second, mut second_rx) = doh_upstream(response).await;
+        let pool = UpstreamPool::new(vec![first, second], vec![]);
+        let srtt = RwLock::new(SrttCache::new(true));
+
+        forward_with_failover_raw(
+            &to_wire(&query),
+            &pool,
+            &srtt,
+            Duration::from_secs(2),
+            Duration::ZERO,
+        )
+        .await
+        .expect("first DoH primary answers");
+
+        assert!(first_rx.try_recv().is_ok());
+        assert!(second_rx.try_recv().is_err());
     }
 
     // Failover chains fallback after the primaries, so a sibling left behind by

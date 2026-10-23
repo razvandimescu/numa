@@ -44,8 +44,8 @@ api_port = 5380
 # [upstream] block: forward (the default), recursive, odoh or auto.
 
 # Forward: relay to upstream servers. Without `address`, numa follows
-# your system DNS as networks change, or uses Quad9 over DoH if it
-# finds none.
+# your system DNS as networks change, or uses Quad9 over DoH (then
+# Cloudflare if Quad9 fails) if it finds none.
 # [upstream]
 # mode = "forward"
 # address = "9.9.9.9"                           # single upstream (plain UDP)
@@ -113,7 +113,8 @@ api_port = 5380
 #                                                # recipes/odoh-upstream.md.
 
 # Auto: probe the root servers at startup. Resolve recursively if they
-# answer, otherwise forward to Quad9 over DoH until the next restart.
+# answer, otherwise forward to Quad9 over DoH (then Cloudflare if Quad9
+# fails) until the next restart.
 # [upstream]
 # mode = "auto"
 
