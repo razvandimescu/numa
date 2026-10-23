@@ -24,6 +24,7 @@
   "stat.enc_suffix": " · {pct}% versch.",
   "stat.cache_entries": "{n} / {max} Einträge",
   "panel.resolution_paths": "Auflösungspfade",
+  "panel.query_latency": "Abfragelatenz",
   "panel.inbound_wire": "Eingehend",
   "panel.inbound_wire_sub": "Apps → numa",
   "panel.outbound_wire": "Ausgehend",
