@@ -333,7 +333,7 @@ fn update_config_content(contents: &str, section: &str, key: &str, value: bool) 
                 if let Some((k, _)) = trimmed.split_once('=') {
                     if k.trim() == key {
                         found = true;
-                        let indent = &line[..line.len() - trimmed.len()];
+                        let indent = &line[..line.len() - line.trim_start().len()];
                         return format!("{}{} = {}", indent, key, value);
                     }
                 }
@@ -464,6 +464,18 @@ mod tests {
             let input = format!("{header}\nenabled = false\n");
             let output = update_config_content(&input, "dnssec", "enabled", true);
             assert_eq!(output, format!("{header}\nenabled = true\n"));
+        }
+    }
+
+    #[test]
+    fn update_config_keeps_the_indent_without_trailing_space() {
+        for (line, want) in [
+            ("enabled = false ", "enabled = true"),
+            ("  enabled = false  ", "  enabled = true"),
+        ] {
+            let output =
+                update_config_content(&format!("[dnssec]\n{line}\n"), "dnssec", "enabled", true);
+            assert_eq!(output, format!("[dnssec]\n{want}\n"));
         }
     }
 
