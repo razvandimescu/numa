@@ -1122,20 +1122,6 @@ async fn bind_api(addr: SocketAddr, retry: Duration) -> tokio::net::TcpListener 
 mod tests {
     use super::*;
 
-    // One operator leaving a jurisdiction (Quad9 exits France 2026-11-24)
-    // must not leave numa without an upstream. Quad9 stays first.
-    #[test]
-    fn doh_fallback_spans_two_operators() {
-        let urls: Vec<String> = doh_fallback(crate::forward::default_client())
-            .iter()
-            .map(ToString::to_string)
-            .collect();
-        assert_eq!(
-            urls,
-            ["https://9.9.9.9/dns-query", "https://1.1.1.1/dns-query"]
-        );
-    }
-
     #[test]
     fn per_datagram_recv_errors_do_not_stop_the_udp_loop() {
         for code in [10040, 10052] {

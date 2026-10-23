@@ -301,12 +301,10 @@ impl UpstreamPool {
         if let Some(stale) = stale_sibling {
             self.fallback.retain(|u| *u != stale);
         }
-        for u in &new {
-            if let Upstream::Udp(addr) = u {
-                let sibling = Upstream::Tcp(*addr);
-                if !self.fallback.contains(&sibling) {
-                    self.fallback.push(sibling);
-                }
+        if let Some(Upstream::Udp(addr)) = new.first() {
+            let sibling = Upstream::Tcp(*addr);
+            if !self.fallback.contains(&sibling) {
+                self.fallback.push(sibling);
             }
         }
         self.primary = new;
