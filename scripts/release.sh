@@ -20,6 +20,12 @@ if [ "$(git branch --show-current)" != "main" ]; then
   exit 1
 fi
 
+git fetch -q origin main
+if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
+  echo "ERROR: main differs from origin/main — pull first" >&2
+  exit 1
+fi
+
 if git tag -l "$TAG" | grep -q .; then
   echo "ERROR: tag $TAG already exists" >&2
   exit 1
@@ -40,7 +46,7 @@ cargo update --workspace
 git add Cargo.toml Cargo.lock
 git commit -m "chore: bump version to $VERSION"
 git tag "$TAG"
-git push origin main "$TAG"
+git push --atomic origin main "$TAG"
 
 echo
 echo "Released $TAG — GitHub Actions will build, publish to crates.io, and create the release."
