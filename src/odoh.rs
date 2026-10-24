@@ -22,14 +22,20 @@ use reqwest::header::HeaderMap;
 use tokio::sync::Mutex;
 use tokio::time::timeout_at;
 
+use crate::forward::read_capped;
 use crate::Result;
 
 /// MIME type used for both directions of the ODoH exchange (RFC 9230 §4).
 pub(crate) const ODOH_CONTENT_TYPE: &str = "application/oblivious-dns-message";
 
+/// Cap on a target config or a sealed response read into memory. Larger
+/// than a DNS reply: sealed responses add HPKE overhead.
+pub(crate) const MAX_ODOH_RESPONSE_BYTES: usize = 8 * 1024;
+
 /// Cap on the response body we read into memory when the relay returns
 /// non-success. Protects against a hostile relay streaming a huge body on
-/// the error path; keeps enough room to carry a human-readable reason.
+/// the error path; keeps enough room to carry a human-readable reason. A
+/// longer body is dropped, and the error keeps only its status.
 const ERROR_BODY_PREVIEW_BYTES: usize = 1024;
 
 /// Fallback TTL when the target's response lacks a usable `Cache-Control`
@@ -197,7 +203,7 @@ pub async fn fetch_odoh_config(
 ) -> Result<OdohTargetConfig> {
     let resp = client.get(configs_url).send().await?.error_for_status()?;
     let ttl = cache_control_ttl(resp.headers()).unwrap_or(DEFAULT_CONFIG_TTL);
-    let body = resp.bytes().await?;
+    let body = read_capped(resp, MAX_ODOH_RESPONSE_BYTES).await?;
     parse_odoh_config(&body, ttl)
 }
 
@@ -318,16 +324,17 @@ async fn attempt_query(req: &OdohRequest<'_>) -> std::result::Result<Vec<u8>, At
             .send()
             .await?;
         let status = resp.status();
-        // `bytes()` consumes the response, so the attribution inputs have to
-        // be read here — but only when there is a failure to attribute.
-        let failure = (!status.is_success()).then(|| {
-            (
+        let (failure, body) = if status.is_success() {
+            (None, read_capped(resp, MAX_ODOH_RESPONSE_BYTES).await?)
+        } else {
+            let hop = (
                 content_type_matches(resp.headers(), ODOH_CONTENT_TYPE),
                 resp.url().to_string(),
-            )
-        });
-        let body = resp.bytes().await?;
-        Ok::<_, reqwest::Error>((status, failure, body))
+            );
+            let preview = read_capped(resp, ERROR_BODY_PREVIEW_BYTES).await;
+            (Some(hop), preview.unwrap_or_default())
+        };
+        Ok::<_, crate::Error>((status, failure, body))
     })
     .await
     .map_err(|_| AttemptError::Other("ODoH relay request timed out".into()))?
@@ -338,8 +345,7 @@ async fn attempt_query(req: &OdohRequest<'_>) -> std::result::Result<Vec<u8>, At
     // practical signal that our cached HPKE key is stale. Treat 400 as a
     // client-side bug (malformed ODoH envelope) — retrying would loop-fail.
     if let Some((forwarded, url)) = failure {
-        let preview_len = resp_body.len().min(ERROR_BODY_PREVIEW_BYTES);
-        let body_preview = String::from_utf8_lossy(&resp_body[..preview_len]);
+        let body_preview = String::from_utf8_lossy(&resp_body);
         let msg = describe_failure(
             status,
             forwarded,
@@ -355,7 +361,7 @@ async fn attempt_query(req: &OdohRequest<'_>) -> std::result::Result<Vec<u8>, At
         });
     }
 
-    let mut buf = resp_body;
+    let mut buf = axum::body::Bytes::from(resp_body);
     let encrypted_response: ObliviousDoHMessage = odoh_rs::parse(&mut buf)
         .map_err(|e| AttemptError::Other(format!("ODoH response parse failed: {e}").into()))?;
     let plaintext_response =
@@ -815,6 +821,75 @@ mod tests {
             cache.last_failure.load_full().is_none(),
             "our own timeout armed the backoff"
         );
+    }
+
+    #[tokio::test]
+    async fn config_fetch_over_the_cap_fails_before_it_ends() {
+        let app = axum::Router::new().route(
+            "/.well-known/odohconfigs",
+            axum::routing::get(|| async {
+                crate::testutil::body_then_stall(MAX_ODOH_RESPONSE_BYTES + 1)
+            }),
+        );
+        let url = format!(
+            "http://{}/.well-known/odohconfigs",
+            crate::testutil::serve(app).await
+        );
+
+        let fetched = tokio::time::timeout(
+            Duration::from_secs(1),
+            fetch_odoh_config(&build_https_client(), &url),
+        )
+        .await
+        .expect("an over-cap config was read until it ended");
+        assert!(fetched.unwrap_err().to_string().contains("exceeds cap"));
+    }
+
+    async fn query_relay_with_long_body(status: axum::http::StatusCode) -> Result<Vec<u8>> {
+        let app = axum::Router::new().route(
+            "/relay",
+            axum::routing::post(move || async move {
+                (
+                    status,
+                    crate::testutil::body_then_stall(MAX_ODOH_RESPONSE_BYTES + 1),
+                )
+            }),
+        );
+        let relay_url = format!("http://{}/relay", crate::testutil::serve(app).await);
+        let client = build_https_client();
+        let cache = OdohConfigCache::new("odoh.invalid".to_string(), client.clone());
+        let cfg = parse_odoh_config(&synth_configs_bytes(), Duration::from_secs(3600)).unwrap();
+        cache.current.store(Some(Arc::new(cfg)));
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            query_through_relay(
+                QUERY_WIRE,
+                &relay_url,
+                "/dns-query",
+                &client,
+                &cache,
+                Duration::from_secs(5),
+            ),
+        )
+        .await
+        .expect("the relay body was read until the query timeout")
+    }
+
+    #[tokio::test]
+    async fn relay_response_over_the_cap_fails_before_it_ends() {
+        let err = query_relay_with_long_body(axum::http::StatusCode::OK)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("exceeds cap"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn relay_error_with_a_long_body_still_names_its_status() {
+        let err = query_relay_with_long_body(axum::http::StatusCode::BAD_GATEWAY)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("returned 502"), "{err}");
     }
 
     fn example_com_query() -> BytePacketBuffer {

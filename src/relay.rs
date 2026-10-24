@@ -19,17 +19,13 @@ use log::{error, info};
 use serde::Deserialize;
 use tokio::net::TcpListener;
 
-use crate::forward::build_relay_client;
-use crate::odoh::{content_type_matches, ODOH_CONTENT_TYPE};
+use crate::forward::{build_relay_client, read_capped};
+use crate::odoh::{content_type_matches, MAX_ODOH_RESPONSE_BYTES, ODOH_CONTENT_TYPE};
 use crate::Result;
 
 /// Cap on the opaque body we accept from a client. ODoH envelopes are
 /// ~100–300 bytes in practice; anything larger is malformed or hostile.
 const MAX_BODY_BYTES: usize = 4 * 1024;
-
-/// Cap on the body we read back from the target before streaming to client.
-/// Slightly larger: target responses carry DNS answers plus HPKE overhead.
-const MAX_TARGET_RESPONSE_BYTES: usize = 8 * 1024;
 
 /// Covers the whole client-to-target round trip — not just `.send()` — so a
 /// slow-drip target can't hang a worker indefinitely after headers arrive.
@@ -170,8 +166,8 @@ async fn forward_to_target(
     client: &reqwest::Client,
     url: &str,
     body: Bytes,
-) -> Result<(StatusCode, Bytes)> {
-    let response = tokio::time::timeout(TARGET_REQUEST_TIMEOUT, async {
+) -> Result<(StatusCode, Vec<u8>)> {
+    tokio::time::timeout(TARGET_REQUEST_TIMEOUT, async {
         let resp = client
             .post(url)
             .header(header::CONTENT_TYPE, ODOH_CONTENT_TYPE)
@@ -180,23 +176,10 @@ async fn forward_to_target(
             .send()
             .await?;
         let status = StatusCode::from_u16(resp.status().as_u16())?;
-        Ok::<_, crate::Error>((status, read_capped(resp).await?))
+        Ok::<_, crate::Error>((status, read_capped(resp, MAX_ODOH_RESPONSE_BYTES).await?))
     })
     .await
-    .map_err(|_| "timed out talking to target")??;
-    Ok(response)
-}
-
-/// Capped while streaming: a hostile target could otherwise send an unbounded or gzip-inflated body.
-async fn read_capped(mut resp: reqwest::Response) -> Result<Bytes> {
-    let mut body = Vec::new();
-    while let Some(chunk) = resp.chunk().await? {
-        if body.len() + chunk.len() > MAX_TARGET_RESPONSE_BYTES {
-            return Err("target response exceeds cap".into());
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body.into())
+    .map_err(|_| "timed out talking to target")?
 }
 
 /// Strict DNS-hostname validator, aimed at closing the SSRF surface a naive
@@ -219,16 +202,11 @@ mod tests {
     use super::*;
 
     async fn spawn_relay() -> (SocketAddr, Arc<RelayState>) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-
         let state = RelayState::new();
-        let app = build_app(state.clone());
-
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-        (addr, state)
+        (
+            crate::testutil::serve(build_app(state.clone())).await,
+            state,
+        )
     }
 
     #[tokio::test]
@@ -391,11 +369,7 @@ mod tests {
                 axum::body::Body::from_stream(futures::stream::repeat(chunk))
             }),
         );
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let target_addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, target).await;
-        });
+        let target_addr = crate::testutil::serve(target).await;
 
         let err = forward_to_target(
             &crate::forward::default_client(),

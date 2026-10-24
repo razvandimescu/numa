@@ -241,6 +241,19 @@ pub(crate) fn default_client() -> reqwest::Client {
     numa_tls_builder().build().unwrap_or_default()
 }
 
+/// Capped while streaming: an unbounded or gzip-inflated body never lands in
+/// memory whole.
+pub(crate) async fn read_capped(mut resp: reqwest::Response, max: usize) -> Result<Vec<u8>> {
+    let mut body = Vec::new();
+    while let Some(chunk) = resp.chunk().await? {
+        if body.len() + chunk.len() > max {
+            return Err(format!("response body exceeds cap of {max} bytes").into());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
 fn https_client_builder(pool_max_idle_per_host: usize) -> reqwest::ClientBuilder {
     numa_tls_builder()
         .http2_initial_stream_window_size(65_535)
@@ -735,21 +748,20 @@ async fn forward_doh_raw(
     client: &reqwest::Client,
     timeout_duration: Duration,
 ) -> Result<Vec<u8>> {
-    let resp = timeout(
-        timeout_duration,
-        client
+    let body = timeout(timeout_duration, async {
+        let resp = client
             .post(url)
             .header("content-type", "application/dns-message")
             .header("accept", "application/dns-message")
             .body(wire.to_vec())
-            .send(),
-    )
-    .await??
-    .error_for_status()?;
-
-    let bytes = resp.bytes().await?;
-    log::debug!("DoH response: {} bytes", bytes.len());
-    Ok(bytes.to_vec())
+            .send()
+            .await?
+            .error_for_status()?;
+        read_capped(resp, crate::wire::MAX_UPSTREAM_PAYLOAD as usize).await
+    })
+    .await??;
+    log::debug!("DoH response: {} bytes", body.len());
+    Ok(body)
 }
 
 /// Send a lightweight keepalive query to a DoH upstream to prevent
@@ -778,7 +790,6 @@ pub async fn keepalive_doh(upstream: &Upstream) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::future::IntoFuture;
 
     use crate::header::ResultCode;
     use crate::question::QueryType;
@@ -876,6 +887,13 @@ mod tests {
         }
     }
 
+    async fn serve_doh(app: axum::Router) -> Upstream {
+        Upstream::Doh {
+            url: format!("http://{}/dns-query", crate::testutil::serve(app).await),
+            client: crate::forward::default_client(),
+        }
+    }
+
     #[tokio::test]
     async fn doh_http_error_propagates() {
         let app = axum::Router::new().route(
@@ -884,15 +902,7 @@ mod tests {
                 (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "bad")
             }),
         );
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(axum::serve(listener, app).into_future());
-
-        let upstream = Upstream::Doh {
-            url: format!("http://{}/dns-query", addr),
-            client: crate::forward::default_client(),
-        };
+        let upstream = serve_doh(app).await;
 
         let result = forward_query(&make_query(), &upstream, Duration::from_secs(2)).await;
         assert!(result.is_err());
@@ -907,18 +917,46 @@ mod tests {
                 "never"
             }),
         );
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(axum::serve(listener, app).into_future());
-
-        let upstream = Upstream::Doh {
-            url: format!("http://{}/dns-query", addr),
-            client: crate::forward::default_client(),
-        };
+        let upstream = serve_doh(app).await;
 
         let result = forward_query(&make_query(), &upstream, Duration::from_millis(100)).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn doh_timeout_covers_a_stalled_body() {
+        let app = axum::Router::new().route(
+            "/dns-query",
+            axum::routing::post(|| async { crate::testutil::body_then_stall(1) }),
+        );
+        let upstream = serve_doh(app).await;
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            forward_query(&make_query(), &upstream, Duration::from_millis(100)),
+        )
+        .await
+        .expect("query outlived its timeout waiting for the body");
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn doh_body_over_the_cap_fails_before_it_ends() {
+        let app = axum::Router::new().route(
+            "/dns-query",
+            axum::routing::post(|| async {
+                crate::testutil::body_then_stall(crate::wire::MAX_UPSTREAM_PAYLOAD as usize + 1)
+            }),
+        );
+        let upstream = serve_doh(app).await;
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            forward_query(&make_query(), &upstream, Duration::from_secs(5)),
+        )
+        .await
+        .expect("an over-cap body was read until the query timeout");
+        assert!(result.unwrap_err().to_string().contains("exceeds cap"));
     }
 
     #[test]
