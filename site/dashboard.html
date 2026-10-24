@@ -234,6 +234,24 @@ body {
   border-bottom: 1px solid var(--border);
   background: var(--bg-surface);
 }
+.sidebar .panel-header {
+  justify-content: flex-start;
+  gap: 0.5rem;
+  cursor: pointer;
+}
+.sidebar .panel-header > :first-child { margin-right: auto; }
+.panel-chevron {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 0.75rem;
+  padding: 0 0.1rem;
+  transition: transform 0.15s;
+}
+.panel.collapsed .panel-chevron { transform: rotate(-90deg); }
+.panel.collapsed > :not(.panel-header) { display: none; }
+.panel.collapsed .panel-header { border-bottom: none; }
 .panel-title {
   font-size: 0.7rem;
   font-weight: 600;
@@ -1839,8 +1857,44 @@ async function deleteService(name) {
 }
 
 // Initial load + polling — translations load first so t() is populated.
+// Sidebar panels collapse on a header click; the choice is kept per panel.
+const COLLAPSED_KEY = 'numa-collapsed';
+
+function initCollapsible() {
+  let collapsed;
+  try {
+    collapsed = new Set(JSON.parse(localStorage.getItem(COLLAPSED_KEY) || '[]'));
+  } catch {
+    collapsed = new Set();
+  }
+  document.querySelectorAll('.sidebar .panel').forEach(panel => {
+    const header = panel.querySelector('.panel-header');
+    const key = header.querySelector('.panel-title[data-i18n]').dataset.i18n;
+    const chevron = document.createElement('button');
+    chevron.type = 'button';
+    chevron.className = 'panel-chevron';
+    chevron.textContent = '\u25be';
+    chevron.dataset.i18nTitle = 'panel.toggle_title';
+    chevron.title = t('panel.toggle_title');
+    header.appendChild(chevron);
+    const apply = isCollapsed => {
+      panel.classList.toggle('collapsed', isCollapsed);
+      chevron.setAttribute('aria-expanded', String(!isCollapsed));
+    };
+    apply(collapsed.has(key));
+    header.addEventListener('click', e => {
+      if (e.target.closest('a, input, select, label, button:not(.panel-chevron)')) return;
+      const isCollapsed = !panel.classList.contains('collapsed');
+      apply(isCollapsed);
+      isCollapsed ? collapsed.add(key) : collapsed.delete(key);
+      localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...collapsed]));
+    });
+  });
+}
+
 initI18n().then(() => {
   applyTheme(localStorage.getItem('numa-theme') || 'auto');
+  initCollapsible();
   refresh();
   setInterval(refresh, 2000);
   checkResolver();

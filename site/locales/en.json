@@ -38,6 +38,7 @@
   "panel.recent_queries": "Recent Queries",
   "panel.memory": "Memory",
   "panel.cached_domains": "Cached Domains",
+  "panel.toggle_title": "Show or hide",
 
   "paths.forward": "Forward",
   "paths.upstream": "Upstream",
