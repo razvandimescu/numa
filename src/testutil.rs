@@ -329,8 +329,6 @@ fn serve_tcp_raw(listener: tokio::net::TcpListener, bytes: Vec<u8>) {
 pub async fn doh_upstream_raw(
     bytes: Vec<u8>,
 ) -> (String, tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) {
-    use std::future::IntoFuture;
-
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let app = axum::Router::new().route(
         "/dns-query",
@@ -349,10 +347,27 @@ pub async fn doh_upstream_raw(
             }
         }),
     );
+    (format!("http://{}/dns-query", serve(app).await), rx)
+}
+
+pub async fn serve(app: axum::Router) -> SocketAddr {
+    use std::future::IntoFuture;
+
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(axum::serve(listener, app).into_future());
-    (format!("http://{}/dns-query", addr), rx)
+    addr
+}
+
+/// Sends `len` bytes, then never ends: a capped read fails at once, an
+/// uncapped one waits forever without filling memory.
+pub fn body_then_stall(len: usize) -> axum::body::Body {
+    use futures::StreamExt;
+
+    let head = axum::body::Bytes::from(vec![0u8; len]);
+    let stream = futures::stream::once(async { Ok::<_, std::convert::Infallible>(head) })
+        .chain(futures::stream::pending());
+    axum::body::Body::from_stream(stream)
 }
 
 /// Wait until `sample` stops changing, having first seen it rise above zero.
