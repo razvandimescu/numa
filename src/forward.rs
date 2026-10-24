@@ -735,19 +735,19 @@ async fn forward_doh_raw(
     client: &reqwest::Client,
     timeout_duration: Duration,
 ) -> Result<Vec<u8>> {
-    let resp = timeout(
-        timeout_duration,
+    let bytes = timeout(timeout_duration, async {
         client
             .post(url)
             .header("content-type", "application/dns-message")
             .header("accept", "application/dns-message")
             .body(wire.to_vec())
-            .send(),
-    )
-    .await??
-    .error_for_status()?;
-
-    let bytes = resp.bytes().await?;
+            .send()
+            .await?
+            .error_for_status()?
+            .bytes()
+            .await
+    })
+    .await??;
     log::debug!("DoH response: {} bytes", bytes.len());
     Ok(bytes.to_vec())
 }
@@ -876,6 +876,16 @@ mod tests {
         }
     }
 
+    async fn serve_doh(app: axum::Router) -> Upstream {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, app).into_future());
+        Upstream::Doh {
+            url: format!("http://{}/dns-query", addr),
+            client: crate::forward::default_client(),
+        }
+    }
+
     #[tokio::test]
     async fn doh_http_error_propagates() {
         let app = axum::Router::new().route(
@@ -884,15 +894,7 @@ mod tests {
                 (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "bad")
             }),
         );
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(axum::serve(listener, app).into_future());
-
-        let upstream = Upstream::Doh {
-            url: format!("http://{}/dns-query", addr),
-            client: crate::forward::default_client(),
-        };
+        let upstream = serve_doh(app).await;
 
         let result = forward_query(&make_query(), &upstream, Duration::from_secs(2)).await;
         assert!(result.is_err());
@@ -907,17 +909,30 @@ mod tests {
                 "never"
             }),
         );
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(axum::serve(listener, app).into_future());
-
-        let upstream = Upstream::Doh {
-            url: format!("http://{}/dns-query", addr),
-            client: crate::forward::default_client(),
-        };
+        let upstream = serve_doh(app).await;
 
         let result = forward_query(&make_query(), &upstream, Duration::from_millis(100)).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn doh_timeout_covers_a_stalled_body() {
+        let app = axum::Router::new().route(
+            "/dns-query",
+            axum::routing::post(|| async {
+                axum::body::Body::from_stream(futures::stream::pending::<
+                    std::result::Result<axum::body::Bytes, std::io::Error>,
+                >())
+            }),
+        );
+        let upstream = serve_doh(app).await;
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            forward_query(&make_query(), &upstream, Duration::from_millis(100)),
+        )
+        .await
+        .expect("query outlived its timeout waiting for the body");
         assert!(result.is_err());
     }
 
