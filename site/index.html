@@ -1660,7 +1660,7 @@ footer .closing {
 <span class="prompt">$</span> <span class="cmd">sudo numa</span>                          <span class="comment"># bind :53, :80, :443, :853, :5380</span>
 <span class="prompt">$</span> <span class="cmd">dig</span> <span class="flag">@127.0.0.1</span> google.com         <span class="comment"># test resolution</span>
 <span class="prompt">$</span> <span class="cmd">open</span> http://localhost:5380           <span class="comment"># dashboard</span>
-<span class="prompt">$</span> <span class="cmd">curl</span> <span class="flag">-X POST</span> localhost:5380/services \
+<span class="prompt">$</span> <span class="cmd">curl</span> <span class="flag">-X POST</span> localhost:5380/services <span class="flag">-H</span> <span class="str">'Content-Type: application/json'</span> \
     <span class="flag">-d</span> <span class="str">'{"name":"frontend",
          "target_port":5173}'</span>          <span class="comment"># https://frontend.numa</span>
       </div>

@@ -300,7 +300,7 @@ If the configured address starts with `https://`, it's DoH. Otherwise, plain UDP
 You absolutely can — those are mature, battle-tested tools. The difference is integration: with dnsmasq + nginx + mkcert, you're configuring three tools with three config formats. Numa puts the DNS record, reverse proxy, and TLS cert behind one API call:
 
 ```bash
-curl -X POST localhost:5380/services -d '{"name":"frontend","target_port":5173}'
+curl -X POST localhost:5380/services -H 'Content-Type: application/json' -d '{"name":"frontend","target_port":5173}'
 ```
 
 That creates the DNS entry, generates a TLS certificate, and starts proxying — including WebSocket upgrade for Vite HMR. One command, no config files. Having full control over the resolution pipeline is what makes auto-revert overrides and LAN discovery possible.
