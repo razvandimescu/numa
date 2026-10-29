@@ -116,8 +116,8 @@ pub async fn resolve_query(
     // ride the permit the first cache miss took, held until we return.
     let mut charge = QueryAdmission::default();
 
-    // Pipeline: overrides -> .localhost -> local zones -> special-use (unless forwarded)
-    //        -> .tld services -> .tld peers/NXDOMAIN (unless not authoritative)
+    // Pipeline: overrides -> .localhost -> local zones -> .tld services
+    //        -> .tld peers/NXDOMAIN (unless not authoritative) -> special-use (unless forwarded)
     //        -> blocklist -> cache -> forwarding -> recursive/upstream
     // Each lock is scoped to avoid holding MutexGuard across await points.
     let (mut response, path, dnssec, upstream_transport) =
@@ -378,19 +378,19 @@ fn resolve_local(
         resp.answers = records;
         return Some((resp, QueryPath::Local, DnssecStatus::Indeterminate));
     }
-    if is_special_use_domain(qname)
-        && crate::system_dns::match_forwarding_rule(qname, &ctx.forwarding_rules).is_none()
-    {
-        // RFC 6761/8880: answer locally unless a forwarding rule covers this zone.
-        let resp = special_use_response(query, qname, qtype);
-        return Some((resp, QueryPath::Local, DnssecStatus::Indeterminate));
-    }
     if !ctx.proxy_tld_suffix.is_empty()
         && (qname.ends_with(&ctx.proxy_tld_suffix) || qname == ctx.proxy_tld)
     {
         if let Some(answer) = resolve_proxy_tld(query, src_addr, qname, qtype, ctx) {
             return Some(answer);
         }
+    }
+    if is_special_use_domain(qname)
+        && crate::system_dns::match_forwarding_rule(qname, &ctx.forwarding_rules).is_none()
+    {
+        // RFC 6761/8880: answer locally unless a forwarding rule covers this zone.
+        let resp = special_use_response(query, qname, qtype);
+        return Some((resp, QueryPath::Local, DnssecStatus::Indeterminate));
     }
     let mut policy_allow = false;
     if ctx.client_policy.is_enabled() {
@@ -2059,6 +2059,36 @@ mod tests {
                 other => panic!("{name}: expected A record, got {:?}", other),
             }
         }
+    }
+
+    /// A tld under a special-use name (`local`, an AD `corp.local`) answers its
+    /// services with no forwarding rule; the rest stays special-use.
+    #[tokio::test]
+    async fn pipeline_special_use_tld_answers_registered_service() {
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.proxy_tld = "local".to_string();
+        ctx.proxy_tld_suffix = ".local".to_string();
+        ctx.proxy_authoritative = false;
+        ctx.services
+            .lock()
+            .unwrap()
+            .insert_from_config("grafana", 3000, None, Vec::new());
+        let ctx = Arc::new(ctx);
+
+        let (resp, path) = resolve_in_test(&ctx, "grafana.local", QueryType::A).await;
+        assert_eq!(path, QueryPath::Local);
+        match resp.answers.first() {
+            Some(DnsRecord::A { addr, .. }) => assert_eq!(*addr, Ipv4Addr::LOCALHOST),
+            other => panic!("expected A record, got {:?}", other),
+        }
+
+        let (resp, path) = resolve_in_test(&ctx, "printer.local", QueryType::A).await;
+        assert_eq!(
+            path,
+            QueryPath::Local,
+            "unknown .local must not go upstream"
+        );
+        assert_eq!(resp.header.rescode, ResultCode::NXDOMAIN);
     }
 
     /// mDNS announcements are unauthenticated, so a LAN peer must not shadow a
