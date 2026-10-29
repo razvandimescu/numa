@@ -262,14 +262,7 @@ impl ScutilState {
         let Some(val) = line.split(':').nth(1) else {
             return;
         };
-        let domain = val.trim().trim_end_matches('.').to_lowercase();
-        if !domain.is_empty()
-            && domain != "local"
-            && !domain.ends_with("in-addr.arpa")
-            && !domain.ends_with("ip6.arpa")
-        {
-            self.current_domain = Some(domain);
-        }
+        self.current_domain = Some(val.trim().to_string());
     }
 
     fn set_nameserver(&mut self, line: &str) {
@@ -359,7 +352,14 @@ fn discover_macos() -> SystemDnsInfo {
 fn make_rule(domain: &str, nameserver: &str) -> Option<ForwardingRule> {
     let addr = crate::forward::parse_upstream_addr(nameserver, 53).ok()?;
     let pool = UpstreamPool::new(vec![Upstream::Udp(addr)], vec![]);
-    Some(ForwardingRule::new(domain.to_string(), pool))
+    let rule = ForwardingRule::new(domain.to_string(), pool);
+    // A `local` rule would send mDNS names (RFC 6762) upstream instead of
+    // letting ctx answer them as special-use.
+    let forwardable = !rule.suffix.is_empty()
+        && rule.suffix != "local"
+        && !rule.suffix.ends_with("in-addr.arpa")
+        && !rule.suffix.ends_with("ip6.arpa");
+    forwardable.then_some(rule)
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -2297,6 +2297,14 @@ mod tests {
     #[test]
     fn search_domain_rules_empty_without_upstream() {
         assert!(search_domain_rules(&["example.com".to_string()], None).is_empty());
+    }
+
+    #[test]
+    fn search_domain_rules_skip_mdns_local() {
+        let domains = ["local", "LOCAL", "corp.local"].map(String::from);
+        let rules = search_domain_rules(&domains, Some("192.168.1.1"));
+        let suffixes: Vec<&str> = rules.iter().map(|r| r.suffix.as_str()).collect();
+        assert_eq!(suffixes, ["corp.local"]);
     }
 
     #[test]
