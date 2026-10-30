@@ -262,7 +262,7 @@ impl ScutilState {
         let Some(val) = line.split(':').nth(1) else {
             return;
         };
-        let domain = val.trim().trim_end_matches('.').to_lowercase();
+        let domain = crate::blocklist::normalize(val.trim());
         if !domain.is_empty() && !domain.ends_with("in-addr.arpa") && !domain.ends_with("ip6.arpa")
         {
             self.current_domain = Some(domain);
@@ -299,6 +299,17 @@ impl ScutilState {
         }
         false
     }
+
+    fn parse(text: &str) -> Self {
+        let mut state = Self::default();
+        for line in text.lines() {
+            if state.handle_line(line.trim()) {
+                break;
+            }
+        }
+        state.flush();
+        state
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -317,19 +328,11 @@ fn discover_macos() -> SystemDnsInfo {
     };
 
     let text = String::from_utf8_lossy(&output.stdout);
-    let mut state = ScutilState::default();
-    for line in text.lines() {
-        if state.handle_line(line.trim()) {
-            break;
-        }
-    }
-    state.flush();
-
     let ScutilState {
         mut rules,
         default_upstream,
         ..
-    } = state;
+    } = ScutilState::parse(&text);
     rules.sort_by_key(|r| std::cmp::Reverse(r.suffix.len()));
 
     for rule in &rules {
@@ -2322,11 +2325,7 @@ mod tests {
     #[test]
     fn scutil_rules_skip_supplemental_reverse_zones() {
         let text = "resolver #1\n  nameserver[0] : 192.168.1.1\n\nresolver #2\n  domain   : corp.example\n  nameserver[0] : 10.8.0.1\n  flags    : Supplemental, Request A records\n\nresolver #3\n  domain   : 8.10.in-addr.arpa\n  nameserver[0] : 10.8.0.1\n  flags    : Supplemental, Request A records\n";
-        let mut state = ScutilState::default();
-        for line in text.lines() {
-            state.handle_line(line.trim());
-        }
-        state.flush();
+        let state = ScutilState::parse(text);
         let suffixes: Vec<&str> = state.rules.iter().map(|r| r.suffix.as_str()).collect();
         assert_eq!(suffixes, ["corp.example"]);
     }
