@@ -118,6 +118,10 @@ api_port = 5380
 # [upstream]
 # mode = "auto"
 
+# numa also builds rules from the system DNS config: search domains on Linux,
+# split-DNS resolvers on macOS. It skips `local`, which is mDNS (RFC 6762).
+# A [[forwarding]] rule with suffix = "local" forwards it anyway.
+#
 # [[forwarding]]                                  # per-suffix conditional forwarding rules
 # suffix = "168.192.in-addr.arpa"                  # single suffix → one upstream
 # upstream = "100.90.1.63:5361"

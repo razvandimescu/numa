@@ -262,7 +262,11 @@ impl ScutilState {
         let Some(val) = line.split(':').nth(1) else {
             return;
         };
-        self.current_domain = Some(val.trim().to_string());
+        let domain = val.trim().trim_end_matches('.').to_lowercase();
+        if !domain.is_empty() && !domain.ends_with("in-addr.arpa") && !domain.ends_with("ip6.arpa")
+        {
+            self.current_domain = Some(domain);
+        }
     }
 
     fn set_nameserver(&mut self, line: &str) {
@@ -355,11 +359,11 @@ fn make_rule(domain: &str, nameserver: &str) -> Option<ForwardingRule> {
     let rule = ForwardingRule::new(domain.to_string(), pool);
     // A `local` rule would send mDNS names (RFC 6762) upstream instead of
     // letting ctx answer them as special-use.
-    let forwardable = !rule.suffix.is_empty()
-        && rule.suffix != "local"
-        && !rule.suffix.ends_with("in-addr.arpa")
-        && !rule.suffix.ends_with("ip6.arpa");
-    forwardable.then_some(rule)
+    if rule.suffix == "local" {
+        info!("not forwarding .local to {nameserver} (mDNS); a [[forwarding]] rule with suffix = \"local\" overrides this");
+        return None;
+    }
+    Some(rule)
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -2300,11 +2304,31 @@ mod tests {
     }
 
     #[test]
-    fn search_domain_rules_skip_mdns_local() {
-        let domains = ["local", "LOCAL", "corp.local"].map(String::from);
+    fn search_domain_rules_skip_only_mdns_local() {
+        let domains = [
+            "local",
+            "LOCAL",
+            "corp.local",
+            "10.in-addr.arpa",
+            "d.f.ip6.arpa",
+        ]
+        .map(String::from);
         let rules = search_domain_rules(&domains, Some("192.168.1.1"));
         let suffixes: Vec<&str> = rules.iter().map(|r| r.suffix.as_str()).collect();
-        assert_eq!(suffixes, ["corp.local"]);
+        assert_eq!(suffixes, ["corp.local", "10.in-addr.arpa", "d.f.ip6.arpa"]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn scutil_rules_skip_supplemental_reverse_zones() {
+        let text = "resolver #1\n  nameserver[0] : 192.168.1.1\n\nresolver #2\n  domain   : corp.example\n  nameserver[0] : 10.8.0.1\n  flags    : Supplemental, Request A records\n\nresolver #3\n  domain   : 8.10.in-addr.arpa\n  nameserver[0] : 10.8.0.1\n  flags    : Supplemental, Request A records\n";
+        let mut state = ScutilState::default();
+        for line in text.lines() {
+            state.handle_line(line.trim());
+        }
+        state.flush();
+        let suffixes: Vec<&str> = state.rules.iter().map(|r| r.suffix.as_str()).collect();
+        assert_eq!(suffixes, ["corp.example"]);
     }
 
     #[test]
