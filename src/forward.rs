@@ -503,38 +503,18 @@ pub async fn forward_query_raw(
         _ => crate::wire::maximize_payload(wire).into_owned(),
     };
     crate::wire::patch_id(&mut sent, crate::packet::random_id());
-    let resp = match upstream {
-        Upstream::Udp(addr) => forward_udp_raw(&sent, *addr, timeout_duration).await,
-        Upstream::Tcp(addr) => forward_tcp_raw(&sent, *addr, timeout_duration).await,
-        Upstream::Doh { url, client } => {
-            forward_doh_raw(&sent, url, client, timeout_duration).await
+    let first = exchange(&sent, upstream, timeout_duration).await?;
+    let mut resp = answered_reply(&sent, upstream, first)?;
+    if matches!(crate::wire::rcode(&resp), 1 | 4) {
+        // FORMERR/NOTIMP to the OPT we sent: a pre-EDNS server (RFC 6891 §7).
+        // Ask once more without it, rather than relaying the error for every
+        // name it serves.
+        if let Some(plain) = crate::wire::strip_opt(&sent) {
+            let budget = timeout_duration.saturating_sub(start.elapsed());
+            sent = plain;
+            let retry = timeout(budget, exchange(&sent, upstream, budget)).await??;
+            resp = answered_reply(&sent, upstream, retry)?;
         }
-        Upstream::Dot {
-            addr,
-            tls_name,
-            connector,
-        } => forward_dot_raw(&sent, *addr, tls_name, connector, timeout_duration).await,
-        Upstream::Odoh {
-            relay_url,
-            target_path,
-            client,
-            target_config,
-        } => {
-            query_through_relay(
-                &sent,
-                relay_url,
-                target_path,
-                client,
-                target_config,
-                timeout_duration,
-            )
-            .await
-        }
-    }?;
-
-    let mut resp = usable_reply(&sent, resp)?;
-    if matches!(upstream, Upstream::Udp(_)) && !udp_reply_answers_question(&sent, &resp) {
-        return Err("plain-UDP upstream answered a different question".into());
     }
     if crate::wire::is_truncated(&resp) {
         let Upstream::Udp(addr) = upstream else {
@@ -549,6 +529,45 @@ pub async fn forward_query_raw(
         }
     }
     resp[..2].copy_from_slice(&wire[..2]);
+    Ok(resp)
+}
+
+/// One round trip to `upstream` over its own transport, reply unvalidated.
+async fn exchange(sent: &[u8], upstream: &Upstream, timeout_duration: Duration) -> Result<Vec<u8>> {
+    match upstream {
+        Upstream::Udp(addr) => forward_udp_raw(sent, *addr, timeout_duration).await,
+        Upstream::Tcp(addr) => forward_tcp_raw(sent, *addr, timeout_duration).await,
+        Upstream::Doh { url, client } => forward_doh_raw(sent, url, client, timeout_duration).await,
+        Upstream::Dot {
+            addr,
+            tls_name,
+            connector,
+        } => forward_dot_raw(sent, *addr, tls_name, connector, timeout_duration).await,
+        Upstream::Odoh {
+            relay_url,
+            target_path,
+            client,
+            target_config,
+        } => {
+            query_through_relay(
+                sent,
+                relay_url,
+                target_path,
+                client,
+                target_config,
+                timeout_duration,
+            )
+            .await
+        }
+    }
+}
+
+/// `usable_reply`, plus the question match a plain-UDP reply must also pass.
+fn answered_reply(sent: &[u8], upstream: &Upstream, resp: Vec<u8>) -> Result<Vec<u8>> {
+    let resp = usable_reply(sent, resp)?;
+    if matches!(upstream, Upstream::Udp(_)) && !udp_reply_answers_question(sent, &resp) {
+        return Err("plain-UDP upstream answered a different question".into());
+    }
     Ok(resp)
 }
 
@@ -1207,6 +1226,59 @@ mod tests {
         let edns = asked.edns.expect("OPT present");
         assert_eq!(edns.udp_payload_size, crate::wire::MAX_UPSTREAM_PAYLOAD);
         assert!(edns.do_bit, "DO survives the payload patch");
+    }
+
+    /// A pre-EDNS resolver: FORMERR to any query carrying an OPT, the answer
+    /// to one without.
+    async fn edns_intolerant_upstream(query: &DnsPacket) -> SocketAddr {
+        let answer = to_wire(&make_response(query));
+        let formerr = to_wire(&DnsPacket::response_from(query, ResultCode::FORMERR));
+        let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = sock.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            while let Ok((n, src)) = sock.recv_from(&mut buf).await {
+                let mut parse = BytePacketBuffer::from_bytes(&buf[..n]);
+                let Ok(asked) = DnsPacket::from_buffer(&mut parse) else {
+                    continue;
+                };
+                let mut reply = if asked.edns.is_some() {
+                    formerr.clone()
+                } else {
+                    answer.clone()
+                };
+                reply[..2].copy_from_slice(&buf[..2]);
+                let _ = sock.send_to(&reply, src).await;
+            }
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn formerr_to_an_opt_is_retried_without_edns() {
+        // Every forwarded query carries an OPT (#329). A legacy resolver
+        // behind a forwarding rule answers that with FORMERR, which must not
+        // become the answer for the whole zone (issue #349).
+        let query = make_query();
+        let addr = edns_intolerant_upstream(&query).await;
+
+        let pool = UpstreamPool::new(vec![Upstream::Udp(addr)], vec![]);
+        let srtt = RwLock::new(SrttCache::new(true));
+        let resp_wire = forward_with_failover_raw(
+            &to_wire(&query),
+            &pool,
+            &srtt,
+            Duration::from_millis(500),
+            Duration::ZERO,
+        )
+        .await
+        .expect("forward should succeed");
+
+        let mut buf = BytePacketBuffer::from_bytes(&resp_wire);
+        let result = DnsPacket::from_buffer(&mut buf).unwrap();
+        assert_eq!(result.header.rescode, ResultCode::NOERROR);
+        assert_eq!(result.answers.len(), 1);
+        assert_eq!(result.header.id, query.header.id, "client id restored");
     }
 
     #[tokio::test]

@@ -175,6 +175,40 @@ pub fn maximize_payload(wire: &[u8]) -> Cow<'_, [u8]> {
     }
 }
 
+/// The same query with its OPT removed and ARCOUNT lowered: the RFC 6891 §7
+/// fallback for a pre-EDNS server that answers an OPT with FORMERR or NOTIMP.
+/// `None` when there is no OPT to drop, the wire cannot be walked, or a TSIG
+/// signs it — removing a record would void the MAC.
+pub fn strip_opt(wire: &[u8]) -> Option<Vec<u8>> {
+    if wire.len() < 12 {
+        return None;
+    }
+    let mut pos = 12;
+    for _ in 0..count(wire, 4) {
+        skip_question(wire, &mut pos).ok()?;
+    }
+    for _ in 0..count(wire, 6) + count(wire, 8) {
+        skip_record(wire, &mut pos).ok()?;
+    }
+    let mut opt = None;
+    for _ in 0..count(wire, 10) {
+        let start = pos;
+        let ttl_offset = skip_record(wire, &mut pos).ok()?;
+        match record_type(wire, ttl_offset) {
+            TYPE_OPT => opt = opt.or(Some(start..pos)),
+            TYPE_TSIG => return None,
+            _ => {}
+        }
+    }
+    let opt = opt?;
+    let arcount = (count(wire, 10) - 1) as u16;
+    let mut out = Vec::with_capacity(wire.len() - opt.len());
+    out.extend_from_slice(&wire[..opt.start]);
+    out.extend_from_slice(&wire[opt.end..pos]);
+    out[10..12].copy_from_slice(&arcount.to_be_bytes());
+    Some(out)
+}
+
 /// EDNS payload size is hop-by-hop (RFC 6891 §6.2.3) — upstream answers to us,
 /// not to our client, so the client's budget is not ours to pass on. Forwarding
 /// a small one alongside DO=1 asks for RRSIGs that cannot fit and earns a TC=1
@@ -1727,6 +1761,26 @@ mod tests {
         wire.extend_from_slice(&tsig_record());
 
         assert_eq!(&ensure_do_bit(&wire)[..], &wire[..]);
+    }
+
+    #[test]
+    fn strip_opt_drops_the_opt_and_lowers_arcount() {
+        let wire = query_wire();
+        let with_opt = ensure_do_bit(&wire).into_owned();
+        let out = strip_opt(&with_opt).expect("an OPT to strip");
+
+        assert_eq!(out, wire, "back to the bare query");
+        assert!(parse_wire(&out).edns.is_none());
+    }
+
+    #[test]
+    fn strip_opt_leaves_opt_less_and_signed_wires_alone() {
+        assert!(strip_opt(&query_wire()).is_none(), "nothing to strip");
+        let mut signed = query_wire();
+        signed[10..12].copy_from_slice(&2u16.to_be_bytes()); // ARCOUNT
+        signed.extend_from_slice(&APPENDED_DO_OPT);
+        signed.extend_from_slice(&tsig_record());
+        assert!(strip_opt(&signed).is_none(), "a TSIG MAC covers ARCOUNT");
     }
 
     #[test]
