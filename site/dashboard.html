@@ -630,7 +630,7 @@ body {
 
 /* Responsive */
 @media (max-width: 1100px) {
-  .main-grid { grid-template-columns: 1fr; }
+  .main-grid { grid-template-columns: minmax(0, 1fr); }
   .query-log-scroll { position: static; max-height: 600px; }
 }
 @media (max-width: 900px) {
@@ -644,6 +644,9 @@ body {
   .tagline { display: none; }
   #headerVersion { display: none; }
   #phoneSetup { display: none; }
+  .log-header { flex-wrap: wrap; gap: 0.6rem; }
+  .log-filters { width: 100%; flex-wrap: wrap; }
+  #logFilterDomain { flex: 1 1 100%; }
 }
 #resolverWarn {
   padding: 0.6rem 0.9rem;
@@ -769,9 +772,9 @@ body {
   <div class="main-grid">
     <!-- Query log -->
     <div class="panel">
-      <div class="panel-header">
+      <div class="panel-header log-header">
         <span class="panel-title" data-i18n="panel.recent_queries">Recent Queries</span>
-        <div style="display:flex;align-items:center;gap:0.5rem;">
+        <div class="log-filters" style="display:flex;align-items:center;gap:0.5rem;">
           <input type="text" id="logFilterDomain" data-i18n-ph="log.filter_domain" placeholder="filter domain..." oninput="applyLogFilter()"
             style="font-family:var(--font-mono);font-size:0.7rem;padding:0.25rem 0.5rem;border:1px solid var(--border);border-radius:4px;background:var(--bg-surface);color:var(--text-primary);outline:none;width:150px;">
           <select id="logFilterPath" onchange="applyLogFilter()"
