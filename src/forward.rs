@@ -3,6 +3,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+use http_body_util::{BodyExt, Limited};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::time::{timeout, timeout_at};
@@ -243,15 +244,9 @@ pub(crate) fn default_client() -> reqwest::Client {
 
 /// Capped while streaming: an unbounded or gzip-inflated body never lands in
 /// memory whole.
-pub(crate) async fn read_capped(mut resp: reqwest::Response, max: usize) -> Result<Vec<u8>> {
-    let mut body = Vec::new();
-    while let Some(chunk) = resp.chunk().await? {
-        if body.len() + chunk.len() > max {
-            return Err(format!("response body exceeds cap of {max} bytes").into());
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
+pub(crate) async fn read_capped(resp: reqwest::Response, max: usize) -> Result<Vec<u8>> {
+    let limited = Limited::new(reqwest::Body::from(resp), max);
+    Ok(limited.collect().await?.to_bytes().into())
 }
 
 fn https_client_builder(pool_max_idle_per_host: usize) -> reqwest::ClientBuilder {
@@ -956,7 +951,7 @@ mod tests {
         )
         .await
         .expect("an over-cap body was read until the query timeout");
-        assert!(result.unwrap_err().to_string().contains("exceeds cap"));
+        assert!(result.unwrap_err().to_string().contains("length limit"));
     }
 
     #[test]

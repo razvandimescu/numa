@@ -378,7 +378,7 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(err.to_string().contains("exceeds cap"), "got: {err}");
+        assert!(err.to_string().contains("length limit"), "got: {err}");
     }
 
     #[test]

@@ -842,7 +842,7 @@ mod tests {
         )
         .await
         .expect("an over-cap config was read until it ended");
-        assert!(fetched.unwrap_err().to_string().contains("exceeds cap"));
+        assert!(fetched.unwrap_err().to_string().contains("length limit"));
     }
 
     async fn query_relay_with_long_body(status: axum::http::StatusCode) -> Result<Vec<u8>> {
@@ -881,7 +881,7 @@ mod tests {
         let err = query_relay_with_long_body(axum::http::StatusCode::OK)
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("exceeds cap"), "{err}");
+        assert!(err.to_string().contains("length limit"), "{err}");
     }
 
     #[tokio::test]
