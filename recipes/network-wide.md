@@ -25,7 +25,7 @@ bind_addr = "0.0.0.0"          # router.numa etc. from other devices
 
 Restart Numa (`sudo numa service restart`). The Docker image already binds both to `0.0.0.0`.
 
-### Windows (untested)
+### Windows
 
 On Windows, DNS listens only on `127.0.0.2:53`, where the system resolver forwards to it. Keep that address and add the host's LAN address:
 
@@ -34,7 +34,18 @@ On Windows, DNS listens only on `127.0.0.2:53`, where the system resolver forwar
 bind_addr = ["127.0.0.2:53", "192.168.1.5:53"]
 ```
 
-Apply the dashboard and proxy settings above as well, restart Numa, then allow inbound UDP and TCP port 53 in Windows Firewall. This configuration has not been tested; if the system resolver stops working after the change, remove the LAN address and open an issue.
+At boot, Windows can start Numa before the network has its address. Numa then stops, and Windows restarts it every few seconds until the address is ready. The host has no DNS during that time. Versions before 0.25.0 are not restarted, so upgrade before you add the LAN address.
+
+Apply the dashboard and proxy settings above as well, then restart Numa (`Restart-Service numa` in an admin PowerShell).
+
+Windows Firewall blocks the service until you allow its ports: 53 for DNS, 80 and 443 for the `.numa` proxy, 5380 for the dashboard. `numa install` runs Numa from `C:\ProgramData\numa\bin`, so an "Allow" you clicked for a copy in Downloads does not cover it. In an admin PowerShell:
+
+```powershell
+New-NetFirewallRule -DisplayName Numa-UDP -Direction Inbound -Protocol UDP -LocalPort 53 -Profile Private -Action Allow
+New-NetFirewallRule -DisplayName Numa-TCP -Direction Inbound -Protocol TCP -LocalPort 53,80,443,5380 -Profile Private -Action Allow
+```
+
+These rules apply only on networks marked Private. If Windows marked your home network Public, switch it under Settings → Network & internet → Wi-Fi (or Ethernet) → Private network.
 
 ## 2. Check it before touching the router
 
@@ -46,7 +57,7 @@ dig @192.168.1.5 router.numa +short     # 192.168.1.5, the Numa host
 curl -sI http://router.numa --resolve router.numa:80:192.168.1.5 | head -1
 ```
 
-If the first command times out, a firewall on the Numa host is dropping port 53.
+If the first command times out, a firewall on the Numa host is dropping port 53. If only `curl` times out, it is dropping port 80.
 
 ## 3. Change the router's DNS
 
@@ -75,7 +86,7 @@ Open the dashboard from any device (`http://192.168.1.5:5380`, or `http://numa.n
 
 ## When the Numa host is down
 
-Every device loses DNS until it comes back, the same as with any single resolver. Numa restarts itself under launchd/systemd, but a powered-off host is still an outage. Options, from least to most effort:
+Every device loses DNS until it comes back, the same as with any single resolver. Numa restarts itself under launchd, systemd and the Windows service manager, but a powered-off host is still an outage. Options, from least to most effort:
 
 - Run Numa on something that stays on (a Pi, a NAS, a mini PC), not a laptop.
 - Run a second Numa instance and set it as the router's secondary DNS. The two do not sync, so copy `numa.toml` and `services.json` between them when you change either.
