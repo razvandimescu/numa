@@ -144,6 +144,9 @@ impl DnsCache {
         if crate::wire::is_truncated(wire) {
             return; // "ask again over TCP" is advice to one client, not an answer
         }
+        if crate::wire::rcode(wire) == 1 {
+            return; // FORMERR judges the query we sent, not the name (issue #349)
+        }
 
         let meta = match crate::wire::scan_ttl_offsets(wire) {
             Ok(m) => m,
@@ -528,6 +531,16 @@ mod tests {
                 "a cached failure must live 1s..300s, got {total}s for {rcode:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_formerr_is_not_cached() {
+        // A FORMERR answers how the query was built (an OPT a legacy server
+        // rejects), so caching it fails every client asking the same name.
+        let mut cache = DnsCache::new(100, 60, 3600);
+        insert_failure(&mut cache, crate::header::ResultCode::FORMERR);
+
+        assert!(cache.lookup_wire("claude.ai", QueryType::A, 0).is_none());
     }
 
     #[test]
