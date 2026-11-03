@@ -4,9 +4,25 @@
 //! the resolved client IP (post-header), not the L4 hop.
 
 use std::net::IpAddr;
+use std::sync::Once;
 
 use ipnet::IpNet;
-use log::warn;
+use log::{debug, warn};
+
+/// Clients admitted when `allow_from` is unset: PowerDNS Recursor's default
+/// `allow-from`, minus loopback (always admitted). A source spoofed from these
+/// ranges aims replies only at private space, so a :53 exposed by a port
+/// forward or cloud NAT is no open reflector. Unlike `PRIVATE_RANGES` it omits
+/// NAT64: a gateway forwards replies for `64:ff9b::/96` to the embedded IPv4.
+const DEFAULT_ALLOW_FROM: &[&str] = &[
+    "10.0.0.0/8",     // RFC 1918
+    "172.16.0.0/12",  // RFC 1918
+    "192.168.0.0/16", // RFC 1918
+    "169.254.0.0/16", // RFC 3927 link-local
+    "100.64.0.0/10",  // RFC 6598 CGNAT, also Tailscale
+    "fc00::/7",       // RFC 4193 ULA
+    "fe80::/10",      // RFC 4291 link-local
+];
 
 /// Private / special-use ranges that must never appear as a routable
 /// destination — the shared definition of "inside the perimeter", consumed by
@@ -51,7 +67,7 @@ pub(crate) fn parse_cidr_list(entries: &[String], context: &str) -> Result<Vec<I
 /// (`::ffff:a.b.c.d`) from a dual-stack bind matches v4 CIDRs. Exclusion is set
 /// subtraction (not longest-prefix), so it always wins. Loopback / empty-set
 /// *policy* stays in the callers — they differ (allow vs passthrough).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub(crate) struct CidrMatcher {
     include: Vec<IpNet>,
     exclude: Vec<IpNet>,
@@ -76,33 +92,43 @@ impl CidrMatcher {
         }
         self.include.iter().any(|n| n.contains(&ip))
     }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.include.is_empty()
-    }
 }
 
-#[derive(Clone, Debug, Default)]
+/// The first refusal is a warning: with `allow_from` unset it is the only sign
+/// that a client outside the private ranges exists. Later ones stay at debug,
+/// so a flood cannot fill the log.
+pub(crate) fn log_refused(surface: &str, peer: IpAddr) {
+    static FIRST: Once = Once::new();
+    FIRST.call_once(|| {
+        warn!(
+            "{surface}: refused {peer}: not in [server] allow_from, which defaults to \
+             loopback and private networks. Add its network to allow_from to serve it. \
+             Logged once."
+        );
+    });
+    debug!("{surface}: dropping {peer}: not in allow_from");
+}
+
+#[derive(Clone, Debug)]
 pub struct AllowFromAcl {
     matcher: CidrMatcher,
 }
 
 impl AllowFromAcl {
     pub fn from_entries(entries: &[String]) -> Result<Self, String> {
+        let entries: Vec<String> = if entries.is_empty() {
+            DEFAULT_ALLOW_FROM.iter().map(|s| s.to_string()).collect()
+        } else {
+            entries.to_vec()
+        };
         Ok(AllowFromAcl {
-            matcher: CidrMatcher::from_entries(entries, &[], "allow_from")?,
+            matcher: CidrMatcher::from_entries(&entries, &[], "allow_from")?,
         })
     }
 
     pub fn allows(&self, peer: IpAddr) -> bool {
-        // Dual-stack `[::]` binds deliver IPv4 clients as `::ffff:a.b.c.d`;
-        // canonicalize so the loopback check matches (CidrMatcher canonicalizes
-        // again for membership — idempotent).
-        let peer = peer.to_canonical();
-        if self.matcher.is_empty() || peer.is_loopback() {
-            return true;
-        }
-        self.matcher.matches(peer)
+        // Dual-stack `[::]` binds deliver IPv4 loopback as `::ffff:127.0.0.1`.
+        peer.to_canonical().is_loopback() || self.matcher.matches(peer)
     }
 
     /// Whether to admit a connection given its PROXY-v2 command kind. A LOCAL
@@ -112,10 +138,6 @@ impl AllowFromAcl {
     /// any allowed address in a PROXY header instead.
     pub fn admits(&self, peer: IpAddr, local_command: bool) -> bool {
         local_command || self.allows(peer)
-    }
-
-    pub fn is_enabled(&self) -> bool {
-        !self.matcher.is_empty()
     }
 }
 
@@ -150,10 +172,27 @@ mod tests {
     }
 
     #[test]
-    fn empty_acl_allows_everything() {
-        let a = AllowFromAcl::default();
-        assert!(!a.is_enabled());
-        check_allows(&a, &[("1.2.3.4", true), ("2001:db8::1", true)]);
+    fn unset_acl_admits_only_private_networks() {
+        check_allows(
+            &acl(&[]),
+            &[
+                ("192.168.1.5", true),
+                ("100.101.102.103", true), // Tailscale
+                ("fd7a:115c:a1e0::1", true),
+                ("fe80::1", true),
+                ("8.8.8.8", false),
+                ("2001:db8::1", false),
+                ("64:ff9b::808:808", false),
+            ],
+        );
+    }
+
+    #[test]
+    fn world_ranges_open_the_resolver() {
+        check_allows(
+            &acl(&["0.0.0.0/0", "::/0"]),
+            &[("8.8.8.8", true), ("2001:db8::1", true)],
+        );
     }
 
     /// Pure test: the LOCAL exemption can't be hit through a listener — the test
@@ -175,9 +214,10 @@ mod tests {
 
     #[test]
     fn cidr_v4_allows_in_range_blocks_out_of_range() {
-        let a = acl(&["192.168.0.0/16"]);
-        assert!(a.is_enabled());
-        check_allows(&a, &[("192.168.1.5", true), ("10.0.0.1", false)]);
+        check_allows(
+            &acl(&["192.168.0.0/16"]),
+            &[("192.168.1.5", true), ("10.0.0.1", false)],
+        );
     }
 
     #[test]
@@ -270,8 +310,6 @@ mod tests {
 
     #[test]
     fn empty_include_matches_nothing() {
-        let m = CidrMatcher::default();
-        assert!(m.is_empty());
-        check_matches(&m, &[("192.168.1.1", false)]);
+        check_matches(&matcher(&[], &[]), &[("192.168.1.1", false)]);
     }
 }

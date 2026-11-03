@@ -8,6 +8,10 @@
 bind_addr = "0.0.0.0:53"
 api_bind_addr = "0.0.0.0"
 data_dir = "/var/lib/numa"
+# Docker Desktop's port mapping hides the client address, and UDP can
+# arrive from an unrelated public IP that the default allow_from refuses.
+# If queries time out there, uncomment:
+# allow_from = ["0.0.0.0/0", "::/0"]
 
 [upstream]
 mode = "odoh"

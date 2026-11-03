@@ -80,6 +80,8 @@ bind_addr = ["0.0.0.0:53", "[fd12::5]:53"]
 
 On Windows, append `"[fd12::5]:53"` to the list from the Windows section instead. `[::]:53` does not work here: on Linux it collides with `0.0.0.0:53`. Restart Numa, check `dig @fd12::5 example.com +short` from another device, and only then set the router's IPv6 DNS to that address.
 
+The default `allow_from` admits ULA and link-local sources, not global ones. If clients reach Numa from a global IPv6 address, add your prefix as shown in [Exposed to the internet?](#exposed-to-the-internet), and update it when your ISP changes the prefix.
+
 ## 4. Confirm
 
 Open the dashboard from any device (`http://192.168.1.5:5380`, or `http://numa.numa` once DNS points at Numa). Other devices ask for the API token: any username, and the password from `sudo numa token` on the Numa host. Their queries should appear in the query log with their own IPs.
@@ -97,9 +99,11 @@ Every device loses DNS until it comes back, the same as with any single resolver
 
 ## Exposed to the internet?
 
-If the Numa host has a public address, set `allow_from` to your LAN ranges, or Numa becomes an open resolver:
+By default, Numa answers only loopback and private addresses: RFC 1918, link-local, `fc00::/7` and `100.64.0.0/10` (Tailscale). A public address or a port forward does not make it an open resolver, as long as Numa sees the real client address. A forwarder on the same host, such as Docker Desktop's port mapping, can replace that address. To serve a client with a public address, add its network to `allow_from`. A list replaces the default, so keep your LAN in it:
 
 ```toml
 [server]
-allow_from = ["192.168.0.0/16", "fd00::/8"]
+allow_from = ["192.168.0.0/16", "198.51.100.0/24"]
 ```
+
+With `0.0.0.0/0` or `::/0` in the list, Numa answers the whole internet and becomes an open resolver.

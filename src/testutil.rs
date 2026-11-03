@@ -72,7 +72,7 @@ pub async fn test_ctx() -> ServerCtx {
         mobile_enabled: false,
         mobile_port: 8765,
         filter_aaaa: false,
-        allow_from: crate::acl::AllowFromAcl::default(),
+        allow_from: crate::acl::AllowFromAcl::from_entries(&[]).unwrap(),
         client_policy: crate::client_policy::ClientPolicySet::default(),
         rebind: std::sync::RwLock::new(
             crate::rebind::RebindFilter::new(
