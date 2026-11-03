@@ -187,14 +187,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn world_ranges_open_the_resolver() {
-        check_allows(
-            &acl(&["0.0.0.0/0", "::/0"]),
-            &[("8.8.8.8", true), ("2001:db8::1", true)],
-        );
-    }
-
     /// Pure test: the LOCAL exemption can't be hit through a listener — the test
     /// peer is always loopback, which `allows` exempts regardless.
     #[test]

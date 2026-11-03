@@ -188,16 +188,12 @@ docker run -d --name numa --network host -v numa-data:/var/lib/numa \
   ghcr.io/razvandimescu/numa
 ```
 
-Docker Desktop's port mapping hides the client address, and UDP queries can arrive from an unrelated public IP. The default `allow_from` refuses those, so DNS over UDP times out. On Docker Desktop, mount a config that keeps the image's settings and admits every client:
+Docker Desktop's port mapping hides the client address, so the default `allow_from` refuses UDP queries and they time out. On Docker Desktop, mount this config instead:
 
 ```toml
 [server]
 api_bind_addr = "0.0.0.0"
 allow_from = ["0.0.0.0/0", "::/0"]
-
-[proxy]
-enabled = true
-bind_addr = "0.0.0.0"
 ```
 
 Images: `linux/amd64` and `linux/arm64`.

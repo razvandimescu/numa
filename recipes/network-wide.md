@@ -99,7 +99,7 @@ Every device loses DNS until it comes back, the same as with any single resolver
 
 ## Exposed to the internet?
 
-By default, Numa answers only loopback and private addresses: RFC 1918, link-local, `fc00::/7` and `100.64.0.0/10` (Tailscale). A public address or a port forward does not make it an open resolver, as long as Numa sees the real client address. A forwarder on the same host, such as Docker Desktop's port mapping, can replace that address. To serve a client with a public address, add its network to `allow_from`. A list replaces the default, so keep your LAN in it:
+By default, Numa answers only loopback and private addresses, including Tailscale's. A public address or a port forward does not make it an open resolver, as long as Numa sees the real client address. A forwarder on the same host, such as Docker Desktop's port mapping, can replace that address. To serve a client with a public address, add its network to `allow_from`. A list replaces the default, so keep your LAN in it:
 
 ```toml
 [server]
