@@ -47,8 +47,7 @@ struct ProxyState {
 
 /// Gate the plain HTTP proxy on `[server].allow_from`, checking the direct TCP
 /// peer — this listener has no PROXY-protocol support, so behind a load balancer
-/// the peer is the balancer, not the client. Loopback and an empty allowlist are
-/// always permitted, so the default open behaviour is unchanged.
+/// the peer is the balancer, not the client.
 async fn allow_from_guard(
     State(ctx): State<Arc<ServerCtx>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -58,7 +57,7 @@ async fn allow_from_guard(
     if ctx.allow_from.allows(peer.ip()) {
         next.run(req).await
     } else {
-        debug!("proxy: dropping {} — not in allow_from", peer.ip());
+        crate::acl::log_refused("proxy", peer.ip());
         StatusCode::FORBIDDEN.into_response()
     }
 }
@@ -627,7 +626,7 @@ mod tests {
     }
 
     /// Spin up a DoH-capable TLS listener with a PROXY v2 allowlist and an
-    /// optional `[server].allow_from` (empty = allow-all).
+    /// optional `[server].allow_from` (empty = the private-network default).
     async fn spawn_doh_server_with_pp(
         pp_from: &[&str],
         allow_from: &[&str],
@@ -897,7 +896,7 @@ mod tests {
 
         let mut tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
         let pp = pp2_v4_proxy(
-            "203.0.113.42".parse().unwrap(),
+            "192.168.1.42".parse().unwrap(),
             "10.0.0.5".parse().unwrap(),
             54321,
             443,

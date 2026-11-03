@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use log::{debug, error, info, warn};
+use log::{error, info, warn};
 
 use crate::blocklist::{
     download_blocklists, parse_blocklist_counted, source_defect, BlocklistStore, SourceKind,
@@ -151,9 +151,9 @@ pub async fn run(load: ConfigLoad) -> crate::Result<()> {
 
     let allow_from = crate::acl::AllowFromAcl::from_entries(&config.server.allow_from)
         .map_err(|e| format!("invalid [server].allow_from: {e}"))?;
-    if allow_from.is_enabled() {
+    if !config.server.allow_from.is_empty() {
         info!(
-            "client-IP allow_from enabled with {} entries (loopback always allowed)",
+            "allow_from: {} entries replace the private-network default (loopback always allowed)",
             config.server.allow_from.len()
         );
     }
@@ -498,7 +498,7 @@ async fn udp_serve_loop(
         };
         if !ctx.allow_from.admits(src_addr.ip(), local_command) {
             // Silent drop: no reply means no amplification, no fingerprint.
-            debug!("UDP: dropping {} — not in allow_from", src_addr);
+            crate::acl::log_refused("UDP", src_addr.ip());
             continue;
         }
         // Response goes to the kernel UDP peer (e.g. dnsdist), not the
