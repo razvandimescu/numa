@@ -10,7 +10,6 @@ use tokio::net::{TcpStream, UdpSocket};
 use tokio::time::{timeout, timeout_at};
 
 use crate::buffer::BytePacketBuffer;
-use crate::header::ResultCode;
 use crate::odoh::{query_through_relay, OdohConfigCache};
 use crate::packet::DnsPacket;
 use crate::srtt::SrttCache;
@@ -729,22 +728,26 @@ pub async fn forward_with_failover_raw(
     timeout_duration: Duration,
     hedge_delay: Duration,
 ) -> Result<Vec<u8>> {
-    let (resp, answered) =
-        forward_in_order(wire, pool, srtt, timeout_duration, hedge_delay).await?;
-    if let Some(target) = pool.retest_target(answered, crate::packet::random_id()) {
-        tokio::spawn(pool.clone().retest(target, wire.to_vec(), timeout_duration));
+    let draw = crate::packet::random_id();
+    let (resp, retest) =
+        forward_in_order(wire, pool, srtt, timeout_duration, hedge_delay, draw).await?;
+    if let Some((target, copy)) = retest {
+        tokio::spawn(pool.clone().retest(target, copy, timeout_duration));
     }
     Ok(resp)
 }
 
 /// `srtt = false` turns off the failed state, so each query follows list order.
+/// A re-test that `draw` selects comes back as its target and the query as it
+/// went upstream, so the copy tests what a client query needs.
 async fn forward_in_order(
     wire: &[u8],
     pool: &UpstreamPool,
     srtt: &RwLock<SrttCache>,
     timeout_duration: Duration,
     hedge_delay: Duration,
-) -> Result<(Vec<u8>, usize)> {
+    draw: u16,
+) -> Result<(Vec<u8>, Option<(usize, Vec<u8>)>)> {
     let wire = &crate::wire::ensure_do_bit(wire)[..];
     let track = srtt.read().unwrap().is_enabled();
     let mut last_err: Option<Box<dyn std::error::Error + Send + Sync>> = None;
@@ -765,7 +768,10 @@ async fn forward_in_order(
                 if is_usable_answer(&resp) {
                     pool.set_failed(i, false);
                 }
-                return Ok((resp, i));
+                let retest = pool
+                    .retest_target(i, draw)
+                    .map(|target| (target, wire.to_vec()));
+                return Ok((resp, retest));
             }
             Err(e) => {
                 if track {
@@ -783,10 +789,7 @@ async fn forward_in_order(
 /// NOERROR or NXDOMAIN. SERVFAIL and REFUSED still reach the client, but they
 /// do not show that the upstream resolves.
 fn is_usable_answer(resp: &[u8]) -> bool {
-    matches!(
-        ResultCode::from_num(crate::wire::rcode(resp)),
-        ResultCode::NOERROR | ResultCode::NXDOMAIN
-    )
+    matches!(crate::wire::full_rcode(resp), 0 | 3)
 }
 
 async fn forward_udp_raw(
@@ -857,6 +860,8 @@ pub async fn keepalive_doh(upstream: &Upstream) {
 mod tests {
     use super::*;
 
+    use crate::header::ResultCode;
+    use crate::packet::EdnsOpt;
     use crate::question::QueryType;
     use crate::record::DnsRecord;
 
@@ -1118,38 +1123,51 @@ mod tests {
         let query = make_query();
         let response = to_wire(&make_response(&query));
         let (first, mut first_rx) = doh_upstream(response.clone()).await;
-        let (second, _rx) = doh_upstream(response).await;
+        let (second, mut second_rx) = doh_upstream(response).await;
         let pool = UpstreamPool::new(vec![first, second], vec![]);
         pool.set_failed(0, true);
         let srtt = RwLock::new(SrttCache::new(true));
         let (wire, timeout) = (to_wire(&query), Duration::from_secs(2));
+        let ask = || forward_in_order(&wire, &pool, &srtt, timeout, Duration::ZERO, RETEST);
 
-        let (_, answered) = forward_in_order(&wire, &pool, &srtt, timeout, Duration::ZERO)
-            .await
-            .unwrap();
-        assert_eq!(answered, 1);
+        let (_, retest) = ask().await.unwrap();
+        let client = second_rx.try_recv().expect("the second primary answered");
         assert!(first_rx.try_recv().is_err(), "a client query went to it");
 
-        pool.clone().retest(0, wire.clone(), timeout).await;
-        let (_, answered) = forward_in_order(&wire, &pool, &srtt, timeout, Duration::ZERO)
-            .await
-            .unwrap();
-        assert_eq!(answered, 0);
+        let (target, copy) = retest.expect("drawn");
+        pool.clone().retest(target, copy, timeout).await;
+        let copy = first_rx.try_recv().expect("the copy");
+        assert_eq!(copy[2..], client[2..], "the copy is not the client's query");
+
+        ask().await.unwrap();
+        assert!(first_rx.try_recv().is_ok(), "queries did not go back to it");
     }
 
     #[tokio::test]
-    async fn refused_does_not_end_the_failed_state() {
+    async fn only_noerror_or_nxdomain_ends_the_failed_state() {
         let query = make_query();
-        let refused = to_wire(&DnsPacket::response_from(&query, ResultCode::REFUSED));
-        let (first, _rx) = doh_upstream(refused).await;
-        let pool = UpstreamPool::new(vec![first], vec![]);
-        pool.set_failed(0, true);
+        let reply = |rescode| DnsPacket::response_from(&query, rescode);
+        let mut badvers = reply(ResultCode::NOERROR);
+        badvers.edns = Some(EdnsOpt {
+            extended_rcode: 1,
+            ..Default::default()
+        });
 
-        pool.clone()
-            .retest(0, to_wire(&query), Duration::from_secs(2))
-            .await;
+        for (reply, stays_failed) in [
+            (reply(ResultCode::NXDOMAIN), false),
+            (reply(ResultCode::REFUSED), true),
+            (badvers, true),
+        ] {
+            let (first, _rx) = doh_upstream(to_wire(&reply)).await;
+            let pool = UpstreamPool::new(vec![first], vec![]);
+            pool.set_failed(0, true);
 
-        assert!(pool.is_failed(0));
+            pool.clone()
+                .retest(0, to_wire(&query), Duration::from_secs(2))
+                .await;
+
+            assert_eq!(pool.is_failed(0), stays_failed, "{:?}", reply.edns);
+        }
     }
 
     #[tokio::test]
@@ -1180,6 +1198,7 @@ mod tests {
             &srtt,
             Duration::from_millis(300),
             Duration::ZERO,
+            RETEST,
         )
         .await
         .expect("second primary answers");

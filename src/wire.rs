@@ -123,9 +123,18 @@ pub fn is_truncated(wire: &[u8]) -> bool {
 
 /// RCODE (RFC 1035 §4.1.1): the low nibble of header byte 3. EDNS extended
 /// rcodes (RFC 6891 §6.1.3) live in the OPT TTL and are not read here, so a
-/// code that is a multiple of 16 (BADVERS) reads as NOERROR.
+/// code that is a multiple of 16 (BADVERS) reads as NOERROR. `full_rcode`
+/// reads them, at the cost of a walk to the OPT.
 pub fn rcode(wire: &[u8]) -> u8 {
     wire.get(3).map_or(0, |b| b & 0x0F)
+}
+
+pub fn full_rcode(wire: &[u8]) -> u16 {
+    let upper = match locate_opt(wire) {
+        Ok(OptSite::Flag(ttl)) => wire[ttl],
+        _ => 0,
+    };
+    u16::from(upper) << 4 | u16::from(rcode(wire))
 }
 
 /// QR=1 (RFC 1035 §4.1.1, header byte 2): the wire is a response.
