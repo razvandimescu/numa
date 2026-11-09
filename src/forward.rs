@@ -1,6 +1,6 @@
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -275,14 +275,14 @@ pub struct UpstreamPool {
 
 /// Shared by the clones of a pool, so each query sees the same state.
 struct Health {
-    failed: Vec<AtomicBool>,
+    strikes: Vec<AtomicU8>,
     retesting: AtomicBool,
 }
 
 impl Health {
     fn new(len: usize) -> Arc<Self> {
         Arc::new(Self {
-            failed: (0..len).map(|_| AtomicBool::new(false)).collect(),
+            strikes: (0..len).map(|_| AtomicU8::new(0)).collect(),
             retesting: AtomicBool::new(false),
         })
     }
@@ -290,6 +290,11 @@ impl Health {
 
 /// Knot Resolver sends one query in 20 to a server other than its choice.
 const RETEST_ONE_IN: u16 = 20;
+
+/// Strikes that make an upstream failed. A timeout or an error is all of
+/// them: staying costs each client the full timeout. A REFUSED answer is
+/// one: it can be about a single name, and staying costs one round trip.
+const FAILED_AT: u8 = 20;
 
 impl UpstreamPool {
     pub fn new(primary: Vec<Upstream>, fallback: Vec<Upstream>) -> Self {
@@ -320,20 +325,25 @@ impl UpstreamPool {
             .unwrap_or_else(|| &self.fallback[i - self.primary.len()])
     }
 
+    /// ODoH is never failed: asking the fallback first would leave the
+    /// oblivious path.
     fn is_failed(&self, i: usize) -> bool {
-        self.health.failed[i].load(Ordering::Relaxed)
+        !matches!(self.upstream(i), Upstream::Odoh { .. })
+            && self.health.strikes[i].load(Ordering::Relaxed) >= FAILED_AT
     }
 
-    /// ODoH stays unmarked: asking the fallback first would leave the
-    /// oblivious path.
     fn set_failed(&self, i: usize, failed: bool) {
-        if !matches!(self.upstream(i), Upstream::Odoh { .. }) {
-            self.health.failed[i].store(failed, Ordering::Relaxed);
-        }
+        let strikes = if failed { FAILED_AT } else { 0 };
+        self.health.strikes[i].store(strikes, Ordering::Relaxed);
+    }
+
+    fn add_strike(&self, i: usize) {
+        let strikes = &self.health.strikes[i];
+        let _ = strikes.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |s| s.checked_add(1));
     }
 
     fn order(&self) -> Vec<usize> {
-        let mut order: Vec<usize> = (0..self.health.failed.len()).collect();
+        let mut order: Vec<usize> = (0..self.health.strikes.len()).collect();
         order.sort_by_key(|&i| self.is_failed(i));
         order
     }
@@ -765,10 +775,13 @@ async fn forward_in_order(
         } else {
             forward_query_raw(wire, upstream, timeout_duration).await
         };
-        let err = match result {
+        match result {
             Ok(resp) if is_refused(&resp) => {
+                if track {
+                    pool.add_strike(i);
+                }
+                log::debug!("upstream {} refused the query", upstream);
                 refused.get_or_insert(resp);
-                "refused".into()
             }
             Ok(resp) => {
                 if is_usable_answer(&resp) {
@@ -779,13 +792,14 @@ async fn forward_in_order(
                     .map(|target| (target, wire.to_vec()));
                 return Ok((resp, retest));
             }
-            Err(e) => e,
-        };
-        if track {
-            pool.set_failed(i, true);
+            Err(e) => {
+                if track {
+                    pool.set_failed(i, true);
+                }
+                log::debug!("upstream {} failed: {}", upstream, e);
+                last_err = Some(e);
+            }
         }
-        log::debug!("upstream {} failed: {}", upstream, err);
-        last_err = Some(err);
     }
 
     match refused {
@@ -1207,8 +1221,37 @@ mod tests {
             .expect("refused by all is still an answer");
 
             assert_eq!(crate::wire::full_rcode(&resp), rescode as u16);
-            assert!(pool.is_failed(0), "the next query asks it first again");
+            assert_eq!(pool.order(), [0, 1], "one refusal moved the upstream");
         }
+    }
+
+    #[tokio::test]
+    async fn refusals_in_a_row_make_an_upstream_failed() {
+        let query = make_query();
+        let refused = to_wire(&DnsPacket::response_from(&query, ResultCode::REFUSED));
+        let (first, _rx) = doh_upstream(refused).await;
+        let (second, _rx) = doh_upstream(to_wire(&make_response(&query))).await;
+        let pool = UpstreamPool::new(vec![first, second], vec![]);
+        let srtt = RwLock::new(SrttCache::new(true));
+        let (wire, timeout) = (to_wire(&query), Duration::from_secs(2));
+        let ask = || forward_in_order(&wire, &pool, &srtt, timeout, Duration::ZERO, RETEST + 1);
+
+        for _ in 1..FAILED_AT {
+            ask().await.unwrap();
+        }
+        // What a usable answer from the first upstream does.
+        pool.set_failed(0, false);
+        for _ in 1..FAILED_AT {
+            ask().await.unwrap();
+        }
+        assert_eq!(
+            pool.order(),
+            [0, 1],
+            "a usable answer did not reset the count"
+        );
+
+        ask().await.unwrap();
+        assert_eq!(pool.order(), [1, 0]);
     }
 
     #[tokio::test]
