@@ -32,8 +32,8 @@ use crate::stats::{ServerStats, Transport};
 use crate::system_dns::discover_system_dns;
 use crate::udp_listener::UdpListener;
 
-// Two operators, so one leaving a jurisdiction can't strand numa. DoH carries
-// no SRTT, so failover keeps this order and Cloudflare only sees Quad9 misses.
+// Two operators, so one leaving a jurisdiction can't strand numa. Failover
+// keeps list order, so Cloudflare only sees queries while Quad9 is failed.
 const DOH_FALLBACK: [&str; 2] = ["https://9.9.9.9/dns-query", "https://1.1.1.1/dns-query"];
 const BLOCKLIST_RETRY_SECS: u64 = 3600;
 

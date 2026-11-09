@@ -49,7 +49,7 @@ api_port = 5380
 # [upstream]
 # mode = "forward"
 # address = "9.9.9.9"                           # single upstream (plain UDP)
-# address = ["192.168.1.1", "9.9.9.9:5353"]    # multiple upstreams — SRTT picks fastest
+# address = ["192.168.1.1", "9.9.9.9:5353"]    # multiple upstreams, asked in order; a failed one is asked last
 # address = "https://dns.quad9.net/dns-query"   # DNS-over-HTTPS (encrypted)
 # address = "tls://9.9.9.9#dns.quad9.net"       # DNS-over-TLS (encrypted, port 853)
 # fallback = ["8.8.8.8", "1.1.1.1"]            # tried only when all primaries fail
@@ -138,8 +138,8 @@ api_port = 5380
 # suffix = "example.corp"
 # upstream = "https://dns.quad9.net/dns-query"
 #
-# [[forwarding]]                                    # array of upstreams → SRTT-aware failover
-# suffix = ["google.com", "goog"]                   # fastest-healthy first, dead one skipped
+# [[forwarding]]                                    # array of upstreams → asked in order,
+# suffix = ["google.com", "goog"]                   # a failed one is asked last
 # upstream = [
 #     "tls://9.9.9.9#dns.quad9.net",
 #     "tls://149.112.112.112#dns.quad9.net",

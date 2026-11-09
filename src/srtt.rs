@@ -10,23 +10,13 @@ const DECAY_AFTER_SECS: u64 = 300;
 const MAX_ENTRIES: usize = 4096;
 const EVICT_BATCH: usize = 64;
 
-/// Failover circuit-breaker threshold: a primary upstream at or above this
-/// SRTT is skipped when a fallback is available. Calibrated between
-/// `INITIAL_SRTT_MS` and `FAILURE_PENALTY_MS` so a single failure trips it
-/// and decay un-trips it within ~5 minutes. With per-`(ip, transport)`
-/// keying, success on a sibling transport (e.g. TCP fallback for the same
-/// IP) does NOT re-arm probing of the broken transport — so on UDP-hostile
-/// networks the UDP timeout is taken at most once per decay window.
-pub const PRIMARY_SKIP_SRTT_MS: u64 = 4000;
-
 struct SrttEntry {
     srtt_ms: u64,
     updated_at: Instant,
 }
 
 /// Per-(ip, transport) EWMA so a UDP-hostile path (BCP 38) doesn't poison
-/// TCP's score on the same IP, and DoT TLS failures stay isolated from
-/// plain TCP. DoH/ODoH route through a URL+pool, never key here.
+/// TCP's score on the same IP.
 pub struct SrttCache {
     entries: HashMap<(IpAddr, UpstreamTransport), SrttEntry>,
     enabled: bool,
