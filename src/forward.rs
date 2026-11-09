@@ -300,8 +300,9 @@ impl UpstreamPool {
         }
     }
 
+    /// The upstream that the next query asks first.
     pub fn preferred(&self) -> Option<&Upstream> {
-        self.primary.first().or(self.fallback.first())
+        self.order().first().map(|&i| self.upstream(i))
     }
 
     pub fn set_primary(&mut self, primary: Vec<Upstream>) {
@@ -1102,6 +1103,15 @@ mod tests {
             [0, 1, 2],
             "all failed: start again at the first"
         );
+    }
+
+    #[test]
+    fn preferred_is_the_upstream_asked_first() {
+        let pool = UpstreamPool::new(vec![udp("10.0.0.1:53")], vec![udp("10.0.0.2:53")]);
+        assert_eq!(pool.preferred().unwrap().to_string(), "10.0.0.1:53");
+
+        pool.set_failed(0, true);
+        assert_eq!(pool.preferred().unwrap().to_string(), "10.0.0.2:53");
     }
 
     #[test]
