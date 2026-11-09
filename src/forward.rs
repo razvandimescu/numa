@@ -10,6 +10,7 @@ use tokio::net::{TcpStream, UdpSocket};
 use tokio::time::{timeout, timeout_at};
 
 use crate::buffer::BytePacketBuffer;
+use crate::header::ResultCode;
 use crate::odoh::{query_through_relay, OdohConfigCache};
 use crate::packet::DnsPacket;
 use crate::srtt::SrttCache;
@@ -751,6 +752,7 @@ async fn forward_in_order(
     let wire = &crate::wire::ensure_do_bit(wire)[..];
     let track = srtt.read().unwrap().is_enabled();
     let mut last_err: Option<Box<dyn std::error::Error + Send + Sync>> = None;
+    let mut refused = None;
 
     for i in pool.order() {
         let upstream = pool.upstream(i);
@@ -763,7 +765,11 @@ async fn forward_in_order(
         } else {
             forward_query_raw(wire, upstream, timeout_duration).await
         };
-        match result {
+        let err = match result {
+            Ok(resp) if is_refused(&resp) => {
+                refused.get_or_insert(resp);
+                "refused".into()
+            }
             Ok(resp) => {
                 if is_usable_answer(&resp) {
                     pool.set_failed(i, false);
@@ -773,23 +779,29 @@ async fn forward_in_order(
                     .map(|target| (target, wire.to_vec()));
                 return Ok((resp, retest));
             }
-            Err(e) => {
-                if track {
-                    pool.set_failed(i, true);
-                }
-                log::debug!("upstream {} failed: {}", upstream, e);
-                last_err = Some(e);
-            }
+            Err(e) => e,
+        };
+        if track {
+            pool.set_failed(i, true);
         }
+        log::debug!("upstream {} failed: {}", upstream, err);
+        last_err = Some(err);
     }
 
-    Err(last_err.unwrap_or_else(|| "no upstream configured".into()))
+    match refused {
+        Some(resp) => Ok((resp, None)),
+        None => Err(last_err.unwrap_or_else(|| "no upstream configured".into())),
+    }
 }
 
-/// NOERROR or NXDOMAIN. SERVFAIL and REFUSED still reach the client, but they
-/// do not show that the upstream resolves.
+/// NOERROR or NXDOMAIN. SERVFAIL reaches the client and REFUSED moves the
+/// query to the next upstream, but neither shows that the upstream resolves.
 fn is_usable_answer(resp: &[u8]) -> bool {
     matches!(crate::wire::full_rcode(resp), 0 | 3)
+}
+
+fn is_refused(resp: &[u8]) -> bool {
+    crate::wire::full_rcode(resp) == ResultCode::REFUSED as u16
 }
 
 async fn forward_udp_raw(
@@ -860,7 +872,6 @@ pub async fn keepalive_doh(upstream: &Upstream) {
 mod tests {
     use super::*;
 
-    use crate::header::ResultCode;
     use crate::packet::EdnsOpt;
     use crate::question::QueryType;
     use crate::record::DnsRecord;
@@ -1167,6 +1178,36 @@ mod tests {
                 .await;
 
             assert_eq!(pool.is_failed(0), stays_failed, "{:?}", reply.edns);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_query_goes_to_the_next_upstream() {
+        let query = make_query();
+        let refused = to_wire(&DnsPacket::response_from(&query, ResultCode::REFUSED));
+        let srtt = RwLock::new(SrttCache::new(true));
+
+        for (second, rescode) in [
+            (to_wire(&make_response(&query)), ResultCode::NOERROR),
+            (refused.clone(), ResultCode::REFUSED),
+        ] {
+            let (first, _rx) = doh_upstream(refused.clone()).await;
+            let (second, _rx) = doh_upstream(second).await;
+            let pool = UpstreamPool::new(vec![first, second], vec![]);
+
+            let (resp, _) = forward_in_order(
+                &to_wire(&query),
+                &pool,
+                &srtt,
+                Duration::from_secs(2),
+                Duration::ZERO,
+                RETEST + 1,
+            )
+            .await
+            .expect("refused by all is still an answer");
+
+            assert_eq!(crate::wire::full_rcode(&resp), rescode as u16);
+            assert!(pool.is_failed(0), "the next query asks it first again");
         }
     }
 
