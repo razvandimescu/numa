@@ -1,6 +1,6 @@
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -275,14 +275,14 @@ pub struct UpstreamPool {
 
 /// Shared by the clones of a pool, so each query sees the same state.
 struct Health {
-    strikes: Vec<AtomicU8>,
+    strikes: Vec<AtomicU32>,
     retesting: AtomicBool,
 }
 
 impl Health {
     fn new(len: usize) -> Arc<Self> {
         Arc::new(Self {
-            strikes: (0..len).map(|_| AtomicU8::new(0)).collect(),
+            strikes: (0..len).map(|_| AtomicU32::new(0)).collect(),
             retesting: AtomicBool::new(false),
         })
     }
@@ -294,7 +294,7 @@ const RETEST_ONE_IN: u16 = 20;
 /// Strikes that make an upstream failed. A timeout or an error is all of
 /// them: staying costs each client the full timeout. A REFUSED answer is
 /// one: it can be about a single name, and staying costs one round trip.
-const FAILED_AT: u8 = 20;
+const FAILED_AT: u32 = 20;
 
 impl UpstreamPool {
     pub fn new(primary: Vec<Upstream>, fallback: Vec<Upstream>) -> Self {
@@ -338,8 +338,7 @@ impl UpstreamPool {
     }
 
     fn add_strike(&self, i: usize) {
-        let strikes = &self.health.strikes[i];
-        let _ = strikes.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |s| s.checked_add(1));
+        self.health.strikes[i].fetch_add(1, Ordering::Relaxed);
     }
 
     fn order(&self) -> Vec<usize> {
