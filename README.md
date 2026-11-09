@@ -88,6 +88,10 @@ Over loopback (`localhost`, `127.0.0.1`, `numa.numa`), the dashboard and API nee
 
 Also delete `~/.config/numa` if you created a user config. If you set `[server] data_dir`, delete that path too.
 
+## One-Click Deploy
+
+[![Deploy on RepoCloud](https://d16t0pc4846x52.cloudfront.net/deploylobe.svg)](https://repocloud.io/details/Numa/)
+
 ## How It Compares
 
 | | Pi-hole | AdGuard Home | Unbound | Numa |
