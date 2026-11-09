@@ -1,5 +1,6 @@
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -43,16 +44,6 @@ pub enum Upstream {
 }
 
 impl Upstream {
-    /// SRTT key, when the upstream has a stable IP. `Doh`/`Odoh` route
-    /// through a URL + connection pool, so they never key here.
-    pub fn tracked_key(&self) -> Option<(IpAddr, UpstreamTransport)> {
-        let ip = match self {
-            Upstream::Udp(a) | Upstream::Tcp(a) | Upstream::Dot { addr: a, .. } => a.ip(),
-            Upstream::Doh { .. } | Upstream::Odoh { .. } => return None,
-        };
-        Some((ip, self.transport()))
-    }
-
     pub fn transport(&self) -> UpstreamTransport {
         match self {
             Upstream::Udp(_) => UpstreamTransport::Udp,
@@ -272,15 +263,41 @@ fn build_dot_connector() -> Result<tokio_rustls::TlsConnector> {
     )))
 }
 
+/// Upstreams in list order: primaries, then fallbacks. A timeout or an error
+/// marks an upstream failed, and numa asks it last until a usable answer.
 #[derive(Clone)]
 pub struct UpstreamPool {
     primary: Vec<Upstream>,
     fallback: Vec<Upstream>,
+    health: Arc<Health>,
 }
+
+/// Shared by the clones of a pool, so each query sees the same state.
+struct Health {
+    failed: Vec<AtomicBool>,
+    retesting: AtomicBool,
+}
+
+impl Health {
+    fn new(len: usize) -> Arc<Self> {
+        Arc::new(Self {
+            failed: (0..len).map(|_| AtomicBool::new(false)).collect(),
+            retesting: AtomicBool::new(false),
+        })
+    }
+}
+
+/// Knot Resolver sends one query in 20 to a server other than its choice.
+const RETEST_ONE_IN: u16 = 20;
 
 impl UpstreamPool {
     pub fn new(primary: Vec<Upstream>, fallback: Vec<Upstream>) -> Self {
-        Self { primary, fallback }
+        let health = Health::new(primary.len() + fallback.len());
+        Self {
+            primary,
+            fallback,
+            health,
+        }
     }
 
     pub fn preferred(&self) -> Option<&Upstream> {
@@ -289,6 +306,57 @@ impl UpstreamPool {
 
     pub fn set_primary(&mut self, primary: Vec<Upstream>) {
         self.primary = primary;
+        self.reset_health();
+    }
+
+    fn reset_health(&mut self) {
+        self.health = Health::new(self.primary.len() + self.fallback.len());
+    }
+
+    fn upstream(&self, i: usize) -> &Upstream {
+        self.primary
+            .get(i)
+            .unwrap_or_else(|| &self.fallback[i - self.primary.len()])
+    }
+
+    fn is_failed(&self, i: usize) -> bool {
+        self.health.failed[i].load(Ordering::Relaxed)
+    }
+
+    /// ODoH stays unmarked: asking the fallback first would leave the
+    /// oblivious path.
+    fn set_failed(&self, i: usize, failed: bool) {
+        if !matches!(self.upstream(i), Upstream::Odoh { .. }) {
+            self.health.failed[i].store(failed, Ordering::Relaxed);
+        }
+    }
+
+    fn order(&self) -> Vec<usize> {
+        let mut order: Vec<usize> = (0..self.health.failed.len()).collect();
+        order.sort_by_key(|&i| self.is_failed(i));
+        order
+    }
+
+    /// When `draw` hits, a failed upstream listed before the one that answered
+    /// gets a copy of the query, so no client waits to learn that it is back.
+    fn retest_target(&self, answered: usize, draw: u16) -> Option<usize> {
+        let failed: Vec<usize> = (0..answered).filter(|&i| self.is_failed(i)).collect();
+        if failed.is_empty() || !draw.is_multiple_of(RETEST_ONE_IN) {
+            return None;
+        }
+        Some(failed[usize::from(draw / RETEST_ONE_IN) % failed.len()])
+    }
+
+    /// One copy at a time, so a dead upstream cannot collect tasks.
+    async fn retest(self, i: usize, wire: Vec<u8>, timeout_duration: Duration) {
+        if self.health.retesting.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let answer = forward_query_raw(&wire, self.upstream(i), timeout_duration).await;
+        if answer.is_ok_and(|resp| is_usable_answer(&resp)) {
+            self.set_failed(i, false);
+        }
+        self.health.retesting.store(false, Ordering::Relaxed);
     }
 
     /// Replace the primaries with `new` if they differ. Returns `true` if the
@@ -316,6 +384,7 @@ impl UpstreamPool {
             }
         }
         self.primary = new;
+        self.reset_health();
         true
     }
 
@@ -659,35 +728,32 @@ pub async fn forward_with_failover_raw(
     timeout_duration: Duration,
     hedge_delay: Duration,
 ) -> Result<Vec<u8>> {
+    let draw = crate::packet::random_id();
+    let (resp, retest) =
+        forward_in_order(wire, pool, srtt, timeout_duration, hedge_delay, draw).await?;
+    if let Some((target, copy)) = retest {
+        tokio::spawn(pool.clone().retest(target, copy, timeout_duration));
+    }
+    Ok(resp)
+}
+
+/// `srtt = false` turns off the failed state, so each query follows list order.
+/// A re-test that `draw` selects comes back as its target and the query as it
+/// went upstream, so the copy tests what a client query needs.
+async fn forward_in_order(
+    wire: &[u8],
+    pool: &UpstreamPool,
+    srtt: &RwLock<SrttCache>,
+    timeout_duration: Duration,
+    hedge_delay: Duration,
+    draw: u16,
+) -> Result<(Vec<u8>, Option<(usize, Vec<u8>)>)> {
     let wire = &crate::wire::ensure_do_bit(wire)[..];
-    let mut candidates: Vec<(usize, u64)> = {
-        let srtt_read = srtt.read().unwrap();
-        pool.primary
-            .iter()
-            .enumerate()
-            .map(|(i, u)| {
-                let rtt = u
-                    .tracked_key()
-                    .map(|(ip, t)| srtt_read.get(ip, t))
-                    .unwrap_or(0);
-                (i, rtt)
-            })
-            .collect()
-    };
-    candidates.sort_by_key(|&(_, rtt)| rtt);
-
-    let has_fallback = !pool.fallback.is_empty();
-    let all_upstreams: Vec<&Upstream> = candidates
-        .iter()
-        .filter(|&&(_, rtt)| !has_fallback || rtt < crate::srtt::PRIMARY_SKIP_SRTT_MS)
-        .map(|&(i, _)| &pool.primary[i])
-        .chain(pool.fallback.iter())
-        .collect();
-
+    let track = srtt.read().unwrap().is_enabled();
     let mut last_err: Option<Box<dyn std::error::Error + Send + Sync>> = None;
 
-    for upstream in &all_upstreams {
-        let start = Instant::now();
+    for i in pool.order() {
+        let upstream = pool.upstream(i);
         let result = if !hedge_delay.is_zero() {
             // Hedge against the same upstream: independent h2 streams (DoH),
             // independent UDP packets (plain DNS), or independent TLS
@@ -699,15 +765,17 @@ pub async fn forward_with_failover_raw(
         };
         match result {
             Ok(resp) => {
-                if let Some((ip, t)) = upstream.tracked_key() {
-                    let rtt_ms = start.elapsed().as_millis() as u64;
-                    srtt.write().unwrap().record_rtt(ip, t, rtt_ms);
+                if is_usable_answer(&resp) {
+                    pool.set_failed(i, false);
                 }
-                return Ok(resp);
+                let retest = pool
+                    .retest_target(i, draw)
+                    .map(|target| (target, wire.to_vec()));
+                return Ok((resp, retest));
             }
             Err(e) => {
-                if let Some((ip, t)) = upstream.tracked_key() {
-                    srtt.write().unwrap().record_failure(ip, t);
+                if track {
+                    pool.set_failed(i, true);
                 }
                 log::debug!("upstream {} failed: {}", upstream, e);
                 last_err = Some(e);
@@ -716,6 +784,12 @@ pub async fn forward_with_failover_raw(
     }
 
     Err(last_err.unwrap_or_else(|| "no upstream configured".into()))
+}
+
+/// NOERROR or NXDOMAIN. SERVFAIL and REFUSED still reach the client, but they
+/// do not show that the upstream resolves.
+fn is_usable_answer(resp: &[u8]) -> bool {
+    matches!(crate::wire::full_rcode(resp), 0 | 3)
 }
 
 async fn forward_udp_raw(
@@ -787,6 +861,7 @@ mod tests {
     use super::*;
 
     use crate::header::ResultCode;
+    use crate::packet::EdnsOpt;
     use crate::question::QueryType;
     use crate::record::DnsRecord;
 
@@ -1005,67 +1080,130 @@ mod tests {
         assert_eq!(pool.label(), "1.2.3.4:53 (+1 more)");
     }
 
-    #[tokio::test]
-    async fn failover_skips_bad_srtt_primary_when_fallback_exists() {
-        // UDP primary's SRTT is pre-pinned at FAILURE_PENALTY. With a
-        // fallback present, the failover loop should skip the primary
-        // entirely (no UDP timeout cost) and go straight to fallback.
-        let query = make_query();
-        let (doh, _rx) = doh_upstream(to_wire(&make_response(&query))).await;
+    fn udp(addr: &str) -> Upstream {
+        Upstream::Udp(addr.parse().unwrap())
+    }
 
-        let bad_udp_addr: SocketAddr = "192.0.2.99:53".parse().unwrap();
-        let pool = UpstreamPool::new(vec![Upstream::Udp(bad_udp_addr)], vec![doh]);
+    const RETEST: u16 = 0;
 
-        let srtt = RwLock::new(SrttCache::new(true));
-        srtt.write()
-            .unwrap()
-            .record_failure(bad_udp_addr.ip(), UpstreamTransport::Udp);
-
-        let wire = to_wire(&query);
-        let start = Instant::now();
-        let resp_wire = forward_with_failover_raw(
-            &wire,
-            &pool,
-            &srtt,
-            // High primary timeout — if the circuit-breaker fails to skip,
-            // the test would block ~500ms on the unreachable UDP primary.
-            Duration::from_millis(500),
-            Duration::ZERO,
-        )
-        .await
-        .expect("should fall through to DoH fallback");
-        assert!(
-            start.elapsed() < Duration::from_millis(200),
-            "primary was attempted, elapsed={:?}",
-            start.elapsed()
+    #[test]
+    fn failed_upstreams_go_last_in_list_order() {
+        let pool = UpstreamPool::new(
+            vec![udp("10.0.0.1:53"), udp("10.0.0.2:53")],
+            vec![udp("10.0.0.3:53")],
         );
+        assert_eq!(pool.order(), [0, 1, 2]);
+        pool.set_failed(0, true);
+        assert_eq!(pool.order(), [1, 2, 0]);
+        pool.set_failed(1, true);
+        pool.set_failed(2, true);
+        assert_eq!(
+            pool.order(),
+            [0, 1, 2],
+            "all failed: start again at the first"
+        );
+    }
 
-        let mut buf = BytePacketBuffer::from_bytes(&resp_wire);
-        let result = DnsPacket::from_buffer(&mut buf).unwrap();
-        assert_eq!(result.header.id, 0xABCD);
+    #[test]
+    fn retest_targets_a_failed_upstream_listed_before_the_answer() {
+        let pool = UpstreamPool::new(
+            vec![udp("10.0.0.1:53"), udp("10.0.0.2:53"), udp("10.0.0.3:53")],
+            vec![],
+        );
+        pool.set_failed(0, true);
+        pool.set_failed(2, true);
+
+        assert_eq!(pool.retest_target(1, RETEST), Some(0), "2 is listed after");
+        assert_eq!(pool.retest_target(1, RETEST + 1), None, "not drawn");
+        assert_eq!(pool.retest_target(0, RETEST), None);
     }
 
     #[tokio::test]
-    async fn failover_tries_bad_srtt_primary_when_no_fallback() {
-        // No fallback means the circuit-breaker must NOT skip the only
-        // upstream — better to try and fail with a timeout than to error
-        // out without sending a single query.
-        let bad_udp_addr: SocketAddr = "192.0.2.99:53".parse().unwrap();
-        let pool = UpstreamPool::new(vec![Upstream::Udp(bad_udp_addr)], vec![]);
+    async fn a_retest_brings_back_a_primary_that_answers_again() {
+        let query = make_query();
+        let response = to_wire(&make_response(&query));
+        let (first, mut first_rx) = doh_upstream(response.clone()).await;
+        let (second, mut second_rx) = doh_upstream(response).await;
+        let pool = UpstreamPool::new(vec![first, second], vec![]);
+        pool.set_failed(0, true);
         let srtt = RwLock::new(SrttCache::new(true));
-        srtt.write()
-            .unwrap()
-            .record_failure(bad_udp_addr.ip(), UpstreamTransport::Udp);
+        let (wire, timeout) = (to_wire(&query), Duration::from_secs(2));
+        let ask = || forward_in_order(&wire, &pool, &srtt, timeout, Duration::ZERO, RETEST);
 
-        let result = forward_with_failover_raw(
-            &[0u8; 12],
+        let (_, retest) = ask().await.unwrap();
+        let client = second_rx.try_recv().expect("the second primary answered");
+        assert!(first_rx.try_recv().is_err(), "a client query went to it");
+
+        let (target, copy) = retest.expect("drawn");
+        pool.clone().retest(target, copy, timeout).await;
+        let copy = first_rx.try_recv().expect("the copy");
+        assert_eq!(copy[2..], client[2..], "the copy is not the client's query");
+
+        ask().await.unwrap();
+        assert!(first_rx.try_recv().is_ok(), "queries did not go back to it");
+    }
+
+    #[tokio::test]
+    async fn only_noerror_or_nxdomain_ends_the_failed_state() {
+        let query = make_query();
+        let reply = |rescode| DnsPacket::response_from(&query, rescode);
+        let mut badvers = reply(ResultCode::NOERROR);
+        badvers.edns = Some(EdnsOpt {
+            extended_rcode: 1,
+            ..Default::default()
+        });
+
+        for (reply, stays_failed) in [
+            (reply(ResultCode::NXDOMAIN), false),
+            (reply(ResultCode::REFUSED), true),
+            (badvers, true),
+        ] {
+            let (first, _rx) = doh_upstream(to_wire(&reply)).await;
+            let pool = UpstreamPool::new(vec![first], vec![]);
+            pool.set_failed(0, true);
+
+            pool.clone()
+                .retest(0, to_wire(&query), Duration::from_secs(2))
+                .await;
+
+            assert_eq!(pool.is_failed(0), stays_failed, "{:?}", reply.edns);
+        }
+    }
+
+    #[tokio::test]
+    async fn one_retest_runs_at_a_time() {
+        let (dead, seen) = crate::testutil::counting_blackhole_upstream().await;
+        let pool = UpstreamPool::new(vec![Upstream::Udp(dead)], vec![]);
+        let wire = to_wire(&make_query());
+        let timeout = Duration::from_millis(100);
+
+        tokio::join!(
+            pool.clone().retest(0, wire.clone(), timeout),
+            pool.clone().retest(0, wire.clone(), timeout),
+        );
+
+        assert_eq!(seen.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn without_srtt_a_failure_changes_nothing() {
+        let query = make_query();
+        let (live, _rx) = doh_upstream(to_wire(&make_response(&query))).await;
+        let pool = UpstreamPool::new(vec![dead_doh().await, live], vec![]);
+        let srtt = RwLock::new(SrttCache::new(false));
+
+        forward_in_order(
+            &to_wire(&query),
             &pool,
             &srtt,
-            Duration::from_millis(50),
+            Duration::from_millis(300),
             Duration::ZERO,
+            RETEST,
         )
-        .await;
-        assert!(result.is_err());
+        .await
+        .expect("second primary answers");
+
+        assert_eq!(pool.order(), [0, 1]);
     }
 
     #[tokio::test]
@@ -1546,8 +1684,8 @@ mod tests {
         assert!(!pool.maybe_replace_primary(set), "already on the set");
     }
 
-    // DoH carries no SRTT, so the second operator in the built-in set sees no
-    // queries while the first answers.
+    // Failover keeps list order, so the second operator in the built-in set
+    // sees no queries while the first answers.
     #[tokio::test]
     async fn second_doh_primary_idle_while_first_answers() {
         let query = make_query();
@@ -1569,6 +1707,60 @@ mod tests {
 
         assert!(first_rx.try_recv().is_ok());
         assert!(second_rx.try_recv().is_err());
+    }
+
+    async fn dead_doh() -> Upstream {
+        let never = axum::routing::post(|| std::future::pending::<&str>());
+        serve_doh(axum::Router::new().route("/dns-query", never)).await
+    }
+
+    #[tokio::test]
+    async fn a_dead_doh_primary_costs_one_timeout() {
+        let query = make_query();
+        let (live, _rx) = doh_upstream(to_wire(&make_response(&query))).await;
+        let pool = UpstreamPool::new(vec![dead_doh().await, live], vec![]);
+        let srtt = RwLock::new(SrttCache::new(true));
+        let wire = to_wire(&query);
+        let timeout = Duration::from_millis(500);
+
+        forward_with_failover_raw(&wire, &pool, &srtt, timeout, Duration::ZERO)
+            .await
+            .expect("second primary answers");
+        let start = Instant::now();
+        forward_with_failover_raw(&wire, &pool, &srtt, timeout, Duration::ZERO)
+            .await
+            .expect("second primary answers");
+
+        assert!(
+            start.elapsed() < Duration::from_millis(200),
+            "waited for the dead primary again: {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_plain_primary_listed_before_doh_gets_the_query() {
+        let query = make_query();
+        let response = to_wire(&make_response(&query));
+        let plain = crate::testutil::mock_upstream_raw(response.clone()).await;
+        let (doh, mut doh_rx) = doh_upstream(response).await;
+        let pool = UpstreamPool::new(vec![Upstream::Udp(plain), doh], vec![]);
+        let srtt = RwLock::new(SrttCache::new(true));
+
+        forward_with_failover_raw(
+            &to_wire(&query),
+            &pool,
+            &srtt,
+            Duration::from_secs(2),
+            Duration::ZERO,
+        )
+        .await
+        .expect("plain primary answers");
+
+        assert!(
+            doh_rx.try_recv().is_err(),
+            "the DoH primary jumped the list"
+        );
     }
 
     // Failover chains fallback after the primaries, so a sibling left behind by
@@ -1601,66 +1793,5 @@ mod tests {
             pool.fallback,
             vec![Upstream::Tcp("192.168.1.1:53".parse().unwrap())]
         );
-    }
-
-    fn tcp_closed_port() -> SocketAddr {
-        // Bind a TCP listener, grab the port, drop → kernel returns RST on connect.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        drop(listener);
-        addr
-    }
-
-    #[tokio::test]
-    async fn udp_failure_records_in_srtt() {
-        let blackhole = crate::testutil::blackhole_upstream();
-        let pool = UpstreamPool::new(vec![Upstream::Udp(blackhole)], vec![]);
-        let srtt = RwLock::new(SrttCache::new(true));
-        let _ = forward_with_failover_raw(
-            &[0u8; 12],
-            &pool,
-            &srtt,
-            Duration::from_millis(100),
-            Duration::ZERO,
-        )
-        .await;
-        assert!(srtt
-            .read()
-            .unwrap()
-            .is_known(blackhole.ip(), UpstreamTransport::Udp));
-    }
-
-    #[tokio::test]
-    async fn dot_failure_records_in_srtt() {
-        let dead1 = tcp_closed_port();
-        let dead2 = tcp_closed_port();
-        let connector = build_dot_connector().unwrap();
-        let pool = UpstreamPool::new(
-            vec![
-                Upstream::Dot {
-                    addr: dead1,
-                    tls_name: Some("dns.quad9.net".to_string()),
-                    connector: connector.clone(),
-                },
-                Upstream::Dot {
-                    addr: dead2,
-                    tls_name: Some("dns.quad9.net".to_string()),
-                    connector,
-                },
-            ],
-            vec![],
-        );
-        let srtt = RwLock::new(SrttCache::new(true));
-        let _ = forward_with_failover_raw(
-            &[0u8; 12],
-            &pool,
-            &srtt,
-            Duration::from_millis(500),
-            Duration::ZERO,
-        )
-        .await;
-        let cache = srtt.read().unwrap();
-        assert!(cache.is_known(dead1.ip(), UpstreamTransport::Dot));
-        assert!(cache.is_known(dead2.ip(), UpstreamTransport::Dot));
     }
 }
