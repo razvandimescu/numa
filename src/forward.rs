@@ -540,9 +540,17 @@ async fn forward_dot_raw(
         None => ServerName::try_from(addr.ip().to_string())?,
     };
 
-    let tcp = timeout(timeout_duration, TcpStream::connect(addr)).await??;
+    let tcp = connect_nodelay(addr, timeout_duration).await?;
     let mut tls = timeout(timeout_duration, connector.connect(server_name, tcp)).await??;
     exchange_framed(&mut tls, wire, timeout_duration).await
+}
+
+/// A TLS handshake ends with a small write. With Nagle on, the kernel then
+/// holds the query until the server acknowledges that write.
+async fn connect_nodelay(addr: SocketAddr, timeout_duration: Duration) -> Result<TcpStream> {
+    let tcp = timeout(timeout_duration, TcpStream::connect(addr)).await??;
+    tcp.set_nodelay(true)?;
+    Ok(tcp)
 }
 
 async fn exchange_framed<S>(
@@ -889,6 +897,15 @@ mod tests {
     use crate::packet::EdnsOpt;
     use crate::question::QueryType;
     use crate::record::DnsRecord;
+
+    #[tokio::test]
+    async fn a_dot_connection_has_nodelay() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let tcp = connect_nodelay(listener.local_addr().unwrap(), Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert!(tcp.nodelay().unwrap(), "Nagle holds the first query");
+    }
 
     #[tokio::test]
     async fn exchange_framed_times_out_when_peer_stops_reading() {
