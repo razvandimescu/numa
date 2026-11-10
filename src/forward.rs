@@ -588,7 +588,6 @@ async fn forward_dot_raw(
 
     let mut tls = dot_connect(addr, tls_name, connector, left).await?;
     let resp = exchange_framed(&mut tls, wire, left).await?;
-    let resp = usable_reply(wire, resp)?;
     idle.put(tls, SystemTime::now());
     Ok(resp)
 }
