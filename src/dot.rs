@@ -457,13 +457,13 @@ mod tests {
 
     #[tokio::test]
     async fn pp2_dot_happy_path_ipv4() {
-        // Trusted client (127.0.0.1) sends a v4 PROXY header declaring an
-        // arbitrary upstream IP. Connection completes; query resolves.
+        // Trusted client (127.0.0.1) sends a v4 PROXY header declaring a
+        // private client IP. Connection completes; query resolves.
         let (addr, cert_der) = spawn_dot_server_with_pp(&["127.0.0.1"]).await;
         let client_config = dot_client(&cert_der, dot_alpn());
 
         let pp = pp2_v4_proxy(
-            "203.0.113.42".parse().unwrap(),
+            "192.168.1.42".parse().unwrap(),
             "10.0.0.5".parse().unwrap(),
             54321,
             853,
@@ -529,7 +529,7 @@ mod tests {
         let client_config = dot_client(&cert_der, dot_alpn());
 
         let pp = pp2_v6_proxy(
-            "2001:db8::1".parse().unwrap(),
+            "fd00::1".parse().unwrap(),
             "2001:db8::cafe".parse().unwrap(),
             54321,
             853,

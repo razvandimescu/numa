@@ -108,7 +108,8 @@ pub struct ServerConfig {
     /// listener in PROXY-required mode.
     #[serde(default)]
     pub proxy_protocol: ProxyProtocolConfig,
-    /// CIDR allowlist applied at every DNS surface. Empty = disabled.
+    /// CIDR allowlist applied at every DNS surface. Empty =
+    /// `acl::DEFAULT_ALLOW_FROM`. Loopback is always allowed.
     #[serde(default)]
     pub allow_from: Vec<String>,
     /// Ceiling on cache-miss resolutions running at once, shared by every

@@ -24,11 +24,13 @@ api_port = 5380
                               # Default: false.
 
 # ── Client-IP allowlist ────────────────────────────────────────────
-# Required on WAN-facing binds, or numa becomes an open recursive
-# resolver. Loopback always allowed. Denied peers: silent UDP drop,
-# TLS close pre-handshake, DoH 403.
+# Unset: loopback plus private networks (RFC 1918, link-local,
+# fc00::/7 and Tailscale's 100.64.0.0/10). A list replaces this
+# default; loopback stays allowed. Denied peers: silent UDP drop,
+# TCP/DoT/HTTPS close before TLS, port-80 proxy 403.
+# ["0.0.0.0/0", "::/0"] makes numa an open resolver.
 #
-# allow_from = ["10.0.0.0/8", "192.168.0.0/16", "fd00::/8"]
+# allow_from = ["192.168.0.0/16", "198.51.100.0/24"]
 
 # ── Resolution ceiling ─────────────────────────────────────────────
 # Cache misses running at once, across UDP, TCP, DoT and DoH together.
