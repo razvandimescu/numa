@@ -552,9 +552,7 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    use rcgen::{CertificateParams, DnType, KeyPair};
-    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
-    use rustls::ServerConfig;
+    use rustls::pki_types::{CertificateDer, ServerName};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use crate::buffer::BytePacketBuffer;
@@ -562,6 +560,7 @@ mod tests {
     use crate::packet::DnsPacket;
     use crate::question::QueryType;
     use crate::record::DnsRecord;
+    use crate::testutil::tls_client;
 
     #[test]
     fn extract_host_strips_port_and_keeps_ipv6_literals() {
@@ -576,33 +575,6 @@ mod tests {
         assert_eq!(host("Numa.Numa:80").as_deref(), Some("numa.numa"));
         assert_eq!(host("localhost").as_deref(), Some("localhost"));
         assert_eq!(host("bad host"), None);
-    }
-
-    /// Self-signed TLS server config that vouches for `*.numa` + `numa.numa`,
-    /// matching the SAN shape produced by `tls::build_tls_config` in production.
-    fn test_tls_configs() -> (Arc<ServerConfig>, CertificateDer<'static>) {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-
-        let key_pair = KeyPair::generate().unwrap();
-        let mut params = CertificateParams::default();
-        params
-            .distinguished_name
-            .push(DnType::CommonName, "Numa .numa services");
-        params.subject_alt_names = vec![
-            rcgen::SanType::DnsName("*.numa".try_into().unwrap()),
-            rcgen::SanType::DnsName("numa.numa".try_into().unwrap()),
-        ];
-        let cert = params.self_signed(&key_pair).unwrap();
-
-        let cert_der = CertificateDer::from(cert.der().to_vec());
-        let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_pair.serialize_der()));
-
-        let server_config = ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(vec![cert_der.clone()], key_der)
-            .unwrap();
-
-        (Arc::new(server_config), cert_der)
     }
 
     /// Wire a PROXY v2 IPv4 PROXY-command header (28 bytes total).
@@ -632,7 +604,7 @@ mod tests {
         pp_from: &[&str],
         allow_from: &[&str],
     ) -> (SocketAddr, CertificateDer<'static>, Arc<ServerCtx>) {
-        let (server_tls, cert_der) = test_tls_configs();
+        let (server_tls, cert_der) = crate::testutil::self_signed_tls();
         let upstream_addr = crate::testutil::blackhole_upstream();
 
         let mut ctx = crate::testutil::test_ctx().await;
@@ -649,7 +621,7 @@ mod tests {
             vec![crate::forward::Upstream::Udp(upstream_addr)],
             vec![],
         ));
-        ctx.tls_config = Some(arc_swap::ArcSwap::from(server_tls));
+        ctx.tls_config = Some(arc_swap::ArcSwap::from_pointee(server_tls));
         let ctx = Arc::new(ctx);
 
         let pp_cfg = ProxyProtocolConfig {
@@ -665,22 +637,12 @@ mod tests {
         (addr, cert_der, ctx)
     }
 
-    fn client_config(cert_der: CertificateDer<'static>) -> Arc<rustls::ClientConfig> {
-        let mut root_store = rustls::RootCertStore::empty();
-        root_store.add(cert_der).unwrap();
-        Arc::new(
-            rustls::ClientConfig::builder()
-                .with_root_certificates(root_store)
-                .with_no_client_auth(),
-        )
-    }
-
     async fn tls_connect(
         addr: SocketAddr,
         cert_der: CertificateDer<'static>,
     ) -> tokio_rustls::client::TlsStream<tokio::net::TcpStream> {
         let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
-        tokio_rustls::TlsConnector::from(client_config(cert_der))
+        tokio_rustls::TlsConnector::from(tls_client(&cert_der, vec![]))
             .connect(ServerName::try_from("numa.numa").unwrap(), tcp)
             .await
             .unwrap()
@@ -833,7 +795,7 @@ mod tests {
 
     async fn doh_answers(addr: SocketAddr, cert_der: CertificateDer<'static>) -> bool {
         let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
-        let Ok(mut stream) = tokio_rustls::TlsConnector::from(client_config(cert_der))
+        let Ok(mut stream) = tokio_rustls::TlsConnector::from(tls_client(&cert_der, vec![]))
             .connect(ServerName::try_from("numa.numa").unwrap(), tcp)
             .await
         else {
@@ -893,7 +855,7 @@ mod tests {
         // ClientHello; server completes TLS, parses the wire DNS message,
         // and returns NOERROR with the local-zone A record.
         let (addr, cert_der, _) = spawn_doh_server_with_pp(&["127.0.0.1"], &[]).await;
-        let client_config = client_config(cert_der);
+        let client_config = tls_client(&cert_der, vec![]);
 
         let mut tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
         let pp = pp2_v4_proxy(
@@ -986,7 +948,7 @@ mod tests {
     async fn proxy_tls_allow_from_gates_proxied_client() {
         let (addr, cert_der, _) =
             spawn_doh_server_with_pp(&["127.0.0.1"], &["203.0.113.0/24"]).await;
-        let client_config = client_config(cert_der);
+        let client_config = tls_client(&cert_der, vec![]);
 
         async fn tls_connects(
             addr: SocketAddr,

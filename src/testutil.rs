@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
+use rustls::pki_types::CertificateDer;
 use tokio::net::UdpSocket;
 
 use crate::blocklist::BlocklistStore;
@@ -302,25 +303,114 @@ pub async fn udp_tcp_upstream_raw(udp_bytes: Vec<u8>, tcp_bytes: Vec<u8>) -> Soc
 }
 
 fn serve_tcp_raw(listener: tokio::net::TcpListener, bytes: Vec<u8>) {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     tokio::spawn(async move {
         while let Ok((mut stream, _)) = listener.accept().await {
-            let mut len_buf = [0u8; 2];
-            if stream.read_exact(&mut len_buf).await.is_err() {
-                continue;
-            }
-            let mut query = vec![0u8; u16::from_be_bytes(len_buf) as usize];
-            if stream.read_exact(&mut query).await.is_err() || query.len() < 2 {
-                continue;
-            }
-            let mut reply = bytes.clone();
-            crate::wire::patch_id(&mut reply, u16::from_be_bytes([query[0], query[1]]));
-            let mut out = Vec::with_capacity(2 + reply.len());
-            out.extend_from_slice(&(reply.len() as u16).to_be_bytes());
-            out.extend_from_slice(&reply);
-            let _ = stream.write_all(&out).await;
+            let _ = answer_framed(&mut stream, &bytes).await;
         }
     });
+}
+
+/// Read one length-prefixed query and answer it with `bytes`, ID patched.
+async fn answer_framed<S>(stream: &mut S, bytes: &[u8]) -> std::io::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut len_buf = [0u8; 2];
+    stream.read_exact(&mut len_buf).await?;
+    let mut query = vec![0u8; u16::from_be_bytes(len_buf) as usize];
+    stream.read_exact(&mut query).await?;
+    if query.len() < 2 {
+        return Err(std::io::ErrorKind::InvalidData.into());
+    }
+    let mut reply = bytes.to_vec();
+    crate::wire::patch_id(&mut reply, u16::from_be_bytes([query[0], query[1]]));
+    let mut out = Vec::with_capacity(2 + reply.len());
+    out.extend_from_slice(&(reply.len() as u16).to_be_bytes());
+    out.extend_from_slice(&reply);
+    stream.write_all(&out).await
+}
+
+/// Self-signed TLS server config that vouches for `*.numa` + `numa.numa`, the
+/// SAN shape of `tls::build_tls_config`, with its certificate for the client.
+pub fn self_signed_tls() -> (rustls::ServerConfig, CertificateDer<'static>) {
+    use rcgen::{CertificateParams, DnType, KeyPair};
+    use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let key_pair = KeyPair::generate().unwrap();
+    let mut params = CertificateParams::default();
+    params
+        .distinguished_name
+        .push(DnType::CommonName, "Numa .numa services");
+    params.subject_alt_names = vec![
+        rcgen::SanType::DnsName("*.numa".try_into().unwrap()),
+        rcgen::SanType::DnsName("numa.numa".try_into().unwrap()),
+    ];
+    let cert = params.self_signed(&key_pair).unwrap();
+
+    let cert_der = CertificateDer::from(cert.der().to_vec());
+    let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_pair.serialize_der()));
+
+    let server_config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert_der.clone()], key_der)
+        .unwrap();
+    (server_config, cert_der)
+}
+
+/// TLS client config that trusts `cert_der` and advertises `alpn`.
+pub fn tls_client(
+    cert_der: &CertificateDer<'static>,
+    alpn: Vec<Vec<u8>>,
+) -> Arc<rustls::ClientConfig> {
+    let mut root_store = rustls::RootCertStore::empty();
+    root_store.add(cert_der.clone()).unwrap();
+    let mut config = rustls::ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+    config.alpn_protocols = alpn;
+    Arc::new(config)
+}
+
+/// DoT counterpart of `mock_upstream_raw`: answers each query with `bytes`
+/// (ID patched), and closes a connection after `per_connection` answers. The
+/// counter is the number of connections it accepted.
+pub async fn dot_upstream_raw(
+    bytes: Vec<u8>,
+    per_connection: usize,
+) -> (Upstream, Arc<std::sync::atomic::AtomicUsize>) {
+    let (server_config, cert_der) = self_signed_tls();
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = Arc::clone(&accepted);
+    tokio::spawn(async move {
+        while let Ok((tcp, _)) = listener.accept().await {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let (acceptor, bytes) = (acceptor.clone(), bytes.clone());
+            tokio::spawn(async move {
+                let Ok(mut tls) = acceptor.accept(tcp).await else {
+                    return;
+                };
+                for _ in 0..per_connection {
+                    if answer_framed(&mut tls, &bytes).await.is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    let upstream = Upstream::Dot {
+        addr,
+        tls_name: Some("numa.numa".to_string()),
+        connector: tokio_rustls::TlsConnector::from(tls_client(&cert_der, vec![])),
+        idle: Arc::default(),
+    };
+    (upstream, accepted)
 }
 
 /// DoH counterpart of `mock_upstream_raw`: answers every POST to `/dns-query`
