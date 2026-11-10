@@ -103,8 +103,7 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
-    use rcgen::{CertificateParams, DnType, KeyPair};
-    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
+    use rustls::pki_types::{CertificateDer, ServerName};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use crate::buffer::BytePacketBuffer;
@@ -112,50 +111,14 @@ mod tests {
     use crate::packet::DnsPacket;
     use crate::question::QueryType;
     use crate::record::DnsRecord;
+    use crate::testutil::tls_client;
 
-    /// Generate a self-signed DoT server config and return its leaf cert DER
+    /// The shared self-signed config with the DoT ALPN, and its leaf cert DER
     /// so callers can build matching client configs with arbitrary ALPN.
     fn test_tls_configs() -> (Arc<ServerConfig>, CertificateDer<'static>) {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-
-        // Mirror production self_signed_tls SAN shape: *.numa wildcard plus
-        // explicit numa.numa apex (the ServerName setup-phone uses as SNI).
-        let key_pair = KeyPair::generate().unwrap();
-        let mut params = CertificateParams::default();
-        params
-            .distinguished_name
-            .push(DnType::CommonName, "Numa .numa services");
-        params.subject_alt_names = vec![
-            rcgen::SanType::DnsName("*.numa".try_into().unwrap()),
-            rcgen::SanType::DnsName("numa.numa".try_into().unwrap()),
-        ];
-        let cert = params.self_signed(&key_pair).unwrap();
-
-        let cert_der = CertificateDer::from(cert.der().to_vec());
-        let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_pair.serialize_der()));
-
-        let mut server_config = ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(vec![cert_der.clone()], key_der)
-            .unwrap();
+        let (mut server_config, cert_der) = crate::testutil::self_signed_tls();
         server_config.alpn_protocols = dot_alpn();
-
         (Arc::new(server_config), cert_der)
-    }
-
-    /// Build a TLS client config that trusts `cert_der` and advertises the
-    /// given ALPN protocols. Used by tests to vary ALPN per test case.
-    fn dot_client(
-        cert_der: &CertificateDer<'static>,
-        alpn: Vec<Vec<u8>>,
-    ) -> Arc<rustls::ClientConfig> {
-        let mut root_store = rustls::RootCertStore::empty();
-        root_store.add(cert_der.clone()).unwrap();
-        let mut config = rustls::ClientConfig::builder()
-            .with_root_certificates(root_store)
-            .with_no_client_auth();
-        config.alpn_protocols = alpn;
-        Arc::new(config)
     }
 
     /// Spin up a DoT listener with a test TLS config. Returns the bind addr
@@ -234,7 +197,7 @@ mod tests {
     #[tokio::test]
     async fn dot_resolves_local_zone() {
         let (addr, cert_der) = spawn_dot_server().await;
-        let client_config = dot_client(&cert_der, dot_alpn());
+        let client_config = tls_client(&cert_der, dot_alpn());
         let mut stream = dot_connect(addr, &client_config).await;
 
         let query = DnsPacket::query(0x1234, "dot-test.example", QueryType::A);
@@ -257,7 +220,7 @@ mod tests {
     #[tokio::test]
     async fn dot_multiple_queries_on_persistent_connection() {
         let (addr, cert_der) = spawn_dot_server().await;
-        let client_config = dot_client(&cert_der, dot_alpn());
+        let client_config = tls_client(&cert_der, dot_alpn());
         let mut stream = dot_connect(addr, &client_config).await;
 
         for i in 0..3u16 {
@@ -272,7 +235,7 @@ mod tests {
     #[tokio::test]
     async fn dot_nxdomain_for_unknown() {
         let (addr, cert_der) = spawn_dot_server().await;
-        let client_config = dot_client(&cert_der, dot_alpn());
+        let client_config = tls_client(&cert_der, dot_alpn());
         let mut stream = dot_connect(addr, &client_config).await;
 
         let query = DnsPacket::query(0xBEEF, "nonexistent.test", QueryType::A);
@@ -290,7 +253,7 @@ mod tests {
     #[tokio::test]
     async fn dot_negotiates_alpn() {
         let (addr, cert_der) = spawn_dot_server().await;
-        let client_config = dot_client(&cert_der, dot_alpn());
+        let client_config = tls_client(&cert_der, dot_alpn());
         let stream = dot_connect(addr, &client_config).await;
         let (_io, conn) = stream.get_ref();
         assert_eq!(conn.alpn_protocol(), Some(&b"dot"[..]));
@@ -303,7 +266,7 @@ mod tests {
         // a TLS handshake with the DoT server. Verifies the rustls server
         // sends `no_application_protocol` rather than silently negotiating.
         let (addr, cert_der) = spawn_dot_server().await;
-        let client_config = dot_client(&cert_der, vec![b"h2".to_vec()]);
+        let client_config = tls_client(&cert_der, vec![b"h2".to_vec()]);
         let connector = tokio_rustls::TlsConnector::from(client_config);
         let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
         let result = connector
@@ -318,7 +281,7 @@ mod tests {
     #[tokio::test]
     async fn dot_concurrent_connections() {
         let (addr, cert_der) = spawn_dot_server().await;
-        let client_config = dot_client(&cert_der, dot_alpn());
+        let client_config = tls_client(&cert_der, dot_alpn());
 
         let mut handles = Vec::new();
         for i in 0..5u16 {
@@ -460,7 +423,7 @@ mod tests {
         // Trusted client (127.0.0.1) sends a v4 PROXY header declaring an
         // arbitrary upstream IP. Connection completes; query resolves.
         let (addr, cert_der) = spawn_dot_server_with_pp(&["127.0.0.1"]).await;
-        let client_config = dot_client(&cert_der, dot_alpn());
+        let client_config = tls_client(&cert_der, dot_alpn());
 
         let pp = pp2_v4_proxy(
             "203.0.113.42".parse().unwrap(),
@@ -484,7 +447,7 @@ mod tests {
         // ClientHello with no PROXY header. The first 12 bytes do not match
         // the v2 signature → connection dropped → TLS handshake fails.
         let (addr, cert_der) = spawn_dot_server_with_pp(&["127.0.0.1"]).await;
-        let client_config = dot_client(&cert_der, dot_alpn());
+        let client_config = tls_client(&cert_der, dot_alpn());
 
         let connector = tokio_rustls::TlsConnector::from(client_config);
         let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
@@ -502,7 +465,7 @@ mod tests {
         // Allowlist contains a non-loopback range only. Connections from
         // 127.0.0.1 must be dropped before any read.
         let (addr, cert_der) = spawn_dot_server_with_pp(&["192.0.2.0/24"]).await;
-        let client_config = dot_client(&cert_der, dot_alpn());
+        let client_config = tls_client(&cert_der, dot_alpn());
 
         // Even with a valid PROXY v2 header, the listener must drop us
         // because our actual TCP peer (127.0.0.1) is not on the allowlist.
@@ -526,7 +489,7 @@ mod tests {
         // hosts. Numa must accept the connection and propagate the IPv6
         // source as the connection's remote_addr.
         let (addr, cert_der) = spawn_dot_server_with_pp(&["127.0.0.1"]).await;
-        let client_config = dot_client(&cert_der, dot_alpn());
+        let client_config = tls_client(&cert_der, dot_alpn());
 
         let pp = pp2_v6_proxy(
             "2001:db8::1".parse().unwrap(),
@@ -549,7 +512,7 @@ mod tests {
         // Numa must accept the connection and use the actual TCP peer as
         // remote_addr instead of trying to dereference an absent address.
         let (addr, cert_der) = spawn_dot_server_with_pp(&["127.0.0.1"]).await;
-        let client_config = dot_client(&cert_der, dot_alpn());
+        let client_config = tls_client(&cert_der, dot_alpn());
 
         let mut stream = dot_connect_with_pp2(addr, &client_config, &pp2_local())
             .await
@@ -588,7 +551,7 @@ mod tests {
         // working. This is the regression check that pp2 introduces no
         // behavior change for users who don't enable the feature.
         let (addr, cert_der) = spawn_dot_server_with_pp(&[]).await;
-        let client_config = dot_client(&cert_der, dot_alpn());
+        let client_config = tls_client(&cert_der, dot_alpn());
         let mut stream = dot_connect(addr, &client_config).await;
 
         let query = DnsPacket::query(0xD004, "dot-test.example", QueryType::A);

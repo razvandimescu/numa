@@ -1,8 +1,8 @@
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant, SystemTime};
 
 use http_body_util::{BodyExt, Limited};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -32,6 +32,7 @@ pub enum Upstream {
         addr: SocketAddr,
         tls_name: Option<String>,
         connector: tokio_rustls::TlsConnector,
+        idle: Arc<DotIdle>,
     },
     /// Oblivious DNS-over-HTTPS (RFC 9230). Queries are HPKE-sealed to the
     /// target and forwarded through an independent relay. Target host lives
@@ -163,6 +164,7 @@ pub fn parse_upstream(
             addr,
             tls_name,
             connector,
+            idle: Arc::default(),
         });
     }
     // tcp://IP:PORT  or  tcp://IP  (default port = `default_port`, typically 53)
@@ -526,13 +528,77 @@ async fn forward_tcp_raw(
     exchange_framed(&mut stream, wire, timeout_duration).await
 }
 
+type DotStream = tokio_rustls::client::TlsStream<TcpStream>;
+
+/// Cloudflare and Quad9 close an idle DoT connection after about 10 s.
+const DOT_IDLE: Duration = Duration::from_secs(10);
+const DOT_MAX_IDLE: usize = 8;
+
+/// Open connections to one DoT upstream that wait for the next query. The
+/// clones of the upstream share them.
+#[derive(Default)]
+pub struct DotIdle(Mutex<Vec<(DotStream, SystemTime)>>);
+
+impl DotIdle {
+    /// The connection used last. Its age is wall-clock time: `Instant` stops
+    /// while the machine sleeps, and the server closes the connection anyway.
+    fn take(&self, now: SystemTime) -> Option<DotStream> {
+        let mut idle = self.0.lock().unwrap();
+        let (stream, since) = idle.pop()?;
+        if now.duration_since(since).is_ok_and(|age| age < DOT_IDLE) {
+            return Some(stream);
+        }
+        // The newest is too old, so the others are too.
+        idle.clear();
+        None
+    }
+
+    fn put(&self, stream: DotStream, now: SystemTime) {
+        let mut idle = self.0.lock().unwrap();
+        if idle.len() < DOT_MAX_IDLE {
+            idle.push((stream, now));
+        }
+    }
+}
+
 async fn forward_dot_raw(
     wire: &[u8],
     addr: SocketAddr,
     tls_name: &Option<String>,
     connector: &tokio_rustls::TlsConnector,
+    idle: &DotIdle,
     timeout_duration: Duration,
 ) -> Result<Vec<u8>> {
+    let deadline = Instant::now() + timeout_duration;
+    // The server can close an idle connection at any time (RFC 7858 §3.4), and
+    // a connection can die with no close at all. An idle connection gets half
+    // of the time, so that a new one can still answer.
+    if let Some(mut tls) = idle.take(SystemTime::now()) {
+        let reused = timeout(timeout_duration / 2, async {
+            let resp = exchange_framed(&mut tls, wire, timeout_duration).await?;
+            usable_reply(wire, resp)
+        })
+        .await;
+        if let Ok(Ok(resp)) = reused {
+            idle.put(tls, SystemTime::now());
+            return Ok(resp);
+        }
+    }
+    let left = deadline.saturating_duration_since(Instant::now());
+
+    let mut tls = dot_connect(addr, tls_name, connector, left).await?;
+    let resp = exchange_framed(&mut tls, wire, left).await?;
+    let resp = usable_reply(wire, resp)?;
+    idle.put(tls, SystemTime::now());
+    Ok(resp)
+}
+
+async fn dot_connect(
+    addr: SocketAddr,
+    tls_name: &Option<String>,
+    connector: &tokio_rustls::TlsConnector,
+    timeout_duration: Duration,
+) -> Result<DotStream> {
     use rustls::pki_types::ServerName;
 
     let server_name = match tls_name {
@@ -541,8 +607,7 @@ async fn forward_dot_raw(
     };
 
     let tcp = connect_nodelay(addr, timeout_duration).await?;
-    let mut tls = timeout(timeout_duration, connector.connect(server_name, tcp)).await??;
-    exchange_framed(&mut tls, wire, timeout_duration).await
+    Ok(timeout(timeout_duration, connector.connect(server_name, tcp)).await??)
 }
 
 /// A TLS handshake ends with a small write. With Nagle on, the kernel then
@@ -609,7 +674,8 @@ pub async fn forward_query_raw(
             addr,
             tls_name,
             connector,
-        } => forward_dot_raw(&sent, *addr, tls_name, connector, timeout_duration).await,
+            idle,
+        } => forward_dot_raw(&sent, *addr, tls_name, connector, idle, timeout_duration).await,
         Upstream::Odoh {
             relay_url,
             target_path,
@@ -905,6 +971,115 @@ mod tests {
             .await
             .unwrap();
         assert!(tcp.nodelay().unwrap(), "Nagle holds the first query");
+    }
+
+    #[tokio::test]
+    async fn dot_queries_reuse_a_connection() {
+        let query = make_query();
+        let reply = to_wire(&make_response(&query));
+        let (upstream, connections) = crate::testutil::dot_upstream_raw(reply, usize::MAX).await;
+
+        for _ in 0..3 {
+            let resp = forward_query_raw(&to_wire(&query), &upstream, Duration::from_secs(2))
+                .await
+                .unwrap();
+            assert_eq!(crate::wire::full_rcode(&resp), 0);
+        }
+        assert_eq!(connections.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_dot_connection_that_the_server_closed_is_replaced() {
+        let query = make_query();
+        let reply = to_wire(&make_response(&query));
+        let (upstream, connections) = crate::testutil::dot_upstream_raw(reply, 1).await;
+
+        for _ in 0..3 {
+            forward_query_raw(&to_wire(&query), &upstream, Duration::from_secs(2))
+                .await
+                .expect("a closed idle connection is not a failed upstream");
+        }
+        assert_eq!(connections.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn an_idle_dot_connection_expires() {
+        let (upstream, _) = crate::testutil::dot_upstream_raw(Vec::new(), usize::MAX).await;
+        let Upstream::Dot {
+            addr,
+            tls_name,
+            connector,
+            idle,
+        } = &upstream
+        else {
+            unreachable!()
+        };
+        let connect = || dot_connect(*addr, tls_name, connector, Duration::from_secs(2));
+        let now = SystemTime::now();
+
+        idle.put(connect().await.unwrap(), now);
+        assert!(idle.take(now + DOT_IDLE - Duration::from_secs(1)).is_some());
+
+        idle.put(connect().await.unwrap(), now);
+        idle.put(connect().await.unwrap(), now);
+        assert!(idle.take(now + DOT_IDLE).is_none(), "used when too old");
+        assert!(idle.take(now).is_none(), "an older connection stayed");
+
+        idle.put(connect().await.unwrap(), now);
+        assert!(
+            idle.take(now - Duration::from_secs(1)).is_none(),
+            "used after the clock went back"
+        );
+
+        for _ in 0..=DOT_MAX_IDLE {
+            idle.put(connect().await.unwrap(), now);
+        }
+        assert_eq!(std::iter::from_fn(|| idle.take(now)).count(), DOT_MAX_IDLE);
+    }
+
+    /// Asks a query while the pool holds a connection on which `sent` went
+    /// out and nothing was read. The answer must come on a new connection.
+    async fn ask_with_idle_dot_connection(sent: &[u8], timeout_duration: Duration) {
+        let mut wire = to_wire(&make_query());
+        crate::wire::patch_id(&mut wire, 2);
+        let reply = to_wire(&make_response(&make_query()));
+        let (upstream, connections) = crate::testutil::dot_upstream_raw(reply, usize::MAX).await;
+        let Upstream::Dot {
+            addr,
+            tls_name,
+            connector,
+            idle,
+        } = &upstream
+        else {
+            unreachable!()
+        };
+
+        let mut tls = dot_connect(*addr, tls_name, connector, timeout_duration)
+            .await
+            .unwrap();
+        tls.write_all(sent).await.unwrap();
+        idle.put(tls, SystemTime::now());
+
+        let resp = forward_dot_raw(&wire, *addr, tls_name, connector, idle, timeout_duration)
+            .await
+            .expect("no answer on a new connection");
+        assert_eq!(resp[..2], wire[..2]);
+        assert_eq!(connections.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn an_answer_to_an_older_query_is_not_used() {
+        let mut older = to_wire(&make_query());
+        crate::wire::patch_id(&mut older, 1);
+        let framed = [&(older.len() as u16).to_be_bytes()[..], &older].concat();
+
+        ask_with_idle_dot_connection(&framed, Duration::from_secs(2)).await;
+    }
+
+    #[tokio::test]
+    async fn a_silent_idle_dot_connection_leaves_time_for_a_new_one() {
+        // The stub waits for the rest of this frame, so it answers nothing.
+        ask_with_idle_dot_connection(&u16::MAX.to_be_bytes(), Duration::from_secs(1)).await;
     }
 
     #[tokio::test]
