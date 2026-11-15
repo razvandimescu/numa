@@ -295,27 +295,19 @@ impl Health {
             retesting: AtomicBool::new(false),
             racers: racers(primary),
             choice: AtomicUsize::new(0),
-            race: Mutex::new(Race::new(primary.len())),
+            race: Mutex::default(),
         })
     }
 }
 
+#[derive(Default)]
 struct Race {
-    /// For each primary, its last 8 races against the upstream asked first:
-    /// the newest in the low bit, set for a win.
-    results: Vec<u8>,
+    /// Among the racers other than the upstream asked first, the one whose
+    /// turn it is, and its wins and losses in that turn.
     turn: usize,
+    wins: u8,
+    losses: u8,
     last: Option<Instant>,
-}
-
-impl Race {
-    fn new(primaries: usize) -> Self {
-        Self {
-            results: vec![0; primaries],
-            turn: 0,
-            last: None,
-        }
-    }
 }
 
 /// The primaries in the group of the first listed one, when the group has two
@@ -423,7 +415,7 @@ impl UpstreamPool {
 
     /// A new network can change which upstream answers first.
     pub fn reset_race(&self) {
-        *self.health.race.lock().unwrap() = Race::new(self.primary.len());
+        *self.health.race.lock().unwrap() = Race::default();
         self.health.choice.store(0, Ordering::Relaxed);
     }
 
@@ -460,21 +452,24 @@ impl UpstreamPool {
         }
         race.last = Some(now);
         let others: Vec<usize> = racers.iter().copied().filter(|&i| i != first).collect();
-        let pick = others[race.turn % others.len()];
-        race.turn += 1;
-        Some(pick)
+        Some(others[race.turn % others.len()])
     }
 
-    /// `won`: the racer answered first. A racer with 7 wins in its last 8
-    /// races becomes the choice, and each racer starts again from no results.
+    /// `won`: the racer answered first. A racer keeps its turn until it loses
+    /// twice, and 7 wins before that make it the choice.
     fn record_race(&self, racer: usize, won: bool) {
         let mut race = self.health.race.lock().unwrap();
-        let results = &mut race.results[racer];
-        *results = *results << 1 | u8::from(won);
-        if results.count_ones() >= 7 {
-            race.results.fill(0);
-            self.health.choice.store(racer, Ordering::Relaxed);
+        if won {
+            race.wins += 1;
+        } else {
+            race.losses += 1;
         }
+        match (race.wins, race.losses) {
+            (7, _) => self.health.choice.store(racer, Ordering::Relaxed),
+            (_, 2) => race.turn += 1,
+            _ => return,
+        }
+        (race.wins, race.losses) = (0, 0);
     }
 
     fn upstream(&self, i: usize) -> &Upstream {
@@ -1773,8 +1768,9 @@ mod tests {
         }
     }
 
-    fn results(pool: &UpstreamPool, i: usize) -> u8 {
-        pool.health.race.lock().unwrap().results[i]
+    fn results(pool: &UpstreamPool) -> (u8, u8) {
+        let race = pool.health.race.lock().unwrap();
+        (race.wins, race.losses)
     }
 
     #[test]
@@ -1817,17 +1813,16 @@ mod tests {
     }
 
     #[test]
-    fn seven_wins_in_eight_races_make_the_choice() {
+    fn seven_wins_before_a_second_loss_make_the_choice() {
         let pool = UpstreamPool::new(
             vec![udp("10.0.0.1:53"), udp("10.0.0.2:53"), udp("10.0.0.3:53")],
             vec![],
         );
-        record(&pool, 1, "LLWWWWWW");
-        assert_eq!(pool.order(), [0, 1, 2], "6 wins of 8");
-        record(&pool, 2, "LWWWWWW");
+        record(&pool, 1, "WWWLWWW");
+        assert_eq!(pool.order(), [0, 1, 2], "6 wins");
         record(&pool, 1, "W");
-        assert_eq!(pool.order(), [1, 0, 2], "7 wins of 8");
-        record(&pool, 2, "W");
+        assert_eq!(pool.order(), [1, 0, 2], "7 wins and 1 loss");
+        record(&pool, 0, "W");
         assert_eq!(
             pool.order(),
             [1, 0, 2],
@@ -1836,10 +1831,25 @@ mod tests {
     }
 
     #[test]
-    fn a_racer_that_wins_its_first_seven_races_becomes_the_choice() {
-        let pool = UpstreamPool::new(vec![udp("10.0.0.1:53"), udp("10.0.0.2:53")], vec![]);
-        record(&pool, 1, "WWWWWWW");
-        assert_eq!(pool.order(), [1, 0]);
+    fn a_second_loss_passes_the_turn() {
+        let pool = UpstreamPool::new(
+            vec![udp("10.0.0.1:53"), udp("10.0.0.2:53"), udp("10.0.0.3:53")],
+            vec![],
+        );
+        let start = Instant::now();
+        let challenger = |n| pool.challenger(0, RETEST, start + RACE_EVERY * n);
+
+        assert_eq!(challenger(0), Some(1));
+        record(&pool, 1, "WWWWWWL");
+        assert_eq!(challenger(1), Some(1), "one loss");
+        record(&pool, 1, "L");
+        assert_eq!(challenger(2), Some(2), "the second loss");
+        record(&pool, 2, "W");
+        assert_eq!(
+            pool.order(),
+            [0, 1, 2],
+            "the wins of the last turn carried over"
+        );
     }
 
     #[tokio::test]
@@ -1851,14 +1861,12 @@ mod tests {
         let slow = Duration::from_millis(500);
 
         for (first_delay, second_delay, rcode, second_results) in [
-            (slow, Duration::ZERO, ResultCode::NXDOMAIN, 0b11),
-            (Duration::ZERO, slow, ResultCode::NOERROR, 0b10),
+            (slow, Duration::ZERO, ResultCode::NXDOMAIN, (1, 0)),
+            (Duration::ZERO, slow, ResultCode::NOERROR, (0, 1)),
         ] {
             let (first, _rx) = slow_doh(noerror.clone(), first_delay).await;
             let (second, _rx) = slow_doh(nxdomain.clone(), second_delay).await;
             let pool = UpstreamPool::new(vec![first, second], vec![]);
-            // An earlier win, so that a loss is not 0.
-            record(&pool, 1, "W");
 
             let start = Instant::now();
             let (resp, _) = forward_in_order(
@@ -1874,7 +1882,7 @@ mod tests {
 
             assert_eq!(crate::wire::full_rcode(&resp), rcode as u16);
             assert!(start.elapsed() < Duration::from_millis(400));
-            assert_eq!(results(&pool, 1), second_results);
+            assert_eq!(results(&pool), second_results);
         }
     }
 
@@ -1901,7 +1909,6 @@ mod tests {
             let (first, _rx) = slow_doh(first, first_delay).await;
             let (second, _rx) = slow_doh(second, second_delay).await;
             let pool = UpstreamPool::new(vec![first, second], vec![]);
-            record(&pool, 1, "W");
 
             let (resp, _) = forward_in_order(
                 &to_wire(&query),
@@ -1915,7 +1922,7 @@ mod tests {
             .unwrap();
 
             assert_eq!(crate::wire::full_rcode(&resp), rcode as u16);
-            assert_eq!(results(&pool, 1), 0b1, "only the earlier win");
+            assert_eq!(results(&pool), (0, 0));
         }
     }
 
@@ -1944,11 +1951,15 @@ mod tests {
         );
         let start = Instant::now();
 
-        let picks: Vec<_> = (0..4)
-            .map(|n| pool.challenger(0, RETEST, start + RACE_EVERY * n))
+        let picks: Vec<_> = (0..3)
+            .map(|n| {
+                let pick = pool.challenger(0, RETEST, start + RACE_EVERY * n);
+                record(&pool, pick.unwrap(), "LL");
+                pick
+            })
             .collect();
 
-        assert_eq!(picks, [Some(1), Some(3), Some(1), Some(3)]);
+        assert_eq!(picks, [Some(1), Some(3), Some(1)]);
     }
 
     #[test]
@@ -2041,12 +2052,12 @@ mod tests {
         let list = || vec![udp("10.0.0.1:53"), udp("10.0.0.2:53"), udp("10.0.0.3:53")];
         let mut pool = UpstreamPool::new(list(), vec![]);
         record(&pool, 1, "WWWWWWW");
-        record(&pool, 2, "WWW");
+        record(&pool, 0, "WWW");
         assert_eq!(pool.order(), [1, 0, 2]);
 
         pool.reset_race();
         assert_eq!(pool.order(), [0, 1, 2]);
-        assert_eq!(results(&pool, 2), 0);
+        assert_eq!(results(&pool), (0, 0));
 
         record(&pool, 1, "WWWWWWW");
         pool.set_primary(list());
