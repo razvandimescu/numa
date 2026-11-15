@@ -847,14 +847,10 @@ async fn network_watch_loop(ctx: Arc<ServerCtx>) {
             }
         }
 
-        // Flush stale LAN peers and race results on any network change
+        // Flush stale LAN peers on any network change
         if changed {
             ctx.lan_peers.lock().unwrap().clear();
             info!("flushed LAN peers after network change");
-            ctx.upstream_pool.lock().unwrap().reset_race();
-            for rule in &ctx.forwarding_rules {
-                rule.upstream.reset_race();
-            }
         }
 
         // Re-probe UDP every 5 minutes when disabled

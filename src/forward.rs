@@ -413,12 +413,6 @@ impl UpstreamPool {
         self.health = Health::new(&self.primary, self.fallback.len());
     }
 
-    /// A new network can change which upstream answers first.
-    pub fn reset_race(&self) {
-        *self.health.race.lock().unwrap() = Race::default();
-        self.health.choice.store(0, Ordering::Relaxed);
-    }
-
     /// The upstream asked first, and each racer when `racing`: a race cannot
     /// open a connection while the client waits.
     pub fn keepalive_targets(&self, racing: bool) -> Vec<&Upstream> {
@@ -2048,20 +2042,16 @@ mod tests {
     }
 
     #[test]
-    fn a_network_change_or_a_new_list_drops_the_choice_and_the_results() {
+    fn a_new_list_drops_the_choice_and_the_results() {
         let list = || vec![udp("10.0.0.1:53"), udp("10.0.0.2:53"), udp("10.0.0.3:53")];
         let mut pool = UpstreamPool::new(list(), vec![]);
         record(&pool, 1, "WWWWWWW");
         record(&pool, 0, "WWW");
         assert_eq!(pool.order(), [1, 0, 2]);
 
-        pool.reset_race();
-        assert_eq!(pool.order(), [0, 1, 2]);
-        assert_eq!(results(&pool), (0, 0));
-
-        record(&pool, 1, "WWWWWWW");
         pool.set_primary(list());
         assert_eq!(pool.order(), [0, 1, 2]);
+        assert_eq!(results(&pool), (0, 0));
     }
 
     #[tokio::test]
