@@ -49,6 +49,7 @@ pub async fn test_ctx() -> ServerCtx {
         lan_ip: Mutex::new(Ipv4Addr::LOCALHOST),
         timeout: Duration::from_millis(200),
         hedge_delay: Duration::ZERO,
+        solo_hedge_delay: Duration::ZERO,
         proxy_tld: "numa".to_string(),
         proxy_tld_suffix: ".numa".to_string(),
         proxy_authoritative: true,
@@ -414,10 +415,12 @@ pub async fn dot_upstream_raw(
 }
 
 /// DoH counterpart of `mock_upstream_raw`: answers every POST to `/dns-query`
-/// with `bytes` (ID patched), and reports each inbound query wire on the
-/// returned channel. The URL is ready to hand an `Upstream::Doh`.
+/// with `bytes` (ID patched) after `delay`, and reports each inbound query
+/// wire on the returned channel when it arrives. The URL is ready to hand an
+/// `Upstream::Doh`.
 pub async fn doh_upstream_raw(
     bytes: Vec<u8>,
+    delay: Duration,
 ) -> (String, tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let app = axum::Router::new().route(
@@ -430,6 +433,7 @@ pub async fn doh_upstream_raw(
                     crate::wire::patch_id(&mut reply, u16::from_be_bytes([query[0], query[1]]));
                 }
                 let _ = tx.send(query.to_vec());
+                tokio::time::sleep(delay).await;
                 (
                     [(axum::http::header::CONTENT_TYPE, "application/dns-message")],
                     reply,

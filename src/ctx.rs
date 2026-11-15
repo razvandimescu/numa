@@ -53,6 +53,7 @@ pub struct ServerCtx {
     pub lan_ip: Mutex<std::net::Ipv4Addr>,
     pub timeout: Duration,
     pub hedge_delay: Duration,
+    pub solo_hedge_delay: Duration,
     pub proxy_tld: String,
     pub proxy_tld_suffix: String, // pre-computed ".{tld}" to avoid per-query allocation
     pub proxy_authoritative: bool,
@@ -91,6 +92,17 @@ pub struct ServerCtx {
     pub allow_from: crate::acl::AllowFromAcl,
     pub client_policy: crate::client_policy::ClientPolicySet,
     pub rebind: RwLock<crate::rebind::RebindFilter>,
+}
+
+impl ServerCtx {
+    /// How long a forwarded query stays unanswered before a second one goes out.
+    fn hedge_delay_for(&self, pool: &UpstreamPool) -> Duration {
+        if pool.has_standby() {
+            self.hedge_delay
+        } else {
+            self.solo_hedge_delay
+        }
+    }
 }
 
 /// Transport-agnostic DNS resolution. Runs the full pipeline (overrides, blocklist,
@@ -528,7 +540,7 @@ async fn resolve_remote(
                     pool,
                     &ctx.srtt,
                     ctx.timeout,
-                    ctx.hedge_delay,
+                    ctx.hedge_delay_for(pool),
                 )
                 .await?;
                 cache_and_parse(ctx, qname, qtype, &wire)
@@ -579,9 +591,9 @@ async fn resolve_remote(
         query,
         QueryPath::Upstream,
         || async {
+            let hedge = ctx.hedge_delay_for(&pool);
             let wire =
-                forward_with_failover_raw(raw_wire, &pool, &ctx.srtt, ctx.timeout, ctx.hedge_delay)
-                    .await?;
+                forward_with_failover_raw(raw_wire, &pool, &ctx.srtt, ctx.timeout, hedge).await?;
             cache_and_parse(ctx, qname, qtype, &wire)
         },
     )
@@ -688,7 +700,7 @@ pub async fn refresh_entry(ctx: &ServerCtx, qname: &str, qtype: QueryType) {
                 pool,
                 &ctx.srtt,
                 ctx.timeout,
-                ctx.hedge_delay,
+                ctx.hedge_delay_for(pool),
             )
             .await
             {
@@ -715,7 +727,7 @@ pub async fn refresh_entry(ctx: &ServerCtx, qname: &str, qtype: QueryType) {
                 &pool,
                 &ctx.srtt,
                 ctx.timeout,
-                ctx.hedge_delay,
+                ctx.hedge_delay_for(&pool),
             )
             .await
             {
@@ -2752,6 +2764,18 @@ mod tests {
         assert_eq!(path, QueryPath::Upstream);
         assert_eq!(resp.header.rescode, ResultCode::NOERROR);
         assert_eq!(resp.answers.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_pool_of_one_upstream_has_its_own_hedge_delay() {
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.hedge_delay = Duration::from_millis(200);
+        let upstream = || crate::forward::Upstream::Udp("127.0.0.1:53".parse().unwrap());
+        let one = UpstreamPool::new(vec![upstream()], vec![]);
+        let two = UpstreamPool::new(vec![upstream()], vec![upstream()]);
+
+        assert_eq!(ctx.hedge_delay_for(&one), Duration::ZERO);
+        assert_eq!(ctx.hedge_delay_for(&two), Duration::from_millis(200));
     }
 
     #[tokio::test]

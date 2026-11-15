@@ -617,6 +617,8 @@ fn run_hedge_multi(rt: &tokio::runtime::Runtime, iterations: usize) {
         numa::forward::parse_upstream(DOH_UPSTREAM, 443, None).expect("failed to parse");
     let secondary_dual =
         numa::forward::parse_upstream(DOH_UPSTREAM, 443, None).expect("failed to parse");
+    // No failed state, so each round measures only the second query.
+    let srtt = std::sync::RwLock::new(numa::srtt::SrttCache::new(false));
     let resolver = rt.block_on(build_hickory_resolver());
 
     println!("Warming up...");
@@ -631,6 +633,9 @@ fn run_hedge_multi(rt: &tokio::runtime::Runtime, iterations: usize) {
         ));
         let _ = rt.block_on(query_hickory_doh(&resolver, "example.com"));
     }
+
+    let same = numa::forward::UpstreamPool::new(vec![primary.clone()], vec![]);
+    let dual = numa::forward::UpstreamPool::new(vec![primary_dual, secondary_dual], vec![]);
 
     let labels = ["Single", "Hedge-same", "Hedge-dual", "Hickory"];
     let mut all: [Vec<f64>; 4] = [vec![], vec![], vec![], vec![]];
@@ -649,25 +654,17 @@ fn run_hedge_multi(rt: &tokio::runtime::Runtime, iterations: usize) {
                 let _ = rt.block_on(numa::forward::forward_query_raw(&w, &primary, timeout));
                 samples[0].push(t.elapsed().as_secs_f64() * 1000.0);
 
-                let t = Instant::now();
-                let _ = rt.block_on(numa::forward::forward_with_hedging_raw(
-                    &w,
-                    &primary,
-                    &primary,
-                    hedge_delay,
-                    timeout,
-                ));
-                samples[1].push(t.elapsed().as_secs_f64() * 1000.0);
-
-                let t = Instant::now();
-                let _ = rt.block_on(numa::forward::forward_with_hedging_raw(
-                    &w,
-                    &primary_dual,
-                    &secondary_dual,
-                    hedge_delay,
-                    timeout,
-                ));
-                samples[2].push(t.elapsed().as_secs_f64() * 1000.0);
+                for (slot, pool) in [(1, &same), (2, &dual)] {
+                    let t = Instant::now();
+                    let _ = rt.block_on(numa::forward::forward_with_failover_raw(
+                        &w,
+                        pool,
+                        &srtt,
+                        timeout,
+                        hedge_delay,
+                    ));
+                    samples[slot].push(t.elapsed().as_secs_f64() * 1000.0);
+                }
 
                 let t = Instant::now();
                 let _ = rt.block_on(query_hickory_doh(&resolver, domain));

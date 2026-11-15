@@ -33,7 +33,8 @@ use crate::system_dns::discover_system_dns;
 use crate::udp_listener::UdpListener;
 
 // Two operators, so one leaving a jurisdiction can't strand numa. Failover
-// keeps list order, so Cloudflare only sees queries while Quad9 is failed.
+// keeps list order, so Cloudflare only sees a query while Quad9 is failed, or
+// has left it unanswered for `hedge_ms`.
 const DOH_FALLBACK: [&str; 2] = ["https://9.9.9.9/dns-query", "https://1.1.1.1/dns-query"];
 const BLOCKLIST_RETRY_SECS: u64 = 3600;
 
@@ -186,6 +187,7 @@ pub async fn run(load: ConfigLoad) -> crate::Result<()> {
 
     let sockets = bind_udp_listeners(&config.server.bind_addr).await?;
 
+    let (hedge_delay, solo_hedge_delay) = resolved_mode.hedge_delays(config.upstream.hedge_ms);
     let ctx = Arc::new(ServerCtx {
         zone_map: build_zone_map(&config.zones)?,
         cache: RwLock::new(DnsCache::new(
@@ -206,7 +208,8 @@ pub async fn run(load: ConfigLoad) -> crate::Result<()> {
         upstream_port: config.upstream.port,
         lan_ip: Mutex::new(crate::lan::detect_lan_ip().unwrap_or(std::net::Ipv4Addr::LOCALHOST)),
         timeout: Duration::from_millis(config.upstream.timeout_ms),
-        hedge_delay: resolved_mode.hedge_delay(config.upstream.hedge_ms),
+        hedge_delay,
+        solo_hedge_delay,
         proxy_tld_suffix: if config.proxy.tld.is_empty() {
             String::new()
         } else {
