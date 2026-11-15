@@ -209,7 +209,7 @@ async fn denial_status(
 /// The zone that holds QNAME, or for DS the parent, is the closest
 /// enclosing signer (Unbound `filter_init`).
 fn denial_zone<'a>(all_rrsigs: &[&'a DnsRecord], qname: &str, qtype: u16) -> Option<&'a str> {
-    let is_ds = qtype == QueryType::DS.to_num();
+    let ds_in_parent = qtype == QueryType::DS.to_num() && !matches!(qname, "" | ".");
     all_rrsigs
         .iter()
         .filter_map(|r| match r {
@@ -217,7 +217,7 @@ fn denial_zone<'a>(all_rrsigs: &[&'a DnsRecord], qname: &str, qtype: u16) -> Opt
             _ => None,
         })
         .filter(|zone| {
-            zone_in_bailiwick(qname, zone) && !(is_ds && zone.eq_ignore_ascii_case(qname))
+            zone_in_bailiwick(qname, zone) && !(ds_in_parent && zone.eq_ignore_ascii_case(qname))
         })
         .max_by_key(|zone| zone.len())
 }
@@ -3053,6 +3053,17 @@ mod tests {
         }
     }
 
+    // The root has no parent, so it denies its own DS. The parser spells it "".
+    #[test]
+    fn root_ds_denial_comes_from_the_root() {
+        for root in ["", "."] {
+            let apex = typed_nsec(root, "aaa", APEX_TYPES);
+            let sig = mk_rrsig(&mk_signer(257), root, QueryType::NSEC, &[&apex]);
+            let zone = denial_zone(&[&sig], root, QueryType::DS.to_num());
+            assert_eq!(zone, Some(root), "{root:?}");
+        }
+    }
+
     // The parent's record at a zone cut lists only what the parent holds
     // there (RFC 4034 §4.1.2), so it proves NODATA for DS alone.
     #[test]
@@ -3139,14 +3150,25 @@ mod tests {
     // A DS lives in the parent zone, so only the parent's signatures count.
     #[tokio::test]
     async fn ds_denial_comes_from_the_parent() {
-        let apex = [nodata_nsec("test")];
-        for (qtype, signers, want) in [
-            (QueryType::A, &["test"][..], DnssecStatus::Secure),
-            (QueryType::DS, &["test"][..], DnssecStatus::Bogus),
-            (QueryType::DS, &["test", "."][..], DnssecStatus::Bogus),
+        for (qname, qtype, signers, want) in [
+            ("test", QueryType::A, &["test"][..], DnssecStatus::Secure),
+            ("test", QueryType::DS, &["test"][..], DnssecStatus::Bogus),
+            (
+                "test",
+                QueryType::DS,
+                &["test", "."][..],
+                DnssecStatus::Bogus,
+            ),
+            (
+                "sub.test",
+                QueryType::DS,
+                &["test"][..],
+                DnssecStatus::Secure,
+            ),
         ] {
-            let status = signed_denial(signers, "test", qtype, false, &apex).await;
-            assert_eq!(status, want, "{qtype:?} signed as {signers:?}");
+            let records = [nodata_nsec(qname)];
+            let status = signed_denial(signers, qname, qtype, false, &records).await;
+            assert_eq!(status, want, "{qname} {qtype:?} signed as {signers:?}");
         }
     }
 }
