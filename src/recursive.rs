@@ -73,7 +73,7 @@ static BOGON_RANGES: LazyLock<CidrMatcher> = LazyLock::new(|| {
         .expect("built-in private ranges are valid CIDRs")
 });
 
-fn is_bogon(ip: IpAddr) -> bool {
+pub(crate) fn is_bogon(ip: IpAddr) -> bool {
     BOGON_RANGES.matches(ip)
 }
 
