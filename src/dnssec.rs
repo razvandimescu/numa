@@ -1260,6 +1260,25 @@ fn closest_encloser(qname: &str, owner: &str, next: &str) -> String {
     labels[labels.len() - depth..].join(".")
 }
 
+const DNAME: u16 = 39;
+
+/// NS without SOA is the parent's side of a zone cut, whose bitmap lists only
+/// what the parent holds there (RFC 4034 §4.1.2).
+fn at_zone_cut(bitmap: &[u8]) -> bool {
+    type_bitmap_contains(bitmap, QueryType::NS.to_num())
+        && !type_bitmap_contains(bitmap, QueryType::SOA.to_num())
+}
+
+/// Names below a zone cut or a DNAME are not in this zone (RFC 6840 §4.1).
+fn holds_no_names_below(bitmap: &[u8]) -> bool {
+    at_zone_cut(bitmap) || type_bitmap_contains(bitmap, DNAME)
+}
+
+fn nsec_denies_name(owner: &str, next: &str, bitmap: &[u8], name: &str) -> bool {
+    nsec_covers_name(owner, next, name)
+        && !(zone_in_bailiwick(name, owner) && holds_no_names_below(bitmap))
+}
+
 fn nsec_proves_nodata(owner: &str, qname: &str, bitmap: &[u8], qtype: u16) -> bool {
     owner.eq_ignore_ascii_case(qname)
         && !type_bitmap_contains(bitmap, qtype)
@@ -1409,6 +1428,30 @@ fn nsec3_any_covers(decoded: &[(Vec<u8>, &DnsRecord)], target: &[u8]) -> bool {
     })
 }
 
+/// RFC 5155 §8.3: the closest encloser is the longest ancestor of QNAME with a
+/// matching NSEC3, and the next closer name is one label longer.
+fn nsec3_closest_encloser(
+    qname: &str,
+    decoded: &[(Vec<u8>, &DnsRecord)],
+    hash: impl Fn(&str) -> Option<Vec<u8>>,
+) -> Option<(String, Vec<u8>)> {
+    let labels: Vec<&str> = qname.split('.').filter(|l| !l.is_empty()).collect();
+    let mut next_closer = hash(qname)?;
+    for i in 1..labels.len() {
+        let name = labels[i..].join(".");
+        let name_hash = hash(&name)?;
+        let Some((_, ce)) = decoded.iter().find(|(oh, _)| *oh == name_hash) else {
+            next_closer = name_hash;
+            continue;
+        };
+        let DnsRecord::NSEC3 { type_bitmap, .. } = ce else {
+            return None;
+        };
+        return (!holds_no_names_below(type_bitmap)).then_some((name, next_closer));
+    }
+    None
+}
+
 /// The NSEC/NSEC3 RRsets a denial rests on get the same signature and
 /// chain-of-trust checks as answer RRsets.
 async fn verify_denial_rrsets(
@@ -1457,19 +1500,20 @@ fn validate_denial(
                 let DnsRecord::NSEC {
                     domain,
                     next_domain,
+                    type_bitmap,
                     ..
                 } = cover
                 else {
                     return false;
                 };
-                if !nsec_covers_name(domain, next_domain, qname) {
+                if !nsec_denies_name(domain, next_domain, type_bitmap, qname) {
                     return false;
                 }
                 let ce = closest_encloser(qname, domain, next_domain);
                 let wildcard = format!("*.{}", ce);
                 nsecs.iter().any(|r| {
-                    matches!(r, DnsRecord::NSEC { domain, next_domain, .. }
-                        if nsec_covers_name(domain, next_domain, &wildcard))
+                    matches!(r, DnsRecord::NSEC { domain, next_domain, type_bitmap, .. }
+                        if nsec_denies_name(domain, next_domain, type_bitmap, &wildcard))
                 })
             });
             if proven {
@@ -1541,51 +1585,16 @@ fn validate_denial(
                 .collect();
 
             if is_nxdomain {
-                // RFC 5155 §8.4: need (1) closest encloser match, (2) next closer covered,
-                // (3) wildcard at closest encloser denied
-                let labels: Vec<&str> = qname.split('.').filter(|l| !l.is_empty()).collect();
-
-                // Pre-compute hashes for all ancestor names + wildcards
-                let mut ancestor_hashes: Vec<Option<Vec<u8>>> = Vec::with_capacity(labels.len());
-                for i in 0..labels.len() {
-                    let name: String = labels[i..].join(".");
-                    ancestor_hashes.push(nsec3_hash(&name, *hash_algorithm, *iterations, salt));
-                }
-
-                let mut proven = false;
-                for i in 1..labels.len() {
-                    let ce_hash = match &ancestor_hashes[i] {
-                        Some(h) => h,
-                        None => continue,
-                    };
-
-                    // (1) Closest encloser: exact hash match
-                    if !decoded.iter().any(|(oh, _)| oh == ce_hash) {
-                        continue;
-                    }
-
-                    // (2) Next closer name covered by range
-                    // ancestor_hashes[i-1] is the hash of labels[i-1..] (one label prepended to CE)
-                    let nc_hash = match &ancestor_hashes[i - 1] {
-                        Some(h) => h,
-                        None => continue,
-                    };
-                    if !nsec3_any_covers(&decoded, nc_hash) {
-                        continue;
-                    }
-
-                    // (3) Wildcard at closest encloser denied
-                    let wildcard = format!("*.{}", labels[i..].join("."));
-                    let wc_hash = match nsec3_hash(&wildcard, *hash_algorithm, *iterations, salt) {
-                        Some(h) => h,
-                        None => continue,
-                    };
-                    if nsec3_any_covers(&decoded, &wc_hash) {
-                        proven = true;
-                        break;
-                    }
-                }
-
+                // RFC 5155 §8.4: a closest encloser proof, and no wildcard at
+                // the closest encloser.
+                let hash = |name: &str| nsec3_hash(name, *hash_algorithm, *iterations, salt);
+                let proven = nsec3_closest_encloser(qname, &decoded, hash).is_some_and(
+                    |(ce, next_closer)| {
+                        nsec3_any_covers(&decoded, &next_closer)
+                            && hash(&format!("*.{ce}"))
+                                .is_some_and(|wc| nsec3_any_covers(&decoded, &wc))
+                    },
+                );
                 if proven {
                     debug!("dnssec: NSEC3 proves NXDOMAIN for '{}'", qname);
                     return DnssecStatus::Secure;
@@ -2885,11 +2894,28 @@ mod tests {
     }
 
     fn nsec(owner: &str, next: &str) -> DnsRecord {
+        typed_nsec(owner, next, &[])
+    }
+
+    fn typed_nsec(owner: &str, next: &str, types: &[u16]) -> DnsRecord {
         DnsRecord::NSEC {
             domain: owner.into(),
             next_domain: next.into(),
-            type_bitmap: vec![],
+            type_bitmap: bitmap(types),
             ttl: 3600,
+        }
+    }
+
+    fn bitmap(types: &[u16]) -> Vec<u8> {
+        let mut window = [0u8; 32];
+        for t in types {
+            window[*t as usize / 8] |= 0x80 >> (t % 8);
+        }
+        let len = window.iter().rposition(|b| *b != 0).map_or(0, |i| i + 1);
+        if len == 0 {
+            vec![]
+        } else {
+            [&[0, len as u8], &window[..len]].concat()
         }
     }
 
@@ -2959,16 +2985,6 @@ mod tests {
     }
 
     fn nsec3(owner: &[u8], next: Vec<u8>, flags: u8, types: &[u16]) -> DnsRecord {
-        let mut window = [0u8; 32];
-        for t in types {
-            window[*t as usize / 8] |= 0x80 >> (t % 8);
-        }
-        let len = window.iter().rposition(|b| *b != 0).map_or(0, |i| i + 1);
-        let type_bitmap = if len == 0 {
-            vec![]
-        } else {
-            [&[0, len as u8], &window[..len]].concat()
-        };
         DnsRecord::NSEC3 {
             domain: format!("{}.test", hash_label(owner)),
             hash_algorithm: 1,
@@ -2976,8 +2992,62 @@ mod tests {
             iterations: 0,
             salt: vec![],
             next_hashed_owner: next,
-            type_bitmap,
+            type_bitmap: bitmap(types),
             ttl: 3600,
+        }
+    }
+
+    const APEX_TYPES: &[u16] = &[2, 6]; // NS SOA
+    const CUT_TYPES: &[u16] = &[2, 43]; // NS DS
+    const DNAME_TYPES: &[u16] = &[39];
+
+    /// `ce` matched with `ce_types`, and `covered` covered by a record with
+    /// `cover_flags`.
+    fn ce_proof(ce: &str, ce_types: &[u16], covered: &str, cover_flags: u8) -> Vec<DnsRecord> {
+        let (ce, covered) = (h(ce), h(covered));
+        vec![
+            nsec3(&ce, step(&ce, true), 0, ce_types),
+            nsec3(
+                &step(&covered, false),
+                step(&covered, true),
+                cover_flags,
+                &[],
+            ),
+        ]
+    }
+
+    // A closest encloser at a zone cut or a DNAME holds no names below it
+    // (RFC 5155 §8.3, RFC 6840 §4.1).
+    #[test]
+    fn nsec3_nxdomain_closest_encloser_is_not_a_cut_or_dname() {
+        for (ce, ce_types, want) in [
+            ("test", APEX_TYPES, DnssecStatus::Secure),
+            ("sub.test", &[][..], DnssecStatus::Secure),
+            ("sub.test", CUT_TYPES, DnssecStatus::Bogus),
+            ("sub.test", DNAME_TYPES, DnssecStatus::Bogus),
+        ] {
+            let qname = format!("www.{ce}");
+            let mut proof = ce_proof(ce, ce_types, &qname, 0);
+            let wc = h(&format!("*.{ce}"));
+            proof.push(nsec3(&step(&wc, false), step(&wc, true), 0, &[]));
+            let status = validate_denial(&proof, &qname, 1, true);
+            assert_eq!(status, want, "{ce} {ce_types:?}");
+        }
+    }
+
+    // RFC 4035 §5.4: the same holds for an NSEC whose owner is an ancestor.
+    #[test]
+    fn nsec_nxdomain_cover_is_not_a_cut_or_dname() {
+        for (owner, types, want) in [
+            ("test", APEX_TYPES, DnssecStatus::Secure),
+            ("sub.test", &[1][..], DnssecStatus::Secure),
+            ("sub.test", CUT_TYPES, DnssecStatus::Bogus),
+            ("sub.test", DNAME_TYPES, DnssecStatus::Bogus),
+        ] {
+            let qname = format!("www.{owner}");
+            let cover = typed_nsec(owner, "zzz.test", types);
+            let status = validate_denial(&[cover], &qname, 1, true);
+            assert_eq!(status, want, "{owner} {types:?}");
         }
     }
 
