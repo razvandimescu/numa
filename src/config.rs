@@ -226,19 +226,13 @@ impl UpstreamMode {
     }
 
     /// How long a forwarded query stays unanswered before numa also asks the
-    /// next upstream, and the same for a pool of one upstream. There the
-    /// second query goes to the same upstream, so it is opt-in: by default it
-    /// would show at a quota'd provider (NextDNS, Control D) as more queries
-    /// for no new answer. ODoH gets neither: a second query doubles the
-    /// relay's HPKE load and the sealed bytes an observer can correlate, and
-    /// the next upstream is not oblivious.
-    pub fn hedge_delays(self, hedge_ms: Option<u64>) -> (Duration, Duration) {
+    /// next upstream. ODoH gets none: a second query doubles the relay's HPKE
+    /// load and the sealed bytes an observer can correlate, and the next
+    /// upstream is not oblivious.
+    pub fn hedge_delay(self, hedge_ms: u64) -> Duration {
         match self {
-            UpstreamMode::Odoh => (Duration::ZERO, Duration::ZERO),
-            _ => (
-                Duration::from_millis(hedge_ms.unwrap_or(DEFAULT_HEDGE_MS)),
-                Duration::from_millis(hedge_ms.unwrap_or(0)),
-            ),
+            UpstreamMode::Odoh => Duration::ZERO,
+            _ => Duration::from_millis(hedge_ms),
         }
     }
 
@@ -267,8 +261,8 @@ pub struct UpstreamConfig {
     pub fallback: Vec<String>,
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
-    #[serde(default)]
-    pub hedge_ms: Option<u64>,
+    #[serde(default = "default_hedge_ms")]
+    pub hedge_ms: u64,
     #[serde(default = "default_root_hints")]
     pub root_hints: Vec<String>,
     #[serde(default = "default_prime_tlds")]
@@ -309,7 +303,7 @@ impl Default for UpstreamConfig {
             port: default_upstream_port(),
             fallback: Vec::new(),
             timeout_ms: default_timeout_ms(),
-            hedge_ms: None,
+            hedge_ms: default_hedge_ms(),
             root_hints: default_root_hints(),
             prime_tlds: default_prime_tlds(),
             srtt: default_srtt(),
@@ -545,7 +539,9 @@ fn default_upstream_port() -> u16 {
 fn default_timeout_ms() -> u64 {
     5000
 }
-const DEFAULT_HEDGE_MS: u64 = 200;
+fn default_hedge_ms() -> u64 {
+    200
+}
 
 #[derive(Deserialize)]
 pub struct CacheConfig {
@@ -1634,21 +1630,17 @@ relay_ip = "178.104.229.30"
     }
 
     #[test]
-    fn hedge_delays_follow_the_mode_and_the_key() {
-        let ms = Duration::from_millis;
-        let off = (Duration::ZERO, Duration::ZERO);
+    fn hedge_delay_zeroed_for_odoh_mode() {
         assert_eq!(
-            UpstreamMode::Forward.hedge_delays(None),
-            (ms(200), Duration::ZERO),
-            "a pool of one upstream gets a second query only with the key"
+            UpstreamMode::Odoh.hedge_delay(50),
+            Duration::ZERO,
+            "ODoH mode must zero hedge regardless of configured hedge_ms"
         );
         assert_eq!(
-            UpstreamMode::Forward.hedge_delays(Some(50)),
-            (ms(50), ms(50))
+            UpstreamMode::Forward.hedge_delay(50),
+            Duration::from_millis(50),
+            "non-ODoH modes honour configured hedge_ms"
         );
-        assert_eq!(UpstreamMode::Forward.hedge_delays(Some(0)), off);
-        assert_eq!(UpstreamMode::Odoh.hedge_delays(Some(50)), off);
-        assert_eq!(UpstreamMode::Odoh.hedge_delays(None), off);
     }
 
     #[test]

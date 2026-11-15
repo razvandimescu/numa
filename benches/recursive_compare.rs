@@ -634,7 +634,8 @@ fn run_hedge_multi(rt: &tokio::runtime::Runtime, iterations: usize) {
         let _ = rt.block_on(query_hickory_doh(&resolver, "example.com"));
     }
 
-    let same = numa::forward::UpstreamPool::new(vec![primary.clone()], vec![]);
+    // Listed twice, so the second query goes to the same upstream.
+    let same = numa::forward::UpstreamPool::new(vec![primary.clone(), primary.clone()], vec![]);
     let dual = numa::forward::UpstreamPool::new(vec![primary_dual, secondary_dual], vec![]);
 
     let labels = ["Single", "Hedge-same", "Hedge-dual", "Hickory"];

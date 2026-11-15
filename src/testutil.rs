@@ -49,7 +49,6 @@ pub async fn test_ctx() -> ServerCtx {
         lan_ip: Mutex::new(Ipv4Addr::LOCALHOST),
         timeout: Duration::from_millis(200),
         hedge_delay: Duration::ZERO,
-        solo_hedge_delay: Duration::ZERO,
         proxy_tld: "numa".to_string(),
         proxy_tld_suffix: ".numa".to_string(),
         proxy_authoritative: true,

@@ -314,11 +314,6 @@ impl UpstreamPool {
         self.order().first().map(|&i| self.upstream(i))
     }
 
-    /// A pool of one upstream has no next upstream for a second query.
-    pub fn has_standby(&self) -> bool {
-        self.health.strikes.len() > 1
-    }
-
     pub fn set_primary(&mut self, primary: Vec<Upstream>) {
         self.primary = primary;
         self.reset_health();
@@ -767,8 +762,7 @@ pub async fn forward_with_failover_raw(
 /// went upstream, so the copy tests what a client query needs.
 ///
 /// While no answer is in, the next upstream gets the query after each
-/// `hedge_delay`, as RFC 8305 staggers connection attempts. A pool of one
-/// upstream gets it again itself, against a lost packet or a stalled handshake.
+/// `hedge_delay`, as RFC 8305 staggers connection attempts.
 async fn forward_in_order(
     wire: &[u8],
     pool: &UpstreamPool,
@@ -782,17 +776,13 @@ async fn forward_in_order(
     let mut last_err: Option<Box<dyn std::error::Error + Send + Sync>> = None;
     let mut refused = None;
 
-    let mut queue = pool.order();
-    if queue.len() == 1 && !hedge_delay.is_zero() {
-        queue.push(queue[0]);
-    }
     let ask = move |i: usize| async move {
         let result = forward_query_raw(wire, pool.upstream(i), timeout_duration).await;
         (i, result)
     };
     let mut open = FuturesUnordered::new();
     let mut open_since: Vec<(usize, Instant)> = Vec::new();
-    let mut queue = queue.into_iter();
+    let mut queue = pool.order().into_iter();
     let mut last_ask = Instant::now();
     let mut next = queue.next();
 
@@ -1555,7 +1545,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn one_upstream_gets_the_second_query_itself() {
+    async fn one_upstream_gets_no_second_query() {
         let query = make_query();
         let (only, mut rx) =
             slow_doh(to_wire(&make_response(&query)), Duration::from_millis(200)).await;
@@ -1574,7 +1564,7 @@ mod tests {
         .unwrap();
 
         assert!(rx.try_recv().is_ok());
-        assert!(rx.try_recv().is_ok(), "no second query");
+        assert!(rx.try_recv().is_err(), "a second query");
     }
 
     #[tokio::test]

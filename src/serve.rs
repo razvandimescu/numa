@@ -187,7 +187,6 @@ pub async fn run(load: ConfigLoad) -> crate::Result<()> {
 
     let sockets = bind_udp_listeners(&config.server.bind_addr).await?;
 
-    let (hedge_delay, solo_hedge_delay) = resolved_mode.hedge_delays(config.upstream.hedge_ms);
     let ctx = Arc::new(ServerCtx {
         zone_map: build_zone_map(&config.zones)?,
         cache: RwLock::new(DnsCache::new(
@@ -208,8 +207,7 @@ pub async fn run(load: ConfigLoad) -> crate::Result<()> {
         upstream_port: config.upstream.port,
         lan_ip: Mutex::new(crate::lan::detect_lan_ip().unwrap_or(std::net::Ipv4Addr::LOCALHOST)),
         timeout: Duration::from_millis(config.upstream.timeout_ms),
-        hedge_delay,
-        solo_hedge_delay,
+        hedge_delay: resolved_mode.hedge_delay(config.upstream.hedge_ms),
         proxy_tld_suffix: if config.proxy.tld.is_empty() {
             String::new()
         } else {

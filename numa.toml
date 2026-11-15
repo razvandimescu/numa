@@ -60,11 +60,7 @@ api_port = 5380
 #                                               # the next upstream after each 200 ms and uses
 #                                               # the first answer, so the slow names reach the
 #                                               # next provider too. 0 keeps strict list order.
-#                                               # A single upstream gets the second query
-#                                               # itself, and only when this key is set: it
-#                                               # rescues packet loss (UDP) and TLS stalls
-#                                               # (DoT), and counts as extra queries at quota'd
-#                                               # providers (NextDNS, Control D).
+#                                               # A single upstream gets no second query.
 
 # Recursive: resolve from the root servers, with no upstream provider.
 # `address`, `port`, `timeout_ms` and `hedge_ms` only affect forwarding,
