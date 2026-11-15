@@ -302,18 +302,14 @@ impl Health {
 
 #[derive(Default)]
 struct Race {
-    /// Among the racers other than the upstream asked first, the one whose
-    /// turn it is, and its wins and losses in that turn.
     turn: usize,
     wins: u8,
     losses: u8,
     last: Option<Instant>,
 }
 
-/// The primaries in the group of the first listed one, when the group has two
-/// or more. A UDP query takes one round trip and a new DoT connection three,
-/// so a mixed group would move to plaintext. A router listed first answers the
-/// local names.
+/// UDP takes one round trip and a new DoT connection three, so a mixed group
+/// would move to plaintext. A router listed first answers the local names.
 fn racers(primary: &[Upstream]) -> Vec<usize> {
     let Some(first) = primary.first().map(Group::of) else {
         return Vec::new();
@@ -357,15 +353,12 @@ impl Group {
 }
 
 /// Two operators, so one leaving a jurisdiction can't strand numa. Cloudflare
-/// is the fallback of Quad9 (`companion`), so the two never race, and
-/// Cloudflare only sees a query while Quad9 is failed, or has left it
-/// unanswered for `hedge_ms`.
+/// is the fallback of Quad9 (`companion`), so the two never race.
 pub(crate) const DOH_FALLBACK: [&str; 2] =
     ["https://9.9.9.9/dns-query", "https://1.1.1.1/dns-query"];
 
 /// The fallback that an auto-detected or built-in primary brings: the TCP
-/// sibling of a UDP primary, so forward mode survives carriers that drop
-/// outbound UDP:53, and Cloudflare for Quad9.
+/// sibling of a UDP primary, and Cloudflare for Quad9.
 pub(crate) fn companion(primary: &Upstream) -> Option<Upstream> {
     match primary {
         Upstream::Udp(addr) => Some(Upstream::Tcp(*addr)),
@@ -385,8 +378,7 @@ const RETEST_ONE_IN: u16 = 20;
 /// one: it can be about a single name, and staying costs one round trip.
 const FAILED_AT: u32 = 20;
 
-/// At most one race a minute: on heavy traffic, two equal upstreams would
-/// otherwise trade the first place every few minutes.
+/// On heavy traffic, two equal upstreams would otherwise trade places every few minutes.
 const RACE_EVERY: Duration = Duration::from_secs(60);
 
 impl UpstreamPool {
@@ -413,8 +405,7 @@ impl UpstreamPool {
         self.health = Health::new(&self.primary, self.fallback.len());
     }
 
-    /// The upstream asked first, and each racer when `racing`: a race cannot
-    /// open a connection while the client waits.
+    /// A racer without an open connection loses each race by its TLS handshake.
     pub fn keepalive_targets(&self, racing: bool) -> Vec<&Upstream> {
         let mut targets: Vec<usize> = self.order().into_iter().take(1).collect();
         if racing {
@@ -427,8 +418,6 @@ impl UpstreamPool {
         targets.into_iter().map(|i| self.upstream(i)).collect()
     }
 
-    /// When `draw` hits and no failed upstream waits for a copy, the upstream
-    /// asked first races one other racer, in turn, at most once a minute.
     fn challenger(&self, first: usize, draw: u16, now: Instant) -> Option<usize> {
         let racers = &self.health.racers;
         if !draw.is_multiple_of(RETEST_ONE_IN)
@@ -449,8 +438,6 @@ impl UpstreamPool {
         Some(others[race.turn % others.len()])
     }
 
-    /// `won`: the racer answered first. A racer keeps its turn until it loses
-    /// twice, and 7 wins before that make it the choice.
     fn record_race(&self, racer: usize, won: bool) {
         let mut race = self.health.race.lock().unwrap();
         if won {
@@ -488,8 +475,7 @@ impl UpstreamPool {
         self.health.strikes[i].fetch_add(1, Ordering::Relaxed);
     }
 
-    /// The upstreams that are not failed, the choice first, then the failed
-    /// ones. Each part keeps list order.
+    /// A failed choice keeps its list place among the failed upstreams.
     fn order(&self) -> Vec<usize> {
         let choice = self.health.choice.load(Ordering::Relaxed);
         let mut order: Vec<usize> = (0..self.health.strikes.len()).collect();
@@ -910,9 +896,7 @@ pub async fn forward_with_failover_raw(
 /// While no answer is in, the next upstream gets the query after each
 /// `hedge_delay`, as RFC 8305 staggers connection attempts.
 ///
-/// In a race, the upstream asked first and a challenger get the query at the
-/// same moment. The first of the two to reply decides it, if the reply is
-/// usable.
+/// In a race, only a usable first reply of the two counts.
 async fn forward_in_order(
     wire: &[u8],
     pool: &UpstreamPool,
@@ -2544,10 +2528,6 @@ mod tests {
         );
     }
 
-    // The built-in pair spans two operators. The rescan brings Cloudflare in
-    // as the fallback of Quad9, so the two never race, and strips the TCP
-    // sibling the previous network left behind. The next network strips
-    // Cloudflare.
     #[test]
     fn maybe_replace_primary_brings_cloudflare_as_the_fallback_of_quad9() {
         let router = "192.168.1.1:53".parse().unwrap();
