@@ -1280,9 +1280,13 @@ fn nsec_denies_name(owner: &str, next: &str, bitmap: &[u8], name: &str) -> bool 
 }
 
 fn nsec_proves_nodata(owner: &str, qname: &str, bitmap: &[u8], qtype: u16) -> bool {
-    owner.eq_ignore_ascii_case(qname)
-        && !type_bitmap_contains(bitmap, qtype)
+    owner.eq_ignore_ascii_case(qname) && bitmap_proves_nodata(bitmap, qtype)
+}
+
+fn bitmap_proves_nodata(bitmap: &[u8], qtype: u16) -> bool {
+    !type_bitmap_contains(bitmap, qtype)
         && !type_bitmap_contains(bitmap, QueryType::CNAME.to_num())
+        && (qtype == QueryType::DS.to_num() || !at_zone_cut(bitmap))
 }
 
 /// RFC 9276 recommends 0 iterations; above this, hashing is a DoS vector
@@ -1603,9 +1607,7 @@ fn validate_denial(
                 // NODATA — exact hash match with type not in bitmap
                 let nodata = decoded.iter().any(|(oh, r)| {
                     if let DnsRecord::NSEC3 { type_bitmap, .. } = r {
-                        oh == &qname_hash
-                            && !type_bitmap_contains(type_bitmap, qtype)
-                            && !type_bitmap_contains(type_bitmap, QueryType::CNAME.to_num())
+                        oh == &qname_hash && bitmap_proves_nodata(type_bitmap, qtype)
                     } else {
                         false
                     }
@@ -3048,6 +3050,24 @@ mod tests {
             let cover = typed_nsec(owner, "zzz.test", types);
             let status = validate_denial(&[cover], &qname, 1, true);
             assert_eq!(status, want, "{owner} {types:?}");
+        }
+    }
+
+    // The parent's record at a zone cut lists only what the parent holds
+    // there (RFC 4034 §4.1.2), so it proves NODATA for DS alone.
+    #[test]
+    fn nodata_at_a_zone_cut_covers_ds_only() {
+        for (name, types, qtype, want) in [
+            ("test", APEX_TYPES, QueryType::A, DnssecStatus::Secure),
+            ("sub.test", &[2][..], QueryType::DS, DnssecStatus::Secure),
+            ("sub.test", CUT_TYPES, QueryType::A, DnssecStatus::Bogus),
+        ] {
+            let q = h(name);
+            let nsec3_match = nsec3(&q, step(&q, true), 0, types);
+            for record in [nsec3_match, typed_nsec(name, "zzz.test", types)] {
+                let status = validate_denial(&[record], name, qtype.to_num(), false);
+                assert_eq!(status, want, "{name} {types:?} {qtype:?}");
+            }
         }
     }
 
