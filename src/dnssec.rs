@@ -167,25 +167,59 @@ pub async fn validate_response(
     }
 
     if rrsets.is_empty() {
-        // NXDOMAIN or NODATA — check authority section for NSEC/NSEC3 proofs
-        let (qname, qtype_num) = response
-            .questions
-            .first()
-            .map(|q| (q.name.as_str(), q.qtype.to_num()))
-            .unwrap_or(("", 0));
-        let is_nxdomain = response.header.rescode == crate::header::ResultCode::NXDOMAIN;
-
-        let denial = match verify_denial_rrsets(&response.authorities, &all_rrsigs, &ctx).await {
-            RrsetVerdict::Verified => {
-                validate_denial(&response.authorities, qname, qtype_num, is_nxdomain)
-            }
-            RrsetVerdict::Insecure => DnssecStatus::Insecure,
-            RrsetVerdict::Bogus => DnssecStatus::Bogus,
-        };
+        let denial = denial_status(response, &all_rrsigs, &ctx).await;
         return finish(start, stats, denial);
     }
 
     finish(start, stats, status)
+}
+
+/// NXDOMAIN or NODATA: check the NSEC/NSEC3 proofs in the authority section.
+async fn denial_status(
+    response: &DnsPacket,
+    all_rrsigs: &[&DnsRecord],
+    ctx: &ValidationCtx<'_>,
+) -> DnssecStatus {
+    let (qname, qtype) = response
+        .questions
+        .first()
+        .map(|q| (q.name.as_str(), q.qtype.to_num()))
+        .unwrap_or(("", 0));
+    let is_nxdomain = response.header.rescode == crate::header::ResultCode::NXDOMAIN;
+
+    let zone_rrsigs: Vec<&DnsRecord> = match denial_zone(all_rrsigs, qname, qtype) {
+        Some(zone) => all_rrsigs
+            .iter()
+            .copied()
+            .filter(|r| {
+                matches!(r, DnsRecord::RRSIG { signer_name, .. }
+                    if signer_name.eq_ignore_ascii_case(zone))
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+
+    match verify_denial_rrsets(&response.authorities, &zone_rrsigs, ctx).await {
+        RrsetVerdict::Verified => validate_denial(&response.authorities, qname, qtype, is_nxdomain),
+        RrsetVerdict::Insecure => DnssecStatus::Insecure,
+        RrsetVerdict::Bogus => DnssecStatus::Bogus,
+    }
+}
+
+/// The zone that holds QNAME, or for DS the parent, is the closest
+/// enclosing signer (Unbound `filter_init`).
+fn denial_zone<'a>(all_rrsigs: &[&'a DnsRecord], qname: &str, qtype: u16) -> Option<&'a str> {
+    let is_ds = qtype == QueryType::DS.to_num();
+    all_rrsigs
+        .iter()
+        .filter_map(|r| match r {
+            DnsRecord::RRSIG { signer_name, .. } => Some(signer_name.as_str()),
+            _ => None,
+        })
+        .filter(|zone| {
+            zone_in_bailiwick(qname, zone) && !(is_ds && zone.eq_ignore_ascii_case(qname))
+        })
+        .max_by_key(|zone| zone.len())
 }
 
 fn finish(
@@ -2885,5 +2919,144 @@ mod tests {
             validate_denial(&proof, "a.b.example.com", 1, true),
             DnssecStatus::Bogus
         );
+    }
+
+    fn h(name: &str) -> Vec<u8> {
+        nsec3_hash(name, 1, 0, &[]).unwrap()
+    }
+
+    /// `hash` plus or minus one, so a range between the two covers only `hash`.
+    fn step(hash: &[u8], up: bool) -> Vec<u8> {
+        let mut out = hash.to_vec();
+        for b in out.iter_mut().rev() {
+            let (v, wrapped) = if up {
+                b.overflowing_add(1)
+            } else {
+                b.overflowing_sub(1)
+            };
+            *b = v;
+            if !wrapped {
+                break;
+            }
+        }
+        out
+    }
+
+    /// Base32hex of a 160-bit hash: 32 characters, no padding.
+    fn hash_label(hash: &[u8]) -> String {
+        const ALPHABET: &[u8] = b"0123456789abcdefghijklmnopqrstuv";
+        let (mut acc, mut bits, mut out) = (0u32, 0, String::new());
+        for &b in hash {
+            acc = (acc << 8) | u32::from(b);
+            bits += 8;
+            while bits >= 5 {
+                bits -= 5;
+                out.push(ALPHABET[(acc >> bits & 31) as usize] as char);
+            }
+            acc &= (1 << bits) - 1;
+        }
+        out
+    }
+
+    fn nsec3(owner: &[u8], next: Vec<u8>, flags: u8, types: &[u16]) -> DnsRecord {
+        let mut window = [0u8; 32];
+        for t in types {
+            window[*t as usize / 8] |= 0x80 >> (t % 8);
+        }
+        let len = window.iter().rposition(|b| *b != 0).map_or(0, |i| i + 1);
+        let type_bitmap = if len == 0 {
+            vec![]
+        } else {
+            [&[0, len as u8], &window[..len]].concat()
+        };
+        DnsRecord::NSEC3 {
+            domain: format!("{}.test", hash_label(owner)),
+            hash_algorithm: 1,
+            flags,
+            iterations: 0,
+            salt: vec![],
+            next_hashed_owner: next,
+            type_bitmap,
+            ttl: 3600,
+        }
+    }
+
+    /// A negative answer with each record signed by the key of the chained
+    /// zone "test" under each name in `signers`. Only "test" signatures are valid.
+    async fn signed_denial(
+        signers: &[&str],
+        qname: &str,
+        qtype: QueryType,
+        nxdomain: bool,
+        records: &[DnsRecord],
+    ) -> DnssecStatus {
+        let (cache, srtt, stats) = empty_ctx();
+        let (ksk, anchors) = seed_chained_test_zone(&cache);
+        let mut response = DnsPacket::new();
+        response
+            .questions
+            .push(crate::question::DnsQuestion::new(qname.into(), qtype));
+        if nxdomain {
+            response.header.rescode = crate::header::ResultCode::NXDOMAIN;
+        }
+        for r in records {
+            response.authorities.push(r.clone());
+            for signer in signers {
+                let sig = mk_rrsig(&ksk, signer, r.query_type(), &[r]);
+                response.authorities.push(sig);
+            }
+        }
+        let rrsigs: Vec<&DnsRecord> = response
+            .authorities
+            .iter()
+            .filter(|r| matches!(r, DnsRecord::RRSIG { .. }))
+            .collect();
+        let ctx = ValidationCtx {
+            cache: &cache,
+            root_hints: &[],
+            srtt: &srtt,
+            trust_anchors: &anchors,
+            stats: &stats,
+        };
+        denial_status(&response, &rrsigs, &ctx).await
+    }
+
+    #[tokio::test]
+    async fn nsec3_denial_applies_within_its_zone() {
+        for (qname, want) in [
+            ("www.test", DnssecStatus::Secure),
+            ("www.example", DnssecStatus::Bogus),
+        ] {
+            let q = h(qname);
+            let nodata = nsec3(&q, step(&q, true), 0, &[]);
+            let status = signed_denial(&["test"], qname, QueryType::A, false, &[nodata]).await;
+            assert_eq!(status, want, "{qname}");
+        }
+    }
+
+    #[tokio::test]
+    async fn nsec_denial_applies_within_its_zone() {
+        let chain = [nsec("test", "a.test"), nsec("zzz.test", "test")];
+        for (qname, want) in [
+            ("zzzz.test", DnssecStatus::Secure),
+            ("www.example", DnssecStatus::Bogus),
+        ] {
+            let status = signed_denial(&["test"], qname, QueryType::A, true, &chain).await;
+            assert_eq!(status, want, "{qname}");
+        }
+    }
+
+    // A DS lives in the parent zone, so only the parent's signatures count.
+    #[tokio::test]
+    async fn ds_denial_comes_from_the_parent() {
+        let apex = [nodata_nsec("test")];
+        for (qtype, signers, want) in [
+            (QueryType::A, &["test"][..], DnssecStatus::Secure),
+            (QueryType::DS, &["test"][..], DnssecStatus::Bogus),
+            (QueryType::DS, &["test", "."][..], DnssecStatus::Bogus),
+        ] {
+            let status = signed_denial(signers, "test", qtype, false, &apex).await;
+            assert_eq!(status, want, "{qtype:?} signed as {signers:?}");
+        }
     }
 }
