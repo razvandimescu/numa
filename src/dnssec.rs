@@ -1232,8 +1232,15 @@ fn canonical_dns_name_order(a: &str, b: &str) -> std::cmp::Ordering {
     a_count.cmp(&b_count)
 }
 
+#[cfg(test)]
+thread_local! {
+    static NSEC_RANGE_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn nsec_covers_name(owner: &str, next: &str, qname: &str) -> bool {
     use std::cmp::Ordering;
+    #[cfg(test)]
+    NSEC_RANGE_CHECKS.with(|n| n.set(n.get() + 1));
 
     let on = canonical_dns_name_order(owner, next);
     let qo = canonical_dns_name_order(qname, owner);
@@ -1483,6 +1490,37 @@ async fn verify_denial_rrsets(
     verdict
 }
 
+/// RFC 4035 §5.4: an NSEC covers QNAME and another denies the wildcard at the
+/// closest encloser. Covers share at most one encloser per label of QNAME, so
+/// each wildcard is looked up once however many covers there are.
+fn nsec_proves_nxdomain(nsecs: &[&DnsRecord], qname: &str) -> bool {
+    let mut enclosers: Vec<String> = Vec::new();
+    for r in nsecs {
+        let DnsRecord::NSEC {
+            domain,
+            next_domain,
+            type_bitmap,
+            ..
+        } = r
+        else {
+            continue;
+        };
+        if nsec_denies_name(domain, next_domain, type_bitmap, qname) {
+            let ce = closest_encloser(qname, domain, next_domain);
+            if !enclosers.contains(&ce) {
+                enclosers.push(ce);
+            }
+        }
+    }
+    enclosers.iter().any(|ce| {
+        let wildcard = format!("*.{ce}");
+        nsecs.iter().any(|r| {
+            matches!(r, DnsRecord::NSEC { domain, next_domain, type_bitmap, .. }
+                if nsec_denies_name(domain, next_domain, type_bitmap, &wildcard))
+        })
+    })
+}
+
 /// Validate denial of existence using NSEC or NSEC3 records from authority section.
 fn validate_denial(
     authorities: &[DnsRecord],
@@ -1498,29 +1536,7 @@ fn validate_denial(
 
     if !nsecs.is_empty() {
         if is_nxdomain {
-            // RFC 4035 §5.4: need (1) NSEC covering the name gap AND (2) NSEC proving
-            // no wildcard at *.closest_encloser
-            let proven = nsecs.iter().any(|cover| {
-                let DnsRecord::NSEC {
-                    domain,
-                    next_domain,
-                    type_bitmap,
-                    ..
-                } = cover
-                else {
-                    return false;
-                };
-                if !nsec_denies_name(domain, next_domain, type_bitmap, qname) {
-                    return false;
-                }
-                let ce = closest_encloser(qname, domain, next_domain);
-                let wildcard = format!("*.{}", ce);
-                nsecs.iter().any(|r| {
-                    matches!(r, DnsRecord::NSEC { domain, next_domain, type_bitmap, .. }
-                        if nsec_denies_name(domain, next_domain, type_bitmap, &wildcard))
-                })
-            });
-            if proven {
+            if nsec_proves_nxdomain(&nsecs, qname) {
                 debug!("dnssec: NSEC proves NXDOMAIN for '{}'", qname);
                 return DnssecStatus::Secure;
             }
@@ -2933,6 +2949,21 @@ mod tests {
             validate_denial(&[covering, apex], "foo.example.com", 1, true),
             DnssecStatus::Secure
         );
+    }
+
+    // One RRset can hold many NSECs that cover QNAME. They share at most one
+    // closest encloser per label of QNAME (two for www.test), so the wildcard
+    // is looked up once per encloser, not once per cover.
+    #[test]
+    fn nsec_nxdomain_check_is_linear_in_records() {
+        let covers: Vec<DnsRecord> = (0..1000)
+            .map(|i| nsec("a.test", &format!("z{i}.test")))
+            .collect();
+        NSEC_RANGE_CHECKS.with(|n| n.set(0));
+        let status = validate_denial(&covers, "www.test", 1, true);
+        let checks = NSEC_RANGE_CHECKS.with(|n| n.get());
+        assert_eq!(status, DnssecStatus::Bogus);
+        assert!(checks <= 3 * covers.len(), "{checks} range checks");
     }
 
     // *.b.example.com exists, so a.b.example.com is synthesized from it; the
