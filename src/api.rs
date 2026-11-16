@@ -752,9 +752,13 @@ fn default_pause_minutes() -> u64 {
 async fn blocking_pause(
     State(ctx): State<Arc<ServerCtx>>,
     Json(req): Json<BlockingPauseRequest>,
-) -> Json<serde_json::Value> {
-    ctx.blocklist.write().unwrap().pause(req.minutes * 60);
-    Json(serde_json::json!({ "paused_minutes": req.minutes }))
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    ctx.blocklist
+        .write()
+        .unwrap()
+        .pause(req.minutes.saturating_mul(60))
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok(Json(serde_json::json!({ "paused_minutes": req.minutes })))
 }
 
 async fn blocking_unpause(State(ctx): State<Arc<ServerCtx>>) -> Json<serde_json::Value> {
@@ -1331,7 +1335,11 @@ mod tests {
         let good = r#"{"domain":"good.dev","target":"1.2.3.4"}"#;
         let bad_target = format!(r#"{{"domain":"bad.dev","target":"{long}"}}"#);
         let bad_domain = format!(r#"{{"domain":"{long}","target":"1.2.3.4"}}"#);
-        for bad in [bad_target, bad_domain] {
+        let bad_duration = format!(
+            r#"{{"domain":"bad.dev","target":"1.2.3.4","duration_secs":{}}}"#,
+            u64::MAX
+        );
+        for bad in [bad_target, bad_domain, bad_duration] {
             for (path, body) in [
                 ("/overrides", format!("[{good},{bad}]")),
                 (
@@ -1347,6 +1355,15 @@ mod tests {
                     "{path} {body}"
                 );
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn blocking_pause_past_the_clock_is_rejected() {
+        for minutes in [u64::MAX / 60, u64::MAX] {
+            let body = format!(r#"{{"minutes":{minutes}}}"#);
+            let resp = post_json(&router(test_ctx().await), "/blocking/pause", &body).await;
+            assert_eq!(resp.status(), 400, "{minutes}");
         }
     }
 

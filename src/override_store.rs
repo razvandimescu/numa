@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::buffer::canonical_name;
 use crate::question::QueryType;
@@ -13,7 +13,7 @@ pub struct OverrideEntry {
     pub record: DnsRecord,
     pub query_type: QueryType,
     pub ttl: u32,
-    pub created_at: Instant,
+    pub expires_at: Option<Instant>,
     pub duration_secs: Option<u64>,
 }
 
@@ -22,30 +22,32 @@ impl OverrideEntry {
         let domain =
             canonical_name(domain).map_err(|e| format!("invalid domain '{domain}': {e}"))?;
         let (query_type, record) = parse_target(&domain, target, ttl)?;
+        let expires_at = duration_secs
+            .map(|d| {
+                Instant::now()
+                    .checked_add(Duration::from_secs(d))
+                    .ok_or(format!("duration_secs {d} is too large"))
+            })
+            .transpose()?;
         Ok(OverrideEntry {
             domain,
             target: target.to_string(),
             record,
             query_type,
             ttl,
-            created_at: Instant::now(),
+            expires_at,
             duration_secs,
         })
     }
 
-    pub fn expires_at(&self) -> Option<Instant> {
-        self.duration_secs
-            .map(|d| self.created_at + std::time::Duration::from_secs(d))
-    }
-
     pub fn is_expired(&self) -> bool {
-        self.expires_at()
+        self.expires_at
             .map(|exp| Instant::now() >= exp)
             .unwrap_or(false)
     }
 
     pub fn remaining_secs(&self) -> Option<u64> {
-        self.expires_at().map(|exp| {
+        self.expires_at.map(|exp| {
             let now = Instant::now();
             if now >= exp {
                 0
