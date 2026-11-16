@@ -16,7 +16,7 @@ use crate::blocklist::{
     SourceResult,
 };
 use crate::blocklist_cache::BlocklistCache;
-use crate::bootstrap_resolver::NumaResolver;
+use crate::bootstrap_resolver::{NumaResolver, PipelineResolver};
 use crate::buffer::BytePacketBuffer;
 use crate::cache::DnsCache;
 use crate::config::{build_zone_map, ConfigLoad};
@@ -61,9 +61,9 @@ pub async fn run(load: ConfigLoad) -> crate::Result<()> {
 
     let root_hints = crate::recursive::parse_root_hints(&config.upstream.root_hints);
 
-    // Routes numa-originated HTTPS (DoH upstream, ODoH relay/target, blocklist
-    // CDN) away from the system resolver so lookups don't loop back through
-    // numa when it's its own system DNS.
+    // Routes numa-originated HTTPS (DoH upstream, ODoH relay/target) away from
+    // the system resolver so lookups don't loop back through numa when it's
+    // its own system DNS.
     let resolver_overrides = match config.upstream.mode {
         crate::config::UpstreamMode::Odoh => config
             .upstream
@@ -261,7 +261,7 @@ pub async fn run(load: ConfigLoad) -> crate::Result<()> {
         api_port,
     );
 
-    spawn_background_services(&ctx, &config, &bootstrap_resolver, api_port)?;
+    spawn_background_services(&ctx, &config, api_port)?;
 
     // UDP DNS listener — shares `[server.proxy_protocol]` with TCP, which
     // already logged any parse error. Silently disable on Err.
@@ -312,7 +312,6 @@ async fn bind_udp_listeners(addrs: &[String]) -> crate::Result<Vec<Arc<UdpListen
 fn spawn_background_services(
     ctx: &Arc<ServerCtx>,
     config: &crate::config::Config,
-    bootstrap_resolver: &Arc<NumaResolver>,
     api_port: u16,
 ) -> crate::Result<()> {
     let blocklist_lists = config.blocking.lists.clone();
@@ -320,16 +319,9 @@ fn spawn_background_services(
     let refresh_hours = config.blocking.refresh_hours;
     if config.blocking.enabled && !blocklist_lists.is_empty() {
         let bl_ctx = Arc::clone(ctx);
-        let bl_resolver = bootstrap_resolver.clone();
         tokio::spawn(async move {
             loop {
-                let loaded = load_blocklists_purging(
-                    &bl_ctx,
-                    &blocklist_lists,
-                    &allow_lists,
-                    Some(bl_resolver.clone()),
-                )
-                .await;
+                let loaded = load_blocklists_purging(&bl_ctx, &blocklist_lists, &allow_lists).await;
                 // A refresh that left us with nothing is not blocking at all, so
                 // waiting the full cycle to try again turns a brief upstream
                 // outage into a day without blocking (issue #336). The config
@@ -905,19 +897,14 @@ const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
 // reload outgrows would stack into its peak, and the purge only runs on later
 // activity in a loader that goes idle. Purge eagerly for the load alone: query
 // throughput pays for eager purging, and queries are not what a reload is doing.
-async fn load_blocklists_purging(
-    ctx: &ServerCtx,
-    block: &[String],
-    allow: &[String],
-    resolver: Option<Arc<NumaResolver>>,
-) -> bool {
+async fn load_blocklists_purging(ctx: &Arc<ServerCtx>, block: &[String], allow: &[String]) -> bool {
     #[cfg(target_env = "musl")]
     let delay = unsafe {
         let delay = libmimalloc_sys::mi_option_get(MI_OPTION_PURGE_DELAY);
         libmimalloc_sys::mi_option_set(MI_OPTION_PURGE_DELAY, 0);
         delay
     };
-    let loaded = load_blocklists(ctx, block, allow, resolver).await;
+    let loaded = load_blocklists(ctx, block, allow).await;
     #[cfg(target_env = "musl")]
     unsafe {
         libmimalloc_sys::mi_collect(true);
@@ -926,14 +913,10 @@ async fn load_blocklists_purging(
     loaded
 }
 
-async fn load_blocklists(
-    ctx: &ServerCtx,
-    block: &[String],
-    allow: &[String],
-    resolver: Option<Arc<NumaResolver>>,
-) -> bool {
+async fn load_blocklists(ctx: &Arc<ServerCtx>, block: &[String], allow: &[String]) -> bool {
     let sources = crate::blocklist::dedup_sources(&[block, allow].concat());
-    let downloaded = download_blocklists(&sources, resolver).await;
+    let resolver = Arc::new(PipelineResolver(Arc::clone(ctx)));
+    let downloaded = download_blocklists(&sources, Some(resolver)).await;
     apply_downloads(ctx, block, allow, &downloaded)
 }
 
@@ -1219,13 +1202,13 @@ mod tests {
         path
     }
 
-    async fn ctx_blocking(domains: &[&str]) -> ServerCtx {
+    async fn ctx_blocking(domains: &[&str]) -> Arc<ServerCtx> {
         let ctx = crate::testutil::test_ctx().await;
         ctx.blocklist
             .write()
             .unwrap()
             .swap_domains(domains.iter().map(|d| d.to_string()).collect());
-        ctx
+        Arc::new(ctx)
     }
 
     /// A source that cannot be read is not an instruction to stop blocking:
@@ -1234,7 +1217,7 @@ mod tests {
     async fn failed_source_keeps_the_live_list() {
         let ctx = ctx_blocking(&["ads.example.com"]).await;
         let missing = temp_path("never_written");
-        let loaded = load_blocklists(&ctx, std::slice::from_ref(&missing), &[], None).await;
+        let loaded = load_blocklists(&ctx, std::slice::from_ref(&missing), &[]).await;
         assert_eq!(ctx.blocklist.read().unwrap().domains_loaded(), 1);
         assert!(
             loaded,
@@ -1248,7 +1231,7 @@ mod tests {
     async fn total_failure_with_no_live_list_asks_for_a_retry() {
         let ctx = ctx_blocking(&[]).await;
         let missing = temp_path("never_written_either");
-        let loaded = load_blocklists(&ctx, std::slice::from_ref(&missing), &[], None).await;
+        let loaded = load_blocklists(&ctx, std::slice::from_ref(&missing), &[]).await;
         assert_eq!(ctx.blocklist.read().unwrap().domains_loaded(), 0);
         assert!(!loaded);
     }
@@ -1259,7 +1242,7 @@ mod tests {
     async fn emptied_local_list_clears_the_live_list() {
         let ctx = ctx_blocking(&["ads.example.com"]).await;
         let source = temp_list("emptied", "# all clear\n");
-        let loaded = load_blocklists(&ctx, std::slice::from_ref(&source), &[], None).await;
+        let loaded = load_blocklists(&ctx, std::slice::from_ref(&source), &[]).await;
         let _ = std::fs::remove_file(&source);
         assert_eq!(ctx.blocklist.read().unwrap().domains_loaded(), 0);
         assert!(
@@ -1272,9 +1255,43 @@ mod tests {
     async fn healthy_local_list_is_swapped_in() {
         let ctx = ctx_blocking(&["ads.example.com"]).await;
         let source = temp_list("healthy", "a.com\nb.com\n");
-        load_blocklists(&ctx, std::slice::from_ref(&source), &[], None).await;
+        load_blocklists(&ctx, std::slice::from_ref(&source), &[]).await;
         let _ = std::fs::remove_file(&source);
         assert_eq!(ctx.blocklist.read().unwrap().domains_loaded(), 2);
+    }
+
+    /// List hosts resolve through the configured upstream, not plain DNS to the
+    /// bootstrap servers (issue #507): only the mock upstream knows `lists.test`.
+    #[tokio::test]
+    async fn list_host_resolves_through_the_upstream() {
+        let list = crate::testutil::serve(axum::Router::new().route(
+            "/list.txt",
+            axum::routing::get(|| async { "ads.example.com\n" }),
+        ))
+        .await;
+        let (upstream, mut queries) = crate::testutil::recording_upstream(
+            crate::testutil::a_record_response("lists.test", std::net::Ipv4Addr::LOCALHOST, 60),
+        )
+        .await;
+        // A block on the list host must not stop the list's own refresh. The
+        // sinkhole's 0.0.0.0 reaches the local list server anyway, so only the
+        // upstream's inbox tells a block from a lookup.
+        let ctx = ctx_blocking(&["lists.test"]).await;
+        *ctx.upstream_pool.lock().unwrap() =
+            UpstreamPool::new(vec![Upstream::Udp(upstream)], vec![]);
+
+        let source = format!("http://lists.test:{}/list.txt", list.port());
+        load_blocklists(&ctx, &[source], &[]).await;
+
+        assert!(
+            queries.try_recv().is_ok(),
+            "the lookup never reached the upstream"
+        );
+        assert!(ctx.blocklist.read().unwrap().is_blocked("ads.example.com"));
+        assert!(
+            ctx.query_log.lock().unwrap().is_empty(),
+            "numa's own lookups are not client queries"
+        );
     }
 
     fn fetched(source: &str, body: &str) -> (String, Result<String, String>) {
@@ -1325,7 +1342,7 @@ mod tests {
     /// Pruning by block sources alone would delete this copy on every refresh.
     #[tokio::test]
     async fn refresh_keeps_cached_copies_of_allow_sources() {
-        let mut ctx = ctx_blocking(&[]).await;
+        let mut ctx = crate::testutil::test_ctx().await;
         ctx.data_dir = std::path::PathBuf::from(temp_path("allow_cache_dir"));
         let allow = "https://allow.example/list.txt".to_string();
         BlocklistCache::new(&ctx.data_dir).store(&allow, "go.example.com\n");

@@ -1043,7 +1043,7 @@ const RETRY_DELAYS_SECS: &[u64] = &[2, 10, 30];
 
 pub async fn download_blocklists(
     lists: &[String],
-    resolver: Option<std::sync::Arc<crate::bootstrap_resolver::NumaResolver>>,
+    resolver: Option<std::sync::Arc<crate::bootstrap_resolver::PipelineResolver>>,
 ) -> Vec<(String, Result<String, String>)> {
     let mut builder = crate::forward::numa_tls_builder()
         .timeout(Duration::from_secs(30))
