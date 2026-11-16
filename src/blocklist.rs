@@ -148,13 +148,8 @@ impl BlocklistStore {
     }
 
     pub fn is_blocked(&self, domain: &str) -> bool {
-        if !self.enabled {
+        if !self.enabled || self.is_paused() {
             return false;
-        }
-        if let Some(until) = self.paused_until {
-            if Instant::now() < until {
-                return false;
-            }
         }
         let domain = normalize(domain);
         // Allow lookups only after a hit: most queries are not blocked. An
@@ -166,14 +161,8 @@ impl BlocklistStore {
     }
 
     pub fn check(&self, domain: &str) -> BlockCheckResult {
-        if !self.enabled {
+        if !self.enabled || self.is_paused() {
             return BlockCheckResult::disabled();
-        }
-
-        if let Some(until) = self.paused_until {
-            if Instant::now() < until {
-                return BlockCheckResult::disabled();
-            }
         }
 
         let domain = normalize(domain);
@@ -645,10 +634,15 @@ mod tests {
     }
 
     #[test]
-    fn disabled_never_blocks() {
-        let mut store = store_with(&["ads.example.com"], &[]);
-        store.set_enabled(false);
-        assert!(!store.is_blocked("ads.example.com"));
+    fn disabled_or_paused_never_blocks() {
+        let mut disabled = store_with(&["ads.example.com"], &[]);
+        disabled.set_enabled(false);
+        let mut paused = store_with(&["ads.example.com"], &[]);
+        paused.pause(60).unwrap();
+        for store in [disabled, paused] {
+            assert!(!store.is_blocked("ads.example.com"));
+            assert!(!store.check("ads.example.com").blocked);
+        }
     }
 
     #[test]

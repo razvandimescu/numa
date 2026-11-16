@@ -47,14 +47,8 @@ impl OverrideEntry {
     }
 
     pub fn remaining_secs(&self) -> Option<u64> {
-        self.expires_at.map(|exp| {
-            let now = Instant::now();
-            if now >= exp {
-                0
-            } else {
-                (exp - now).as_secs()
-            }
-        })
+        self.expires_at
+            .map(|exp| exp.saturating_duration_since(Instant::now()).as_secs())
     }
 }
 
@@ -180,6 +174,15 @@ mod tests {
         let empty = store.heap_bytes();
         store.insert_all([entry("example.com", "1.2.3.4")]);
         assert!(store.heap_bytes() > empty);
+    }
+
+    #[test]
+    fn remaining_secs_stops_at_zero() {
+        let mut e = entry("example.com", "1.2.3.4");
+        e.expires_at = Some(Instant::now() + Duration::from_secs(60));
+        assert!(matches!(e.remaining_secs(), Some(59 | 60)));
+        e.expires_at = Some(Instant::now() - Duration::from_secs(1));
+        assert_eq!(e.remaining_secs(), Some(0));
     }
 
     #[test]
