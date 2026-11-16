@@ -47,14 +47,8 @@ impl OverrideEntry {
     }
 
     pub fn remaining_secs(&self) -> Option<u64> {
-        self.expires_at.map(|exp| {
-            let now = Instant::now();
-            if now >= exp {
-                0
-            } else {
-                (exp - now).as_secs()
-            }
-        })
+        self.expires_at
+            .map(|exp| exp.saturating_duration_since(Instant::now()).as_secs())
     }
 }
 
