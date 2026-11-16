@@ -86,6 +86,15 @@ impl BytePacketBuffer {
         Ok(&self.buf[start..end])
     }
 
+    pub fn read_to(&mut self, end: usize) -> Result<Vec<u8>> {
+        let len = end
+            .checked_sub(self.pos)
+            .ok_or("RDLENGTH too short for the fixed fields")?;
+        let bytes = self.get_range(self.pos, len)?.to_vec();
+        self.pos = end;
+        Ok(bytes)
+    }
+
     pub fn read_u16(&mut self) -> Result<u16> {
         let res = ((self.read()? as u16) << 8) | (self.read()? as u16);
         Ok(res)
@@ -193,17 +202,11 @@ impl BytePacketBuffer {
     }
 
     pub fn write_u16(&mut self, val: u16) -> Result<()> {
-        self.write((val >> 8) as u8)?;
-        self.write((val & 0xFF) as u8)?;
-        Ok(())
+        self.write_bytes(&val.to_be_bytes())
     }
 
     pub fn write_u32(&mut self, val: u32) -> Result<()> {
-        self.write(((val >> 24) & 0xFF) as u8)?;
-        self.write(((val >> 16) & 0xFF) as u8)?;
-        self.write(((val >> 8) & 0xFF) as u8)?;
-        self.write((val & 0xFF) as u8)?;
-        Ok(())
+        self.write_bytes(&val.to_be_bytes())
     }
 
     /// Write a qname in wire format, parsing RFC 1035 §5.1 text escapes.
@@ -299,6 +302,7 @@ impl BytePacketBuffer {
         Ok(())
     }
 
+    #[inline]
     pub fn write_bytes(&mut self, data: &[u8]) -> Result<()> {
         let end = self.pos + data.len();
         if end > BUF_SIZE {
@@ -319,8 +323,8 @@ impl BytePacketBuffer {
     }
 
     pub fn set_u16(&mut self, pos: usize, val: u16) -> Result<()> {
-        self.set(pos, (val >> 8) as u8)?;
-        self.set(pos + 1, (val & 0xFF) as u8)?;
+        let field = self.buf.get_mut(pos..pos + 2).ok_or("End of buffer")?;
+        field.copy_from_slice(&val.to_be_bytes());
         Ok(())
     }
 }
