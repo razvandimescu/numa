@@ -6,6 +6,7 @@
 use std::io::{self, IoSliceMut};
 use std::net::{IpAddr, SocketAddr};
 
+use log::debug;
 use quinn_udp::{RecvMeta, Transmit, UdpSocketState};
 use tokio::io::Interest;
 use tokio::net::UdpSocket;
@@ -60,6 +61,25 @@ impl UdpListener {
     }
 
     pub async fn send_to(
+        &self,
+        buf: &[u8],
+        dst: SocketAddr,
+        src: Option<IpAddr>,
+    ) -> io::Result<usize> {
+        match self.send_from(buf, dst, src).await {
+            // A VPN route change can make Windows fail pinned sends with
+            // WSAEINVAL for a while; retrying the pin keeps failing, but after
+            // one unpinned send it goes through again.
+            Err(e) if src.is_some() => {
+                debug!("reply to {dst} from {src:?} failed ({e}), resending unpinned then pinned");
+                let unpinned = self.send_from(buf, dst, None).await;
+                self.send_from(buf, dst, src).await.or(unpinned)
+            }
+            sent => sent,
+        }
+    }
+
+    async fn send_from(
         &self,
         buf: &[u8],
         dst: SocketAddr,
@@ -162,6 +182,22 @@ mod tests {
             IpAddr::V4(Ipv4Addr::LOCALHOST),
             "reply must come from the IP the query arrived on, not 0.0.0.0"
         );
+        assert_eq!(reply_src.port(), server_port);
+    }
+
+    #[tokio::test]
+    async fn rejected_reply_source_falls_back_to_unpinned() {
+        let server = UdpListener::bind("0.0.0.0:0").await.unwrap();
+        let server_port = server.local_addr().unwrap().port();
+        let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+        let not_local = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        server
+            .send_to(b"yo", client.local_addr().unwrap(), Some(not_local))
+            .await
+            .unwrap();
+        let (payload, reply_src) = recv_reply(&client).await;
+        assert_eq!(payload, b"yo");
         assert_eq!(reply_src.port(), server_port);
     }
 
