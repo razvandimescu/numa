@@ -177,6 +177,15 @@ mod tests {
     }
 
     #[test]
+    fn remaining_secs_stops_at_zero() {
+        let mut e = entry("example.com", "1.2.3.4");
+        e.expires_at = Some(Instant::now() + Duration::from_secs(60));
+        assert!(matches!(e.remaining_secs(), Some(59 | 60)));
+        e.expires_at = Some(Instant::now() - Duration::from_secs(1));
+        assert_eq!(e.remaining_secs(), Some(0));
+    }
+
+    #[test]
     fn names_are_stored_as_the_wire_reads_them() {
         let mut store = OverrideStore::new();
         store.insert_all([

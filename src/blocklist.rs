@@ -634,10 +634,15 @@ mod tests {
     }
 
     #[test]
-    fn disabled_never_blocks() {
-        let mut store = store_with(&["ads.example.com"], &[]);
-        store.set_enabled(false);
-        assert!(!store.is_blocked("ads.example.com"));
+    fn disabled_or_paused_never_blocks() {
+        let mut disabled = store_with(&["ads.example.com"], &[]);
+        disabled.set_enabled(false);
+        let mut paused = store_with(&["ads.example.com"], &[]);
+        paused.pause(60).unwrap();
+        for store in [disabled, paused] {
+            assert!(!store.is_blocked("ads.example.com"));
+            assert!(!store.check("ads.example.com").blocked);
+        }
     }
 
     #[test]
