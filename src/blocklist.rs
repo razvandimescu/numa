@@ -301,8 +301,12 @@ impl BlocklistStore {
         self.enabled
     }
 
-    pub fn pause(&mut self, seconds: u64) {
-        self.paused_until = Some(Instant::now() + std::time::Duration::from_secs(seconds));
+    pub fn pause(&mut self, seconds: u64) -> crate::Result<()> {
+        let until = Instant::now()
+            .checked_add(Duration::from_secs(seconds))
+            .ok_or(format!("pause of {seconds} s is too long"))?;
+        self.paused_until = Some(until);
+        Ok(())
     }
 
     pub fn unpause(&mut self) {
