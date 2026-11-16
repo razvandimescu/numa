@@ -52,16 +52,15 @@ api_port = 5380
 # address = ["192.168.1.1", "9.9.9.9:5353"]    # multiple upstreams, asked in order; a failed one is asked last
 # address = "https://dns.quad9.net/dns-query"   # DNS-over-HTTPS (encrypted)
 # address = "tls://9.9.9.9#dns.quad9.net"       # DNS-over-TLS (encrypted, port 853)
-# fallback = ["8.8.8.8", "1.1.1.1"]            # tried only when all primaries fail
+# fallback = ["8.8.8.8", "1.1.1.1"]            # asked after the primaries: when they fail, or
+#                                               # stay silent for hedge_ms
 # port = 53                                     # default port for addresses without :port
 # timeout_ms = 5000                             # default
-# hedge_ms = 0                                   # request hedging delay (ms). Default: 0 (off).
-#                                                # Set to e.g. 10 to fire a parallel upstream
-#                                                # request after 10ms of silence — rescues packet
-#                                                # loss (UDP), dispatch spikes (DoH), TLS stalls
-#                                                # (DoT). Doubles the upstream query count, so
-#                                                # leave off for quota'd providers (NextDNS,
-#                                                # Control D).
+# hedge_ms = 200                                # default. While no answer is in, numa also asks
+#                                               # the next upstream after each 200 ms and uses
+#                                               # the first answer, so the slow names reach the
+#                                               # next provider too. 0 keeps strict list order.
+#                                               # A single upstream gets no second query.
 
 # Recursive: resolve from the root servers, with no upstream provider.
 # `address`, `port`, `timeout_ms` and `hedge_ms` only affect forwarding,

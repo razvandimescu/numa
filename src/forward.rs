@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
+use futures::stream::{FuturesUnordered, StreamExt};
 use http_body_util::{BodyExt, Limited};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
@@ -740,71 +741,6 @@ fn usable_reply(wire: &[u8], resp: Vec<u8>) -> Result<Vec<u8>> {
     Ok(resp)
 }
 
-pub async fn forward_with_hedging_raw(
-    wire: &[u8],
-    primary: &Upstream,
-    secondary: &Upstream,
-    hedge_delay: Duration,
-    timeout_duration: Duration,
-) -> Result<Vec<u8>> {
-    use tokio::time::sleep;
-
-    let primary_fut = forward_query_raw(wire, primary, timeout_duration);
-    tokio::pin!(primary_fut);
-
-    let delay = sleep(hedge_delay);
-    tokio::pin!(delay);
-
-    // Phase 1: wait for either primary to return, or the hedge delay.
-    tokio::select! {
-        result = &mut primary_fut => return result,
-        _ = &mut delay => {}
-    }
-
-    // Phase 2: hedge delay expired — fire secondary while still polling primary.
-    let secondary_fut = forward_query_raw(wire, secondary, timeout_duration);
-    tokio::pin!(secondary_fut);
-
-    // First successful response wins. If one errors, wait for the other.
-    let mut primary_err: Option<crate::Error> = None;
-    let mut secondary_err: Option<crate::Error> = None;
-
-    loop {
-        tokio::select! {
-            r = &mut primary_fut, if primary_err.is_none() => {
-                match r {
-                    Ok(resp) => return Ok(resp),
-                    Err(e) => {
-                        if let Some(se) = secondary_err.take() {
-                            return Err(se);
-                        }
-                        primary_err = Some(e);
-                    }
-                }
-            }
-            r = &mut secondary_fut, if secondary_err.is_none() => {
-                match r {
-                    Ok(resp) => return Ok(resp),
-                    Err(e) => {
-                        if let Some(pe) = primary_err.take() {
-                            return Err(pe);
-                        }
-                        secondary_err = Some(e);
-                    }
-                }
-            }
-        }
-
-        match (primary_err, secondary_err) {
-            (Some(pe), Some(_)) => return Err(pe),
-            (pe, se) => {
-                primary_err = pe;
-                secondary_err = se;
-            }
-        }
-    }
-}
-
 pub async fn forward_with_failover_raw(
     wire: &[u8],
     pool: &UpstreamPool,
@@ -824,6 +760,9 @@ pub async fn forward_with_failover_raw(
 /// `srtt = false` turns off the failed state, so each query follows list order.
 /// A re-test that `draw` selects comes back as its target and the query as it
 /// went upstream, so the copy tests what a client query needs.
+///
+/// While no answer is in, the next upstream gets the query after each
+/// `hedge_delay`, as RFC 8305 staggers connection attempts.
 async fn forward_in_order(
     wire: &[u8],
     pool: &UpstreamPool,
@@ -837,17 +776,34 @@ async fn forward_in_order(
     let mut last_err: Option<Box<dyn std::error::Error + Send + Sync>> = None;
     let mut refused = None;
 
-    for i in pool.order() {
-        let upstream = pool.upstream(i);
-        let result = if !hedge_delay.is_zero() {
-            // Hedge against the same upstream: independent h2 streams (DoH),
-            // independent UDP packets (plain DNS), or independent TLS
-            // connections (DoT). Rescues packet loss, dispatch spikes, and
-            // TLS handshake stalls.
-            forward_with_hedging_raw(wire, upstream, upstream, hedge_delay, timeout_duration).await
-        } else {
-            forward_query_raw(wire, upstream, timeout_duration).await
+    let ask = move |i: usize| async move {
+        let result = forward_query_raw(wire, pool.upstream(i), timeout_duration).await;
+        (i, result)
+    };
+    let mut open = FuturesUnordered::new();
+    let mut open_since: Vec<(usize, Instant)> = Vec::new();
+    let mut queue = pool.order().into_iter();
+    let mut last_ask = Instant::now();
+    let mut next = queue.next();
+
+    loop {
+        if let Some(i) = next.take() {
+            last_ask = Instant::now();
+            open_since.push((i, last_ask));
+            open.push(ask(i));
+        }
+        let hedge = !hedge_delay.is_zero() && queue.len() > 0;
+        let (i, result) = tokio::select! {
+            biased;
+            Some(done) = open.next() => done,
+            _ = tokio::time::sleep(hedge_delay.saturating_sub(last_ask.elapsed())), if hedge => {
+                next = queue.next();
+                continue;
+            }
+            else => break,
         };
+        open_since.retain(|&(j, _)| j != i);
+        let upstream = pool.upstream(i);
         match result {
             Ok(resp) if is_refused(&resp) => {
                 if track {
@@ -859,6 +815,14 @@ async fn forward_in_order(
             Ok(resp) => {
                 if is_usable_answer(&resp) {
                     pool.set_failed(i, false);
+                    // Silent for a full delay while another upstream answered:
+                    // one strike, so an upstream that drops every query becomes
+                    // failed and no client waits for its timeout.
+                    for &(j, since) in &open_since {
+                        if track && since.elapsed() >= hedge_delay {
+                            pool.add_strike(j);
+                        }
+                    }
                 }
                 let retest = pool
                     .retest_target(i, draw)
@@ -872,6 +836,9 @@ async fn forward_in_order(
                 log::debug!("upstream {} failed: {}", upstream, e);
                 last_err = Some(e);
             }
+        }
+        if open.is_empty() {
+            next = queue.next();
         }
     }
 
@@ -1139,7 +1106,14 @@ mod tests {
     async fn doh_upstream(
         response: Vec<u8>,
     ) -> (Upstream, tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) {
-        let (url, rx) = crate::testutil::doh_upstream_raw(response).await;
+        slow_doh(response, Duration::ZERO).await
+    }
+
+    async fn slow_doh(
+        response: Vec<u8>,
+        delay: Duration,
+    ) -> (Upstream, tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) {
+        let (url, rx) = crate::testutil::doh_upstream_raw(response, delay).await;
         let upstream = Upstream::Doh {
             url,
             client: crate::forward::default_client(),
@@ -1409,12 +1383,13 @@ mod tests {
             let (second, _rx) = doh_upstream(second).await;
             let pool = UpstreamPool::new(vec![first, second], vec![]);
 
+            let start = Instant::now();
             let (resp, _) = forward_in_order(
                 &to_wire(&query),
                 &pool,
                 &srtt,
                 Duration::from_secs(2),
-                Duration::ZERO,
+                Duration::from_secs(1),
                 RETEST + 1,
             )
             .await
@@ -1422,6 +1397,10 @@ mod tests {
 
             assert_eq!(crate::wire::full_rcode(&resp), rescode as u16);
             assert_eq!(pool.order(), [0, 1], "one refusal moved the upstream");
+            assert!(
+                start.elapsed() < Duration::from_millis(500),
+                "a refusal waited for the hedge delay"
+            );
         }
     }
 
@@ -1452,6 +1431,140 @@ mod tests {
 
         ask().await.unwrap();
         assert_eq!(pool.order(), [1, 0]);
+    }
+
+    const HEDGE: Duration = Duration::from_millis(50);
+
+    #[tokio::test]
+    async fn a_silent_upstream_hands_the_query_to_the_next_one() {
+        let query = make_query();
+        let response = to_wire(&make_response(&query));
+        let (slow, _rx) = slow_doh(response.clone(), Duration::from_secs(1)).await;
+        let (fallback, mut fallback_rx) = doh_upstream(response).await;
+        let pool = UpstreamPool::new(vec![slow, dead_doh().await], vec![fallback]);
+        let srtt = RwLock::new(SrttCache::new(true));
+
+        let start = Instant::now();
+        forward_in_order(
+            &to_wire(&query),
+            &pool,
+            &srtt,
+            Duration::from_secs(2),
+            HEDGE,
+            RETEST + 1,
+        )
+        .await
+        .expect("the fallback answers");
+
+        assert!(fallback_rx.try_recv().is_ok(), "the fallback got no query");
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "waited for the slow upstream: {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_servfail_goes_to_the_client_at_once() {
+        let query = make_query();
+        let servfail = to_wire(&DnsPacket::response_from(&query, ResultCode::SERVFAIL));
+        let (first, _rx) = slow_doh(servfail, Duration::from_millis(150)).await;
+        let pool = UpstreamPool::new(vec![first, dead_doh().await], vec![]);
+        let srtt = RwLock::new(SrttCache::new(true));
+
+        let start = Instant::now();
+        let (resp, _) = forward_in_order(
+            &to_wire(&query),
+            &pool,
+            &srtt,
+            Duration::from_secs(2),
+            HEDGE,
+            RETEST + 1,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(crate::wire::full_rcode(&resp), ResultCode::SERVFAIL as u16);
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn an_upstream_that_stays_silent_becomes_failed() {
+        let query = make_query();
+        let (live, _rx) = doh_upstream(to_wire(&make_response(&query))).await;
+        let pool = UpstreamPool::new(vec![dead_doh().await, live], vec![]);
+        let srtt = RwLock::new(SrttCache::new(true));
+        let (wire, timeout) = (to_wire(&query), Duration::from_secs(3));
+        let hedge = Duration::from_millis(10);
+        let ask = || forward_in_order(&wire, &pool, &srtt, timeout, hedge, RETEST + 1);
+
+        let start = Instant::now();
+        for _ in 1..FAILED_AT {
+            ask().await.unwrap();
+        }
+        // What a usable answer from the first upstream does.
+        pool.set_failed(0, false);
+        for _ in 1..FAILED_AT {
+            ask().await.unwrap();
+        }
+        assert_eq!(
+            pool.order(),
+            [0, 1],
+            "a usable answer did not reset the count"
+        );
+
+        ask().await.unwrap();
+        assert_eq!(pool.order(), [1, 0]);
+        assert!(
+            start.elapsed() < timeout,
+            "a query waited for the timeout: {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_upstream_asked_second_gets_no_strike_when_the_first_answers() {
+        let query = make_query();
+        let (first, _rx) =
+            slow_doh(to_wire(&make_response(&query)), Duration::from_millis(250)).await;
+        let pool = UpstreamPool::new(vec![first, dead_doh().await], vec![]);
+        let srtt = RwLock::new(SrttCache::new(true));
+
+        forward_in_order(
+            &to_wire(&query),
+            &pool,
+            &srtt,
+            Duration::from_secs(2),
+            Duration::from_millis(200),
+            RETEST + 1,
+        )
+        .await
+        .expect("the first upstream answers");
+
+        assert_eq!(pool.health.strikes[1].load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn one_upstream_gets_no_second_query() {
+        let query = make_query();
+        let (only, mut rx) =
+            slow_doh(to_wire(&make_response(&query)), Duration::from_millis(200)).await;
+        let pool = UpstreamPool::new(vec![only], vec![]);
+        let srtt = RwLock::new(SrttCache::new(true));
+
+        forward_in_order(
+            &to_wire(&query),
+            &pool,
+            &srtt,
+            Duration::from_secs(2),
+            HEDGE,
+            RETEST + 1,
+        )
+        .await
+        .unwrap();
+
+        assert!(rx.try_recv().is_ok());
+        assert!(rx.try_recv().is_err(), "a second query");
     }
 
     #[tokio::test]
@@ -1486,8 +1599,21 @@ mod tests {
         )
         .await
         .expect("second primary answers");
-
         assert_eq!(pool.order(), [0, 1]);
+
+        for _ in 0..FAILED_AT {
+            forward_in_order(
+                &to_wire(&query),
+                &pool,
+                &srtt,
+                Duration::from_secs(3),
+                Duration::from_millis(10),
+                RETEST + 1,
+            )
+            .await
+            .expect("second primary answers");
+        }
+        assert_eq!(pool.order(), [0, 1], "a strike without srtt");
     }
 
     #[tokio::test]
@@ -1984,7 +2110,7 @@ mod tests {
             &pool,
             &srtt,
             Duration::from_secs(2),
-            Duration::ZERO,
+            HEDGE,
         )
         .await
         .expect("first DoH primary answers");

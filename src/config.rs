@@ -225,12 +225,10 @@ impl UpstreamMode {
         }
     }
 
-    /// Hedging duplicates the in-flight query against the same upstream to
-    /// rescue tail latency. Beneficial for UDP/DoH/DoT (cheap retransmit /
-    /// h2 stream multiplexing). For ODoH it doubles the relay's HPKE
-    /// seal/unseal load and the sealed-byte footprint a passive observer
-    /// can correlate, with no latency win — the relay hop dominates either
-    /// way. Force-zero in oblivious mode regardless of `hedge_ms`.
+    /// How long a forwarded query stays unanswered before numa also asks the
+    /// next upstream. ODoH gets none: a second query doubles the relay's HPKE
+    /// load and the sealed bytes an observer can correlate, and the next
+    /// upstream is not oblivious.
     pub fn hedge_delay(self, hedge_ms: u64) -> Duration {
         match self {
             UpstreamMode::Odoh => Duration::ZERO,
@@ -541,12 +539,8 @@ fn default_upstream_port() -> u16 {
 fn default_timeout_ms() -> u64 {
     5000
 }
-/// Off by default: hedging fires a second upstream query, which silently
-/// doubles the count at the provider — hurts quota'd DNS (NextDNS, Control
-/// D). Opt in with `hedge_ms = 10` for tail-latency rescue on flaky nets
-/// or handshake-slow DoT.
 fn default_hedge_ms() -> u64 {
-    0
+    200
 }
 
 #[derive(Deserialize)]
