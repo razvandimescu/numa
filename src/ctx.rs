@@ -662,6 +662,29 @@ fn cache_and_parse(
     DnsPacket::from_buffer(&mut buf)
 }
 
+/// Resolves for numa's own connections. Skips the client stages (blocklist,
+/// rebind filter, query log, stats): a blocked list host still refreshes.
+pub(crate) async fn resolve_internal(
+    ctx: &Arc<ServerCtx>,
+    qname: &str,
+    qtype: QueryType,
+) -> crate::Result<DnsPacket> {
+    let query = DnsPacket::query(0, qname, qtype);
+    let mut wire = BytePacketBuffer::new();
+    query.write(&mut wire)?;
+    let (resp, ..) = resolve_remote(
+        &query,
+        wire.filled(),
+        SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0)),
+        qname,
+        qtype,
+        ctx,
+        &mut QueryAdmission::default(),
+    )
+    .await;
+    Ok(resp)
+}
+
 /// Re-resolve a single (domain, qtype) and update the cache.
 /// Used for both stale-entry refresh and proactive cache warming.
 pub async fn refresh_entry(ctx: &ServerCtx, qname: &str, qtype: QueryType) {

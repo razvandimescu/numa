@@ -1,5 +1,5 @@
 //! `reqwest` DNS resolver used by numa-originated HTTPS (DoH upstream, ODoH
-//! relay/target, blocklist CDN). When numa is its own system resolver
+//! relay/target). When numa is its own system resolver
 //! (`/etc/resolv.conf → 127.0.0.1`, HAOS add-on, Pi-hole-style container),
 //! the default `getaddrinfo` path loops back through numa before numa can
 //! answer — a chicken-and-egg that deadlocks cold boot. See issue #122.
@@ -14,11 +14,13 @@
 
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
 use std::time::Duration;
 
 use log::{debug, info, warn};
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 
+use crate::ctx::ServerCtx;
 use crate::forward::{forward_tcp, forward_udp};
 use crate::packet::DnsPacket;
 use crate::question::QueryType;
@@ -65,7 +67,7 @@ impl NumaResolver {
         };
         let ips: Vec<String> = bootstrap.iter().map(|s| s.ip().to_string()).collect();
         info!(
-            "bootstrap resolver: {} via {} — used for numa-originated HTTPS hostname resolution",
+            "bootstrap resolver: {} via {} — used to resolve upstream hostnames",
             ips.join(", "),
             source
         );
@@ -112,6 +114,31 @@ impl Resolve for NumaResolver {
                 hostname,
                 addrs.len()
             );
+            Ok(Box::new(addrs.into_iter()) as Addrs)
+        })
+    }
+}
+
+/// For downloads that are not upstreams (blocklists): their names need no
+/// bootstrap, and plain DNS would bypass an encrypted upstream (issue #507).
+pub struct PipelineResolver(pub Arc<ServerCtx>);
+
+impl Resolve for PipelineResolver {
+    fn resolve(&self, name: Name) -> Resolving {
+        let ctx = Arc::clone(&self.0);
+        Box::pin(async move {
+            let host = name.as_str();
+            let (a, aaaa) = tokio::try_join!(
+                crate::ctx::resolve_internal(&ctx, host, QueryType::A),
+                crate::ctx::resolve_internal(&ctx, host, QueryType::AAAA),
+            )?;
+            let mut addrs = Vec::new();
+            extract_addrs(&a, &mut addrs);
+            extract_addrs(&aaaa, &mut addrs);
+            if addrs.is_empty() {
+                let rcode = a.header.rescode.as_str();
+                return Err(format!("no address for {host} ({rcode})").into());
+            }
             Ok(Box::new(addrs.into_iter()) as Addrs)
         })
     }
