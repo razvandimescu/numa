@@ -1,4 +1,6 @@
 use std::net::SocketAddr;
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
+use std::process::Command;
 
 use log::info;
 
@@ -62,6 +64,7 @@ impl ForwardingRule {
 }
 
 /// Result of system DNS discovery — default upstream + conditional forwarding rules.
+#[derive(Default)]
 pub struct SystemDnsInfo {
     pub default_upstream: Option<String>,
     pub forwarding_rules: Vec<ForwardingRule>,
@@ -72,11 +75,7 @@ pub struct SystemDnsInfo {
 pub fn os_default_nameserver() -> Option<String> {
     #[cfg(target_os = "macos")]
     {
-        let output = std::process::Command::new("scutil")
-            .arg("--dns")
-            .output()
-            .ok()?;
-        parse_scutil_default_nameserver(&String::from_utf8_lossy(&output.stdout))
+        parse_scutil_default_nameserver(&stdout_of(Command::new("scutil").arg("--dns")).ok()?)
     }
     #[cfg(target_os = "linux")]
     {
@@ -123,11 +122,7 @@ fn iter_resolvectl_servers(text: &str) -> impl Iterator<Item = &str> {
 
 #[cfg(target_os = "linux")]
 fn resolvectl_status() -> Option<String> {
-    let output = std::process::Command::new("resolvectl")
-        .args(["status", "--no-pager"])
-        .output()
-        .ok()?;
-    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+    stdout_of(Command::new("resolvectl").args(["status", "--no-pager"])).ok()
 }
 
 /// True if a resolver at `nameserver` (port 53) matches one of this
@@ -170,10 +165,7 @@ pub fn discover_system_dns() -> SystemDnsInfo {
     #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     {
         log::debug!("no conditional forwarding rules discovered");
-        SystemDnsInfo {
-            default_upstream: None,
-            forwarding_rules: Vec::new(),
-        }
+        SystemDnsInfo::default()
     }
 }
 
@@ -231,6 +223,43 @@ fn is_port_53(bind_addr: &str) -> bool {
         .parse::<SocketAddr>()
         .map(|s| s.port() == 53)
         .unwrap_or(false)
+}
+
+/// stdout as text, whatever the exit status.
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
+fn stdout_of(cmd: &mut Command) -> std::io::Result<String> {
+    cmd.output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+}
+
+/// Runs `cmd` on our terminal, where systemctl may ask for a polkit password.
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
+fn run_attached(cmd: &mut Command, what: &str) -> Result<(), String> {
+    let status = cmd
+        .status()
+        .map_err(|e| format!("failed to run {}: {}", what, e))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{} exited with {}", what, status))
+    }
+}
+
+/// Captures the output and puts it in the error when `cmd` fails.
+#[cfg(any(target_os = "linux", windows))]
+fn run_checked(cmd: &mut Command, what: &str) -> Result<(), String> {
+    let out = cmd
+        .output()
+        .map_err(|e| format!("failed to run {}: {}", what, e))?;
+    if !out.status.success() {
+        let detail = format!(
+            "{} {}",
+            String::from_utf8_lossy(&out.stdout).trim(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+        return Err(format!("{} failed: {}", what, detail.trim()));
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -316,18 +345,13 @@ impl ScutilState {
 fn discover_macos() -> SystemDnsInfo {
     use log::{debug, warn};
 
-    let output = match std::process::Command::new("scutil").arg("--dns").output() {
-        Ok(o) => o,
+    let text = match stdout_of(Command::new("scutil").arg("--dns")) {
+        Ok(text) => text,
         Err(e) => {
             warn!("failed to run scutil --dns: {}", e);
-            return SystemDnsInfo {
-                default_upstream: None,
-                forwarding_rules: Vec::new(),
-            };
+            return SystemDnsInfo::default();
         }
     };
-
-    let text = String::from_utf8_lossy(&output.stdout);
     let ScutilState {
         mut rules,
         default_upstream,
@@ -498,11 +522,7 @@ pub fn detect_dhcp_dns() -> Option<String> {
 fn detect_dhcp_dns_macos() -> Option<String> {
     // Try common interfaces
     for iface in &["en0", "en1"] {
-        let output = std::process::Command::new("ipconfig")
-            .args(["getpacket", iface])
-            .output()
-            .ok()?;
-        let text = String::from_utf8_lossy(&output.stdout);
+        let text = stdout_of(Command::new("ipconfig").args(["getpacket", iface])).ok()?;
         for line in text.lines() {
             if line.contains("domain_name_server") {
                 // Format: "domain_name_server (ip_mult): {213.154.124.25, 1.0.0.1}"
@@ -530,21 +550,13 @@ fn detect_dhcp_dns_macos() -> Option<String> {
 fn discover_windows() -> SystemDnsInfo {
     use log::{debug, warn};
 
-    let output = match std::process::Command::new(crate::system32("ipconfig.exe"))
-        .arg("/all")
-        .output()
-    {
-        Ok(o) => o,
+    let text = match stdout_of(Command::new(crate::system32("ipconfig.exe")).arg("/all")) {
+        Ok(text) => text,
         Err(e) => {
             warn!("failed to run ipconfig /all: {}", e);
-            return SystemDnsInfo {
-                default_upstream: None,
-                forwarding_rules: Vec::new(),
-            };
+            return SystemDnsInfo::default();
         }
     };
-
-    let text = String::from_utf8_lossy(&output.stdout);
     let mut upstream = None;
 
     for line in text.lines() {
@@ -578,33 +590,16 @@ fn discover_windows() -> SystemDnsInfo {
 }
 
 #[cfg(windows)]
-fn run_checked(cmd: &mut std::process::Command, what: &str) -> Result<(), String> {
-    let out = cmd
-        .output()
-        .map_err(|e| format!("failed to run {}: {}", what, e))?;
-    if !out.status.success() {
-        let detail = format!(
-            "{} {}",
-            String::from_utf8_lossy(&out.stdout).trim(),
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-        return Err(format!("{} failed: {}", what, detail.trim()));
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
 fn run_powershell(script: &str, what: &str) -> Result<(), String> {
     run_checked(
-        std::process::Command::new(crate::system32("WindowsPowerShell\\v1.0\\powershell.exe"))
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-Command",
-                script,
-            ]),
+        Command::new(crate::system32("WindowsPowerShell\\v1.0\\powershell.exe")).args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+        ]),
         what,
     )
 }
@@ -654,7 +649,7 @@ fn unwind_legacy_install_if_present() {
 
     // Re-enable Dnscache (registry Start=2 = auto) before anything else —
     // the Wlansvc/Wcmsvc cascade can't recover until Dnscache is startable.
-    let _ = std::process::Command::new(crate::system32("reg.exe"))
+    let _ = Command::new(crate::system32("reg.exe"))
         .args([
             "add",
             "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Dnscache",
@@ -672,7 +667,7 @@ fn unwind_legacy_install_if_present() {
     if let Ok(serde_json::Value::Object(obj)) = serde_json::from_str(&json) {
         for name in obj.keys() {
             let name_arg = format!("name={}", name);
-            let _ = std::process::Command::new(crate::system32("netsh.exe"))
+            let _ = Command::new(crate::system32("netsh.exe"))
                 .args([
                     "interface",
                     "ipv4",
@@ -735,7 +730,7 @@ fn windows_service_exe_path() -> std::path::PathBuf {
 /// caller reads stdout to format a useful error.
 #[cfg(windows)]
 fn run_sc(args: &[&str]) -> Result<std::process::Output, String> {
-    let out = std::process::Command::new(crate::system32("sc.exe"))
+    let out = Command::new(crate::system32("sc.exe"))
         .args(args)
         .output()
         .map_err(|e| format!("failed to run sc {}: {}", args.first().unwrap_or(&""), e))?;
@@ -754,7 +749,7 @@ fn restrict_data_dir() -> Result<(), String> {
         .map_err(|e| format!("failed to create {}: {}", dir.display(), e))?;
     let icacls = |args: &[&str]| {
         run_checked(
-            std::process::Command::new(crate::system32("icacls.exe"))
+            Command::new(crate::system32("icacls.exe"))
                 .arg(&dir)
                 .args(args),
             &format!("icacls {} {}", dir.display(), args.join(" ")),
@@ -993,12 +988,8 @@ fn backup_path() -> std::path::PathBuf {
 
 #[cfg(target_os = "macos")]
 fn get_network_services() -> Result<Vec<String>, String> {
-    let output = std::process::Command::new("networksetup")
-        .arg("-listallnetworkservices")
-        .output()
+    let text = stdout_of(Command::new("networksetup").arg("-listallnetworkservices"))
         .map_err(|e| format!("failed to run networksetup: {}", e))?;
-
-    let text = String::from_utf8_lossy(&output.stdout);
     let services: Vec<String> = text
         .lines()
         .skip(1) // first line is "An asterisk (*) denotes..."
@@ -1011,12 +1002,9 @@ fn get_network_services() -> Result<Vec<String>, String> {
 
 #[cfg(target_os = "macos")]
 fn get_dns_servers(service: &str) -> Result<Vec<String>, String> {
-    let output = std::process::Command::new("networksetup")
-        .args(["-getdnsservers", service])
-        .output()
+    let text = stdout_of(Command::new("networksetup").args(["-getdnsservers", service]))
         .map_err(|e| format!("failed to get DNS for {}: {}", service, e))?;
-
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let text = text.trim();
     if text.contains("aren't any DNS Servers") {
         Ok(vec![]) // using DHCP defaults
     } else {
@@ -1081,7 +1069,7 @@ fn install_macos() -> Result<(), String> {
 
     // Set DNS to 127.0.0.1 and add "numa" search domain for each service
     for service in &services {
-        let status = std::process::Command::new("networksetup")
+        let status = Command::new("networksetup")
             .args(["-setdnsservers", service, "127.0.0.1"])
             .status()
             .map_err(|e| format!("failed to set DNS for {}: {}", service, e))?;
@@ -1093,7 +1081,7 @@ fn install_macos() -> Result<(), String> {
         }
 
         // Add "numa" as search domain so browsers resolve .numa without trailing slash
-        let _ = std::process::Command::new("networksetup")
+        let _ = Command::new("networksetup")
             .args(["-setsearchdomains", service, "numa"])
             .status();
     }
@@ -1130,7 +1118,7 @@ fn write_resolver_dropin() {
     // Force mDNSResponder to re-read /etc/resolver/* immediately. Without
     // a flush, the new file is picked up only after FSEvents propagation
     // (seconds) or until the negative cache for `.numa` lookups expires.
-    let _ = std::process::Command::new("killall")
+    let _ = Command::new("killall")
         .args(["-HUP", "mDNSResponder"])
         .status();
     eprintln!("  Anchored .numa resolution at {}", path.display());
@@ -1141,7 +1129,7 @@ fn remove_resolver_dropin() {
     let path = std::path::Path::new(MACOS_RESOLVER_DROPIN);
     match std::fs::remove_file(path) {
         Ok(_) => {
-            let _ = std::process::Command::new("killall")
+            let _ = Command::new("killall")
                 .args(["-HUP", "mDNSResponder"])
                 .status();
             eprintln!("  Removed {}", path.display());
@@ -1193,7 +1181,7 @@ fn uninstall_macos() -> Result<(), String> {
             a
         };
 
-        let status = std::process::Command::new("networksetup")
+        let status = Command::new("networksetup")
             .args(&args)
             .status()
             .map_err(|e| format!("failed to restore DNS for {}: {}", service, e))?;
@@ -1210,7 +1198,7 @@ fn uninstall_macos() -> Result<(), String> {
         }
 
         // Clear the "numa" search domain
-        let _ = std::process::Command::new("networksetup")
+        let _ = Command::new("networksetup")
             .args(["-setsearchdomains", service, "Empty"])
             .status();
     }
@@ -1419,10 +1407,7 @@ pub fn restart_service() -> Result<(), String> {
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn binary_version(exe_path: &std::path::Path) -> String {
-    match std::process::Command::new(exe_path)
-        .arg("--version")
-        .output()
-    {
+    match Command::new(exe_path).arg("--version").output() {
         Ok(o) => String::from_utf8_lossy(&o.stderr).trim().to_string(),
         Err(_) => "unknown".to_string(),
     }
@@ -1434,7 +1419,7 @@ fn binary_version(exe_path: &std::path::Path) -> String {
 /// is what `kickstart` will re-exec — the on-disk plist can diverge).
 #[cfg(target_os = "macos")]
 fn restart_service_macos() -> Result<(), String> {
-    let print = std::process::Command::new("launchctl")
+    let print = Command::new("launchctl")
         .args(["print", PLIST_SYSTEM_TARGET])
         .output()
         .map_err(|e| format!("failed to run launchctl print: {}", e))?;
@@ -1446,17 +1431,14 @@ fn restart_service_macos() -> Result<(), String> {
     eprintln!("  Tip: use 'make deploy' instead — handles codesign + restart.\n");
 
     let version = binary_version(std::path::Path::new(&plist_exe));
-    let _ = std::process::Command::new("codesign")
+    let _ = Command::new("codesign")
         .args(["-f", "-s", "-", &plist_exe])
         .output();
 
-    let status = std::process::Command::new("launchctl")
-        .args(["kickstart", "-k", PLIST_SYSTEM_TARGET])
-        .status()
-        .map_err(|e| format!("failed to run launchctl kickstart: {}", e))?;
-    if !status.success() {
-        return Err(format!("launchctl kickstart failed with status {}", status));
-    }
+    run_attached(
+        Command::new("launchctl").args(["kickstart", "-k", PLIST_SYSTEM_TARGET]),
+        "launchctl kickstart",
+    )?;
     eprintln!("  Service restarted → {}\n", version);
     Ok(())
 }
@@ -1535,18 +1517,14 @@ fn install_service_macos(skip_system_dns: bool) -> Result<(), String> {
     // already in launchd state), silently leaving the daemon running a
     // stale binary path after `numa install` rewrites the plist on disk —
     // which is exactly what `brew upgrade numa` does.
-    let _ = std::process::Command::new("launchctl")
+    let _ = Command::new("launchctl")
         .args(["bootout", "system", PLIST_DEST])
         .status();
 
-    let status = std::process::Command::new("launchctl")
-        .args(["bootstrap", "system", PLIST_DEST])
-        .status()
-        .map_err(|e| format!("failed to run launchctl: {}", e))?;
-
-    if !status.success() {
-        return Err("launchctl bootstrap failed".to_string());
-    }
+    run_attached(
+        Command::new("launchctl").args(["bootstrap", "system", PLIST_DEST]),
+        "launchctl bootstrap",
+    )?;
 
     // Wait for numa to be ready before redirecting DNS
     let api_up = (0..10).any(|i| {
@@ -1557,7 +1535,7 @@ fn install_service_macos(skip_system_dns: bool) -> Result<(), String> {
     });
     if !api_up {
         // Service failed to start — don't redirect DNS to a dead endpoint
-        let _ = std::process::Command::new("launchctl")
+        let _ = Command::new("launchctl")
             .args(["bootout", "system", PLIST_DEST])
             .status();
         return Err(
@@ -1587,7 +1565,7 @@ fn uninstall_service_macos() -> Result<(), String> {
     // the plist. The modern API needs the file path as the specifier;
     // doing this in the wrong order would leave the service loaded in
     // memory until reboot. (Deprecated `unload -w` had the same issue.)
-    let bootout_status = std::process::Command::new("launchctl")
+    let bootout_status = Command::new("launchctl")
         .args(["bootout", "system", PLIST_DEST])
         .status();
     if let Ok(s) = bootout_status {
@@ -1613,7 +1591,7 @@ fn uninstall_service_macos() -> Result<(), String> {
 fn service_status_macos() -> Result<(), String> {
     // `list <label>` only searches the caller's bootstrap domain (gui/<uid>);
     // our daemon is bootstrapped into `system`, so target it explicitly.
-    let output = std::process::Command::new("launchctl")
+    let output = Command::new("launchctl")
         .args(["print", PLIST_SYSTEM_TARGET])
         .output()
         .map_err(|e| format!("failed to run launchctl: {}", e))?;
@@ -1662,15 +1640,11 @@ fn migrate_legacy_backup_linux(backup: &std::path::Path) {
 
 #[cfg(target_os = "linux")]
 fn is_systemd_resolved_active() -> bool {
-    command_succeeds(std::process::Command::new("systemctl").args([
-        "is-active",
-        "--quiet",
-        "systemd-resolved",
-    ]))
+    command_succeeds(Command::new("systemctl").args(["is-active", "--quiet", "systemd-resolved"]))
 }
 
 #[cfg(target_os = "linux")]
-fn command_succeeds(cmd: &mut std::process::Command) -> bool {
+fn command_succeeds(cmd: &mut Command) -> bool {
     cmd.output().is_ok_and(|o| o.status.success())
 }
 
@@ -1905,12 +1879,8 @@ fn uninstall_service_linux() -> Result<(), String> {
 
 #[cfg(target_os = "linux")]
 fn service_status_linux() -> Result<(), String> {
-    let output = std::process::Command::new("systemctl")
-        .args(["status", "numa"])
-        .output()
+    let text = stdout_of(Command::new("systemctl").args(["status", "numa"]))
         .map_err(|e| format!("failed to run systemctl: {}", e))?;
-
-    let text = String::from_utf8_lossy(&output.stdout);
     if text.is_empty() {
         eprintln!("  Numa service is not installed.\n");
     } else {
@@ -1924,19 +1894,8 @@ fn service_status_linux() -> Result<(), String> {
 
 #[cfg(target_os = "linux")]
 fn run_systemctl(args: &[&str]) -> Result<(), String> {
-    let status = std::process::Command::new("systemctl")
-        .args(args)
-        .status()
-        .map_err(|e| format!("systemctl {} failed: {}", args.join(" "), e))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "systemctl {} exited with {}",
-            args.join(" "),
-            status
-        ))
-    }
+    let what = format!("systemctl {}", args.join(" "));
+    run_attached(Command::new("systemctl").args(args), &what)
 }
 
 // --- CA trust management ---
@@ -2021,43 +1980,37 @@ fn untrust_ca() -> Result<(), String> {
 
 #[cfg(target_os = "macos")]
 fn trust_ca_macos(ca_path: &std::path::Path) -> Result<(), String> {
-    let status = std::process::Command::new("security")
-        .args([
-            "add-trusted-cert",
-            "-d",
-            "-r",
-            "trustRoot",
-            "-k",
-            "/Library/Keychains/System.keychain",
-        ])
-        .arg(ca_path)
-        .status()
-        .map_err(|e| format!("security: {}", e))?;
-    if !status.success() {
-        return Err("security add-trusted-cert failed".into());
-    }
+    run_attached(
+        Command::new("security")
+            .args([
+                "add-trusted-cert",
+                "-d",
+                "-r",
+                "trustRoot",
+                "-k",
+                "/Library/Keychains/System.keychain",
+            ])
+            .arg(ca_path),
+        "security add-trusted-cert",
+    )?;
     eprintln!("  Trusted Numa CA in system keychain");
     Ok(())
 }
 
 #[cfg(target_os = "macos")]
 fn untrust_ca_macos() -> Result<(), String> {
-    if let Ok(out) = std::process::Command::new("security")
-        .args([
-            "find-certificate",
-            "-c",
-            crate::tls::CA_COMMON_NAME,
-            "-a",
-            "-Z",
-            "/Library/Keychains/System.keychain",
-        ])
-        .output()
-    {
-        let stdout = String::from_utf8_lossy(&out.stdout);
+    if let Ok(stdout) = stdout_of(Command::new("security").args([
+        "find-certificate",
+        "-c",
+        crate::tls::CA_COMMON_NAME,
+        "-a",
+        "-Z",
+        "/Library/Keychains/System.keychain",
+    ])) {
         for line in stdout.lines() {
             if let Some(hash) = line.strip_prefix("SHA-1 hash: ") {
                 let hash = hash.trim();
-                let _ = std::process::Command::new("security")
+                let _ = Command::new("security")
                     .args([
                         "delete-certificate",
                         "-Z",
@@ -2114,41 +2067,30 @@ fn run_refresh(store_name: &str, argv: &[&str]) -> Result<(), String> {
     let (cmd, args) = argv
         .split_first()
         .expect("refresh command must be non-empty");
-    // .output() (not .status()) captures update-ca-certificates' chatty stdout,
-    // which would otherwise land last in the install transcript.
-    let output = std::process::Command::new(cmd)
-        .args(args)
-        .output()
-        .map_err(|e| format!("{} ({}): {}", cmd, store_name, e))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
-            "{} ({}) failed: {}",
-            cmd,
-            store_name,
-            stderr.trim()
-        ));
-    }
-    Ok(())
+    // Captured, not attached: update-ca-certificates' chatty stdout would
+    // otherwise land last in the install transcript.
+    run_checked(
+        Command::new(cmd).args(args),
+        &format!("{} ({})", cmd, store_name),
+    )
 }
 
 #[cfg(windows)]
 fn trust_ca_windows(ca_path: &std::path::Path) -> Result<(), String> {
-    let status = std::process::Command::new(crate::system32("certutil.exe"))
-        .args(["-addstore", "-f", "Root"])
-        .arg(ca_path)
-        .status()
-        .map_err(|e| format!("certutil: {}", e))?;
-    if !status.success() {
-        return Err("certutil -addstore Root failed (run as Administrator?)".into());
-    }
+    run_attached(
+        Command::new(crate::system32("certutil.exe"))
+            .args(["-addstore", "-f", "Root"])
+            .arg(ca_path),
+        "certutil -addstore Root",
+    )
+    .map_err(|e| format!("{} (run as Administrator?)", e))?;
     eprintln!("  Trusted Numa CA in Windows Root store");
     Ok(())
 }
 
 #[cfg(windows)]
 fn untrust_ca_windows() -> Result<(), String> {
-    let _ = std::process::Command::new(crate::system32("certutil.exe"))
+    let _ = Command::new(crate::system32("certutil.exe"))
         .args(["-delstore", "Root", crate::tls::CA_COMMON_NAME])
         .status();
     eprintln!("  Removed Numa CA from Windows Root store");
@@ -2287,7 +2229,7 @@ mod tests {
     fn command_succeeds_keeps_child_stderr_out_of_ours() {
         let ours = std::fs::read_link("/proc/self/fd/2").unwrap();
         assert!(command_succeeds(
-            std::process::Command::new("sh")
+            Command::new("sh")
                 .args(["-c", r#"[ "$(readlink /proc/self/fd/2)" != "$1" ]"#, "sh"])
                 .arg(ours),
         ));
