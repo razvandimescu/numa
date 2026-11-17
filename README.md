@@ -55,7 +55,7 @@ On Linux, `sudo` does not search `~/.cargo/bin`, `~/.nix-profile/bin` or Linuxbr
 sudo numa                              # Ctrl-C to stop (port 53 requires root/admin)
 ```
 
-Test it with `dig @127.0.0.1 example.com` (`@127.0.0.2` on Windows). The dashboard is at `http://localhost:5380`. By default, other devices on your network can also query Numa. To limit this, set `[server] allow_from` to the networks you trust.
+Test it with `dig @127.0.0.1 example.com` (`@127.0.0.2` on Windows). The dashboard is at `http://localhost:5380`. By default, devices on your private network or tailnet can also query Numa, and public addresses get no answer. To change this, set `[server] allow_from` to the networks you trust.
 
 ### 3. Set as system DNS
 
@@ -186,6 +186,14 @@ The dashboard is at `http://localhost:5380`. With port mapping, or from another 
 docker run -d --name numa --network host -v numa-data:/var/lib/numa \
   -v /path/to/numa.toml:/root/.config/numa/numa.toml \
   ghcr.io/razvandimescu/numa
+```
+
+Docker Desktop's port mapping hides the client address, so the default `allow_from` refuses UDP queries and they time out. On Docker Desktop, mount this config instead:
+
+```toml
+[server]
+api_bind_addr = "0.0.0.0"
+allow_from = ["0.0.0.0/0", "::/0"]
 ```
 
 Images: `linux/amd64` and `linux/arm64`.
