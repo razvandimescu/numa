@@ -1107,6 +1107,12 @@ function formatRemaining(secs) {
   return t('overrides.left_hm', { h: Math.floor(secs / 3600), m: Math.floor((secs % 3600) / 60) });
 }
 
+function formatLatency(ms) {
+  if (ms < 0.1) return Math.round(ms * 1000) + 'µs';
+  if (ms < 1000) return ms.toFixed(1) + 'ms';
+  return (ms / 1000).toFixed(1) + 's';
+}
+
 function formatBytes(bytes) {
   if (bytes === 0) return '0 B';
   if (bytes < 1024) return bytes + ' B';
@@ -1333,7 +1339,7 @@ function applyLogFilter() {
       <td><span class="path-tag ${e.path}">${e.path}</span>${rebindTag}</td>
       <td><span class="path-tag ${e.transport}">${e.transport}</span></td>
       <td style="white-space:nowrap;"><span style="display:inline-block;width:15px;text-align:center;">${e.dnssec === 'secure' ? '<svg title="' + t('log.dnssec_title') + '" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--emerald)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>' : ''}</span>${e.rescode}</td>
-      <td>${e.latency_ms.toFixed(1)}ms</td>
+      <td>${formatLatency(e.latency_ms)}</td>
     </tr>`;
   }).join('');
 }
