@@ -49,14 +49,14 @@ api_port = 5380
 # [upstream]
 # mode = "forward"
 # address = "9.9.9.9"                           # single upstream (plain UDP)
-# address = ["192.168.1.1", "9.9.9.9:5353"]    # multiple upstreams, asked in order; a failed one is asked last
-# address = ["9.9.9.9", "1.1.1.1"]              # upstreams of the same kind as the first (private
-#                                               # address, plain, or encrypted) race: about 1
-#                                               # query in 20, at most one a minute, goes to two
-#                                               # of them at once. The others take turns, and
-#                                               # one that answers first 7 times before it
-#                                               # loses twice is asked first. For a fixed
-#                                               # order, put the others in `fallback`.
+# address = ["9.9.9.9", "1.1.1.1"]              # multiple upstreams, asked in order; a failed
+#                                               # one is asked last. Upstreams of the same kind
+#                                               # as the first (private address, plain, or
+#                                               # encrypted) race: about 1 query in 20, at most
+#                                               # one a minute, goes to two of them at once. One
+#                                               # that answers first 7 times before it loses
+#                                               # twice is asked first. For a fixed order, put
+#                                               # the others in `fallback`.
 # address = "https://dns.quad9.net/dns-query"   # DNS-over-HTTPS (encrypted)
 # address = "tls://9.9.9.9#dns.quad9.net"       # DNS-over-TLS (encrypted, port 853)
 # fallback = ["8.8.8.8", "1.1.1.1"]            # asked after the primaries: when they fail, or
