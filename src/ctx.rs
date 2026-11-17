@@ -6,6 +6,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use arc_swap::ArcSwap;
 use log::{debug, error, info, warn};
+use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use rustls::ServerConfig;
 use tokio::sync::broadcast;
 
@@ -664,7 +665,7 @@ fn cache_and_parse(
 
 /// Resolves for numa's own connections. Skips the client stages (blocklist,
 /// rebind filter, query log, stats): a blocked list host still refreshes.
-pub(crate) async fn resolve_internal(
+async fn resolve_internal(
     ctx: &Arc<ServerCtx>,
     qname: &str,
     qtype: QueryType,
@@ -683,6 +684,31 @@ pub(crate) async fn resolve_internal(
     )
     .await;
     Ok(resp)
+}
+
+/// For downloads that are not upstreams (blocklists): their names need no
+/// bootstrap, and plain DNS would bypass an encrypted upstream (issue #507).
+pub struct PipelineResolver(pub Arc<ServerCtx>);
+
+impl Resolve for PipelineResolver {
+    fn resolve(&self, name: Name) -> Resolving {
+        let ctx = Arc::clone(&self.0);
+        Box::pin(async move {
+            let host = name.as_str();
+            let (a, aaaa) = tokio::try_join!(
+                resolve_internal(&ctx, host, QueryType::A),
+                resolve_internal(&ctx, host, QueryType::AAAA),
+            )?;
+            let mut addrs = Vec::new();
+            crate::bootstrap_resolver::extract_addrs(&a, &mut addrs);
+            crate::bootstrap_resolver::extract_addrs(&aaaa, &mut addrs);
+            if addrs.is_empty() {
+                let rcode = a.header.rescode.as_str();
+                return Err(format!("no address for {host} ({rcode})").into());
+            }
+            Ok(Box::new(addrs.into_iter()) as Addrs)
+        })
+    }
 }
 
 /// Re-resolve a single (domain, qtype) and update the cache.

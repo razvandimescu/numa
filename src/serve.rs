@@ -16,11 +16,11 @@ use crate::blocklist::{
     SourceResult,
 };
 use crate::blocklist_cache::BlocklistCache;
-use crate::bootstrap_resolver::{NumaResolver, PipelineResolver};
+use crate::bootstrap_resolver::BootstrapResolver;
 use crate::buffer::BytePacketBuffer;
 use crate::cache::DnsCache;
 use crate::config::{build_zone_map, ConfigLoad};
-use crate::ctx::{handle_query, ServerCtx};
+use crate::ctx::{handle_query, PipelineResolver, ServerCtx};
 use crate::forward::{
     build_https_client_with_resolver, parse_upstream_list, Upstream, UpstreamPool,
 };
@@ -72,7 +72,7 @@ pub async fn run(load: ConfigLoad) -> crate::Result<()> {
             .unwrap_or_default(),
         _ => std::collections::BTreeMap::new(),
     };
-    let bootstrap_resolver: Arc<NumaResolver> = Arc::new(NumaResolver::new(
+    let bootstrap_resolver: Arc<BootstrapResolver> = Arc::new(BootstrapResolver::new(
         &config.upstream.fallback,
         resolver_overrides,
     ));
@@ -700,7 +700,7 @@ async fn resolve_upstream_pool(
     config: &crate::config::Config,
     system_dns: &crate::system_dns::SystemDnsInfo,
     root_hints: &[SocketAddr],
-    bootstrap_resolver: &Arc<NumaResolver>,
+    bootstrap_resolver: &Arc<BootstrapResolver>,
 ) -> crate::Result<(crate::config::UpstreamMode, bool, UpstreamPool, String)> {
     let recursive_pool = || {
         let dummy = UpstreamPool::new(vec![Upstream::Udp("0.0.0.0:0".parse().unwrap())], vec![]);

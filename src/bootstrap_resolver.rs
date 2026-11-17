@@ -14,13 +14,11 @@
 
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Arc;
 use std::time::Duration;
 
 use log::{debug, info, warn};
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 
-use crate::ctx::ServerCtx;
 use crate::forward::{forward_tcp, forward_udp};
 use crate::packet::DnsPacket;
 use crate::question::QueryType;
@@ -33,12 +31,12 @@ const DEFAULT_BOOTSTRAP: &[SocketAddr] = &[
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), 53),
 ];
 
-pub struct NumaResolver {
+pub struct BootstrapResolver {
     bootstrap: Vec<SocketAddr>,
     overrides: BTreeMap<String, Vec<IpAddr>>,
 }
 
-impl NumaResolver {
+impl BootstrapResolver {
     /// Build a resolver from the configured `upstream.fallback` list and any
     /// per-hostname overrides (e.g. ODoH's `relay_ip`/`target_ip`).
     ///
@@ -93,7 +91,7 @@ impl NumaResolver {
     }
 }
 
-impl Resolve for NumaResolver {
+impl Resolve for BootstrapResolver {
     fn resolve(&self, name: Name) -> Resolving {
         let hostname = name.as_str().to_string();
 
@@ -114,31 +112,6 @@ impl Resolve for NumaResolver {
                 hostname,
                 addrs.len()
             );
-            Ok(Box::new(addrs.into_iter()) as Addrs)
-        })
-    }
-}
-
-/// For downloads that are not upstreams (blocklists): their names need no
-/// bootstrap, and plain DNS would bypass an encrypted upstream (issue #507).
-pub struct PipelineResolver(pub Arc<ServerCtx>);
-
-impl Resolve for PipelineResolver {
-    fn resolve(&self, name: Name) -> Resolving {
-        let ctx = Arc::clone(&self.0);
-        Box::pin(async move {
-            let host = name.as_str();
-            let (a, aaaa) = tokio::try_join!(
-                crate::ctx::resolve_internal(&ctx, host, QueryType::A),
-                crate::ctx::resolve_internal(&ctx, host, QueryType::AAAA),
-            )?;
-            let mut addrs = Vec::new();
-            extract_addrs(&a, &mut addrs);
-            extract_addrs(&aaaa, &mut addrs);
-            if addrs.is_empty() {
-                let rcode = a.header.rescode.as_str();
-                return Err(format!("no address for {host} ({rcode})").into());
-            }
             Ok(Box::new(addrs.into_iter()) as Addrs)
         })
     }
@@ -193,7 +166,7 @@ async fn query_with_tcp_fallback(
     }
 }
 
-fn extract_addrs(pkt: &DnsPacket, out: &mut Vec<SocketAddr>) {
+pub(crate) fn extract_addrs(pkt: &DnsPacket, out: &mut Vec<SocketAddr>) {
     for r in &pkt.answers {
         match r {
             DnsRecord::A { addr, .. } => out.push(SocketAddr::new(IpAddr::V4(*addr), 0)),
@@ -210,7 +183,7 @@ mod tests {
 
     #[test]
     fn empty_fallback_uses_defaults() {
-        let r = NumaResolver::new(&[], BTreeMap::new());
+        let r = BootstrapResolver::new(&[], BTreeMap::new());
         let got: Vec<String> = r.bootstrap().iter().map(|s| s.to_string()).collect();
         assert_eq!(got, vec!["9.9.9.9:53", "1.1.1.1:53"]);
     }
@@ -222,7 +195,7 @@ mod tests {
             "dns.quad9.net".to_string(),
             "1.1.1.1:5353".to_string(),
         ];
-        let r = NumaResolver::new(&fallback, BTreeMap::new());
+        let r = BootstrapResolver::new(&fallback, BTreeMap::new());
         let got: Vec<String> = r.bootstrap().iter().map(|s| s.to_string()).collect();
         assert_eq!(got, vec!["9.9.9.9:53", "1.1.1.1:5353"]);
     }
@@ -234,7 +207,7 @@ mod tests {
             "odoh-relay.example".to_string(),
             vec![IpAddr::V4(Ipv4Addr::new(178, 104, 229, 30))],
         );
-        let r = NumaResolver::new(&[], overrides);
+        let r = BootstrapResolver::new(&[], overrides);
         let name: Name = "odoh-relay.example".parse().unwrap();
         let fut = r.resolve(name);
         let res = futures::executor::block_on(fut).unwrap();
@@ -253,7 +226,7 @@ mod tests {
                 IpAddr::V6(Ipv6Addr::LOCALHOST),
             ],
         );
-        let r = NumaResolver::new(&[], overrides);
+        let r = BootstrapResolver::new(&[], overrides);
         let res = futures::executor::block_on(r.resolve("dual.example".parse().unwrap())).unwrap();
         let addrs: Vec<_> = res.collect();
         assert_eq!(addrs.len(), 2);
