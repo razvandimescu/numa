@@ -134,7 +134,7 @@ pub fn parse_upstream_addr(s: &str, default_port: u16) -> std::result::Result<So
 pub fn parse_upstream_list(
     addrs: &[String],
     default_port: u16,
-    resolver: Option<Arc<crate::bootstrap_resolver::NumaResolver>>,
+    resolver: Option<Arc<crate::bootstrap_resolver::BootstrapResolver>>,
 ) -> Result<Vec<Upstream>> {
     addrs
         .iter()
@@ -145,7 +145,7 @@ pub fn parse_upstream_list(
 pub fn parse_upstream(
     s: &str,
     default_port: u16,
-    resolver: Option<Arc<crate::bootstrap_resolver::NumaResolver>>,
+    resolver: Option<Arc<crate::bootstrap_resolver::BootstrapResolver>>,
 ) -> Result<Upstream> {
     if s.starts_with("https://") {
         return Ok(Upstream::Doh {
@@ -183,7 +183,7 @@ pub fn parse_upstream(
 /// should use [`build_relay_client`].
 ///
 /// Uses the system resolver. Callers running inside `serve::run` pass the
-/// shared [`crate::bootstrap_resolver::NumaResolver`] via
+/// shared [`crate::bootstrap_resolver::BootstrapResolver`] via
 /// [`build_https_client_with_resolver`] to avoid the self-loop (issue #122).
 pub fn build_https_client() -> reqwest::Client {
     build_https_client_with_resolver(1, None)
@@ -202,10 +202,10 @@ pub fn build_relay_client(pool_max_idle_per_host: usize) -> reqwest::Client {
 }
 
 /// [`build_https_client`] with an optional custom DNS resolver. Numa wires
-/// [`crate::bootstrap_resolver::NumaResolver`] here.
+/// [`crate::bootstrap_resolver::BootstrapResolver`] here.
 pub fn build_https_client_with_resolver(
     pool_max_idle_per_host: usize,
-    resolver: Option<Arc<crate::bootstrap_resolver::NumaResolver>>,
+    resolver: Option<Arc<crate::bootstrap_resolver::BootstrapResolver>>,
 ) -> reqwest::Client {
     let mut builder = https_client_builder(pool_max_idle_per_host);
     if let Some(r) = resolver {
