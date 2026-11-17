@@ -753,8 +753,8 @@ async fn resolve_upstream_pool(
 
             // Pair every UDP primary with a TCP sibling in fallback so
             // Forward mode survives carriers that drop outbound UDP:53
-            // for amplification mitigation (BCP 38). An auto-detected or
-            // built-in primary brings its `companion`, as on a rescan.
+            // for amplification mitigation (BCP 38).
+            // An auto-detected or built-in primary brings its `companion`, as on a rescan.
             let auto = config.upstream.address.is_empty();
             for u in &primary {
                 if !auto && !matches!(u, Upstream::Udp(_)) {

@@ -281,7 +281,6 @@ struct Health {
     strikes: Vec<AtomicU32>,
     retesting: AtomicBool,
     racers: Vec<usize>,
-    /// The racer asked first while it is not failed.
     choice: AtomicUsize,
     race: Mutex<Race>,
 }
@@ -352,13 +351,10 @@ impl Group {
     }
 }
 
-/// Two operators, so one leaving a jurisdiction can't strand numa. Cloudflare
-/// is the fallback of Quad9 (`companion`), so the two never race.
+/// Two operators, so one leaving a jurisdiction can't strand numa.
 pub(crate) const DOH_FALLBACK: [&str; 2] =
     ["https://9.9.9.9/dns-query", "https://1.1.1.1/dns-query"];
 
-/// The fallback that an auto-detected or built-in primary brings: the TCP
-/// sibling of a UDP primary, and Cloudflare for Quad9.
 pub(crate) fn companion(primary: &Upstream) -> Option<Upstream> {
     match primary {
         Upstream::Udp(addr) => Some(Upstream::Tcp(*addr)),
@@ -407,15 +403,16 @@ impl UpstreamPool {
 
     /// A racer without an open connection loses each race by its TLS handshake.
     pub fn keepalive_targets(&self, racing: bool) -> Vec<&Upstream> {
-        let mut targets: Vec<usize> = self.order().into_iter().take(1).collect();
+        let mut targets: Vec<&Upstream> = self.preferred().into_iter().collect();
         if racing {
             for &i in &self.health.racers {
-                if !targets.contains(&i) {
-                    targets.push(i);
+                let racer = self.upstream(i);
+                if !targets.contains(&racer) {
+                    targets.push(racer);
                 }
             }
         }
-        targets.into_iter().map(|i| self.upstream(i)).collect()
+        targets
     }
 
     fn challenger(&self, first: usize, draw: u16, now: Instant) -> Option<usize> {
@@ -486,9 +483,8 @@ impl UpstreamPool {
         order
     }
 
-    /// When `draw` hits, a failed upstream gets a copy of the query, so no
-    /// client waits to learn that it is back: one listed before the upstream
-    /// that answered, or a racer, which can come back as the choice.
+    /// When `draw` hits, a failed upstream listed before the answer, or any failed racer, gets a
+    /// copy of the query, so no client waits to learn that it is back.
     fn retest_target(&self, answered: usize, draw: u16) -> Option<usize> {
         let failed: Vec<usize> = (0..self.health.strikes.len())
             .filter(|&i| (i < answered || self.health.racers.contains(&i)) && self.is_failed(i))
@@ -895,8 +891,6 @@ pub async fn forward_with_failover_raw(
 ///
 /// While no answer is in, the next upstream gets the query after each
 /// `hedge_delay`, as RFC 8305 staggers connection attempts.
-///
-/// In a race, only a usable first reply of the two counts.
 async fn forward_in_order(
     wire: &[u8],
     pool: &UpstreamPool,
@@ -1831,19 +1825,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_race_gives_the_client_the_first_answer() {
+    async fn a_race_answers_with_the_first_reply_and_counts_only_a_usable_one() {
+        use ResultCode::*;
         let query = make_query();
-        let noerror = to_wire(&make_response(&query));
-        let nxdomain = to_wire(&DnsPacket::response_from(&query, ResultCode::NXDOMAIN));
+        let reply = |rescode| to_wire(&DnsPacket::response_from(&query, rescode));
+        let answer = || to_wire(&make_response(&query));
         let srtt = RwLock::new(SrttCache::new(true));
-        let slow = Duration::from_millis(500);
 
-        for (first_delay, second_delay, rcode, second_results) in [
-            (slow, Duration::ZERO, ResultCode::NXDOMAIN, (1, 0)),
-            (Duration::ZERO, slow, ResultCode::NOERROR, (0, 1)),
+        for ((first, first_ms), (second, second_ms), rcode, second_results) in [
+            ((answer(), 500), (reply(NXDOMAIN), 0), NXDOMAIN, (1, 0)),
+            ((answer(), 0), (reply(NXDOMAIN), 500), NOERROR, (0, 1)),
+            ((reply(REFUSED), 0), (answer(), 100), NOERROR, (0, 0)),
+            ((answer(), 300), (reply(SERVFAIL), 0), SERVFAIL, (0, 0)),
         ] {
-            let (first, _rx) = slow_doh(noerror.clone(), first_delay).await;
-            let (second, _rx) = slow_doh(nxdomain.clone(), second_delay).await;
+            let (first, _rx) = slow_doh(first, Duration::from_millis(first_ms)).await;
+            let (second, _rx) = slow_doh(second, Duration::from_millis(second_ms)).await;
             let pool = UpstreamPool::new(vec![first, second], vec![]);
 
             let start = Instant::now();
@@ -1861,46 +1857,6 @@ mod tests {
             assert_eq!(crate::wire::full_rcode(&resp), rcode as u16);
             assert!(start.elapsed() < Duration::from_millis(400));
             assert_eq!(results(&pool), second_results);
-        }
-    }
-
-    #[tokio::test]
-    async fn a_refused_or_servfail_first_answer_gives_no_result() {
-        let query = make_query();
-        let reply = |rescode| to_wire(&DnsPacket::response_from(&query, rescode));
-        let noerror = to_wire(&make_response(&query));
-        let srtt = RwLock::new(SrttCache::new(true));
-        let ms = Duration::from_millis;
-
-        for ((first, first_delay), (second, second_delay), rcode) in [
-            (
-                (reply(ResultCode::REFUSED), ms(0)),
-                (noerror.clone(), ms(100)),
-                ResultCode::NOERROR,
-            ),
-            (
-                (noerror.clone(), ms(300)),
-                (reply(ResultCode::SERVFAIL), ms(0)),
-                ResultCode::SERVFAIL,
-            ),
-        ] {
-            let (first, _rx) = slow_doh(first, first_delay).await;
-            let (second, _rx) = slow_doh(second, second_delay).await;
-            let pool = UpstreamPool::new(vec![first, second], vec![]);
-
-            let (resp, _) = forward_in_order(
-                &to_wire(&query),
-                &pool,
-                &srtt,
-                Duration::from_secs(2),
-                Duration::from_secs(1),
-                RETEST,
-            )
-            .await
-            .unwrap();
-
-            assert_eq!(crate::wire::full_rcode(&resp), rcode as u16);
-            assert_eq!(results(&pool), (0, 0));
         }
     }
 
@@ -1974,7 +1930,6 @@ mod tests {
         assert_eq!(pool.order(), [1, 0]);
     }
 
-    // Guard: passes without the race too.
     #[tokio::test]
     async fn without_srtt_no_race_starts() {
         let query = make_query();
@@ -2543,8 +2498,6 @@ mod tests {
         assert_eq!(pool.fallback, [Upstream::Tcp(router)]);
     }
 
-    // A fallback is in no race, so the second operator of the built-in pair
-    // sees no query while the first answers in time.
     #[tokio::test]
     async fn a_fallback_stays_idle_while_the_primary_answers() {
         let query = make_query();
