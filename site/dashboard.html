@@ -313,6 +313,36 @@ body {
   color: var(--text-dim);
   flex-shrink: 0;
 }
+.upstream-rows {
+  display: grid;
+  grid-template-columns: minmax(0, 19rem) auto 1fr auto auto;
+  gap: 0.6rem 0.8rem;
+  align-items: center;
+}
+.upstream-rows .path-pct { width: auto; text-align: right; }
+.upstream-addr {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.upstream-tag {
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  padding: 0.05rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.upstream-tag.asked_first { color: var(--emerald); border-color: var(--emerald); }
+.upstream-tag.failed { color: var(--rose); border-color: var(--rose); }
+.path-bar-fill.upstream-primary, .path-bar-fill.upstream-fallback { background: var(--text-dim); }
+.path-bar-fill.upstream-asked_first { background: var(--emerald); }
+.path-bar-fill.upstream-failed { background: var(--rose); }
 
 /* Query log table */
 .query-log {
@@ -638,6 +668,8 @@ body {
 }
 @media (max-width: 700px) {
   .stats-row { grid-template-columns: repeat(2, 1fr); }
+  .upstream-rows { grid-template-columns: auto 1fr auto auto; }
+  .upstream-rows .upstream-addr { grid-column: 1 / -1; text-align: left; margin-top: 0.3rem; }
   .dashboard { padding: 1rem; }
   .header { padding: 0.8rem 1rem; }
   .logo { font-size: 1.4rem; }
@@ -1202,13 +1234,53 @@ const UPSTREAM_WIRE_DEFS = [
   { key: 'odoh', label: 'ODoH', cls: 'odoh' },
 ];
 
-function renderUpstreamWire(ut) {
+function renderUpstreamWire(ut, upstreams) {
   const total = (ut.udp + ut.doh + ut.dot + ut.odoh) || 0;
-  renderBarChart('upstreamWireBars', UPSTREAM_WIRE_DEFS, ut, total || 1);
   const encPct = encryptionPct(ut, ['doh', 'dot', 'odoh'], ['udp', 'doh', 'dot', 'odoh']);
-  const el = document.getElementById('upstreamWireEncrypted');
-  el.textContent = total > 0 ? t('wire.encrypted_outbound', { pct: encPct }) : '';
-  el.style.color = encPct >= 80 ? 'var(--emerald)' : encPct >= 50 ? 'var(--amber)' : 'var(--rose)';
+  const enc = document.createElement('span');
+  enc.textContent = total > 0 ? t('wire.encrypted_outbound', { pct: encPct }) : '';
+  enc.style.color = encPct >= 80 ? 'var(--emerald)' : encPct >= 50 ? 'var(--amber)' : 'var(--rose)';
+  const head = document.getElementById('upstreamWireEncrypted');
+  if (!upstreams.length) {
+    renderBarChart('upstreamWireBars', UPSTREAM_WIRE_DEFS, ut, total || 1);
+    head.replaceChildren(enc);
+    return;
+  }
+  renderUpstreamRows(upstreams);
+  head.replaceChildren(upstreamHeadline(upstreams), enc.textContent ? ' · ' : '', enc);
+}
+
+function upstreamHeadline(upstreams) {
+  const failed = upstreams.filter(u => u.failed).length;
+  const first = upstreams.find(u => u.asked_first);
+  const median = first && first.p50_ms != null
+    ? t('upstreams.header', { ms: first.p50_ms })
+    : t('upstreams.none');
+  const el = document.createElement('span');
+  el.textContent = failed
+    ? t('upstreams.failed_count', { n: failed, total: upstreams.length }) + ' · ' + median
+    : median;
+  el.title = t('upstreams.order_title');
+  el.style.color = failed ? 'var(--amber)' : 'var(--emerald)';
+  return el;
+}
+
+const UPSTREAM_TAG_TITLES = { fallback: 'upstreams.fallback_title', failed: 'upstreams.failed_title' };
+
+function renderUpstreamRows(upstreams) {
+  const total = upstreams.reduce((sum, u) => sum + u.answers, 0);
+  document.getElementById('upstreamWireBars').innerHTML = `<div class="upstream-rows">${
+    upstreams.map(u => {
+      const role = u.failed ? 'failed' : u.asked_first ? 'asked_first' : u.kind;
+      const pct = (total ? (u.answers / total) * 100 : 0).toFixed(1);
+      const title = UPSTREAM_TAG_TITLES[role] ? ` title="${h(t(UPSTREAM_TAG_TITLES[role]))}"` : '';
+      return `
+      <span class="upstream-addr" title="${h(u.addr)}">${h(u.addr)}</span>
+      <span class="upstream-tag ${role}"${title}>${h(t('upstreams.' + role))}</span>
+      <div class="path-bar-track"><div class="path-bar-fill upstream-${role}" style="width: ${pct}%"></div></div>
+      <span class="path-pct">${pct}%</span>
+      <span class="path-pct">${u.p50_ms == null ? '—' : u.p50_ms + ' ms'}</span>`;
+    }).join('')}</div>`;
 }
 
 function renderQueryLog(entries) {
@@ -1386,6 +1458,7 @@ async function refresh() {
     document.getElementById('uptimeSub').textContent = formatUptimeSub(stats.uptime_secs);
     document.getElementById('headerVersion').textContent = stats.version ? 'v' + stats.version : '';
     document.getElementById('footerUpstream').textContent = stats.upstream || '';
+    document.getElementById('footerUpstreamItem').hidden = (stats.upstreams || []).length > 0;
     document.getElementById('footerConfig').textContent = stats.config_path || '';
     document.getElementById('footerData').textContent = stats.data_dir || '';
     document.getElementById('footerDnssec').textContent = stats.dnssec ? t('footer.on') : t('footer.off');
@@ -1489,7 +1562,7 @@ async function refresh() {
     // Panels
     renderPaths(q);
     renderTransport(stats.transport);
-    renderUpstreamWire(stats.upstream_transport || { udp: 0, doh: 0, dot: 0, odoh: 0 });
+    renderUpstreamWire(stats.upstream_transport || { udp: 0, doh: 0, dot: 0, odoh: 0 }, stats.upstreams || []);
     renderQueryLog(logs);
     renderOverrides(overrides);
     renderCache(cache);
@@ -1910,8 +1983,8 @@ initI18n().then(() => {
   · <span data-i18n="footer.data">Data:</span> <span id="footerData" style="user-select:all;color:var(--emerald);"></span>
   · <span data-i18n="footer.logs">Logs:</span> <span id="footerLogs" style="user-select:all;color:var(--emerald);"></span>
   <br>
-  <span data-i18n="footer.upstream">Upstream:</span> <span id="footerUpstream" style="user-select:all;color:var(--emerald);"></span>
-  · <span data-i18n="footer.dnssec">DNSSEC:</span> <span id="footerDnssec" style="color:var(--text-dim);">—</span>
+  <span id="footerUpstreamItem"><span data-i18n="footer.upstream">Upstream:</span> <span id="footerUpstream" style="user-select:all;color:var(--emerald);"></span>
+  · </span><span data-i18n="footer.dnssec">DNSSEC:</span> <span id="footerDnssec" style="color:var(--text-dim);">—</span>
   · <span data-i18n="footer.srtt">SRTT:</span> <span id="footerSrtt" style="color:var(--text-dim);">—</span>
   · <span data-i18n="footer.rebind">Rebind:</span> <span id="footerRebind" style="color:var(--text-dim);">—</span>
   · <a href="https://github.com/razvandimescu/numa" target="_blank" rel="noopener" style="color:var(--amber);text-decoration:none;" data-i18n="footer.github">GitHub</a>
