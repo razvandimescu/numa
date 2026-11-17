@@ -1,11 +1,13 @@
+use std::collections::VecDeque;
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use futures::stream::{FuturesUnordered, StreamExt};
 use http_body_util::{BodyExt, Limited};
+use serde::Serialize;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::time::{timeout, timeout_at};
@@ -279,6 +281,7 @@ pub struct UpstreamPool {
 /// Shared by the clones of a pool, so each query sees the same state.
 struct Health {
     strikes: Vec<AtomicU32>,
+    answers: Vec<Answers>,
     retesting: AtomicBool,
 }
 
@@ -286,9 +289,46 @@ impl Health {
     fn new(len: usize) -> Arc<Self> {
         Arc::new(Self {
             strikes: (0..len).map(|_| AtomicU32::new(0)).collect(),
+            answers: (0..len).map(|_| Answers::default()).collect(),
             retesting: AtomicBool::new(false),
         })
     }
+}
+
+const RECENT_ANSWERS: usize = 256;
+
+/// The answers of one upstream that went to clients.
+#[derive(Default)]
+struct Answers {
+    count: AtomicU64,
+    recent_ms: Mutex<VecDeque<u32>>,
+}
+
+impl Answers {
+    fn record(&self, took: Duration) {
+        self.count.fetch_add(1, Ordering::Relaxed);
+        let mut recent = self.recent_ms.lock().unwrap();
+        if recent.len() == RECENT_ANSWERS {
+            recent.pop_front();
+        }
+        recent.push_back(u32::try_from(took.as_millis()).unwrap_or(u32::MAX));
+    }
+
+    fn median_ms(&self) -> Option<u32> {
+        let mut ms: Vec<u32> = self.recent_ms.lock().unwrap().iter().copied().collect();
+        ms.sort_unstable();
+        ms.get(ms.len() / 2).copied()
+    }
+}
+
+#[derive(Serialize)]
+pub struct UpstreamReport {
+    pub addr: String,
+    pub kind: &'static str,
+    pub asked_first: bool,
+    pub failed: bool,
+    pub answers: u64,
+    pub p50_ms: Option<u32>,
 }
 
 /// Knot Resolver sends one query in 20 to a server other than its choice.
@@ -409,6 +449,28 @@ impl UpstreamPool {
             return false;
         };
         self.maybe_replace_primary(vec![Upstream::Udp(new_sock)])
+    }
+
+    /// Each upstream in list order, with the answers it gave to clients.
+    pub fn report(&self) -> Vec<UpstreamReport> {
+        let first = self.order().first().copied();
+        self.health
+            .answers
+            .iter()
+            .enumerate()
+            .map(|(i, answers)| UpstreamReport {
+                addr: self.upstream(i).to_string(),
+                kind: if i < self.primary.len() {
+                    "primary"
+                } else {
+                    "fallback"
+                },
+                asked_first: first == Some(i),
+                failed: self.is_failed(i),
+                answers: answers.count.load(Ordering::Relaxed),
+                p50_ms: answers.median_ms(),
+            })
+            .collect()
     }
 
     pub fn label(&self) -> String {
@@ -747,14 +809,14 @@ pub async fn forward_with_failover_raw(
     srtt: &RwLock<SrttCache>,
     timeout_duration: Duration,
     hedge_delay: Duration,
-) -> Result<Vec<u8>> {
+) -> Result<(Vec<u8>, UpstreamTransport)> {
     let draw = crate::packet::random_id();
-    let (resp, retest) =
+    let (resp, answered, retest) =
         forward_in_order(wire, pool, srtt, timeout_duration, hedge_delay, draw).await?;
     if let Some((target, copy)) = retest {
         tokio::spawn(pool.clone().retest(target, copy, timeout_duration));
     }
-    Ok(resp)
+    Ok((resp, pool.upstream(answered).transport()))
 }
 
 /// `srtt = false` turns off the failed state, so each query follows list order.
@@ -770,15 +832,16 @@ async fn forward_in_order(
     timeout_duration: Duration,
     hedge_delay: Duration,
     draw: u16,
-) -> Result<(Vec<u8>, Option<(usize, Vec<u8>)>)> {
+) -> Result<(Vec<u8>, usize, Option<(usize, Vec<u8>)>)> {
     let wire = &crate::wire::ensure_do_bit(wire)[..];
     let track = srtt.read().unwrap().is_enabled();
     let mut last_err: Option<Box<dyn std::error::Error + Send + Sync>> = None;
     let mut refused = None;
 
     let ask = move |i: usize| async move {
+        let start = Instant::now();
         let result = forward_query_raw(wire, pool.upstream(i), timeout_duration).await;
-        (i, result)
+        (i, result, start.elapsed())
     };
     let mut open = FuturesUnordered::new();
     let mut open_since: Vec<(usize, Instant)> = Vec::new();
@@ -793,7 +856,7 @@ async fn forward_in_order(
             open.push(ask(i));
         }
         let hedge = !hedge_delay.is_zero() && queue.len() > 0;
-        let (i, result) = tokio::select! {
+        let (i, result, took) = tokio::select! {
             biased;
             Some(done) = open.next() => done,
             _ = tokio::time::sleep(hedge_delay.saturating_sub(last_ask.elapsed())), if hedge => {
@@ -810,7 +873,7 @@ async fn forward_in_order(
                     pool.add_strike(i);
                 }
                 log::debug!("upstream {} refused the query", upstream);
-                refused.get_or_insert(resp);
+                refused.get_or_insert((resp, i, took));
             }
             Ok(resp) => {
                 if is_usable_answer(&resp) {
@@ -824,10 +887,11 @@ async fn forward_in_order(
                         }
                     }
                 }
+                pool.health.answers[i].record(took);
                 let retest = pool
                     .retest_target(i, draw)
                     .map(|target| (target, wire.to_vec()));
-                return Ok((resp, retest));
+                return Ok((resp, i, retest));
             }
             Err(e) => {
                 if track {
@@ -843,7 +907,10 @@ async fn forward_in_order(
     }
 
     match refused {
-        Some(resp) => Ok((resp, None)),
+        Some((resp, i, took)) => {
+            pool.health.answers[i].record(took);
+            Ok((resp, i, None))
+        }
         None => Err(last_err.unwrap_or_else(|| "no upstream configured".into())),
     }
 }
@@ -1329,7 +1396,7 @@ mod tests {
         let (wire, timeout) = (to_wire(&query), Duration::from_secs(2));
         let ask = || forward_in_order(&wire, &pool, &srtt, timeout, Duration::ZERO, RETEST);
 
-        let (_, retest) = ask().await.unwrap();
+        let (_, _, retest) = ask().await.unwrap();
         let client = second_rx.try_recv().expect("the second primary answered");
         assert!(first_rx.try_recv().is_err(), "a client query went to it");
 
@@ -1384,7 +1451,7 @@ mod tests {
             let pool = UpstreamPool::new(vec![first, second], vec![]);
 
             let start = Instant::now();
-            let (resp, _) = forward_in_order(
+            let (resp, _, _) = forward_in_order(
                 &to_wire(&query),
                 &pool,
                 &srtt,
@@ -1436,6 +1503,49 @@ mod tests {
     const HEDGE: Duration = Duration::from_millis(50);
 
     #[tokio::test]
+    async fn the_report_counts_only_the_answers_that_reach_the_client() {
+        let query = make_query();
+        let response = to_wire(&make_response(&query));
+        let (slow, _rx) = slow_doh(response.clone(), Duration::from_secs(1)).await;
+        let (fallback, _fallback_rx) = doh_upstream(response).await;
+        let pool = UpstreamPool::new(vec![slow], vec![fallback]);
+        let srtt = RwLock::new(SrttCache::new(true));
+
+        forward_with_failover_raw(
+            &to_wire(&query),
+            &pool,
+            &srtt,
+            Duration::from_secs(2),
+            HEDGE,
+        )
+        .await
+        .expect("the fallback answers");
+
+        let report: Vec<_> = pool
+            .report()
+            .iter()
+            .map(|u| (u.kind, u.asked_first, u.answers, u.p50_ms.is_some()))
+            .collect();
+        assert_eq!(
+            report,
+            [("primary", true, 0, false), ("fallback", false, 1, true)]
+        );
+    }
+
+    #[test]
+    fn the_median_covers_only_the_recent_answers() {
+        let answers = Answers::default();
+        for _ in 0..RECENT_ANSWERS {
+            answers.record(Duration::from_secs(1));
+        }
+        assert_eq!(answers.median_ms(), Some(1000));
+        for _ in 0..=RECENT_ANSWERS / 2 {
+            answers.record(Duration::from_millis(1));
+        }
+        assert_eq!(answers.median_ms(), Some(1));
+    }
+
+    #[tokio::test]
     async fn a_silent_upstream_hands_the_query_to_the_next_one() {
         let query = make_query();
         let response = to_wire(&make_response(&query));
@@ -1473,7 +1583,7 @@ mod tests {
         let srtt = RwLock::new(SrttCache::new(true));
 
         let start = Instant::now();
-        let (resp, _) = forward_in_order(
+        let (resp, _, _) = forward_in_order(
             &to_wire(&query),
             &pool,
             &srtt,
@@ -1629,7 +1739,7 @@ mod tests {
 
         let srtt = RwLock::new(SrttCache::new(true));
         let wire = to_wire(&query);
-        let resp_wire = forward_with_failover_raw(
+        let (resp_wire, _) = forward_with_failover_raw(
             &wire,
             &pool,
             &srtt,
@@ -1669,7 +1779,7 @@ mod tests {
 
         let pool = UpstreamPool::new(vec![Upstream::Udp(addr)], vec![]);
         let srtt = RwLock::new(SrttCache::new(true));
-        let resp_wire = forward_with_failover_raw(
+        let (resp_wire, _) = forward_with_failover_raw(
             &to_wire(&query),
             &pool,
             &srtt,
@@ -1699,7 +1809,7 @@ mod tests {
             vec![],
         );
         let srtt = RwLock::new(SrttCache::new(true));
-        let resp_wire = forward_with_failover_raw(
+        let (resp_wire, _) = forward_with_failover_raw(
             &to_wire(&query),
             &pool,
             &srtt,
@@ -1725,7 +1835,7 @@ mod tests {
 
         let pool = UpstreamPool::new(vec![truncating, Upstream::Udp(good_addr)], vec![]);
         let srtt = RwLock::new(SrttCache::new(true));
-        let resp_wire = forward_with_failover_raw(
+        let (resp_wire, _) = forward_with_failover_raw(
             &to_wire(&query),
             &pool,
             &srtt,

@@ -187,6 +187,7 @@ struct StatsResponse {
     version: &'static str,
     uptime_secs: u64,
     upstream: String,
+    upstreams: Vec<crate::forward::UpstreamReport>,
     mode: &'static str, // "recursive" or "forward" — never "auto" at runtime
     config_path: String,
     config_found: bool,
@@ -574,16 +575,18 @@ async fn stats(State(ctx): State<Arc<ServerCtx>>) -> Json<StatsResponse> {
     let total_estimated =
         cache_bytes + blocklist_bytes + query_log_bytes + srtt_bytes + overrides_bytes;
 
-    let upstream = if ctx.upstream_mode == crate::config::UpstreamMode::Recursive {
-        "recursive (root hints)".to_string()
+    let (upstream, upstreams) = if ctx.upstream_mode == crate::config::UpstreamMode::Recursive {
+        ("recursive (root hints)".to_string(), Vec::new())
     } else {
-        ctx.upstream_pool.lock().unwrap().label()
+        let pool = ctx.upstream_pool.lock().unwrap();
+        (pool.label(), pool.report())
     };
 
     Json(StatsResponse {
         version: crate::version(),
         uptime_secs: snap.uptime_secs,
         upstream,
+        upstreams,
         mode: ctx.upstream_mode.as_str(),
         config_path: ctx.config_path.clone(),
         config_found: ctx.config_found,
@@ -1285,6 +1288,8 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(json["uptime_secs"].is_number());
         assert!(json["queries"]["total"].is_number());
+        assert_eq!(json["upstreams"][0]["asked_first"], true);
+        assert_eq!(json["upstreams"][0]["answers"], 0);
     }
 
     #[tokio::test]
