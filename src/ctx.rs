@@ -516,6 +516,8 @@ async fn resolve_remote(
         // Conditional forwarding takes priority over recursive mode
         // (e.g. Tailscale .ts.net, VPC private zones)
         let key = (qname.to_string(), qtype);
+        let mut answered_by = None;
+        let leader_answered_by = &mut answered_by;
         let (resp, path, err) = resolve_coalesced(
             &ctx.inflight,
             &ctx.admission,
@@ -523,8 +525,8 @@ async fn resolve_remote(
             key,
             query,
             QueryPath::Forwarded,
-            || async {
-                let wire = forward_with_failover_raw(
+            move || async move {
+                let (wire, transport) = forward_with_failover_raw(
                     raw_wire,
                     pool,
                     &ctx.srtt,
@@ -532,14 +534,13 @@ async fn resolve_remote(
                     ctx.hedge_delay,
                 )
                 .await?;
+                *leader_answered_by = Some(transport);
                 cache_and_parse(ctx, qname, qtype, &wire)
             },
         )
         .await;
         log_coalesced_outcome(src_addr, qtype, qname, path, err.as_deref(), "FORWARD");
-        let upstream_transport = (path == QueryPath::Forwarded)
-            .then(|| pool.preferred().map(|u| u.transport()))
-            .flatten();
+        let upstream_transport = answered_by.filter(|_| path == QueryPath::Forwarded);
         return (resp, path, DnssecStatus::Indeterminate, upstream_transport);
     }
 
@@ -572,6 +573,8 @@ async fn resolve_remote(
 
     let pool = ctx.upstream_pool.lock().unwrap().clone();
     let key = (qname.to_string(), qtype);
+    let mut answered_by = None;
+    let leader_answered_by = &mut answered_by;
     let (resp, path, err) = resolve_coalesced(
         &ctx.inflight,
         &ctx.admission,
@@ -579,18 +582,17 @@ async fn resolve_remote(
         key,
         query,
         QueryPath::Upstream,
-        || async {
-            let wire =
+        move || async move {
+            let (wire, transport) =
                 forward_with_failover_raw(raw_wire, &pool, &ctx.srtt, ctx.timeout, ctx.hedge_delay)
                     .await?;
+            *leader_answered_by = Some(transport);
             cache_and_parse(ctx, qname, qtype, &wire)
         },
     )
     .await;
     log_coalesced_outcome(src_addr, qtype, qname, path, err.as_deref(), "UPSTREAM");
-    let upstream_transport = (path == QueryPath::Upstream)
-        .then(|| pool.preferred().map(|u| u.transport()))
-        .flatten();
+    let upstream_transport = answered_by.filter(|_| path == QueryPath::Upstream);
     (resp, path, DnssecStatus::Indeterminate, upstream_transport)
 }
 
@@ -732,7 +734,7 @@ pub async fn refresh_entry(ctx: &ServerCtx, qname: &str, qtype: QueryType) {
     if let Some(pool) = crate::system_dns::match_forwarding_rule(qname, &ctx.forwarding_rules) {
         let mut buf = BytePacketBuffer::new();
         if query.write(&mut buf).is_ok() {
-            if let Ok(wire) = forward_with_failover_raw(
+            if let Ok((wire, _)) = forward_with_failover_raw(
                 buf.filled(),
                 pool,
                 &ctx.srtt,
@@ -759,7 +761,7 @@ pub async fn refresh_entry(ctx: &ServerCtx, qname: &str, qtype: QueryType) {
         let mut buf = BytePacketBuffer::new();
         if query.write(&mut buf).is_ok() {
             let pool = ctx.upstream_pool.lock().unwrap().clone();
-            if let Ok(wire) = forward_with_failover_raw(
+            if let Ok((wire, _)) = forward_with_failover_raw(
                 buf.filled(),
                 &pool,
                 &ctx.srtt,
@@ -3723,6 +3725,32 @@ mod tests {
             vec![],
         ));
         Arc::new(ctx)
+    }
+
+    /// A silent first upstream stays first, so the stats must name the
+    /// upstream that answered, not the one asked first.
+    #[tokio::test]
+    async fn stats_count_the_transport_of_the_upstream_that_answered() {
+        let answer =
+            crate::testutil::a_record_response("hedge.test", Ipv4Addr::new(10, 0, 0, 1), 60);
+        let mut buf = BytePacketBuffer::new();
+        answer.write(&mut buf).unwrap();
+        let tcp = crate::testutil::udp_tcp_upstream_raw(vec![], buf.filled().to_vec()).await;
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.hedge_delay = Duration::from_millis(50);
+        ctx.upstream_pool = Mutex::new(UpstreamPool::new(
+            vec![Upstream::Udp(crate::testutil::blackhole_upstream())],
+            vec![Upstream::Tcp(tcp)],
+        ));
+        let ctx = Arc::new(ctx);
+
+        let (resp, _) = resolve_in_test(&ctx, "hedge.test", QueryType::A).await;
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+        let snap = ctx.stats.lock().unwrap().snapshot();
+        assert_eq!(
+            (snap.upstream_transport_udp, snap.upstream_transport_tcp),
+            (0, 1)
+        );
     }
 
     /// Amazon-style NODATA behind a multi-link CNAME chain: the upstream
