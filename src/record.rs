@@ -6,7 +6,6 @@ use crate::question::QueryType;
 use crate::Result;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[allow(dead_code)]
 pub enum DnsRecord {
     UNKNOWN {
         domain: String,
@@ -105,20 +104,28 @@ pub enum DnsRecord {
 
 impl DnsRecord {
     pub fn domain(&self) -> &str {
+        self.domain_and_ttl().0
+    }
+
+    pub fn ttl(&self) -> u32 {
+        self.domain_and_ttl().1
+    }
+
+    fn domain_and_ttl(&self) -> (&str, u32) {
         match self {
-            DnsRecord::A { domain, .. }
-            | DnsRecord::NS { domain, .. }
-            | DnsRecord::CNAME { domain, .. }
-            | DnsRecord::PTR { domain, .. }
-            | DnsRecord::MX { domain, .. }
-            | DnsRecord::AAAA { domain, .. }
-            | DnsRecord::DNSKEY { domain, .. }
-            | DnsRecord::DS { domain, .. }
-            | DnsRecord::RRSIG { domain, .. }
-            | DnsRecord::NSEC { domain, .. }
-            | DnsRecord::NSEC3 { domain, .. }
-            | DnsRecord::SOA { domain, .. }
-            | DnsRecord::UNKNOWN { domain, .. } => domain,
+            DnsRecord::A { domain, ttl, .. }
+            | DnsRecord::NS { domain, ttl, .. }
+            | DnsRecord::CNAME { domain, ttl, .. }
+            | DnsRecord::PTR { domain, ttl, .. }
+            | DnsRecord::MX { domain, ttl, .. }
+            | DnsRecord::AAAA { domain, ttl, .. }
+            | DnsRecord::DNSKEY { domain, ttl, .. }
+            | DnsRecord::DS { domain, ttl, .. }
+            | DnsRecord::RRSIG { domain, ttl, .. }
+            | DnsRecord::NSEC { domain, ttl, .. }
+            | DnsRecord::NSEC3 { domain, ttl, .. }
+            | DnsRecord::SOA { domain, ttl, .. }
+            | DnsRecord::UNKNOWN { domain, ttl, .. } => (domain, *ttl),
         }
     }
 
@@ -140,32 +147,13 @@ impl DnsRecord {
         }
     }
 
-    pub fn ttl(&self) -> u32 {
-        match self {
-            DnsRecord::A { ttl, .. }
-            | DnsRecord::NS { ttl, .. }
-            | DnsRecord::CNAME { ttl, .. }
-            | DnsRecord::PTR { ttl, .. }
-            | DnsRecord::MX { ttl, .. }
-            | DnsRecord::AAAA { ttl, .. }
-            | DnsRecord::DNSKEY { ttl, .. }
-            | DnsRecord::DS { ttl, .. }
-            | DnsRecord::RRSIG { ttl, .. }
-            | DnsRecord::NSEC { ttl, .. }
-            | DnsRecord::NSEC3 { ttl, .. }
-            | DnsRecord::SOA { ttl, .. }
-            | DnsRecord::UNKNOWN { ttl, .. } => *ttl,
-        }
-    }
-
     pub fn heap_bytes(&self) -> usize {
         match self {
-            DnsRecord::A { domain, .. } => domain.capacity(),
+            DnsRecord::A { domain, .. } | DnsRecord::AAAA { domain, .. } => domain.capacity(),
             DnsRecord::NS { domain, host, .. }
             | DnsRecord::CNAME { domain, host, .. }
-            | DnsRecord::PTR { domain, host, .. } => domain.capacity() + host.capacity(),
-            DnsRecord::MX { domain, host, .. } => domain.capacity() + host.capacity(),
-            DnsRecord::AAAA { domain, .. } => domain.capacity(),
+            | DnsRecord::PTR { domain, host, .. }
+            | DnsRecord::MX { domain, host, .. } => domain.capacity() + host.capacity(),
             DnsRecord::DNSKEY {
                 domain, public_key, ..
             } => domain.capacity() + public_key.capacity(),
@@ -204,24 +192,6 @@ impl DnsRecord {
         }
     }
 
-    pub fn set_ttl(&mut self, new_ttl: u32) {
-        match self {
-            DnsRecord::A { ttl, .. }
-            | DnsRecord::NS { ttl, .. }
-            | DnsRecord::CNAME { ttl, .. }
-            | DnsRecord::PTR { ttl, .. }
-            | DnsRecord::MX { ttl, .. }
-            | DnsRecord::AAAA { ttl, .. }
-            | DnsRecord::DNSKEY { ttl, .. }
-            | DnsRecord::DS { ttl, .. }
-            | DnsRecord::RRSIG { ttl, .. }
-            | DnsRecord::NSEC { ttl, .. }
-            | DnsRecord::NSEC3 { ttl, .. }
-            | DnsRecord::SOA { ttl, .. }
-            | DnsRecord::UNKNOWN { ttl, .. } => *ttl = new_ttl,
-        }
-    }
-
     pub(crate) fn set_domain(&mut self, new_domain: String) {
         match self {
             DnsRecord::A { domain, .. }
@@ -241,79 +211,44 @@ impl DnsRecord {
     }
 
     pub fn read(buffer: &mut BytePacketBuffer) -> Result<DnsRecord> {
-        let mut domain = String::with_capacity(64);
-        buffer.read_qname(&mut domain)?;
-
+        let domain = read_name(buffer)?;
         let qtype_num = buffer.read_u16()?;
         let qtype = QueryType::from_num(qtype_num);
         let _ = buffer.read_u16()?; // class
         let ttl = buffer.read_u32()?;
         let data_len = buffer.read_u16()?;
-        let rdata_start = buffer.pos();
+        let rdata_end = buffer.pos() + data_len as usize;
 
         match qtype {
             QueryType::A => {
-                let raw_addr = buffer.read_u32()?;
-                let addr = Ipv4Addr::new(
-                    ((raw_addr >> 24) & 0xFF) as u8,
-                    ((raw_addr >> 16) & 0xFF) as u8,
-                    ((raw_addr >> 8) & 0xFF) as u8,
-                    (raw_addr & 0xFF) as u8,
-                );
+                let addr = Ipv4Addr::from(buffer.read_u32()?);
                 Ok(DnsRecord::A { domain, addr, ttl })
             }
             QueryType::AAAA => {
-                let raw_addr1 = buffer.read_u32()?;
-                let raw_addr2 = buffer.read_u32()?;
-                let raw_addr3 = buffer.read_u32()?;
-                let raw_addr4 = buffer.read_u32()?;
-                let addr = Ipv6Addr::new(
-                    ((raw_addr1 >> 16) & 0xFFFF) as u16,
-                    (raw_addr1 & 0xFFFF) as u16,
-                    ((raw_addr2 >> 16) & 0xFFFF) as u16,
-                    (raw_addr2 & 0xFFFF) as u16,
-                    ((raw_addr3 >> 16) & 0xFFFF) as u16,
-                    (raw_addr3 & 0xFFFF) as u16,
-                    ((raw_addr4 >> 16) & 0xFFFF) as u16,
-                    (raw_addr4 & 0xFFFF) as u16,
-                );
+                let octets: [u8; 16] = buffer.get_range(buffer.pos(), 16)?.try_into()?;
+                buffer.step(16)?;
+                let addr = Ipv6Addr::from(octets);
                 Ok(DnsRecord::AAAA { domain, addr, ttl })
             }
             QueryType::NS => {
-                let mut ns = String::with_capacity(64);
-                buffer.read_qname(&mut ns)?;
-                Ok(DnsRecord::NS {
-                    domain,
-                    host: ns,
-                    ttl,
-                })
+                let host = read_name(buffer)?;
+                Ok(DnsRecord::NS { domain, host, ttl })
             }
             QueryType::CNAME => {
-                let mut cname = String::with_capacity(64);
-                buffer.read_qname(&mut cname)?;
-                Ok(DnsRecord::CNAME {
-                    domain,
-                    host: cname,
-                    ttl,
-                })
+                let host = read_name(buffer)?;
+                Ok(DnsRecord::CNAME { domain, host, ttl })
             }
             QueryType::PTR => {
-                let mut ptr = String::with_capacity(64);
-                buffer.read_qname(&mut ptr)?;
-                Ok(DnsRecord::PTR {
-                    domain,
-                    host: ptr,
-                    ttl,
-                })
+                let host = read_name(buffer)?;
+                Ok(DnsRecord::PTR { domain, host, ttl })
             }
             QueryType::MX => {
                 let priority = buffer.read_u16()?;
-                let mut mx = String::with_capacity(64);
-                buffer.read_qname(&mut mx)?;
+                let host = read_name(buffer)?;
                 Ok(DnsRecord::MX {
                     domain,
                     priority,
-                    host: mx,
+                    host,
                     ttl,
                 })
             }
@@ -321,12 +256,7 @@ impl DnsRecord {
                 let flags = buffer.read_u16()?;
                 let protocol = buffer.read()?;
                 let algorithm = buffer.read()?;
-                let rdata_end = rdata_start + data_len as usize;
-                let key_len = rdata_end
-                    .checked_sub(buffer.pos())
-                    .ok_or("DNSKEY data_len too short for fixed fields")?;
-                let public_key = buffer.get_range(buffer.pos(), key_len)?.to_vec();
-                buffer.step(key_len)?;
+                let public_key = buffer.read_to(rdata_end)?;
                 Ok(DnsRecord::DNSKEY {
                     domain,
                     flags,
@@ -340,12 +270,7 @@ impl DnsRecord {
                 let key_tag = buffer.read_u16()?;
                 let algorithm = buffer.read()?;
                 let digest_type = buffer.read()?;
-                let rdata_end = rdata_start + data_len as usize;
-                let digest_len = rdata_end
-                    .checked_sub(buffer.pos())
-                    .ok_or("DS data_len too short for fixed fields")?;
-                let digest = buffer.get_range(buffer.pos(), digest_len)?.to_vec();
-                buffer.step(digest_len)?;
+                let digest = buffer.read_to(rdata_end)?;
                 Ok(DnsRecord::DS {
                     domain,
                     key_tag,
@@ -363,14 +288,8 @@ impl DnsRecord {
                 let expiration = buffer.read_u32()?;
                 let inception = buffer.read_u32()?;
                 let key_tag = buffer.read_u16()?;
-                let mut signer_name = String::with_capacity(64);
-                buffer.read_qname(&mut signer_name)?;
-                let rdata_end = rdata_start + data_len as usize;
-                let sig_len = rdata_end
-                    .checked_sub(buffer.pos())
-                    .ok_or("RRSIG data_len too short for fixed fields + signer_name")?;
-                let signature = buffer.get_range(buffer.pos(), sig_len)?.to_vec();
-                buffer.step(sig_len)?;
+                let signer_name = read_name(buffer)?;
+                let signature = buffer.read_to(rdata_end)?;
                 Ok(DnsRecord::RRSIG {
                     domain,
                     type_covered,
@@ -386,14 +305,8 @@ impl DnsRecord {
                 })
             }
             QueryType::NSEC => {
-                let rdata_end = rdata_start + data_len as usize;
-                let mut next_domain = String::with_capacity(64);
-                buffer.read_qname(&mut next_domain)?;
-                let bitmap_len = rdata_end
-                    .checked_sub(buffer.pos())
-                    .ok_or("NSEC data_len too short for type bitmap")?;
-                let type_bitmap = buffer.get_range(buffer.pos(), bitmap_len)?.to_vec();
-                buffer.step(bitmap_len)?;
+                let next_domain = read_name(buffer)?;
+                let type_bitmap = buffer.read_to(rdata_end)?;
                 Ok(DnsRecord::NSEC {
                     domain,
                     next_domain,
@@ -402,21 +315,14 @@ impl DnsRecord {
                 })
             }
             QueryType::NSEC3 => {
-                let rdata_end = rdata_start + data_len as usize;
                 let hash_algorithm = buffer.read()?;
                 let flags = buffer.read()?;
                 let iterations = buffer.read_u16()?;
-                let salt_length = buffer.read()? as usize;
-                let salt = buffer.get_range(buffer.pos(), salt_length)?.to_vec();
-                buffer.step(salt_length)?;
-                let hash_length = buffer.read()? as usize;
-                let next_hashed_owner = buffer.get_range(buffer.pos(), hash_length)?.to_vec();
-                buffer.step(hash_length)?;
-                let bitmap_len = rdata_end
-                    .checked_sub(buffer.pos())
-                    .ok_or("NSEC3 data_len too short for type bitmap")?;
-                let type_bitmap = buffer.get_range(buffer.pos(), bitmap_len)?.to_vec();
-                buffer.step(bitmap_len)?;
+                let salt_len = buffer.read()? as usize;
+                let salt = buffer.read_to(buffer.pos() + salt_len)?;
+                let hash_len = buffer.read()? as usize;
+                let next_hashed_owner = buffer.read_to(buffer.pos() + hash_len)?;
+                let type_bitmap = buffer.read_to(rdata_end)?;
                 Ok(DnsRecord::NSEC3 {
                     domain,
                     hash_algorithm,
@@ -430,10 +336,8 @@ impl DnsRecord {
             }
             QueryType::SOA => {
                 // MNAME/RNAME compressible per RFC 1035 §3.3.13 — decompress to avoid stale pointers on re-emit.
-                let mut mname = String::with_capacity(64);
-                buffer.read_qname(&mut mname)?;
-                let mut rname = String::with_capacity(64);
-                buffer.read_qname(&mut rname)?;
+                let mname = read_name(buffer)?;
+                let rname = read_name(buffer)?;
                 let serial = buffer.read_u32()?;
                 let refresh = buffer.read_u32()?;
                 let retry = buffer.read_u32()?;
@@ -453,8 +357,7 @@ impl DnsRecord {
             }
             _ => {
                 // TXT, SRV, HTTPS, SVCB, etc. — stored as opaque bytes until parsed natively
-                let data = buffer.get_range(buffer.pos(), data_len as usize)?.to_vec();
-                buffer.step(data_len as usize)?;
+                let data = buffer.read_to(rdata_end)?;
                 Ok(DnsRecord::UNKNOWN {
                     domain,
                     qtype: qtype_num,
@@ -465,71 +368,25 @@ impl DnsRecord {
         }
     }
 
-    pub fn write(&self, buffer: &mut BytePacketBuffer) -> Result<usize> {
-        let start_pos = buffer.pos();
+    pub fn write(&self, buffer: &mut BytePacketBuffer) -> Result<()> {
+        let (domain, ttl) = self.domain_and_ttl();
+        write_header(buffer, domain, self.query_type().to_num(), ttl)?;
+        let rdlen_pos = buffer.pos();
+        buffer.write_u16(0)?;
 
         match *self {
-            DnsRecord::A {
-                ref domain,
-                ref addr,
-                ttl,
-            } => {
-                write_header(buffer, domain, QueryType::A.to_num(), ttl)?;
-                buffer.write_u16(4)?;
-                buffer.write_bytes(&addr.octets())?;
-            }
-            DnsRecord::NS {
-                ref domain,
-                ref host,
-                ttl,
-            } => {
-                write_header(buffer, domain, QueryType::NS.to_num(), ttl)?;
-                let pos = buffer.pos();
-                buffer.write_u16(0)?;
-                buffer.write_qname_compressed(host)?;
-                let size = buffer.pos() - (pos + 2);
-                buffer.set_u16(pos, size as u16)?;
-            }
-            DnsRecord::CNAME {
-                ref domain,
-                ref host,
-                ttl,
-            } => {
-                write_header(buffer, domain, QueryType::CNAME.to_num(), ttl)?;
-                let pos = buffer.pos();
-                buffer.write_u16(0)?;
-                buffer.write_qname_compressed(host)?;
-                let size = buffer.pos() - (pos + 2);
-                buffer.set_u16(pos, size as u16)?;
-            }
-            DnsRecord::PTR {
-                ref domain,
-                ref host,
-                ttl,
-            } => {
-                write_header(buffer, domain, QueryType::PTR.to_num(), ttl)?;
-                let pos = buffer.pos();
-                buffer.write_u16(0)?;
-                buffer.write_qname_compressed(host)?;
-                let size = buffer.pos() - (pos + 2);
-                buffer.set_u16(pos, size as u16)?;
-            }
+            DnsRecord::A { ref addr, .. } => buffer.write_bytes(&addr.octets())?,
+            DnsRecord::AAAA { ref addr, .. } => buffer.write_bytes(&addr.octets())?,
+            DnsRecord::NS { ref host, .. }
+            | DnsRecord::CNAME { ref host, .. }
+            | DnsRecord::PTR { ref host, .. } => buffer.write_qname_compressed(host)?,
             DnsRecord::MX {
-                ref domain,
-                priority,
-                ref host,
-                ttl,
+                priority, ref host, ..
             } => {
-                write_header(buffer, domain, QueryType::MX.to_num(), ttl)?;
-                let pos = buffer.pos();
-                buffer.write_u16(0)?;
                 buffer.write_u16(priority)?;
                 buffer.write_qname_compressed(host)?;
-                let size = buffer.pos() - (pos + 2);
-                buffer.set_u16(pos, size as u16)?;
             }
             DnsRecord::SOA {
-                ref domain,
                 ref mname,
                 ref rname,
                 serial,
@@ -537,64 +394,39 @@ impl DnsRecord {
                 retry,
                 expire,
                 minimum,
-                ttl,
+                ..
             } => {
-                write_header(buffer, domain, QueryType::SOA.to_num(), ttl)?;
-                let rdlen_pos = buffer.pos();
-                buffer.write_u16(0)?;
                 buffer.write_qname_compressed(mname)?;
                 buffer.write_qname_compressed(rname)?;
-                buffer.write_u32(serial)?;
-                buffer.write_u32(refresh)?;
-                buffer.write_u32(retry)?;
-                buffer.write_u32(expire)?;
-                buffer.write_u32(minimum)?;
-                let rdlen = buffer.pos() - (rdlen_pos + 2);
-                buffer.set_u16(rdlen_pos, rdlen as u16)?;
-            }
-            DnsRecord::AAAA {
-                ref domain,
-                ref addr,
-                ttl,
-            } => {
-                write_header(buffer, domain, QueryType::AAAA.to_num(), ttl)?;
-                buffer.write_u16(16)?;
-                for octet in &addr.segments() {
-                    buffer.write_u16(*octet)?;
+                for field in [serial, refresh, retry, expire, minimum] {
+                    buffer.write_u32(field)?;
                 }
             }
             DnsRecord::DNSKEY {
-                ref domain,
                 flags,
                 protocol,
                 algorithm,
                 ref public_key,
-                ttl,
+                ..
             } => {
-                write_header(buffer, domain, QueryType::DNSKEY.to_num(), ttl)?;
-                buffer.write_u16((4 + public_key.len()) as u16)?;
                 buffer.write_u16(flags)?;
                 buffer.write_u8(protocol)?;
                 buffer.write_u8(algorithm)?;
                 buffer.write_bytes(public_key)?;
             }
             DnsRecord::DS {
-                ref domain,
                 key_tag,
                 algorithm,
                 digest_type,
                 ref digest,
-                ttl,
+                ..
             } => {
-                write_header(buffer, domain, QueryType::DS.to_num(), ttl)?;
-                buffer.write_u16((4 + digest.len()) as u16)?;
                 buffer.write_u16(key_tag)?;
                 buffer.write_u8(algorithm)?;
                 buffer.write_u8(digest_type)?;
                 buffer.write_bytes(digest)?;
             }
             DnsRecord::RRSIG {
-                ref domain,
                 type_covered,
                 algorithm,
                 labels,
@@ -604,11 +436,8 @@ impl DnsRecord {
                 key_tag,
                 ref signer_name,
                 ref signature,
-                ttl,
+                ..
             } => {
-                write_header(buffer, domain, QueryType::RRSIG.to_num(), ttl)?;
-                let rdlen_pos = buffer.pos();
-                buffer.write_u16(0)?; // RDLENGTH placeholder
                 buffer.write_u16(type_covered)?;
                 buffer.write_u8(algorithm)?;
                 buffer.write_u8(labels)?;
@@ -619,37 +448,24 @@ impl DnsRecord {
                 // RFC 4034 §3.1.7 and §4.1.1: signer and next-domain names are never compressed.
                 buffer.write_qname(signer_name)?;
                 buffer.write_bytes(signature)?;
-                let rdlen = buffer.pos() - (rdlen_pos + 2);
-                buffer.set_u16(rdlen_pos, rdlen as u16)?;
             }
             DnsRecord::NSEC {
-                ref domain,
                 ref next_domain,
                 ref type_bitmap,
-                ttl,
+                ..
             } => {
-                write_header(buffer, domain, QueryType::NSEC.to_num(), ttl)?;
-                let rdlen_pos = buffer.pos();
-                buffer.write_u16(0)?;
                 buffer.write_qname(next_domain)?;
                 buffer.write_bytes(type_bitmap)?;
-                let rdlen = buffer.pos() - (rdlen_pos + 2);
-                buffer.set_u16(rdlen_pos, rdlen as u16)?;
             }
             DnsRecord::NSEC3 {
-                ref domain,
                 hash_algorithm,
                 flags,
                 iterations,
                 ref salt,
                 ref next_hashed_owner,
                 ref type_bitmap,
-                ttl,
+                ..
             } => {
-                write_header(buffer, domain, QueryType::NSEC3.to_num(), ttl)?;
-                let rdlen =
-                    1 + 1 + 2 + 1 + salt.len() + 1 + next_hashed_owner.len() + type_bitmap.len();
-                buffer.write_u16(rdlen as u16)?;
                 buffer.write_u8(hash_algorithm)?;
                 buffer.write_u8(flags)?;
                 buffer.write_u16(iterations)?;
@@ -659,20 +475,18 @@ impl DnsRecord {
                 buffer.write_bytes(next_hashed_owner)?;
                 buffer.write_bytes(type_bitmap)?;
             }
-            DnsRecord::UNKNOWN {
-                ref domain,
-                qtype,
-                ref data,
-                ttl,
-            } => {
-                write_header(buffer, domain, qtype, ttl)?;
-                buffer.write_u16(data.len() as u16)?;
-                buffer.write_bytes(data)?;
-            }
+            DnsRecord::UNKNOWN { ref data, .. } => buffer.write_bytes(data)?,
         }
 
-        Ok(buffer.pos() - start_pos)
+        let rdlen = buffer.pos() - (rdlen_pos + 2);
+        buffer.set_u16(rdlen_pos, rdlen as u16)
     }
+}
+
+fn read_name(buffer: &mut BytePacketBuffer) -> Result<String> {
+    let mut name = String::with_capacity(64);
+    buffer.read_qname(&mut name)?;
+    Ok(name)
 }
 
 fn write_header(buffer: &mut BytePacketBuffer, domain: &str, qtype: u16, ttl: u32) -> Result<()> {

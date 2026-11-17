@@ -156,8 +156,7 @@ impl DnsPacket {
                 let udp_payload_size = buffer.read_u16()?;
                 let ttl_field = buffer.read_u32()?; // packed flags
                 let rdlength = buffer.read_u16()?;
-                let options = buffer.get_range(buffer.pos(), rdlength as usize)?.to_vec();
-                buffer.step(rdlength as usize)?;
+                let options = buffer.read_to(buffer.pos() + rdlength as usize)?;
 
                 result.edns = Some(EdnsOpt {
                     udp_payload_size,
