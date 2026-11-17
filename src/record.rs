@@ -373,7 +373,12 @@ impl DnsRecord {
         write_header(buffer, domain, self.query_type().to_num(), ttl)?;
         let rdlen_pos = buffer.pos();
         buffer.write_u16(0)?;
+        self.write_rdata(buffer)?;
+        let rdlen = buffer.pos() - (rdlen_pos + 2);
+        buffer.set_u16(rdlen_pos, rdlen as u16)
+    }
 
+    pub fn write_rdata(&self, buffer: &mut BytePacketBuffer) -> Result<()> {
         match *self {
             DnsRecord::A { ref addr, .. } => buffer.write_bytes(&addr.octets())?,
             DnsRecord::AAAA { ref addr, .. } => buffer.write_bytes(&addr.octets())?,
@@ -477,9 +482,7 @@ impl DnsRecord {
             }
             DnsRecord::UNKNOWN { ref data, .. } => buffer.write_bytes(data)?,
         }
-
-        let rdlen = buffer.pos() - (rdlen_pos + 2);
-        buffer.set_u16(rdlen_pos, rdlen as u16)
+        Ok(())
     }
 }
 
