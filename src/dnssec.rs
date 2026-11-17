@@ -592,12 +592,8 @@ fn rrsig_verified_by(
     {
         return false;
     }
-    verify_signature(
-        *algorithm,
-        public_key,
-        &build_signed_data(rrsig, rrset),
-        signature,
-    )
+    build_signed_data(rrsig, rrset)
+        .is_some_and(|data| verify_signature(*algorithm, public_key, &data, signature))
 }
 
 /// Does the `rrset_type` RRset in `records` carry an RRSIG made by one of
@@ -907,28 +903,21 @@ pub fn verify_ds(ds: &DnsRecord, dnskey: &DnsRecord, owner: &str) -> bool {
             return false;
         }
 
-        // Compute digest: SHA-256(owner_wire + DNSKEY_RDATA)
-        let owner_wire = name_to_wire(owner);
-        let mut dnskey_rdata = Vec::with_capacity(4 + public_key.len());
-        dnskey_rdata.push((*flags >> 8) as u8);
-        dnskey_rdata.push((*flags & 0xFF) as u8);
-        dnskey_rdata.push(*protocol);
-        dnskey_rdata.push(*dk_algo);
-        dnskey_rdata.extend_from_slice(public_key);
-
-        let mut input = Vec::with_capacity(owner_wire.len() + dnskey_rdata.len());
-        input.extend(&owner_wire);
-        input.extend(&dnskey_rdata);
+        // RFC 4034 §5.1.4: the digest covers the owner name and DNSKEY RDATA, both canonical.
+        let mut input = BytePacketBuffer::canonical();
+        if input.write_qname(owner).is_err() || dnskey.write_rdata(&mut input).is_err() {
+            return false;
+        }
 
         match *digest_type {
             2 => {
                 // SHA-256
-                let computed = digest::digest(&digest::SHA256, &input);
+                let computed = digest::digest(&digest::SHA256, input.filled());
                 computed.as_ref() == digest.as_slice()
             }
             4 => {
                 // SHA-384
-                let computed = digest::digest(&digest::SHA384, &input);
+                let computed = digest::digest(&digest::SHA384, input.filled());
                 computed.as_ref() == digest.as_slice()
             }
             _ => false,
@@ -942,178 +931,57 @@ pub fn verify_ds(ds: &DnsRecord, dnskey: &DnsRecord, owner: &str) -> bool {
 
 /// Encode a DNS name in canonical wire form per RFC 4034 §6.2:
 /// uncompressed, with ASCII letters lowercased.
-///
-/// Lowercasing happens *after* escape resolution because `\065` yields
-/// `'A'`, which canonical form must convert to `'a'`.
 pub fn name_to_wire(name: &str) -> Vec<u8> {
-    let mut buf = BytePacketBuffer::new();
+    let mut buf = BytePacketBuffer::canonical();
     buf.write_qname(name)
         .expect("name_to_wire: input must parse as a valid DNS name");
-    let mut wire = buf.filled().to_vec();
-    downcase_wire_name(&mut wire, 0);
-    wire
+    buf.filled().to_vec()
 }
 
-pub fn build_signed_data(rrsig: &DnsRecord, rrset: &[&DnsRecord]) -> Vec<u8> {
-    let mut data = Vec::with_capacity(256);
-
-    if let DnsRecord::RRSIG {
-        type_covered,
-        algorithm,
-        labels,
+/// RFC 4034 §3.1.8.1: the RRSIG RDATA without its signature, then each RR of
+/// `rrset` in canonical form with the RRSIG's original TTL.
+pub fn build_signed_data(rrsig: &DnsRecord, rrset: &[&DnsRecord]) -> Option<Vec<u8>> {
+    let DnsRecord::RRSIG {
         original_ttl,
-        expiration,
-        inception,
-        key_tag,
-        signer_name,
+        signature,
         ..
     } = rrsig
-    {
-        // RRSIG RDATA (without signature)
-        data.extend(&type_covered.to_be_bytes());
-        data.push(*algorithm);
-        data.push(*labels);
-        data.extend(&original_ttl.to_be_bytes());
-        data.extend(&expiration.to_be_bytes());
-        data.extend(&inception.to_be_bytes());
-        data.extend(&key_tag.to_be_bytes());
-        data.extend(name_to_wire(signer_name));
+    else {
+        return None;
+    };
+    let mut buf = BytePacketBuffer::canonical();
+    let mut data = canonical_rdata(rrsig, &mut buf)?;
+    data.truncate(data.len() - signature.len());
 
-        // RFC 4034 §6.3 orders by RDATA alone. Sorting whole wire records
-        // orders by RDLENGTH first, which differs whenever RDATA lengths do.
-        let mut canonical: Vec<(Vec<u8>, &DnsRecord)> = rrset
-            .iter()
-            .map(|r| (record_rdata_canonical(r), *r))
-            .collect();
-        canonical.sort_by(|a, b| a.0.cmp(&b.0));
-
-        for (rdata, record) in &canonical {
-            data.extend(record_to_canonical_wire(record, *original_ttl, rdata));
-        }
+    // RFC 4034 §6.3 orders by RDATA alone. Sorting whole wire records
+    // orders by RDLENGTH first, which differs whenever RDATA lengths do.
+    let mut canonical = Vec::with_capacity(rrset.len());
+    for record in rrset {
+        canonical.push((canonical_rdata(record, &mut buf)?, *record));
     }
+    canonical.sort_by(|a, b| a.0.cmp(&b.0));
 
-    data
+    for (rdata, record) in canonical {
+        buf.seek(0).ok()?;
+        buf.write_qname(record.domain()).ok()?;
+        data.extend(buf.filled());
+        data.extend(record.query_type().to_num().to_be_bytes());
+        data.extend(1u16.to_be_bytes()); // class IN
+        data.extend(original_ttl.to_be_bytes());
+        data.extend((rdata.len() as u16).to_be_bytes());
+        data.extend(rdata);
+    }
+    Some(data)
 }
 
-fn record_to_canonical_wire(record: &DnsRecord, original_ttl: u32, rdata: &[u8]) -> Vec<u8> {
-    let mut wire = Vec::with_capacity(128);
-
-    // Owner name (lowercased, uncompressed)
-    wire.extend(name_to_wire(record.domain()));
-
-    // Type
-    wire.extend(&record.query_type().to_num().to_be_bytes());
-
-    // Class IN
-    wire.extend(&1u16.to_be_bytes());
-
-    // Original TTL (from RRSIG, not the record's current TTL)
-    wire.extend(&original_ttl.to_be_bytes());
-
-    wire.extend(&(rdata.len() as u16).to_be_bytes());
-    wire.extend(rdata);
-
-    wire
-}
-
-fn record_rdata_canonical(record: &DnsRecord) -> Vec<u8> {
-    match record {
-        DnsRecord::A { addr, .. } => addr.octets().to_vec(),
-        DnsRecord::AAAA { addr, .. } => addr.octets().to_vec(),
-        DnsRecord::NS { host, .. }
-        | DnsRecord::CNAME { host, .. }
-        | DnsRecord::PTR { host, .. } => name_to_wire(host),
-        DnsRecord::MX { priority, host, .. } => {
-            let mut rdata = Vec::with_capacity(2 + host.len() + 2);
-            rdata.extend(&priority.to_be_bytes());
-            rdata.extend(name_to_wire(host));
-            rdata
-        }
-        DnsRecord::DNSKEY {
-            flags,
-            protocol,
-            algorithm,
-            public_key,
-            ..
-        } => {
-            let mut rdata = Vec::with_capacity(4 + public_key.len());
-            rdata.extend(&flags.to_be_bytes());
-            rdata.push(*protocol);
-            rdata.push(*algorithm);
-            rdata.extend(public_key);
-            rdata
-        }
-        DnsRecord::DS {
-            key_tag,
-            algorithm,
-            digest_type,
-            digest,
-            ..
-        } => {
-            let mut rdata = Vec::with_capacity(4 + digest.len());
-            rdata.extend(&key_tag.to_be_bytes());
-            rdata.push(*algorithm);
-            rdata.push(*digest_type);
-            rdata.extend(digest);
-            rdata
-        }
-        DnsRecord::NSEC {
-            next_domain,
-            type_bitmap,
-            ..
-        } => {
-            let wire = name_to_wire(next_domain);
-            let mut rdata = Vec::with_capacity(wire.len() + type_bitmap.len());
-            rdata.extend(&wire);
-            rdata.extend(type_bitmap);
-            rdata
-        }
-        DnsRecord::NSEC3 {
-            hash_algorithm,
-            flags,
-            iterations,
-            salt,
-            next_hashed_owner,
-            type_bitmap,
-            ..
-        } => {
-            let mut rdata =
-                Vec::with_capacity(6 + salt.len() + next_hashed_owner.len() + type_bitmap.len());
-            rdata.push(*hash_algorithm);
-            rdata.push(*flags);
-            rdata.extend(&iterations.to_be_bytes());
-            rdata.push(salt.len() as u8);
-            rdata.extend(salt);
-            rdata.push(next_hashed_owner.len() as u8);
-            rdata.extend(next_hashed_owner);
-            rdata.extend(type_bitmap);
-            rdata
-        }
-        DnsRecord::SOA {
-            mname,
-            rname,
-            serial,
-            refresh,
-            retry,
-            expire,
-            minimum,
-            ..
-        } => {
-            let mname_wire = name_to_wire(mname);
-            let rname_wire = name_to_wire(rname);
-            let mut rdata = Vec::with_capacity(mname_wire.len() + rname_wire.len() + 20);
-            rdata.extend(&mname_wire);
-            rdata.extend(&rname_wire);
-            rdata.extend(&serial.to_be_bytes());
-            rdata.extend(&refresh.to_be_bytes());
-            rdata.extend(&retry.to_be_bytes());
-            rdata.extend(&expire.to_be_bytes());
-            rdata.extend(&minimum.to_be_bytes());
-            rdata
-        }
-        DnsRecord::UNKNOWN { data, .. } => canonical_unknown_rdata(record.query_type(), data),
-        DnsRecord::RRSIG { .. } => Vec::new(),
+/// Reuses `buf` so a whole RRset needs one 4 KB scratch buffer.
+fn canonical_rdata(record: &DnsRecord, buf: &mut BytePacketBuffer) -> Option<Vec<u8>> {
+    if let DnsRecord::UNKNOWN { data, .. } = record {
+        return Some(canonical_unknown_rdata(record.query_type(), data));
     }
+    buf.seek(0).ok()?;
+    record.write_rdata(buf).ok()?;
+    Some(buf.filled().to_vec())
 }
 
 // RFC 4034 §6.2: SRV and NAPTR embed a domain name that is downcased in
@@ -1985,7 +1853,7 @@ mod tests {
             signature: Vec::new(),
             ttl: 3600,
         };
-        let signed_data = build_signed_data(&rrsig, rrset);
+        let signed_data = build_signed_data(&rrsig, rrset).unwrap();
         let sig = signer.key.sign(&SystemRandom::new(), &signed_data).unwrap();
         if let DnsRecord::RRSIG { signature, .. } = &mut rrsig {
             *signature = sig.as_ref().to_vec();
@@ -2559,7 +2427,7 @@ mod tests {
         else {
             unreachable!()
         };
-        let signed_data = build_signed_data(&rrsig, &[&ds]);
+        let signed_data = build_signed_data(&rrsig, &[&ds]).unwrap();
         verify_signature(*algorithm, &b64(zsk), &signed_data, signature)
     }
 
@@ -2678,7 +2546,7 @@ mod tests {
         let rrset = [&short_high, &long_low];
         let rrsig = mk_rrsig(&zsk, "test", QueryType::TXT, &rrset);
 
-        let data = build_signed_data(&rrsig, &rrset);
+        let data = build_signed_data(&rrsig, &rrset).unwrap();
         let pos = |rdata: &[u8]| data.windows(rdata.len()).position(|w| w == rdata);
         assert!(pos(b"\x00\x04\x01a\x01a") < pos(b"\x00\x03\x02zz"));
     }

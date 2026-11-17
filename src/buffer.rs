@@ -11,6 +11,7 @@ pub struct BytePacketBuffer {
     pub buf: [u8; BUF_SIZE],
     pub pos: usize,
     overflow: bool,
+    canonical: bool,
     compression_targets: [u16; MAX_COMPRESSION_TARGETS],
     compression_target_count: usize,
 }
@@ -27,8 +28,17 @@ impl BytePacketBuffer {
             buf: [0; BUF_SIZE],
             pos: 0,
             overflow: false,
+            canonical: false,
             compression_targets: [0; MAX_COMPRESSION_TARGETS],
             compression_target_count: 0,
+        }
+    }
+
+    /// RFC 4034 §6.2 canonical form: names are written uncompressed and lowercased.
+    pub fn canonical() -> Self {
+        Self {
+            canonical: true,
+            ..Self::new()
         }
     }
 
@@ -217,6 +227,7 @@ impl BytePacketBuffer {
             return Ok(());
         }
 
+        let start = self.pos;
         let bytes = qname.as_bytes();
         let mut i = 0;
         while i < bytes.len() {
@@ -275,6 +286,10 @@ impl BytePacketBuffer {
         }
 
         self.write_u8(0)?;
+        if self.canonical {
+            // After escape resolution, so \065 lowercases too. Length bytes are below 0x40.
+            self.buf[start..self.pos].make_ascii_lowercase();
+        }
         Ok(())
     }
 
@@ -283,7 +298,7 @@ impl BytePacketBuffer {
     pub fn write_qname_compressed(&mut self, qname: &str) -> Result<()> {
         let start = self.pos;
         self.write_qname(qname)?;
-        if self.buf[start] == 0 {
+        if self.canonical || self.buf[start] == 0 {
             return Ok(());
         }
         let len = self.pos - start;
@@ -506,6 +521,15 @@ mod tests {
             &buf.filled()[17..],
             b"\xc0\x00\x04mail\x07example\x03com\x00"
         );
+    }
+
+    #[test]
+    fn canonical_write_spells_out_repeated_names_in_lowercase() {
+        let mut buf = BytePacketBuffer::canonical();
+        for name in ["Mail.Example", "mail.example"] {
+            buf.write_qname_compressed(name).unwrap();
+        }
+        assert_eq!(buf.filled(), b"\x04mail\x07example\x00".repeat(2));
     }
 
     #[test]

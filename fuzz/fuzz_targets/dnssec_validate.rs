@@ -128,7 +128,7 @@ fn build_signed_data_safe<'a>(
             if rrset.is_empty() {
                 return None;
             }
-            Some((*rrsig, build_signed_data(rrsig, &rrset)))
+            Some((*rrsig, build_signed_data(rrsig, &rrset)?))
         })
         .collect()
 }
