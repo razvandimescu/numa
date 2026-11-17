@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -283,15 +283,89 @@ struct Health {
     strikes: Vec<AtomicU32>,
     answers: Vec<Answers>,
     retesting: AtomicBool,
+    racers: Vec<usize>,
+    choice: AtomicUsize,
+    race: Mutex<Race>,
 }
 
 impl Health {
-    fn new(len: usize) -> Arc<Self> {
+    fn new(primary: &[Upstream], fallbacks: usize) -> Arc<Self> {
+        let len = primary.len() + fallbacks;
         Arc::new(Self {
             strikes: (0..len).map(|_| AtomicU32::new(0)).collect(),
             answers: (0..len).map(|_| Answers::default()).collect(),
             retesting: AtomicBool::new(false),
+            racers: racers(primary),
+            choice: AtomicUsize::new(0),
+            race: Mutex::default(),
         })
+    }
+}
+
+#[derive(Default)]
+struct Race {
+    turn: usize,
+    wins: u8,
+    losses: u8,
+    last: Option<Instant>,
+}
+
+/// UDP takes one round trip and a new DoT connection three, so a mixed group
+/// would move to plaintext. A router listed first answers the local names.
+fn racers(primary: &[Upstream]) -> Vec<usize> {
+    let Some(first) = primary.first().map(Group::of) else {
+        return Vec::new();
+    };
+    let racers: Vec<usize> = (0..primary.len())
+        .filter(|&i| Group::of(&primary[i]) == first)
+        .collect();
+    if racers.len() > 1 {
+        racers
+    } else {
+        Vec::new()
+    }
+}
+
+#[derive(PartialEq)]
+enum Group {
+    Local,
+    Plain,
+    Encrypted,
+}
+
+impl Group {
+    fn of(upstream: &Upstream) -> Self {
+        let ip = match upstream {
+            Upstream::Udp(addr) | Upstream::Tcp(addr) | Upstream::Dot { addr, .. } => {
+                Some(addr.ip())
+            }
+            Upstream::Doh { url, .. } => reqwest::Url::parse(url)
+                .ok()
+                .and_then(|url| url.host_str()?.trim_matches(['[', ']']).parse().ok()),
+            Upstream::Odoh { .. } => None,
+        };
+        if ip.is_some_and(crate::recursive::is_bogon) {
+            Self::Local
+        } else if matches!(upstream, Upstream::Udp(_) | Upstream::Tcp(_)) {
+            Self::Plain
+        } else {
+            Self::Encrypted
+        }
+    }
+}
+
+/// Two operators, so one leaving a jurisdiction can't strand numa.
+pub(crate) const DOH_FALLBACK: [&str; 2] =
+    ["https://9.9.9.9/dns-query", "https://1.1.1.1/dns-query"];
+
+pub(crate) fn companion(primary: &Upstream) -> Option<Upstream> {
+    match primary {
+        Upstream::Udp(addr) => Some(Upstream::Tcp(*addr)),
+        Upstream::Doh { url, client } if url == DOH_FALLBACK[0] => Some(Upstream::Doh {
+            url: DOH_FALLBACK[1].to_string(),
+            client: client.clone(),
+        }),
+        _ => None,
     }
 }
 
@@ -339,9 +413,12 @@ const RETEST_ONE_IN: u16 = 20;
 /// one: it can be about a single name, and staying costs one round trip.
 const FAILED_AT: u32 = 20;
 
+/// On heavy traffic, two equal upstreams would otherwise trade places every few minutes.
+const RACE_EVERY: Duration = Duration::from_secs(60);
+
 impl UpstreamPool {
     pub fn new(primary: Vec<Upstream>, fallback: Vec<Upstream>) -> Self {
-        let health = Health::new(primary.len() + fallback.len());
+        let health = Health::new(&primary, fallback.len());
         Self {
             primary,
             fallback,
@@ -360,7 +437,56 @@ impl UpstreamPool {
     }
 
     fn reset_health(&mut self) {
-        self.health = Health::new(self.primary.len() + self.fallback.len());
+        self.health = Health::new(&self.primary, self.fallback.len());
+    }
+
+    /// A racer without an open connection loses each race by its TLS handshake.
+    pub fn keepalive_targets(&self, racing: bool) -> Vec<&Upstream> {
+        let mut targets: Vec<&Upstream> = self.preferred().into_iter().collect();
+        if racing {
+            for &i in &self.health.racers {
+                let racer = self.upstream(i);
+                if !targets.contains(&racer) {
+                    targets.push(racer);
+                }
+            }
+        }
+        targets
+    }
+
+    fn challenger(&self, first: usize, draw: u16, now: Instant) -> Option<usize> {
+        let racers = &self.health.racers;
+        if !draw.is_multiple_of(RETEST_ONE_IN)
+            || !racers.contains(&first)
+            || self.retest_target(first, draw).is_some()
+        {
+            return None;
+        }
+        let mut race = self.health.race.lock().unwrap();
+        if race
+            .last
+            .is_some_and(|last| now.duration_since(last) < RACE_EVERY)
+        {
+            return None;
+        }
+        race.last = Some(now);
+        let others: Vec<usize> = racers.iter().copied().filter(|&i| i != first).collect();
+        Some(others[race.turn % others.len()])
+    }
+
+    fn record_race(&self, racer: usize, won: bool) {
+        let mut race = self.health.race.lock().unwrap();
+        if won {
+            race.wins += 1;
+        } else {
+            race.losses += 1;
+        }
+        match (race.wins, race.losses) {
+            (7, _) => self.health.choice.store(racer, Ordering::Relaxed),
+            (_, 2) => race.turn += 1,
+            _ => return,
+        }
+        (race.wins, race.losses) = (0, 0);
     }
 
     fn upstream(&self, i: usize) -> &Upstream {
@@ -385,16 +511,23 @@ impl UpstreamPool {
         self.health.strikes[i].fetch_add(1, Ordering::Relaxed);
     }
 
+    /// A failed choice keeps its list place among the failed upstreams.
     fn order(&self) -> Vec<usize> {
+        let choice = self.health.choice.load(Ordering::Relaxed);
         let mut order: Vec<usize> = (0..self.health.strikes.len()).collect();
-        order.sort_by_key(|&i| self.is_failed(i));
+        order.sort_by_key(|&i| {
+            let failed = self.is_failed(i);
+            (failed, !failed && i != choice)
+        });
         order
     }
 
-    /// When `draw` hits, a failed upstream listed before the one that answered
-    /// gets a copy of the query, so no client waits to learn that it is back.
+    /// When `draw` hits, a failed upstream listed before the answer, or any failed racer, gets a
+    /// copy of the query, so no client waits to learn that it is back.
     fn retest_target(&self, answered: usize, draw: u16) -> Option<usize> {
-        let failed: Vec<usize> = (0..answered).filter(|&i| self.is_failed(i)).collect();
+        let failed: Vec<usize> = (0..self.health.strikes.len())
+            .filter(|&i| (i < answered || self.health.racers.contains(&i)) && self.is_failed(i))
+            .collect();
         if failed.is_empty() || !draw.is_multiple_of(RETEST_ONE_IN) {
             return None;
         }
@@ -416,25 +549,19 @@ impl UpstreamPool {
     /// Replace the primaries with `new` if they differ. Returns `true` if the
     /// pool changed.
     ///
-    /// Keeps the TCP sibling in step with the primary. The sibling exists so
-    /// Forward mode survives carriers that drop outbound UDP:53, but failover
-    /// chains `fallback` *after* the primaries, so a sibling left over from the
+    /// Keeps the `companion` of the primary in step with it. Failover chains
+    /// `fallback` *after* the primaries, so a companion left over from the
     /// previous network is retried before anything reachable (#169).
     pub fn maybe_replace_primary(&mut self, new: Vec<Upstream>) -> bool {
         if self.primary == new {
             return false;
         }
-        let stale_sibling = match self.primary.first() {
-            Some(Upstream::Udp(addr)) => Some(Upstream::Tcp(*addr)),
-            _ => None,
-        };
-        if let Some(stale) = stale_sibling {
+        if let Some(stale) = self.primary.first().and_then(companion) {
             self.fallback.retain(|u| *u != stale);
         }
-        if let Some(Upstream::Udp(addr)) = new.first() {
-            let sibling = Upstream::Tcp(*addr);
-            if !self.fallback.contains(&sibling) {
-                self.fallback.push(sibling);
+        if let Some(fresh) = new.first().and_then(companion) {
+            if !self.fallback.contains(&fresh) {
+                self.fallback.push(fresh);
             }
         }
         self.primary = new;
@@ -845,7 +972,19 @@ async fn forward_in_order(
     };
     let mut open = FuturesUnordered::new();
     let mut open_since: Vec<(usize, Instant)> = Vec::new();
-    let mut queue = pool.order().into_iter();
+    let mut queue = pool.order();
+    let mut race = match queue.first() {
+        Some(&first) if track => pool
+            .challenger(first, draw, Instant::now())
+            .map(|racer| (first, racer)),
+        _ => None,
+    };
+    if let Some((_, racer)) = race {
+        queue.retain(|&i| i != racer);
+        open_since.push((racer, Instant::now()));
+        open.push(ask(racer));
+    }
+    let mut queue = queue.into_iter();
     let mut last_ask = Instant::now();
     let mut next = queue.next();
 
@@ -866,6 +1005,7 @@ async fn forward_in_order(
             else => break,
         };
         open_since.retain(|&(j, _)| j != i);
+        let raced = race.take_if(|&mut (first, racer)| i == first || i == racer);
         let upstream = pool.upstream(i);
         match result {
             Ok(resp) if is_refused(&resp) => {
@@ -878,6 +1018,9 @@ async fn forward_in_order(
             Ok(resp) => {
                 if is_usable_answer(&resp) {
                     pool.set_failed(i, false);
+                    if let Some((_, racer)) = raced {
+                        pool.record_race(racer, i == racer);
+                    }
                     // Silent for a full delay while another upstream answered:
                     // one strike, so an upstream that drops every query becomes
                     // failed and no client waits for its timeout.
@@ -1372,8 +1515,9 @@ mod tests {
 
     #[test]
     fn retest_targets_a_failed_upstream_listed_before_the_answer() {
+        // No racers: the first primary is local, the others are not.
         let pool = UpstreamPool::new(
-            vec![udp("10.0.0.1:53"), udp("10.0.0.2:53"), udp("10.0.0.3:53")],
+            vec![udp("10.0.0.1:53"), udp("8.8.8.8:53"), udp("9.9.9.9:53")],
             vec![],
         );
         pool.set_failed(0, true);
@@ -1690,6 +1834,272 @@ mod tests {
         );
 
         assert_eq!(seen.load(Ordering::SeqCst), 1);
+    }
+
+    fn doh(url: &str) -> Upstream {
+        Upstream::Doh {
+            url: url.to_string(),
+            client: default_client(),
+        }
+    }
+
+    fn record(pool: &UpstreamPool, racer: usize, races: &str) {
+        for race in races.chars() {
+            pool.record_race(racer, race == 'W');
+        }
+    }
+
+    fn results(pool: &UpstreamPool) -> (u8, u8) {
+        let race = pool.health.race.lock().unwrap();
+        (race.wins, race.losses)
+    }
+
+    #[test]
+    fn racers_are_the_primaries_in_the_group_of_the_first() {
+        for (primary, racers) in [
+            (
+                vec![
+                    doh("https://9.9.9.9/dns-query"),
+                    udp("8.8.8.8:53"),
+                    doh("https://[2606:4700::1111]/dns-query"),
+                ],
+                vec![0, 2],
+            ),
+            (
+                vec![
+                    udp("8.8.8.8:53"),
+                    udp("9.9.9.9:53"),
+                    doh("https://1.1.1.1/dns-query"),
+                ],
+                vec![0, 1],
+            ),
+            (
+                vec![
+                    udp("192.168.1.1:53"),
+                    doh("https://192.168.1.2/dns-query"),
+                    udp("9.9.9.9:53"),
+                    udp("1.1.1.1:53"),
+                ],
+                vec![0, 1],
+            ),
+            (
+                vec![udp("192.168.1.1:53"), udp("9.9.9.9:53"), udp("1.1.1.1:53")],
+                vec![],
+            ),
+        ] {
+            let label = format!("{primary:?}");
+            let pool = UpstreamPool::new(primary, vec![udp("8.8.4.4:53")]);
+            assert_eq!(pool.health.racers, racers, "{label}");
+        }
+    }
+
+    #[test]
+    fn seven_wins_before_a_second_loss_make_the_choice() {
+        let pool = UpstreamPool::new(
+            vec![udp("10.0.0.1:53"), udp("10.0.0.2:53"), udp("10.0.0.3:53")],
+            vec![],
+        );
+        record(&pool, 1, "WWWLWWW");
+        assert_eq!(pool.order(), [0, 1, 2], "6 wins");
+        record(&pool, 1, "W");
+        assert_eq!(pool.order(), [1, 0, 2], "7 wins and 1 loss");
+        record(&pool, 0, "W");
+        assert_eq!(
+            pool.order(),
+            [1, 0, 2],
+            "the new choice kept the old results"
+        );
+    }
+
+    #[test]
+    fn a_second_loss_passes_the_turn() {
+        let pool = UpstreamPool::new(
+            vec![udp("10.0.0.1:53"), udp("10.0.0.2:53"), udp("10.0.0.3:53")],
+            vec![],
+        );
+        let start = Instant::now();
+        let challenger = |n| pool.challenger(0, RETEST, start + RACE_EVERY * n);
+
+        assert_eq!(challenger(0), Some(1));
+        record(&pool, 1, "WWWWWWL");
+        assert_eq!(challenger(1), Some(1), "one loss");
+        record(&pool, 1, "L");
+        assert_eq!(challenger(2), Some(2), "the second loss");
+        record(&pool, 2, "W");
+        assert_eq!(
+            pool.order(),
+            [0, 1, 2],
+            "the wins of the last turn carried over"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_race_answers_with_the_first_reply_and_counts_only_a_usable_one() {
+        use ResultCode::*;
+        let query = make_query();
+        let reply = |rescode| to_wire(&DnsPacket::response_from(&query, rescode));
+        let answer = || to_wire(&make_response(&query));
+        let srtt = RwLock::new(SrttCache::new(true));
+
+        for ((first, first_ms), (second, second_ms), rcode, second_results) in [
+            ((answer(), 500), (reply(NXDOMAIN), 0), NXDOMAIN, (1, 0)),
+            ((answer(), 0), (reply(NXDOMAIN), 500), NOERROR, (0, 1)),
+            ((reply(REFUSED), 0), (answer(), 100), NOERROR, (0, 0)),
+            ((answer(), 300), (reply(SERVFAIL), 0), SERVFAIL, (0, 0)),
+        ] {
+            let (first, _rx) = slow_doh(first, Duration::from_millis(first_ms)).await;
+            let (second, _rx) = slow_doh(second, Duration::from_millis(second_ms)).await;
+            let pool = UpstreamPool::new(vec![first, second], vec![]);
+
+            let start = Instant::now();
+            let (resp, _, _) = forward_in_order(
+                &to_wire(&query),
+                &pool,
+                &srtt,
+                Duration::from_secs(2),
+                Duration::from_secs(1),
+                RETEST,
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(crate::wire::full_rcode(&resp), rcode as u16);
+            assert!(start.elapsed() < Duration::from_millis(400));
+            assert_eq!(results(&pool), second_results);
+        }
+    }
+
+    #[test]
+    fn a_race_waits_a_minute_after_the_last() {
+        let pool = UpstreamPool::new(vec![udp("10.0.0.1:53"), udp("10.0.0.2:53")], vec![]);
+        let start = Instant::now();
+        let at = |secs| start + Duration::from_secs(secs);
+
+        assert_eq!(pool.challenger(0, RETEST, at(0)), Some(1));
+        assert_eq!(pool.challenger(0, RETEST, at(59)), None);
+        assert_eq!(pool.challenger(0, RETEST + 1, at(60)), None, "not drawn");
+        assert_eq!(pool.challenger(0, RETEST, at(60)), Some(1));
+    }
+
+    #[test]
+    fn the_other_racers_take_turns() {
+        let pool = UpstreamPool::new(
+            vec![
+                udp("10.0.0.1:53"),
+                udp("10.0.0.2:53"),
+                udp("8.8.8.8:53"),
+                udp("10.0.0.3:53"),
+            ],
+            vec![udp("10.0.0.4:53")],
+        );
+        let start = Instant::now();
+
+        let picks: Vec<_> = (0..3)
+            .map(|n| {
+                let pick = pool.challenger(0, RETEST, start + RACE_EVERY * n);
+                record(&pool, pick.unwrap(), "LL");
+                pick
+            })
+            .collect();
+
+        assert_eq!(picks, [Some(1), Some(3), Some(1)]);
+    }
+
+    #[test]
+    fn a_failed_racer_gets_the_copy_and_no_race_starts() {
+        let pool = UpstreamPool::new(
+            vec![udp("10.0.0.1:53"), udp("10.0.0.2:53"), udp("10.0.0.3:53")],
+            vec![],
+        );
+        pool.set_failed(2, true);
+
+        assert_eq!(
+            pool.retest_target(0, RETEST),
+            Some(2),
+            "a racer listed after the answer"
+        );
+        assert_eq!(pool.challenger(0, RETEST, Instant::now()), None);
+    }
+
+    #[tokio::test]
+    async fn a_failed_choice_is_the_choice_again_after_a_usable_copy() {
+        let query = make_query();
+        let response = to_wire(&make_response(&query));
+        let (first, _rx) = doh_upstream(response.clone()).await;
+        let (second, _rx) = doh_upstream(response).await;
+        let pool = UpstreamPool::new(vec![first, second], vec![]);
+        record(&pool, 1, "WWWWWWW");
+        pool.set_failed(1, true);
+        assert_eq!(pool.order(), [0, 1]);
+
+        pool.clone()
+            .retest(1, to_wire(&query), Duration::from_secs(2))
+            .await;
+
+        assert_eq!(pool.order(), [1, 0]);
+    }
+
+    #[tokio::test]
+    async fn without_srtt_no_race_starts() {
+        let query = make_query();
+        let response = to_wire(&make_response(&query));
+        let (first, _rx) = slow_doh(response.clone(), Duration::from_millis(100)).await;
+        let (second, mut second_rx) = doh_upstream(response).await;
+        let pool = UpstreamPool::new(vec![first, second], vec![]);
+        let srtt = RwLock::new(SrttCache::new(false));
+
+        forward_in_order(
+            &to_wire(&query),
+            &pool,
+            &srtt,
+            Duration::from_secs(2),
+            Duration::from_secs(1),
+            RETEST,
+        )
+        .await
+        .unwrap();
+
+        assert!(second_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn each_racer_gets_the_keepalive_and_a_fallback_none() {
+        let pool = UpstreamPool::new(
+            vec![
+                doh("https://9.9.9.9/dns-query"),
+                doh("https://8.8.8.8/dns-query"),
+            ],
+            vec![doh("https://1.1.1.1/dns-query")],
+        );
+        let targets = |racing| -> Vec<String> {
+            pool.keepalive_targets(racing)
+                .iter()
+                .map(|u| u.to_string())
+                .collect()
+        };
+
+        assert_eq!(
+            targets(true),
+            ["https://9.9.9.9/dns-query", "https://8.8.8.8/dns-query"]
+        );
+        assert_eq!(
+            targets(false),
+            ["https://9.9.9.9/dns-query"],
+            "no race without srtt"
+        );
+    }
+
+    #[test]
+    fn a_new_list_drops_the_choice_and_the_results() {
+        let list = || vec![udp("10.0.0.1:53"), udp("10.0.0.2:53"), udp("10.0.0.3:53")];
+        let mut pool = UpstreamPool::new(list(), vec![]);
+        record(&pool, 1, "WWWWWWW");
+        record(&pool, 0, "WWW");
+        assert_eq!(pool.order(), [1, 0, 2]);
+
+        pool.set_primary(list());
+        assert_eq!(pool.order(), [0, 1, 2]);
+        assert_eq!(results(&pool), (0, 0));
     }
 
     #[tokio::test]
@@ -2182,37 +2592,28 @@ mod tests {
         );
     }
 
-    // The built-in DoH set spans two operators, so the rescan adopts all of it
-    // and strips the TCP sibling the previous network left behind.
     #[test]
-    fn maybe_replace_primary_adopts_the_whole_set() {
-        let mut pool = UpstreamPool::new(
-            vec![Upstream::Udp("192.168.1.1:53".parse().unwrap())],
-            vec![Upstream::Tcp("192.168.1.1:53".parse().unwrap())],
-        );
-        let doh = |url: &str| Upstream::Doh {
-            url: url.to_string(),
-            client: crate::forward::default_client(),
-        };
-        let set = vec![
-            doh("https://9.9.9.9/dns-query"),
-            doh("https://1.1.1.1/dns-query"),
-        ];
-        assert!(pool.maybe_replace_primary(set.clone()));
-        assert_eq!(pool.primary, set);
-        assert!(pool.fallback.is_empty());
-        assert!(!pool.maybe_replace_primary(set), "already on the set");
+    fn maybe_replace_primary_brings_cloudflare_as_the_fallback_of_quad9() {
+        let router = "192.168.1.1:53".parse().unwrap();
+        let mut pool = UpstreamPool::new(vec![Upstream::Udp(router)], vec![Upstream::Tcp(router)]);
+        let quad9 = vec![doh(DOH_FALLBACK[0])];
+
+        assert!(pool.maybe_replace_primary(quad9.clone()));
+        assert_eq!(pool.primary, quad9);
+        assert_eq!(pool.fallback, [doh(DOH_FALLBACK[1])]);
+        assert!(!pool.maybe_replace_primary(quad9), "already on the pair");
+
+        assert!(pool.maybe_update_primary("192.168.1.1", 53));
+        assert_eq!(pool.fallback, [Upstream::Tcp(router)]);
     }
 
-    // Failover keeps list order, so the second operator in the built-in set
-    // sees no queries while the first answers.
     #[tokio::test]
-    async fn second_doh_primary_idle_while_first_answers() {
+    async fn a_fallback_stays_idle_while_the_primary_answers() {
         let query = make_query();
         let response = to_wire(&make_response(&query));
         let (first, mut first_rx) = doh_upstream(response.clone()).await;
         let (second, mut second_rx) = doh_upstream(response).await;
-        let pool = UpstreamPool::new(vec![first, second], vec![]);
+        let pool = UpstreamPool::new(vec![first], vec![second]);
         let srtt = RwLock::new(SrttCache::new(true));
 
         forward_with_failover_raw(

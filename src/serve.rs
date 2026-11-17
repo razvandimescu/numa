@@ -22,7 +22,8 @@ use crate::cache::DnsCache;
 use crate::config::{build_zone_map, ConfigLoad};
 use crate::ctx::{handle_query, PipelineResolver, ServerCtx};
 use crate::forward::{
-    build_https_client_with_resolver, parse_upstream_list, Upstream, UpstreamPool,
+    build_https_client_with_resolver, companion, parse_upstream_list, Upstream, UpstreamPool,
+    DOH_FALLBACK,
 };
 use crate::odoh::OdohConfigCache;
 use crate::override_store::OverrideStore;
@@ -32,20 +33,14 @@ use crate::stats::{ServerStats, Transport};
 use crate::system_dns::discover_system_dns;
 use crate::udp_listener::UdpListener;
 
-// Two operators, so one leaving a jurisdiction can't strand numa. Failover
-// keeps list order, so Cloudflare only sees a query while Quad9 is failed, or
-// has left it unanswered for `hedge_ms`.
-const DOH_FALLBACK: [&str; 2] = ["https://9.9.9.9/dns-query", "https://1.1.1.1/dns-query"];
 const BLOCKLIST_RETRY_SECS: u64 = 3600;
 
+/// Quad9 alone: `companion` brings Cloudflare as its fallback.
 fn doh_fallback(client: reqwest::Client) -> Vec<Upstream> {
-    DOH_FALLBACK
-        .iter()
-        .map(|url| Upstream::Doh {
-            url: url.to_string(),
-            client: client.clone(),
-        })
-        .collect()
+    vec![Upstream::Doh {
+        url: DOH_FALLBACK[0].to_string(),
+        client,
+    }]
 }
 
 /// Boot the DNS server and run until the UDP listener errors out.
@@ -717,7 +712,9 @@ async fn resolve_upstream_pool(
             } else {
                 log::warn!("recursive probe failed — falling back to Quad9/Cloudflare DoH");
                 let client = build_https_client_with_resolver(1, Some(bootstrap_resolver.clone()));
-                let pool = UpstreamPool::new(doh_fallback(client), vec![]);
+                let primary = doh_fallback(client);
+                let fallback = primary.iter().filter_map(companion).collect();
+                let pool = UpstreamPool::new(primary, fallback);
                 let label = pool.label();
                 (crate::config::UpstreamMode::Forward, false, pool, label)
             }
@@ -736,7 +733,7 @@ async fn resolve_upstream_pool(
                     Some(detected) => vec![detected],
                     None => {
                         info!("could not detect system DNS, falling back to Quad9/Cloudflare DoH");
-                        DOH_FALLBACK.map(String::from).to_vec()
+                        vec![DOH_FALLBACK[0].to_string()]
                     }
                 }
             } else {
@@ -757,23 +754,22 @@ async fn resolve_upstream_pool(
             // Pair every UDP primary with a TCP sibling in fallback so
             // Forward mode survives carriers that drop outbound UDP:53
             // for amplification mitigation (BCP 38).
+            // An auto-detected or built-in primary brings its `companion`, as on a rescan.
+            let auto = config.upstream.address.is_empty();
             for u in &primary {
-                if let crate::forward::Upstream::Udp(addr) = u {
-                    let tcp = crate::forward::Upstream::Tcp(*addr);
-                    if !fallback.contains(&tcp) {
-                        fallback.push(tcp);
+                if !auto && !matches!(u, Upstream::Udp(_)) {
+                    continue;
+                }
+                if let Some(companion) = companion(u) {
+                    if !fallback.contains(&companion) {
+                        fallback.push(companion);
                     }
                 }
             }
 
             let pool = UpstreamPool::new(primary, fallback);
             let label = pool.label();
-            (
-                crate::config::UpstreamMode::Forward,
-                config.upstream.address.is_empty(),
-                pool,
-                label,
-            )
+            (crate::config::UpstreamMode::Forward, auto, pool, label)
         }
         crate::config::UpstreamMode::Odoh => {
             let odoh = config.upstream.odoh_upstream()?;
@@ -1057,9 +1053,9 @@ async fn doh_keepalive_loop(ctx: Arc<ServerCtx>) {
     loop {
         interval.tick().await;
         let pool = ctx.upstream_pool.lock().unwrap().clone();
-        if let Some(upstream) = pool.preferred() {
-            crate::forward::keepalive_doh(upstream).await;
-        }
+        let racing = ctx.srtt.read().unwrap().is_enabled();
+        let targets = pool.keepalive_targets(racing);
+        futures::future::join_all(targets.into_iter().map(crate::forward::keepalive_doh)).await;
     }
 }
 
