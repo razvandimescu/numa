@@ -23,14 +23,17 @@ jobs:
             os: ubuntu-latest
             name: numa-linux-x86_64
             cross: true
+            smoke: qemu-x86_64 -cpu qemu64
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
             name: numa-linux-aarch64
             cross: true
+            smoke: qemu-aarch64 -cpu cortex-a53
           - target: arm-unknown-linux-musleabihf
             os: ubuntu-latest
             name: numa-linux-armv6
             cross: true
+            smoke: qemu-arm -cpu arm1176
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             name: numa-windows-x86_64
@@ -57,11 +60,11 @@ jobs:
         if: matrix.cross
         run: cross build --release --target ${{ matrix.target }}
 
-      - name: Smoke-test on a baseline x86_64 CPU
-        if: matrix.target == 'x86_64-unknown-linux-musl'
+      - name: Smoke-test on the oldest supported CPU
+        if: matrix.smoke
         run: |
           sudo apt-get update && sudo apt-get install -y qemu-user
-          qemu-x86_64 -cpu qemu64 target/${{ matrix.target }}/release/numa --version
+          ${{ matrix.smoke }} target/${{ matrix.target }}/release/numa --version
 
       - name: Package (Unix)
         if: runner.os != 'Windows'
