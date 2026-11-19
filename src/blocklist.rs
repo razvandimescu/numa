@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use log::{info, warn};
@@ -9,6 +9,7 @@ use crate::domain_list::PersistedDomainList;
 pub struct BlocklistStore {
     domains: HashSet<String>,
     allow_domains: HashSet<String>, // from allowlist sources; replaced each refresh
+    allow_patterns: HashMap<String, Vec<String>>,
     allowlist: PersistedDomainList,
     manual: PersistedDomainList, // UI/API-blocked domains; survives list refresh
     enabled: bool,
@@ -138,6 +139,7 @@ impl BlocklistStore {
         BlocklistStore {
             domains: HashSet::new(),
             allow_domains: HashSet::new(),
+            allow_patterns: HashMap::new(),
             allowlist,
             manual,
             enabled: true,
@@ -156,7 +158,8 @@ impl BlocklistStore {
         // allowlist source is someone else's list, so it can't undo a manual block.
         let blocked = self.manual.find_normalized(&domain).is_some()
             || (find_in_set(&domain, &self.domains).is_some()
-                && find_in_set(&domain, &self.allow_domains).is_none());
+                && find_in_set(&domain, &self.allow_domains).is_none()
+                && self.allow_pattern(&domain).is_none());
         blocked && self.allowlist.find_normalized(&domain).is_none()
     }
 
@@ -180,6 +183,10 @@ impl BlocklistStore {
             return BlockCheckResult::allowed(matched, reason);
         }
 
+        if let Some(pattern) = self.allow_pattern(&domain) {
+            return BlockCheckResult::allowed(pattern, "pattern in allowlist source");
+        }
+
         if let Some(matched) = find_in_set(&domain, &self.domains) {
             return BlockCheckResult::blocked(matched, match_reason(matched, &domain, "blocklist"));
         }
@@ -194,8 +201,32 @@ impl BlocklistStore {
         self.last_refresh = Some(Instant::now());
     }
 
-    pub fn swap_allow_domains(&mut self, domains: HashSet<String>) {
+    pub fn swap_allow_domains(&mut self, mut domains: HashSet<String>) {
+        let mut patterns: HashMap<String, Vec<String>> = HashMap::new();
+        for pattern in domains.extract_if(|d| d.contains('*')) {
+            let key = tokens(&pattern)
+                .min_by_key(|t| patterns.get(*t).map_or(0, Vec::len))
+                .unwrap_or_default()
+                .to_string();
+            patterns.entry(key).or_default().push(pattern);
+        }
+        self.allow_patterns = patterns;
         self.allow_domains = domains;
+    }
+
+    /// Adblock `*` matches any characters, and `||` covers subdomains, so a
+    /// pattern matches the name or any of its parents.
+    fn allow_pattern(&self, domain: &str) -> Option<&str> {
+        if self.allow_patterns.is_empty() {
+            return None;
+        }
+        let names = || std::iter::successors(Some(domain), |d| d.split_once('.').map(|p| p.1));
+        tokens(domain)
+            .chain([""])
+            .filter_map(|key| self.allow_patterns.get(key))
+            .flatten()
+            .find(|p| names().any(|name| glob_matches(p, name)))
+            .map(String::as_str)
     }
 
     pub fn allow_domains_loaded(&self) -> usize {
@@ -516,6 +547,28 @@ pub(crate) fn find_in_set<'a>(domain: &'a str, set: &HashSet<String>) -> Option<
 pub(crate) fn set_heap_bytes(set: &HashSet<String>) -> usize {
     let per_slot_overhead = std::mem::size_of::<u64>() + std::mem::size_of::<String>() + 1;
     set.capacity() * per_slot_overhead + set.iter().map(|d| d.capacity()).sum::<usize>()
+}
+
+fn tokens(name: &str) -> impl Iterator<Item = &str> {
+    name.split(|c: char| !c.is_ascii_alphanumeric() && c != '*')
+        .filter(|t| t.len() > 1 && !t.contains('*'))
+}
+
+fn glob_matches(pattern: &str, name: &str) -> bool {
+    let mut parts = pattern.split('*');
+    let Some(mut rest) = parts.next().and_then(|first| name.strip_prefix(first)) else {
+        return false;
+    };
+    let Some(last) = parts.next_back() else {
+        return rest.is_empty();
+    };
+    for part in parts {
+        match rest.find(part) {
+            Some(i) => rest = &rest[i + part.len()..],
+            None => return false,
+        }
+    }
+    rest.ends_with(last)
 }
 
 fn insert_if_valid(set: &mut HashSet<String>, raw: &str) -> bool {
@@ -839,6 +892,31 @@ mod tests {
         let check = store.check("www.go.example.com");
         assert!(!check.blocked);
         assert_eq!(check.reason, "parent domain in allowlist source");
+    }
+
+    #[test]
+    fn allow_source_star_matches_any_characters() {
+        let mut store = store_with(&["example.com", "example.org"], &[]);
+        let text = "@@||t*.example.com^\n@@||*cdn.example.com^\n@@||go.example.*^\n@@||x*-*.example.com^\n@@||cdn*.example*^\n";
+        store.swap_allow_domains(parse_blocklist_counted(text, SourceKind::Allow).domains);
+        for (domain, blocked) in [
+            ("ti.example.com", false),
+            ("www.ts.example.com", false),
+            ("cdn.example.com", false),
+            ("img-cdn.example.com", false),
+            ("go.example.org", false),
+            ("x1-2.example.com", false),
+            ("cdn2.example.org", false),
+            ("x1.example.com", true),
+            ("ads.example.com", true),
+            ("example.com", true),
+        ] {
+            assert_eq!(store.is_blocked(domain), blocked, "{domain}");
+            assert_eq!(store.check(domain).blocked, blocked, "{domain}");
+        }
+        let check = store.check("ti.example.com");
+        assert_eq!(check.matched_rule.as_deref(), Some("t*.example.com"));
+        assert_eq!(check.reason, "pattern in allowlist source");
     }
 
     #[test]
