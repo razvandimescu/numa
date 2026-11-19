@@ -204,10 +204,11 @@ impl BlocklistStore {
     pub fn swap_allow_domains(&mut self, mut domains: HashSet<String>) {
         let mut patterns: HashMap<String, Vec<String>> = HashMap::new();
         for pattern in domains.extract_if(|d| d.contains('*')) {
-            patterns
-                .entry(pattern_key(&pattern).to_string())
-                .or_default()
-                .push(pattern);
+            let key = tokens(&pattern)
+                .min_by_key(|t| patterns.get(*t).map_or(0, Vec::len))
+                .unwrap_or_default()
+                .to_string();
+            patterns.entry(key).or_default().push(pattern);
         }
         self.allow_patterns = patterns;
         self.allow_domains = domains;
@@ -220,7 +221,7 @@ impl BlocklistStore {
             return None;
         }
         let names = || std::iter::successors(Some(domain), |d| d.split_once('.').map(|p| p.1));
-        names()
+        tokens(domain)
             .chain([""])
             .filter_map(|key| self.allow_patterns.get(key))
             .flatten()
@@ -548,11 +549,9 @@ pub(crate) fn set_heap_bytes(set: &HashSet<String>) -> usize {
     set.capacity() * per_slot_overhead + set.iter().map(|d| d.capacity()).sum::<usize>()
 }
 
-fn pattern_key(pattern: &str) -> &str {
-    let last = pattern.rsplit('*').next().unwrap_or_default();
-    last.strip_prefix('.')
-        .or_else(|| last.split_once('.').map(|p| p.1))
-        .unwrap_or_default()
+fn tokens(name: &str) -> impl Iterator<Item = &str> {
+    name.split(|c: char| !c.is_ascii_alphanumeric() && c != '*')
+        .filter(|t| t.len() > 1 && !t.contains('*'))
 }
 
 fn glob_matches(pattern: &str, name: &str) -> bool {
@@ -898,7 +897,7 @@ mod tests {
     #[test]
     fn allow_source_star_matches_any_characters() {
         let mut store = store_with(&["example.com", "example.org"], &[]);
-        let text = "@@||t*.example.com^\n@@||*cdn.example.com^\n@@||go.example.*^\n@@||x*-*.example.com^\n";
+        let text = "@@||t*.example.com^\n@@||*cdn.example.com^\n@@||go.example.*^\n@@||x*-*.example.com^\n@@||cdn*.example*^\n";
         store.swap_allow_domains(parse_blocklist_counted(text, SourceKind::Allow).domains);
         for (domain, blocked) in [
             ("ti.example.com", false),
@@ -907,6 +906,7 @@ mod tests {
             ("img-cdn.example.com", false),
             ("go.example.org", false),
             ("x1-2.example.com", false),
+            ("cdn2.example.org", false),
             ("x1.example.com", true),
             ("ads.example.com", true),
             ("example.com", true),
