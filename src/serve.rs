@@ -163,6 +163,9 @@ pub async fn run(load: ConfigLoad) -> crate::Result<()> {
         );
     }
 
+    let client_lookup = crate::client_lookup::ClientLookup::from_config(&config.client_lookup)
+        .map_err(|e| format!("invalid [client_lookup]: {e}"))?;
+
     let rebind_allow = crate::domain_list::PersistedDomainList::new(
         "rebind-allow.json",
         &config.server.rebind_allowlist,
@@ -233,6 +236,7 @@ pub async fn run(load: ConfigLoad) -> crate::Result<()> {
         filter_aaaa: config.server.filter_aaaa,
         allow_from,
         client_policy,
+        client_lookup,
         rebind: RwLock::new(rebind),
     });
 

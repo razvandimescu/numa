@@ -38,6 +38,8 @@ pub struct Config {
     pub forwarding: Vec<ForwardingRuleConfig>,
     #[serde(default)]
     pub client_policy: Vec<crate::client_policy::ClientPolicyConfig>,
+    #[serde(default)]
+    pub client_lookup: crate::client_lookup::ClientLookupConfig,
 }
 
 #[derive(Deserialize, Clone, Debug)]
