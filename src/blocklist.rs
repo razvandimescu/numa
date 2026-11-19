@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use log::{info, warn};
@@ -9,7 +9,7 @@ use crate::domain_list::PersistedDomainList;
 pub struct BlocklistStore {
     domains: HashSet<String>,
     allow_domains: HashSet<String>, // from allowlist sources; replaced each refresh
-    allow_patterns: Vec<String>,
+    allow_patterns: HashMap<String, Vec<String>>,
     allowlist: PersistedDomainList,
     manual: PersistedDomainList, // UI/API-blocked domains; survives list refresh
     enabled: bool,
@@ -139,7 +139,7 @@ impl BlocklistStore {
         BlocklistStore {
             domains: HashSet::new(),
             allow_domains: HashSet::new(),
-            allow_patterns: Vec::new(),
+            allow_patterns: HashMap::new(),
             allowlist,
             manual,
             enabled: true,
@@ -202,17 +202,29 @@ impl BlocklistStore {
     }
 
     pub fn swap_allow_domains(&mut self, mut domains: HashSet<String>) {
-        self.allow_patterns = domains.extract_if(|d| d.contains('*')).collect();
+        let mut patterns: HashMap<String, Vec<String>> = HashMap::new();
+        for pattern in domains.extract_if(|d| d.contains('*')) {
+            patterns
+                .entry(pattern_key(&pattern).to_string())
+                .or_default()
+                .push(pattern);
+        }
+        self.allow_patterns = patterns;
         self.allow_domains = domains;
     }
 
     /// Adblock `*` matches any characters, and `||` covers subdomains, so a
     /// pattern matches the name or any of its parents.
     fn allow_pattern(&self, domain: &str) -> Option<&str> {
-        let names = std::iter::successors(Some(domain), |d| d.split_once('.').map(|p| p.1));
-        self.allow_patterns
-            .iter()
-            .find(|p| names.clone().any(|name| glob_matches(p, name)))
+        if self.allow_patterns.is_empty() {
+            return None;
+        }
+        let names = || std::iter::successors(Some(domain), |d| d.split_once('.').map(|p| p.1));
+        names()
+            .chain([""])
+            .filter_map(|key| self.allow_patterns.get(key))
+            .flatten()
+            .find(|p| names().any(|name| glob_matches(p, name)))
             .map(String::as_str)
     }
 
@@ -536,21 +548,28 @@ pub(crate) fn set_heap_bytes(set: &HashSet<String>) -> usize {
     set.capacity() * per_slot_overhead + set.iter().map(|d| d.capacity()).sum::<usize>()
 }
 
+fn pattern_key(pattern: &str) -> &str {
+    let last = pattern.rsplit('*').next().unwrap_or_default();
+    last.strip_prefix('.')
+        .or_else(|| last.split_once('.').map(|p| p.1))
+        .unwrap_or_default()
+}
+
 fn glob_matches(pattern: &str, name: &str) -> bool {
-    let Some((first, rest)) = pattern.split_once('*') else {
-        return pattern == name;
-    };
-    let (middle, last) = rest.rsplit_once('*').unwrap_or(("", rest));
-    let Some(mut name) = name.strip_prefix(first).and_then(|n| n.strip_suffix(last)) else {
+    let mut parts = pattern.split('*');
+    let Some(mut rest) = parts.next().and_then(|first| name.strip_prefix(first)) else {
         return false;
     };
-    for part in middle.split('*') {
-        match name.find(part) {
-            Some(i) => name = &name[i + part.len()..],
+    let Some(last) = parts.next_back() else {
+        return rest.is_empty();
+    };
+    for part in parts {
+        match rest.find(part) {
+            Some(i) => rest = &rest[i + part.len()..],
             None => return false,
         }
     }
-    true
+    rest.ends_with(last)
 }
 
 fn insert_if_valid(set: &mut HashSet<String>, raw: &str) -> bool {
