@@ -1332,8 +1332,8 @@ function applyLogFilter() {
       ? ` <span class="path-tag" style="background:rgba(192,98,58,0.12);color:var(--amber-dim);" title="${t('log.stripped_title')}">${t('log.stripped_tag')}</span>`
       : '';
     return `
-    <tr title="${t('log.source_title', { src: e.src || t('log.src_unknown') })}">
-      <td>${formatTime(e.timestamp_epoch)}<br><span class="src-tag">${shortSrc(e.src)}</span></td>
+    <tr title="${t('log.source_title', { src: (e.client_name ? e.client_name + ' · ' : '') + (e.src || t('log.src_unknown')) })}">
+      <td>${formatTime(e.timestamp_epoch)}<br><span class="src-tag">${e.client_name ? h(e.client_name) : shortSrc(e.src)}</span></td>
       <td>${e.query_type}</td>
       <td class="domain-cell" title="${h(e.domain)}">${h(e.domain)}${allowBtn}</td>
       <td><span class="path-tag ${e.path}">${e.path}</span>${rebindTag}</td>

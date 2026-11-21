@@ -7,6 +7,7 @@ pub mod blocklist_cache;
 pub mod bootstrap_resolver;
 pub mod buffer;
 pub mod cache;
+pub mod client_lookup;
 pub mod client_policy;
 pub mod config;
 pub mod config_cli;
