@@ -2643,14 +2643,11 @@ mod tests {
         let srtt = RwLock::new(SrttCache::new(true));
         let wire = to_wire(&query);
         let timeout = Duration::from_millis(500);
+        let ask = || forward_in_order(&wire, &pool, &srtt, timeout, Duration::ZERO, RETEST + 1);
 
-        forward_with_failover_raw(&wire, &pool, &srtt, timeout, Duration::ZERO)
-            .await
-            .expect("second primary answers");
+        ask().await.expect("second primary answers");
         let start = Instant::now();
-        forward_with_failover_raw(&wire, &pool, &srtt, timeout, Duration::ZERO)
-            .await
-            .expect("second primary answers");
+        ask().await.expect("second primary answers");
 
         assert!(
             start.elapsed() < Duration::from_millis(200),
