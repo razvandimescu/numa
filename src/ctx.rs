@@ -906,7 +906,7 @@ fn is_special_use_domain(qname: &str) -> bool {
         return false;
     }
     // DDR (RFC 9462)
-    if qname == "_dns.resolver.arpa" || qname.ends_with("._dns.resolver.arpa") {
+    if is_resolver_arpa(qname) {
         return true;
     }
     // NAT64 (RFC 8880)
@@ -915,6 +915,10 @@ fn is_special_use_domain(qname: &str) -> bool {
     }
     // RFC 6762: .local is reserved for mDNS — never forward to upstream
     qname == "local" || qname.ends_with(".local")
+}
+
+fn is_resolver_arpa(qname: &str) -> bool {
+    qname == "resolver.arpa" || qname.ends_with(".resolver.arpa")
 }
 
 /// Family-appropriate synthesized answer for a locally-handled name (sinkhole,
@@ -1119,6 +1123,9 @@ fn special_use_response(query: &DnsPacket, qname: &str, qtype: QueryType) -> Dns
             _ => {}
         }
         resp
+    } else if is_resolver_arpa(qname) {
+        // RFC 9462 §4: NODATA tells clients there is no designated resolver
+        DnsPacket::response_from(query, ResultCode::NOERROR)
     } else {
         DnsPacket::response_from(query, ResultCode::NXDOMAIN)
     }
@@ -1703,6 +1710,31 @@ mod tests {
             "forwarding rule must take precedence over special-use NXDOMAIN"
         );
         assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+    }
+
+    #[tokio::test]
+    async fn resolver_arpa_is_answered_locally_with_nodata() {
+        let upstream_addr = crate::testutil::mock_upstream(crate::testutil::a_record_response(
+            "resolver.arpa",
+            Ipv4Addr::new(192, 0, 2, 1),
+            60,
+        ))
+        .await;
+        let ctx = crate::testutil::test_ctx().await;
+        *ctx.upstream_pool.lock().unwrap() =
+            UpstreamPool::new(vec![Upstream::Udp(upstream_addr)], vec![]);
+        let ctx = Arc::new(ctx);
+
+        for (name, qtype) in [
+            ("_dns.resolver.arpa", QueryType::SVCB),
+            ("resolver.arpa", QueryType::SOA),
+            ("foo.resolver.arpa", QueryType::A),
+        ] {
+            let (resp, path) = resolve_in_test(&ctx, name, qtype).await;
+            assert_eq!(path, QueryPath::Local, "{name} {qtype:?}");
+            assert_eq!(resp.header.rescode, ResultCode::NOERROR, "{name} {qtype:?}");
+            assert!(resp.answers.is_empty(), "{name} {qtype:?}");
+        }
     }
 
     #[tokio::test]
