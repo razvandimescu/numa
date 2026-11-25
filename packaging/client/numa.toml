@@ -8,6 +8,8 @@
 bind_addr = "0.0.0.0:53"
 api_bind_addr = "0.0.0.0"
 data_dir = "/var/lib/numa"
+# Docker Desktop hides client addresses; if UDP queries time out there:
+# allow_from = ["0.0.0.0/0", "::/0"]
 
 [upstream]
 mode = "odoh"

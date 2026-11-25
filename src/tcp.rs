@@ -113,7 +113,7 @@ pub(crate) async fn serve_connections<H, F>(
 
             if !ctx.allow_from.admits(remote_addr.ip(), local_command) {
                 // Close before any TLS handshake: no fingerprint, no cert exposure.
-                debug!("{label}: dropping {remote_addr} — not in allow_from");
+                crate::acl::log_refused(label, remote_addr.ip());
                 return;
             }
 
@@ -547,7 +547,7 @@ mod tests {
 
         let mut stream = TcpStream::connect(addr).await.unwrap();
         let pp = pp2_v4_proxy_header(
-            "203.0.113.42".parse().unwrap(),
+            "192.168.1.42".parse().unwrap(),
             "10.0.0.5".parse().unwrap(),
             54321,
             53,
