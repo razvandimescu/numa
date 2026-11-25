@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
@@ -172,6 +174,8 @@ struct QueryLogResponse {
     seq: u64,
     timestamp_epoch: f64,
     src: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    client_name: Option<String>,
     domain: String,
     query_type: String,
     path: String,
@@ -519,7 +523,7 @@ async fn query_log(
         limit: params.limit,
     };
 
-    let raw_entries: Vec<QueryLogResponse> = {
+    let mut raw_entries: Vec<QueryLogResponse> = {
         let log = ctx.query_log.lock().unwrap();
         log.query(&filter)
             .into_iter()
@@ -533,6 +537,7 @@ async fn query_log(
                     seq: e.seq,
                     timestamp_epoch: epoch,
                     src: e.src_addr.to_string(),
+                    client_name: None,
                     domain: e.domain.clone(),
                     query_type: e.query_type.as_str().to_string(),
                     path: e.path.as_str().to_string(),
@@ -545,6 +550,20 @@ async fn query_log(
             })
             .collect()
     };
+
+    if let Some(lookup) = &ctx.client_lookup {
+        let mut names: HashMap<String, Option<String>> = HashMap::new();
+        for e in &mut raw_entries {
+            if !names.contains_key(&e.src) {
+                let name = match e.src.parse::<SocketAddr>() {
+                    Ok(a) => lookup.lookup(a.ip()).await,
+                    Err(_) => None,
+                };
+                names.insert(e.src.clone(), name);
+            }
+            e.client_name = names[&e.src].clone();
+        }
+    }
 
     Json(raw_entries)
 }

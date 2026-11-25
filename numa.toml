@@ -192,6 +192,11 @@ api_port = 5380
 # block = ["reddit.com"]
 # filter_aaaa = true             # override global [server].filter_aaaa for these clients (alone makes a rule valid)
 
+# Show client hostnames in the query log: PTR lookups sent to this upstream
+# (usually your router). Display only; results cached 10 minutes.
+# [client_lookup]
+# upstream = "192.168.1.1:5353"
+
 [cache]
 max_entries = 100000
 min_ttl = 60

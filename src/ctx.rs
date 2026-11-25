@@ -91,6 +91,7 @@ pub struct ServerCtx {
     pub filter_aaaa: bool,
     pub allow_from: crate::acl::AllowFromAcl,
     pub client_policy: crate::client_policy::ClientPolicySet,
+    pub client_lookup: Option<Arc<crate::client_lookup::ClientLookup>>,
     pub rebind: RwLock<crate::rebind::RebindFilter>,
 }
 
@@ -151,9 +152,13 @@ pub async fn resolve_query(
 
     let elapsed = start.elapsed();
 
+    let src_label = match &ctx.client_lookup {
+        Some(l) if !src_addr.ip().is_loopback() => l.label(src_addr),
+        _ => src_addr.to_string(),
+    };
     info!(
         "{} | {:?} {} | {} | {} | {}ms",
-        src_addr,
+        src_label,
         qtype,
         qname,
         path.as_str(),
