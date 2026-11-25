@@ -389,8 +389,14 @@ fn resolve_local(
     if is_special_use_domain(qname)
         && crate::system_dns::match_forwarding_rule(qname, &ctx.forwarding_rules).is_none()
     {
-        // RFC 6761/8880: answer locally unless a forwarding rule covers this zone.
-        let resp = special_use_response(query, qname, qtype);
+        // RFC 6761: answer locally unless a forwarding rule covers this zone.
+        // RFC 9462 §4: NODATA tells clients there is no designated resolver.
+        let rcode = if is_resolver_arpa(qname) {
+            ResultCode::NOERROR
+        } else {
+            ResultCode::NXDOMAIN
+        };
+        let resp = DnsPacket::response_from(query, rcode);
         return Some((resp, QueryPath::Local, DnssecStatus::Indeterminate));
     }
     let mut policy_allow = false;
@@ -909,10 +915,6 @@ fn is_special_use_domain(qname: &str) -> bool {
     if is_resolver_arpa(qname) {
         return true;
     }
-    // NAT64 (RFC 8880)
-    if qname == "ipv4only.arpa" {
-        return true;
-    }
     // RFC 6762: .local is reserved for mDNS — never forward to upstream
     qname == "local" || qname.ends_with(".local")
 }
@@ -1091,43 +1093,6 @@ fn log_coalesced_outcome(
             err.unwrap_or("leader failed")
         ),
         _ => {}
-    }
-}
-
-fn special_use_response(query: &DnsPacket, qname: &str, qtype: QueryType) -> DnsPacket {
-    use std::net::{Ipv4Addr, Ipv6Addr};
-    if qname == "ipv4only.arpa" {
-        // RFC 8880: well-known NAT64 addresses
-        let mut resp = DnsPacket::response_from(query, ResultCode::NOERROR);
-        let domain = qname.to_string();
-        match qtype {
-            QueryType::A => {
-                resp.answers.push(DnsRecord::A {
-                    domain: domain.clone(),
-                    addr: Ipv4Addr::new(192, 0, 0, 170),
-                    ttl: 300,
-                });
-                resp.answers.push(DnsRecord::A {
-                    domain,
-                    addr: Ipv4Addr::new(192, 0, 0, 171),
-                    ttl: 300,
-                });
-            }
-            QueryType::AAAA => {
-                resp.answers.push(DnsRecord::AAAA {
-                    domain,
-                    addr: Ipv6Addr::new(0x0064, 0xff9b, 0, 0, 0, 0, 0xc000, 0x00aa),
-                    ttl: 300,
-                });
-            }
-            _ => {}
-        }
-        resp
-    } else if is_resolver_arpa(qname) {
-        // RFC 9462 §4: NODATA tells clients there is no designated resolver
-        DnsPacket::response_from(query, ResultCode::NOERROR)
-    } else {
-        DnsPacket::response_from(query, ResultCode::NXDOMAIN)
     }
 }
 
@@ -1735,6 +1700,30 @@ mod tests {
             assert_eq!(resp.header.rescode, ResultCode::NOERROR, "{name} {qtype:?}");
             assert!(resp.answers.is_empty(), "{name} {qtype:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn ipv4only_arpa_is_answered_by_the_upstream_dns64() {
+        let synthesized = "2001:db8:64::c000:aa".parse().unwrap();
+        let upstream_addr = crate::testutil::mock_upstream(crate::testutil::aaaa_record_response(
+            "ipv4only.arpa",
+            synthesized,
+            60,
+        ))
+        .await;
+        let ctx = crate::testutil::test_ctx().await;
+        *ctx.upstream_pool.lock().unwrap() =
+            UpstreamPool::new(vec![Upstream::Udp(upstream_addr)], vec![]);
+        let ctx = Arc::new(ctx);
+
+        let (resp, path) = resolve_in_test(&ctx, "ipv4only.arpa", QueryType::AAAA).await;
+
+        assert_eq!(path, QueryPath::Upstream);
+        assert!(
+            matches!(resp.answers.as_slice(), [DnsRecord::AAAA { addr, .. }] if *addr == synthesized),
+            "got {:?}",
+            resp.answers
+        );
     }
 
     #[tokio::test]
