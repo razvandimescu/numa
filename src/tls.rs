@@ -50,6 +50,11 @@ pub const CA_COMMON_NAME: &str = "Numa Local CA";
 /// Filename of the CA certificate inside the data dir.
 pub const CA_FILE_NAME: &str = "ca.pem";
 
+/// HTTP/1.1 stays for clients that offer only it, such as browsers opening a WebSocket.
+pub(crate) fn proxy_alpn() -> Vec<Vec<u8>> {
+    vec![b"h2".to_vec(), b"http/1.1".to_vec()]
+}
+
 /// Collect all service + LAN peer names and regenerate the TLS cert.
 pub fn regenerate_tls(ctx: &ServerCtx) {
     let tls = match &ctx.tls_config {
@@ -65,7 +70,7 @@ pub fn regenerate_tls(ctx: &ServerCtx) {
     names.extend(ctx.lan_peers.lock().unwrap().names());
     let names: Vec<String> = names.into_iter().collect();
 
-    match build_tls_config(&ctx.proxy_tld, &names, Vec::new(), &ctx.data_dir) {
+    match build_tls_config(&ctx.proxy_tld, &names, proxy_alpn(), &ctx.data_dir) {
         Ok(new_config) => {
             tls.store(new_config);
             info!("TLS cert regenerated for {} services", names.len());
@@ -86,7 +91,7 @@ pub fn build_proxy_tls(
         return (None, false);
     }
     match (&config.proxy.cert_path, &config.proxy.key_path) {
-        (Some(cert), Some(key)) => match load_pem_tls_config(cert, key, Vec::new()) {
+        (Some(cert), Some(key)) => match load_pem_tls_config(cert, key, proxy_alpn()) {
             Ok(cfg) => {
                 info!(
                     "HTTPS proxy: serving user-provided cert from {}",
@@ -109,7 +114,7 @@ pub fn build_proxy_tls(
         }
         (None, None) => {
             let names = service_store.names();
-            match build_tls_config(&config.proxy.tld, &names, Vec::new(), data_dir) {
+            match build_tls_config(&config.proxy.tld, &names, proxy_alpn(), data_dir) {
                 Ok(cfg) => (Some(ArcSwap::from(cfg)), false),
                 Err(e) => {
                     if let Some(advisory) = try_data_dir_advisory(&e, data_dir) {
@@ -126,8 +131,8 @@ pub fn build_proxy_tls(
 
 /// Load a TLS server config from user-supplied cert + key PEM files.
 /// Shared by the HTTPS proxy and DoT listener for their respective BYO
-/// cert paths. `alpn` is advertised in the ServerHello — empty for the
-/// proxy (negotiates per-connection), `[b"dot"]` for DoT (RFC 7858 §3.2).
+/// cert paths. `alpn` is advertised in the ServerHello: `proxy_alpn()` for
+/// the proxy, `[b"dot"]` for DoT (RFC 7858 §3.2).
 pub fn load_pem_tls_config(
     cert_path: &Path,
     key_path: &Path,
@@ -194,8 +199,8 @@ pub fn try_data_dir_advisory(err: &crate::Error, data_dir: &Path) -> Option<Stri
 /// Build a TLS config with a cert covering all provided service names.
 /// Wildcards under single-label TLDs (*.numa) are rejected by browsers,
 /// so we list each service explicitly as a SAN.
-/// `alpn` is advertised in the TLS ServerHello — pass empty for the proxy
-/// (which accepts any ALPN), or `[b"dot"]` for DoT (RFC 7858 §3.2).
+/// `alpn` is advertised in the TLS ServerHello: `proxy_alpn()` for the proxy,
+/// `[b"dot"]` for DoT (RFC 7858 §3.2).
 /// `data_dir` is where the CA material is stored — taken from
 /// `[server] data_dir` in numa.toml (defaults to `crate::data_dir()`).
 pub fn build_tls_config(
@@ -472,15 +477,39 @@ mod tests {
         (cert_path, key_path)
     }
 
-    #[test]
-    fn load_pem_tls_config_round_trip() {
-        let dir = fresh_temp_dir("pem");
-        let (cert_path, key_path) = write_self_signed_pem_pair(&dir, "example.test");
+    #[tokio::test]
+    async fn proxy_tls_offers_h2_then_http1() {
+        let dir = fresh_temp_dir("proxy-alpn");
+        let mut config = Config::default();
+        let store = ServiceStore::new();
 
-        let config =
-            load_pem_tls_config(&cert_path, &key_path, Vec::new()).expect("load self-signed pair");
-        assert!(config.alpn_protocols.is_empty(), "proxy ALPN stays empty");
+        let local_ca = build_proxy_tls(&config, &store, &dir).0.unwrap();
+        let initial = local_ca.load_full();
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.data_dir = dir.clone();
+        ctx.tls_config = Some(local_ca);
+        regenerate_tls(&ctx);
+        let regenerated = ctx.tls_config.as_ref().unwrap().load_full();
 
+        let (cert_path, key_path) = write_self_signed_pem_pair(&dir, "byo.test");
+        config.proxy.cert_path = Some(cert_path);
+        config.proxy.key_path = Some(key_path);
+        let byo = build_proxy_tls(&config, &store, &dir)
+            .0
+            .unwrap()
+            .load_full();
+
+        for (path, tls) in [
+            ("local CA", initial),
+            ("regenerated", regenerated),
+            ("BYO", byo),
+        ] {
+            assert_eq!(
+                tls.alpn_protocols,
+                [b"h2".to_vec(), b"http/1.1".to_vec()],
+                "{path} proxy config"
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

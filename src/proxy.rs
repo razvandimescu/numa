@@ -10,12 +10,14 @@ use axum::routing::{any, get};
 use axum::Router;
 use http_body_util::BodyExt;
 use hyper::header::HeaderValue;
+use hyper::service::Service;
 use hyper::StatusCode;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use log::{debug, error, info, warn};
 use tokio::io::copy_bidirectional;
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, Semaphore};
+use tokio_rustls::server::TlsStream;
 use tokio_rustls::TlsAcceptor;
 
 use crate::config::ProxyProtocolConfig;
@@ -196,6 +198,10 @@ async fn serve_tls_connection(
         .layer(Extension(ConnectInfo(remote_addr)))
         .layer(Extension((slot, proxy_pool)));
 
+    if tls_stream.get_ref().1.alpn_protocol() == Some(b"h2".as_slice()) {
+        return serve_h2(tls_stream, app, remote_addr).await;
+    }
+
     let io = hyper_util::rt::TokioIo::new(tls_stream);
     let svc = hyper_util::service::TowerToHyperService::new(app.into_service());
 
@@ -210,6 +216,62 @@ async fn serve_tls_connection(
         .await
     {
         debug!("TLS connection error from {}: {}", remote_addr, e);
+    }
+}
+
+/// h2 has no `header_read_timeout`, so a connection is closed once
+/// `REQUEST_READ_TIMEOUT` passes with no request started and none in flight.
+async fn serve_h2(tls_stream: TlsStream<SlottedStream>, app: Router, remote_addr: SocketAddr) {
+    let started = Arc::new(Notify::new());
+    let in_flight = Arc::new(());
+    let svc = {
+        let started = Arc::clone(&started);
+        let tokens = Arc::downgrade(&in_flight);
+        let router = hyper_util::service::TowerToHyperService::new(app.into_service());
+        hyper::service::service_fn(move |mut req: Request<hyper::body::Incoming>| {
+            started.notify_one();
+            if let Some(host) = req
+                .uri()
+                .authority()
+                .and_then(|a| HeaderValue::from_str(a.as_str()).ok())
+            {
+                req.headers_mut().insert(hyper::header::HOST, host);
+            }
+            // The response body owns a token, so a streaming response stays in flight.
+            let token = tokens.upgrade();
+            let hold_token = move |frame| {
+                let _held = &token;
+                frame
+            };
+            let response = router.call(req);
+            async move {
+                response
+                    .await
+                    .map(|r| r.map(|body| body.map_frame(hold_token)))
+            }
+        })
+    };
+    let conn = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+        .serve_connection(hyper_util::rt::TokioIo::new(tls_stream), svc);
+    tokio::pin!(conn);
+
+    let idle = async {
+        while tokio::time::timeout(REQUEST_READ_TIMEOUT, started.notified())
+            .await
+            .is_ok()
+            || Arc::strong_count(&in_flight) > 1
+        {}
+    };
+    tokio::select! {
+        result = conn.as_mut() => {
+            if let Err(e) = result {
+                debug!("TLS connection error from {}: {}", remote_addr, e);
+            }
+        }
+        () = idle => {
+            conn.as_mut().graceful_shutdown();
+            let _ = tokio::time::timeout(REQUEST_READ_TIMEOUT, conn).await;
+        }
     }
 }
 
@@ -478,6 +540,9 @@ async fn proxy_handler(
     // Regular HTTP proxy
     let (mut parts, body) = req.into_parts();
     parts.uri = target_uri;
+    if parts.version == hyper::Version::HTTP_2 {
+        parts.version = hyper::Version::HTTP_11;
+    }
     let proxied_req = Request::from_parts(parts, body);
 
     match state.client.request(proxied_req).await {
@@ -604,7 +669,8 @@ mod tests {
         pp_from: &[&str],
         allow_from: &[&str],
     ) -> (SocketAddr, CertificateDer<'static>, Arc<ServerCtx>) {
-        let (server_tls, cert_der) = crate::testutil::self_signed_tls();
+        let (mut server_tls, cert_der) = crate::testutil::self_signed_tls();
+        server_tls.alpn_protocols = crate::tls::proxy_alpn();
         let upstream_addr = crate::testutil::blackhole_upstream();
 
         let mut ctx = crate::testutil::test_ctx().await;
@@ -640,12 +706,60 @@ mod tests {
     async fn tls_connect(
         addr: SocketAddr,
         cert_der: CertificateDer<'static>,
+        alpn: Vec<Vec<u8>>,
     ) -> tokio_rustls::client::TlsStream<tokio::net::TcpStream> {
         let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
-        tokio_rustls::TlsConnector::from(tls_client(&cert_der, vec![]))
+        tokio_rustls::TlsConnector::from(tls_client(&cert_der, alpn))
             .connect(ServerName::try_from("numa.numa").unwrap(), tcp)
             .await
             .unwrap()
+    }
+
+    async fn h2_client(
+        addr: SocketAddr,
+        cert_der: CertificateDer<'static>,
+    ) -> (
+        hyper::client::conn::http2::SendRequest<Body>,
+        tokio::task::JoinHandle<hyper::Result<()>>,
+    ) {
+        let tls = tls_connect(addr, cert_der, vec![b"h2".to_vec()]).await;
+        assert_eq!(tls.get_ref().1.alpn_protocol(), Some(&b"h2"[..]));
+        let (sender, conn) = hyper::client::conn::http2::handshake(
+            TokioExecutor::new(),
+            hyper_util::rt::TokioIo::new(tls),
+        )
+        .await
+        .unwrap();
+        (sender, tokio::spawn(conn))
+    }
+
+    /// Backend that answers with the Host header it received, pausing mid-body
+    /// for longer than the proxy's idle timeout.
+    async fn spawn_slow_host_echo_backend() -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let n = sock.read(&mut buf).await.unwrap();
+                    let head = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
+                    let host = head
+                        .lines()
+                        .find_map(|l| l.strip_prefix("host: "))
+                        .unwrap_or_default()
+                        .to_string();
+                    let (first, rest) = host.split_at(host.len() / 2);
+                    let status =
+                        format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", host.len());
+                    sock.write_all(status.as_bytes()).await.unwrap();
+                    sock.write_all(first.as_bytes()).await.unwrap();
+                    tokio::time::sleep(REQUEST_READ_TIMEOUT * 3).await;
+                    let _ = sock.write_all(rest.as_bytes()).await;
+                });
+            }
+        });
+        port
     }
 
     /// Backend that answers every request with 101 and then holds the socket.
@@ -718,19 +832,65 @@ mod tests {
     #[tokio::test]
     async fn idle_tls_client_is_dropped_after_header_timeout() {
         let (addr, cert_der, _) = spawn_doh_server_with_pp(&[], &[]).await;
-        let mut stream = tls_connect(addr, cert_der).await;
+        for alpn in [vec![], vec![b"h2".to_vec()]] {
+            let mut stream = tls_connect(addr, cert_der.clone(), alpn.clone()).await;
 
-        let read = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut [0u8; 1])).await;
+            let read =
+                tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut Vec::new()))
+                    .await;
+            assert!(read.is_ok(), "idle connection offering {alpn:?} kept open");
+        }
+    }
+
+    #[tokio::test]
+    async fn idle_h2_connection_closes_with_goaway() {
+        let (addr, cert_der, _) = spawn_doh_server_with_pp(&[], &[]).await;
+        let (_h2, conn) = h2_client(addr, cert_der).await;
+
+        let closed = tokio::time::timeout(Duration::from_secs(5), conn).await;
         assert!(
-            matches!(read, Ok(Ok(0)) | Ok(Err(_))),
-            "idle connection kept open: {read:?}"
+            matches!(closed, Ok(Ok(Ok(())))),
+            "idle h2 connection not closed cleanly: {closed:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn h2_serves_doh_and_numa_sites() {
+        let (addr, cert_der, ctx) = spawn_doh_server_with_pp(&[], &[]).await;
+        let backend_port = spawn_slow_host_echo_backend().await;
+        ctx.services
+            .lock()
+            .unwrap()
+            .insert_from_config("app", backend_port, None, Vec::new());
+        let (mut h2, _) = h2_client(addr, cert_der).await;
+
+        let mut q_buf = BytePacketBuffer::new();
+        DnsPacket::query(0xE003, "doh-test.example", QueryType::A)
+            .write(&mut q_buf)
+            .unwrap();
+        let doh = Request::post("https://numa.numa/dns-query")
+            .header(hyper::header::CONTENT_TYPE, "application/dns-message")
+            .body(Body::from(q_buf.filled().to_vec()))
+            .unwrap();
+        let resp = h2.send_request(doh).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let wire = resp.into_body().collect().await.unwrap().to_bytes();
+        let answer = DnsPacket::from_buffer(&mut BytePacketBuffer::from_bytes(&wire)).unwrap();
+        assert_eq!(answer.answers.len(), 1);
+
+        let site = Request::get("https://app.numa/")
+            .body(Body::empty())
+            .unwrap();
+        let resp = h2.send_request(site).await.unwrap();
+        let body = resp.into_body().collect().await;
+        let body = body.expect("idle timeout cut the response").to_bytes();
+        assert_eq!(body, "app.numa", "backend saw the wrong Host");
     }
 
     #[tokio::test]
     async fn stalled_doh_body_is_dropped_after_read_timeout() {
         let (addr, cert_der, _) = spawn_doh_server_with_pp(&[], &[]).await;
-        let mut stream = tls_connect(addr, cert_der).await;
+        let mut stream = tls_connect(addr, cert_der, vec![]).await;
         stream
             .write_all(
                 b"POST /dns-query HTTP/1.1\r\nHost: numa.numa\r\n\
@@ -757,7 +917,7 @@ mod tests {
 
         let mut upgraded = Vec::with_capacity(MAX_PROXY_CONNECTIONS);
         for _ in 0..MAX_PROXY_CONNECTIONS {
-            let mut stream = tls_connect(addr, cert_der.clone()).await;
+            let mut stream = tls_connect(addr, cert_der.clone(), vec![]).await;
             stream.write_all(upgrade).await.unwrap();
             let mut head = [0u8; 12];
             stream.read_exact(&mut head).await.unwrap();
@@ -765,7 +925,7 @@ mod tests {
             upgraded.push(stream);
         }
 
-        let mut extra = tls_connect(addr, cert_der.clone()).await;
+        let mut extra = tls_connect(addr, cert_der.clone(), vec![]).await;
         extra.write_all(upgrade).await.unwrap();
         let mut response = Vec::new();
         let read =
@@ -820,7 +980,7 @@ mod tests {
 
         let mut held = Vec::with_capacity(crate::tcp::MAX_CONNECTIONS);
         for _ in 0..crate::tcp::MAX_CONNECTIONS {
-            let mut stream = tls_connect(addr, cert_der.clone()).await;
+            let mut stream = tls_connect(addr, cert_der.clone(), vec![]).await;
             stream.write_all(request).await.unwrap();
             accepted.recv().await.unwrap();
             held.push(stream);
