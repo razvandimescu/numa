@@ -28,7 +28,7 @@ use crate::tls::accept_tls;
 
 pub(crate) const REQUEST_READ_TIMEOUT: Duration =
     Duration::from_secs(if cfg!(test) { 1 } else { 30 });
-// Each proxied connection also opens one to the backend.
+// Caps proxied connections and in-flight proxied requests, each holding a backend socket.
 const MAX_PROXY_CONNECTIONS: usize = if cfg!(test) { 16 } else { 128 };
 
 type HttpClient = Client<hyper_util::client::legacy::connect::HttpConnector, Body>;
@@ -146,6 +146,7 @@ async fn accept_loop_tls(
         client,
     };
     let proxy_pool = Arc::new(Semaphore::new(MAX_PROXY_CONNECTIONS));
+    let proxied_requests = Arc::new(Semaphore::new(MAX_PROXY_CONNECTIONS));
 
     serve_connections(
         listener,
@@ -159,6 +160,7 @@ async fn accept_loop_tls(
                 ctx,
                 proxy_state.clone(),
                 Arc::clone(&proxy_pool),
+                Arc::clone(&proxied_requests),
             )
         },
     )
@@ -171,6 +173,7 @@ async fn serve_tls_connection(
     ctx: Arc<ServerCtx>,
     proxy_state: ProxyState,
     proxy_pool: Arc<Semaphore>,
+    proxied_requests: Arc<Semaphore>,
 ) {
     let slot = stream.slot();
     // Load the latest TLS config on each connection (picks up new service certs)
@@ -196,7 +199,7 @@ async fn serve_tls_connection(
         .fallback(any(proxy_tls_handler))
         .with_state(proxy_state)
         .layer(Extension(ConnectInfo(remote_addr)))
-        .layer(Extension((slot, proxy_pool)));
+        .layer(Extension((slot, proxy_pool, proxied_requests)));
 
     if tls_stream.get_ref().1.alpn_protocol() == Some(b"h2".as_slice()) {
         return serve_h2(tls_stream, app, remote_addr).await;
@@ -237,18 +240,9 @@ async fn serve_h2(tls_stream: TlsStream<SlottedStream>, app: Router, remote_addr
             {
                 req.headers_mut().insert(hyper::header::HOST, host);
             }
-            // The response body owns a token, so a streaming response stays in flight.
             let token = tokens.upgrade();
-            let hold_token = move |frame| {
-                let _held = &token;
-                frame
-            };
             let response = router.call(req);
-            async move {
-                response
-                    .await
-                    .map(|r| r.map(|body| body.map_frame(hold_token)))
-            }
+            async move { response.await.map(|r| hold_while_streaming(r, token)) }
         })
     };
     let conn = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
@@ -273,6 +267,19 @@ async fn serve_h2(tls_stream: TlsStream<SlottedStream>, app: Router, remote_addr
             let _ = tokio::time::timeout(REQUEST_READ_TIMEOUT, conn).await;
         }
     }
+}
+
+/// Keeps `guard` alive until the response body has been sent or dropped.
+fn hold_while_streaming<G: Send + 'static>(
+    response: axum::response::Response,
+    guard: G,
+) -> axum::response::Response {
+    response.map(|body| {
+        Body::new(body.map_frame(move |frame| {
+            let _held = &guard;
+            frame
+        }))
+    })
 }
 
 fn error_page(title: &str, body: &str) -> String {
@@ -408,21 +415,26 @@ pub fn host_name(host: &HeaderValue) -> Option<String> {
 // Proxied traffic can hold its socket indefinitely (withheld bodies, hung
 // backends, upgrades), so it moves to its own pool and can't starve DoH. The
 // move is one-way: later DoH requests on the same keep-alive connection stay there.
+// h2 streams share one slot, so each request also holds a permit until its body ends.
 async fn proxy_tls_handler(
-    Extension((slot, pool)): Extension<(Slot, Arc<Semaphore>)>,
+    Extension((slot, pool, requests)): Extension<(Slot, Arc<Semaphore>, Arc<Semaphore>)>,
     state: State<ProxyState>,
     peer: ConnectInfo<SocketAddr>,
     req: Request,
 ) -> axum::response::Response {
-    if !slot.move_to(&pool) {
+    let permit = slot
+        .move_to(&pool)
+        .then(|| requests.try_acquire_owned().ok())
+        .flatten();
+    let Some(permit) = permit else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             [(hyper::header::CONNECTION, "close")],
-            "proxy connection limit reached",
+            "proxy limit reached",
         )
             .into_response();
-    }
-    proxy_handler(state, peer, req).await
+    };
+    hold_while_streaming(proxy_handler(state, peer, req).await, permit)
 }
 
 async fn proxy_handler(
@@ -733,6 +745,24 @@ mod tests {
         (sender, tokio::spawn(conn))
     }
 
+    async fn h2_doh_answers(h2: &mut hyper::client::conn::http2::SendRequest<Body>) -> bool {
+        let mut q_buf = BytePacketBuffer::new();
+        DnsPacket::query(0xE003, "doh-test.example", QueryType::A)
+            .write(&mut q_buf)
+            .unwrap();
+        let doh = Request::post("https://numa.numa/dns-query")
+            .header(hyper::header::CONTENT_TYPE, "application/dns-message")
+            .body(Body::from(q_buf.filled().to_vec()))
+            .unwrap();
+        let resp = h2.send_request(doh).await.unwrap();
+        if resp.status() != StatusCode::OK {
+            return false;
+        }
+        let wire = resp.into_body().collect().await.unwrap().to_bytes();
+        DnsPacket::from_buffer(&mut BytePacketBuffer::from_bytes(&wire))
+            .is_ok_and(|answer| answer.answers.len() == 1)
+    }
+
     /// Backend that answers with the Host header it received, pausing mid-body
     /// for longer than the proxy's idle timeout.
     async fn spawn_slow_host_echo_backend() -> u16 {
@@ -864,19 +894,7 @@ mod tests {
             .insert_from_config("app", backend_port, None, Vec::new());
         let (mut h2, _) = h2_client(addr, cert_der).await;
 
-        let mut q_buf = BytePacketBuffer::new();
-        DnsPacket::query(0xE003, "doh-test.example", QueryType::A)
-            .write(&mut q_buf)
-            .unwrap();
-        let doh = Request::post("https://numa.numa/dns-query")
-            .header(hyper::header::CONTENT_TYPE, "application/dns-message")
-            .body(Body::from(q_buf.filled().to_vec()))
-            .unwrap();
-        let resp = h2.send_request(doh).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let wire = resp.into_body().collect().await.unwrap().to_bytes();
-        let answer = DnsPacket::from_buffer(&mut BytePacketBuffer::from_bytes(&wire)).unwrap();
-        assert_eq!(answer.answers.len(), 1);
+        assert!(h2_doh_answers(&mut h2).await, "DoH over h2 failed");
 
         let site = Request::get("https://app.numa/")
             .body(Body::empty())
@@ -885,6 +903,30 @@ mod tests {
         let body = resp.into_body().collect().await;
         let body = body.expect("idle timeout cut the response").to_bytes();
         assert_eq!(body, "app.numa", "backend saw the wrong Host");
+    }
+
+    #[tokio::test]
+    async fn h2_streams_count_against_the_proxy_limit() {
+        let (addr, cert_der, ctx) = spawn_doh_server_with_pp(&[], &[]).await;
+        let backend_port = spawn_slow_host_echo_backend().await;
+        ctx.services
+            .lock()
+            .unwrap()
+            .insert_from_config("app", backend_port, None, Vec::new());
+        let (mut h2, _) = h2_client(addr, cert_der).await;
+        let site = || {
+            Request::get("https://app.numa/")
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        let mut streaming = Vec::with_capacity(MAX_PROXY_CONNECTIONS);
+        for _ in 0..MAX_PROXY_CONNECTIONS {
+            streaming.push(h2.send_request(site()).await.unwrap());
+        }
+        let extra = h2.send_request(site()).await.unwrap();
+        assert_eq!(extra.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(h2_doh_answers(&mut h2).await, "the proxy limit blocked DoH");
     }
 
     #[tokio::test]
