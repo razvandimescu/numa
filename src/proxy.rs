@@ -222,8 +222,7 @@ async fn serve_tls_connection(
     }
 }
 
-/// h2 has no `header_read_timeout`, so a connection is closed once
-/// `REQUEST_READ_TIMEOUT` passes with no request started and none in flight.
+/// hyper's h2 builder has no `header_read_timeout`.
 async fn serve_h2(tls_stream: TlsStream<SlottedStream>, app: Router, remote_addr: SocketAddr) {
     let started = Arc::new(Notify::new());
     let in_flight = Arc::new(());
@@ -269,7 +268,6 @@ async fn serve_h2(tls_stream: TlsStream<SlottedStream>, app: Router, remote_addr
     }
 }
 
-/// Keeps `guard` alive until the response body has been sent or dropped.
 fn hold_while_streaming<G: Send + 'static>(
     response: axum::response::Response,
     guard: G,
@@ -415,7 +413,6 @@ pub fn host_name(host: &HeaderValue) -> Option<String> {
 // Proxied traffic can hold its socket indefinitely (withheld bodies, hung
 // backends, upgrades), so it moves to its own pool and can't starve DoH. The
 // move is one-way: later DoH requests on the same keep-alive connection stay there.
-// h2 streams share one slot, so each request also holds a permit until its body ends.
 async fn proxy_tls_handler(
     Extension((slot, pool, requests)): Extension<(Slot, Arc<Semaphore>, Arc<Semaphore>)>,
     state: State<ProxyState>,
@@ -767,8 +764,6 @@ mod tests {
             .is_ok_and(|answer| answer.answers.len() == 1)
     }
 
-    /// Backend that answers with the Host header it received, pausing mid-body
-    /// for longer than the proxy's idle timeout.
     async fn spawn_slow_host_echo_backend() -> u16 {
         use futures::StreamExt;
 

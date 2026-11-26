@@ -131,8 +131,7 @@ pub fn build_proxy_tls(
 
 /// Load a TLS server config from user-supplied cert + key PEM files.
 /// Shared by the HTTPS proxy and DoT listener for their respective BYO
-/// cert paths. `alpn` is advertised in the ServerHello: `proxy_alpn()` for
-/// the proxy, `[b"dot"]` for DoT (RFC 7858 §3.2).
+/// cert paths.
 pub fn load_pem_tls_config(
     cert_path: &Path,
     key_path: &Path,
@@ -199,8 +198,6 @@ pub fn try_data_dir_advisory(err: &crate::Error, data_dir: &Path) -> Option<Stri
 /// Build a TLS config with a cert covering all provided service names.
 /// Wildcards under single-label TLDs (*.numa) are rejected by browsers,
 /// so we list each service explicitly as a SAN.
-/// `alpn` is advertised in the TLS ServerHello: `proxy_alpn()` for the proxy,
-/// `[b"dot"]` for DoT (RFC 7858 §3.2).
 /// `data_dir` is where the CA material is stored — taken from
 /// `[server] data_dir` in numa.toml (defaults to `crate::data_dir()`).
 pub fn build_tls_config(
