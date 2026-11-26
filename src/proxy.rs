@@ -745,14 +745,18 @@ mod tests {
         (sender, tokio::spawn(conn))
     }
 
-    async fn h2_doh_answers(h2: &mut hyper::client::conn::http2::SendRequest<Body>) -> bool {
+    fn doh_test_query() -> Vec<u8> {
         let mut q_buf = BytePacketBuffer::new();
-        DnsPacket::query(0xE003, "doh-test.example", QueryType::A)
+        DnsPacket::query(0xE002, "doh-test.example", QueryType::A)
             .write(&mut q_buf)
             .unwrap();
+        q_buf.filled().to_vec()
+    }
+
+    async fn h2_doh_answers(h2: &mut hyper::client::conn::http2::SendRequest<Body>) -> bool {
         let doh = Request::post("https://numa.numa/dns-query")
             .header(hyper::header::CONTENT_TYPE, "application/dns-message")
-            .body(Body::from(q_buf.filled().to_vec()))
+            .body(Body::from(doh_test_query()))
             .unwrap();
         let resp = h2.send_request(doh).await.unwrap();
         if resp.status() != StatusCode::OK {
@@ -766,30 +770,19 @@ mod tests {
     /// Backend that answers with the Host header it received, pausing mid-body
     /// for longer than the proxy's idle timeout.
     async fn spawn_slow_host_echo_backend() -> u16 {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        tokio::spawn(async move {
-            while let Ok((mut sock, _)) = listener.accept().await {
-                tokio::spawn(async move {
-                    let mut buf = [0u8; 4096];
-                    let n = sock.read(&mut buf).await.unwrap();
-                    let head = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
-                    let host = head
-                        .lines()
-                        .find_map(|l| l.strip_prefix("host: "))
-                        .unwrap_or_default()
-                        .to_string();
-                    let (first, rest) = host.split_at(host.len() / 2);
-                    let status =
-                        format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", host.len());
-                    sock.write_all(status.as_bytes()).await.unwrap();
-                    sock.write_all(first.as_bytes()).await.unwrap();
-                    tokio::time::sleep(REQUEST_READ_TIMEOUT * 3).await;
-                    let _ = sock.write_all(rest.as_bytes()).await;
-                });
-            }
+        use futures::StreamExt;
+
+        let app = Router::new().fallback(|headers: hyper::HeaderMap| async move {
+            let host = headers.get(hyper::header::HOST);
+            let mut first = host.map_or(Vec::new(), |h| h.as_bytes().to_vec());
+            let rest = first.split_off(first.len() / 2);
+            let rest = async move {
+                tokio::time::sleep(REQUEST_READ_TIMEOUT * 3).await;
+                Ok::<_, std::convert::Infallible>(rest)
+            };
+            Body::from_stream(futures::stream::iter([Ok(first)]).chain(futures::stream::once(rest)))
         });
-        port
+        crate::testutil::serve(app).await.port()
     }
 
     /// Backend that answers every request with 101 and then holds the socket.
@@ -908,7 +901,8 @@ mod tests {
     #[tokio::test]
     async fn h2_streams_count_against_the_proxy_limit() {
         let (addr, cert_der, ctx) = spawn_doh_server_with_pp(&[], &[]).await;
-        let backend_port = spawn_slow_host_echo_backend().await;
+        let stalling = Router::new().fallback(|| async { crate::testutil::body_then_stall(1) });
+        let backend_port = crate::testutil::serve(stalling).await.port();
         ctx.services
             .lock()
             .unwrap()
@@ -1003,11 +997,7 @@ mod tests {
         else {
             return false;
         };
-        let mut q_buf = BytePacketBuffer::new();
-        DnsPacket::query(0xE002, "doh-test.example", QueryType::A)
-            .write(&mut q_buf)
-            .unwrap();
-        doh_post_raw(&mut stream, q_buf.filled()).await.0 == 200
+        doh_post_raw(&mut stream, &doh_test_query()).await.0 == 200
     }
 
     /// Fill every slot with a proxied request stuck inside `proxy_handler`,
