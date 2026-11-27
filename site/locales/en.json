@@ -60,7 +60,7 @@
   "paths.errors": "Errors",
   "paths.refused": "Refused",
 
-  "log.filter_domain": "filter domain...",
+  "log.filter_domain": "domain or client...",
   "log.all_paths": "all paths",
   "log.path_recursive": "recursive",
   "log.path_coalesced": "coalesced",
@@ -96,6 +96,7 @@
   "log.dnssec_title": "DNSSEC verified",
   "log.source_title": "Source: {src}",
   "log.src_unknown": "unknown",
+  "log.client_filter_title": "Show only queries from this client",
 
   "panel.local_services": "Local Services",
   "services.desc": "Give localhost apps clean URLs. Persistent, with HTTP proxy.",
