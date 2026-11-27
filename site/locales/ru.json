@@ -49,7 +49,7 @@
   "paths.errors": "Ошибки",
   "paths.refused": "Отклонен",
 
-  "log.filter_domain": "поиск домена...",
+  "log.filter_domain": "домен или клиент...",
   "log.all_paths": "все пути",
   "log.path_recursive": "рекурсивный",
   "log.path_coalesced": "объединенный",
@@ -85,6 +85,7 @@
   "log.dnssec_title": "DNSSEC проверен",
   "log.source_title": "Источник: {src}",
   "log.src_unknown": "неизвестно",
+  "log.client_filter_title": "Показать только запросы этого клиента",
 
   "panel.local_services": "Локальные сервисы",
   "services.desc": "Чистые URL для локальных приложений. Сохраняется, работает через HTTP прокси.",

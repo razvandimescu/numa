@@ -392,6 +392,18 @@ body {
   text-overflow: ellipsis;
   color: var(--text-primary);
 }
+.query-log .src-tag {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+.query-log .src-tag:hover {
+  color: var(--text-primary);
+  text-decoration: underline;
+}
 .path-tag {
   display: inline-block;
   padding: 0.1rem 0.4rem;
@@ -807,7 +819,7 @@ body {
       <div class="panel-header log-header">
         <span class="panel-title" data-i18n="panel.recent_queries">Recent Queries</span>
         <div class="log-filters" style="display:flex;align-items:center;gap:0.5rem;">
-          <input type="text" id="logFilterDomain" data-i18n-ph="log.filter_domain" placeholder="filter domain..." oninput="applyLogFilter()"
+          <input type="text" id="logFilterDomain" data-i18n-ph="log.filter_domain" placeholder="domain or client..." oninput="applyLogFilter()"
             style="font-family:var(--font-mono);font-size:0.7rem;padding:0.25rem 0.5rem;border:1px solid var(--border);border-radius:4px;background:var(--bg-surface);color:var(--text-primary);outline:none;width:150px;">
           <select id="logFilterPath" onchange="applyLogFilter()"
             style="font-family:var(--font-mono);font-size:0.7rem;padding:0.25rem 0.4rem;border:1px solid var(--border);border-radius:4px;background:var(--bg-surface);color:var(--text-secondary);outline:none;">
@@ -1098,7 +1110,7 @@ document.addEventListener('click', (e) => {
 
 function shortSrc(addr) {
   if (!addr) return '';
-  const ip = addr.replace(/:\d+$/, '');
+  const ip = addr.replace(/:\d+$/, '').replace(/^\[(.*)\]$/, '$1');
   if (ip === '127.0.0.1' || ip === '::1') return 'localhost';
   return ip;
 }
@@ -1301,16 +1313,21 @@ function logFilterSet() {
   return [...document.querySelectorAll('.log-filters input, .log-filters select')].some(el => el.value.trim());
 }
 
+function filterLogByClient(client) {
+  document.getElementById('logFilterDomain').value = client;
+  applyLogFilter();
+}
+
 function applyLogFilter() {
   const filterSet = logFilterSet();
   if (filterSet !== logFetchFiltered) refresh();
-  const domainFilter = document.getElementById('logFilterDomain').value.trim().toLowerCase();
+  const textFilter = document.getElementById('logFilterDomain').value.trim().toLowerCase();
   const pathFilter = document.getElementById('logFilterPath').value;
   const transportFilter = document.getElementById('logFilterTransport').value;
 
   let filtered = lastLogEntries;
-  if (domainFilter) {
-    filtered = filtered.filter(e => e.domain.toLowerCase().includes(domainFilter));
+  if (textFilter) {
+    filtered = filtered.filter(e => e.domain.toLowerCase().includes(textFilter) || shortSrc(e.src) === textFilter);
   }
   if (pathFilter === 'STRIPPED') {
     filtered = filtered.filter(e => e.rebind_stripped);
@@ -1341,7 +1358,7 @@ function applyLogFilter() {
       : '';
     return `
     <tr title="${t('log.source_title', { src: e.src || t('log.src_unknown') })}">
-      <td>${formatTime(e.timestamp_epoch)}<br><span class="src-tag">${shortSrc(e.src)}</span></td>
+      <td>${formatTime(e.timestamp_epoch)}<br><button class="src-tag" onclick="filterLogByClient(this.textContent)" title="${t('log.client_filter_title')}">${h(shortSrc(e.src))}</button></td>
       <td>${e.query_type}</td>
       <td class="domain-cell" title="${h(e.domain)}">${h(e.domain)}${allowBtn}</td>
       <td><span class="path-tag ${e.path}">${e.path}</span>${rebindTag}</td>
