@@ -1009,6 +1009,9 @@ const API = '';
 const h = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 let prevTotal = null;
 let lastLogEntries = [];
+let logFetchFiltered = false;
+const LOG_ROWS = 200;
+const LOG_KEPT = 1000;
 const rebindAllowed = new Set(); // domains allowlisted this session, so old log rows show "allowed" instead of the button
 let prevTime = null;
 
@@ -1294,7 +1297,13 @@ function renderQueryLog(entries) {
   applyLogFilter();
 }
 
+function logFilterSet() {
+  return [...document.querySelectorAll('.log-filters input, .log-filters select')].some(el => el.value.trim());
+}
+
 function applyLogFilter() {
+  const filterSet = logFilterSet();
+  if (filterSet !== logFetchFiltered) refresh();
   const domainFilter = document.getElementById('logFilterDomain').value.trim().toLowerCase();
   const pathFilter = document.getElementById('logFilterPath').value;
   const transportFilter = document.getElementById('logFilterTransport').value;
@@ -1313,12 +1322,11 @@ function applyLogFilter() {
   }
 
   const tbody = document.getElementById('queryLogBody');
-  document.getElementById('queryCount').textContent =
-    filtered.length < lastLogEntries.length
-      ? t('log.count_filtered', { n: filtered.length, total: lastLogEntries.length })
-      : t('log.count_last', { n: filtered.length });
+  document.getElementById('queryCount').textContent = filterSet
+    ? t('log.count_filtered', { n: filtered.length, total: lastLogEntries.length })
+    : t('log.count_last', { n: filtered.length });
 
-  tbody.innerHTML = filtered.map(e => {
+  tbody.innerHTML = filtered.slice(0, LOG_ROWS).map(e => {
     const allowBtn = e.path === 'BLOCKED'
       ? ` <button class="btn-delete" data-domain="${h(e.domain)}" onclick="unblockDomain(this.dataset.domain)" title="${t('log.allow_title')}" style="color:var(--emerald);font-size:0.65rem;">${t('log.allow')}</button>`
       : e.rebind_stripped && rebindAllowed.has(e.domain)
@@ -1440,9 +1448,10 @@ async function checkResolver() {
 }
 async function refresh() {
   try {
+    logFetchFiltered = logFilterSet();
     const [stats, logs, overrides, cache, services, blockingInfo, allowlist, manualBlocks] = await Promise.all([
       fetchJSON('/stats'),
-      fetchJSON('/query-log?limit=200'),
+      fetchJSON('/query-log?limit=' + (logFetchFiltered ? LOG_KEPT : LOG_ROWS)),
       fetchJSON('/overrides'),
       fetchJSON('/cache'),
       fetchJSON('/services'),
