@@ -590,6 +590,8 @@ impl UpstreamPool {
                 addr: self.upstream(i).to_string(),
                 kind: if i < self.primary.len() {
                     "primary"
+                } else if self.is_tcp_copy(self.upstream(i)) {
+                    "tcp_backup"
                 } else {
                     "fallback"
                 },
@@ -604,7 +606,8 @@ impl UpstreamPool {
     pub fn label(&self) -> String {
         match self.preferred() {
             Some(u) => {
-                let total = self.primary.len() + self.fallback.len();
+                let fallbacks = self.fallback.iter().filter(|f| !self.is_tcp_copy(f));
+                let total = self.primary.len() + fallbacks.count();
                 if total > 1 {
                     format!("{} (+{} more)", u, total - 1)
                 } else {
@@ -613,6 +616,10 @@ impl UpstreamPool {
             }
             None => "none".to_string(),
         }
+    }
+
+    fn is_tcp_copy(&self, fallback: &Upstream) -> bool {
+        matches!(fallback, Upstream::Tcp(addr) if self.primary.contains(&Upstream::Udp(*addr)))
     }
 }
 
@@ -1494,8 +1501,37 @@ mod tests {
         assert_eq!(pool.label(), "1.2.3.4:53 (+1 more)");
     }
 
+    #[test]
+    fn pool_label_leaves_out_the_tcp_copy() {
+        let pool = UpstreamPool::new(vec![udp("1.2.3.4:53")], vec![tcp("1.2.3.4:53")]);
+        assert_eq!(pool.label(), "1.2.3.4:53");
+
+        let pool = UpstreamPool::new(
+            vec![udp("1.2.3.4:53")],
+            vec![udp("8.8.8.8:53"), tcp("1.2.3.4:53")],
+        );
+        assert_eq!(pool.label(), "1.2.3.4:53 (+1 more)");
+    }
+
+    #[test]
+    fn report_tags_only_the_tcp_copy_of_a_primary() {
+        let pool = UpstreamPool::new(
+            vec![udp("10.0.0.1:53"), tcp("10.0.0.1:53"), udp("10.0.0.2:53")],
+            vec![udp("8.8.8.8:53"), tcp("10.0.0.2:53")],
+        );
+        let kinds: Vec<_> = pool.report().iter().map(|u| u.kind).collect();
+        assert_eq!(
+            kinds,
+            ["primary", "primary", "primary", "fallback", "tcp_backup"]
+        );
+    }
+
     fn udp(addr: &str) -> Upstream {
         Upstream::Udp(addr.parse().unwrap())
+    }
+
+    fn tcp(addr: &str) -> Upstream {
+        Upstream::Tcp(addr.parse().unwrap())
     }
 
     const RETEST: u16 = 0;
