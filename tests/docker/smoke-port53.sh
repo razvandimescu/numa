@@ -7,10 +7,14 @@
 # 0.0.0.0:53). Verifies:
 #   - process exits with code 1
 #   - stderr contains the advisory ("cannot bind to")
-#   - stderr contains both fix suggestions ("numa install", "bind_addr")
+#   - the advisory names the holder it found in procfs, rather than
+#     guessing systemd-resolved (issue #299)
+#   - it does not claim `numa install` frees a port numa cannot free
+#   - it still offers the spare-port alternative and the recipe link
 #
 # This is the end-to-end test for the fix in:
-#   src/main.rs — AddrInUse match arm → eprint advisory + process::exit(1)
+#   src/system_dns.rs — port53_holder() + port53_advisory()
+#   src/serve.rs      — bind_udp_listeners() → eprint advisory + exit(1)
 #
 # No systemd-resolved needed — the conflict is simulated by a Python
 # UDP socket held open before numa starts.
@@ -116,16 +120,31 @@ else
     fail "advisory printed to stderr" "stderr did not contain 'cannot bind to'"
 fi
 
-if echo "$OUTPUT" | grep -q "numa install"; then
-    pass "advisory offers 'sudo numa install'"
+if echo "$OUTPUT" | grep -q "held by python3"; then
+    pass "advisory names the holder process"
 else
-    fail "advisory offers 'sudo numa install'" "not found in output"
+    fail "advisory names the holder process" "'held by python3' not found in output"
+fi
+
+# numa install cannot free a port held by anything but systemd-resolved,
+# so offering it here is the misinformation issue #299 reported.
+if echo "$OUTPUT" | grep -q "numa install"; then
+    fail "advisory does not offer 'numa install' for a holder it cannot free" \
+         "output still suggests numa install"
+else
+    pass "advisory does not offer 'numa install' for a holder it cannot free"
 fi
 
 if echo "$OUTPUT" | grep -q "bind_addr"; then
     pass "advisory offers non-privileged port alternative"
 else
     fail "advisory offers non-privileged port alternative" "'bind_addr' not found in output"
+fi
+
+if echo "$OUTPUT" | grep -q "recipes/port-53.md"; then
+    pass "advisory links the port-53 recipe"
+else
+    fail "advisory links the port-53 recipe" "recipe URL not found in output"
 fi
 
 echo

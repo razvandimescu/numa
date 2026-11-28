@@ -69,7 +69,7 @@ Test it with `dig @127.0.0.1 example.com` (`@127.0.0.2` on Windows). The dashboa
 
 Update the binary the way you installed it (`brew upgrade`, `cargo install numa`, or rerun install.sh). Re-running `install` restarts the service on the new binary and keeps the token and CA.
 
-On Linux, `install` reconfigures systemd-resolved with a drop-in file. `uninstall` removes it. Stop any other process that holds port 53 (dnsmasq, including NetworkManager's) before you install.
+On Linux, `install` reconfigures systemd-resolved with a drop-in file. `uninstall` removes it. Stop any other process that holds port 53 (dnsmasq, including NetworkManager's) before you install. See [recipes/port-53.md](recipes/port-53.md).
 
 ### Logging in
 
