@@ -1139,6 +1139,7 @@ mod tests {
     use crate::packet::EdnsOpt;
     use crate::question::QueryType;
     use crate::record::DnsRecord;
+    use crate::testutil::to_wire;
 
     #[tokio::test]
     async fn a_dot_connection_has_nodelay() {
@@ -1304,12 +1305,6 @@ mod tests {
             ttl: 300,
         });
         resp
-    }
-
-    fn to_wire(pkt: &DnsPacket) -> Vec<u8> {
-        let mut buf = BytePacketBuffer::new();
-        pkt.write(&mut buf).unwrap();
-        buf.filled().to_vec()
     }
 
     /// A DoH upstream answering `response`, plus the queries it received.

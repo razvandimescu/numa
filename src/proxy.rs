@@ -634,7 +634,7 @@ mod tests {
     use crate::packet::DnsPacket;
     use crate::question::QueryType;
     use crate::record::DnsRecord;
-    use crate::testutil::tls_client;
+    use crate::testutil::{tls_client, to_wire};
 
     #[test]
     fn extract_host_strips_port_and_keeps_ipv6_literals() {
@@ -743,11 +743,7 @@ mod tests {
     }
 
     fn doh_test_query() -> Vec<u8> {
-        let mut q_buf = BytePacketBuffer::new();
-        DnsPacket::query(0xE002, "doh-test.example", QueryType::A)
-            .write(&mut q_buf)
-            .unwrap();
-        q_buf.filled().to_vec()
+        to_wire(&DnsPacket::query(0xE002, "doh-test.example", QueryType::A))
     }
 
     async fn h2_doh_answers(h2: &mut hyper::client::conn::http2::SendRequest<Body>) -> bool {

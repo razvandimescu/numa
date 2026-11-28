@@ -491,10 +491,7 @@ mod tests {
 
     fn failure_wire(rcode: crate::header::ResultCode) -> Vec<u8> {
         let query = DnsPacket::query(0x1234, "claude.ai", QueryType::A);
-        let resp = DnsPacket::response_from(&query, rcode);
-        let mut buf = crate::buffer::BytePacketBuffer::new();
-        resp.write(&mut buf).unwrap();
-        buf.filled().to_vec()
+        crate::testutil::to_wire(&DnsPacket::response_from(&query, rcode))
     }
 
     fn insert_failure(cache: &mut DnsCache, rcode: crate::header::ResultCode) {
