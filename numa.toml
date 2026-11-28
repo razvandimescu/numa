@@ -48,7 +48,9 @@ api_port = 5380
 # Cloudflare if Quad9 fails) if it finds none.
 # [upstream]
 # mode = "forward"
-# address = "9.9.9.9"                           # single upstream (plain UDP)
+# address = "9.9.9.9"                           # single upstream (plain UDP, same as udp://).
+#                                               # Truncated or slow answers are retried over TCP
+# address = "tcp://9.9.9.9"                     # plain TCP only
 # address = ["9.9.9.9", "1.1.1.1"]              # multiple upstreams, asked in order; a failed
 #                                               # one is asked last. Upstreams of the same kind
 #                                               # as the first (private address, plain, or

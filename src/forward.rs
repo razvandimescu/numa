@@ -175,7 +175,7 @@ pub fn parse_upstream(
         let addr = parse_upstream_addr(rest, default_port)?;
         return Ok(Upstream::Tcp(addr));
     }
-    let addr = parse_upstream_addr(s, default_port)?;
+    let addr = parse_upstream_addr(s.strip_prefix("udp://").unwrap_or(s), default_port)?;
     Ok(Upstream::Udp(addr))
 }
 
@@ -417,7 +417,8 @@ const FAILED_AT: u32 = 20;
 const RACE_EVERY: Duration = Duration::from_secs(60);
 
 impl UpstreamPool {
-    pub fn new(primary: Vec<Upstream>, fallback: Vec<Upstream>) -> Self {
+    pub fn new(primary: Vec<Upstream>, mut fallback: Vec<Upstream>) -> Self {
+        fallback.retain(|u| !primary.contains(u));
         let health = Health::new(&primary, fallback.len());
         Self {
             primary,
@@ -1458,6 +1459,24 @@ mod tests {
     fn parse_tcp_scheme_explicit_port() {
         let u = parse_upstream("tcp://1.2.3.4:5353", 53, None).unwrap();
         assert_eq!(u, Upstream::Tcp("1.2.3.4:5353".parse().unwrap()));
+    }
+
+    #[test]
+    fn parse_udp_scheme() {
+        let u = parse_upstream("udp://1.2.3.4", 53, None).unwrap();
+        assert_eq!(u, Upstream::Udp("1.2.3.4:53".parse().unwrap()));
+        let u = parse_upstream("udp://[::1]:5353", 53, None).unwrap();
+        assert_eq!(u, Upstream::Udp("[::1]:5353".parse().unwrap()));
+    }
+
+    #[test]
+    fn pool_drops_a_fallback_that_is_also_a_primary() {
+        let addr = "10.0.0.1:53".parse().unwrap();
+        let pool = UpstreamPool::new(
+            vec![Upstream::Udp(addr), Upstream::Tcp(addr)],
+            vec![Upstream::Tcp(addr)],
+        );
+        assert!(pool.fallback.is_empty());
     }
 
     #[test]
