@@ -598,6 +598,8 @@ pub struct BlockingConfig {
     pub refresh_hours: u64,
     #[serde(default)]
     pub allowlist: Vec<String>,
+    #[serde(default)]
+    pub exclude: Vec<String>,
 }
 
 /// A zero would spin the refresh loop with a zero-second sleep, re-downloading
@@ -622,6 +624,7 @@ impl Default for BlockingConfig {
             lists: default_blocklists(),
             refresh_hours: default_refresh_hours(),
             allowlist: Vec::new(),
+            exclude: Vec::new(),
         }
     }
 }

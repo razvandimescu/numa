@@ -75,6 +75,7 @@ pub async fn test_ctx() -> ServerCtx {
         filter_aaaa: false,
         allow_from: crate::acl::AllowFromAcl::default(),
         client_policy: crate::client_policy::ClientPolicySet::default(),
+        blocking_exclude: crate::acl::CidrMatcher::default(),
         rebind: std::sync::RwLock::new(
             crate::rebind::RebindFilter::new(
                 false,

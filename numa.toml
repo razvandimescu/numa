@@ -173,6 +173,8 @@ api_port = 5380
 #     "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/whitelist-referral-onlydomains.txt",
 #     "/etc/numa/allow.txt",   # URLs and paths refresh like the lists above
 # ]
+# exclude = ["192.168.1.0/24"] # clients (CIDRs/IPs) that bypass blocking;
+#                              # [[client_policy]] rules still apply to them
 
 # ── Per-client domain policies ─────────────────────────────────────
 # Block or allow specific domains for specific clients, on top of the
