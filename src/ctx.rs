@@ -277,7 +277,10 @@ async fn resolve_with_cname_chase(
     let mut current_qname = qname.to_string();
 
     loop {
-        if resp.has_answer_of_type(qtype) || resp.header.rescode != ResultCode::NOERROR {
+        if resp.has_answer_of_type(qtype)
+            || resp.header.rescode != ResultCode::NOERROR
+            || resp.header.authed_data
+        {
             return (resp, path, dnssec, ut);
         }
         match crate::recursive::follow_cname_links(&resp, &current_qname, &mut visited) {
@@ -323,8 +326,7 @@ async fn resolve_with_cname_chase(
             );
         }
 
-        resp.answers.extend(sub_resp.answers);
-        resp.header.rescode = sub_resp.header.rescode;
+        resp = crate::recursive::join_cname_target(resp, sub_resp, qtype);
         ut = ut.or(sub_ut);
     }
     (
@@ -3781,6 +3783,65 @@ mod tests {
         assert!(
             matches!(&resp.answers[1], DnsRecord::A { addr, .. } if *addr == Ipv4Addr::new(93, 184, 216, 34))
         );
+    }
+
+    #[tokio::test]
+    async fn cname_chase_leaves_a_validated_answer_alone() {
+        let mut validated = crate::testutil::noerror_response(vec![crate::testutil::cname_record(
+            "alias.test",
+            "target.test",
+            300,
+        )]);
+        validated.header.authed_data = true;
+        let upstream = crate::testutil::mock_upstream_by_qname(vec![
+            ("alias.test", validated),
+            (
+                "target.test",
+                crate::testutil::a_record_response("target.test", Ipv4Addr::new(192, 0, 2, 9), 60),
+            ),
+        ])
+        .await;
+        let ctx = ctx_with_upstream(upstream).await;
+        let mut query = DnsPacket::query(0xBEEF, "alias.test", QueryType::A);
+        query.header.authed_data = true;
+
+        let (resp, _) = resolve_in_test_with_query(&ctx, query).await;
+        assert!(resp.header.authed_data);
+        assert_eq!(resp.answers.len(), 1, "{:?}", resp.answers);
+    }
+
+    #[tokio::test]
+    async fn cname_chase_carries_the_denial_of_a_missing_target() {
+        let soa = DnsRecord::SOA {
+            domain: "test".into(),
+            mname: "ns.test".into(),
+            rname: "hostmaster.test".into(),
+            serial: 1,
+            refresh: 7200,
+            retry: 3600,
+            expire: 1209600,
+            minimum: 300,
+            ttl: 300,
+        };
+        let mut nxdomain = crate::testutil::noerror_response(vec![]);
+        nxdomain.header.rescode = ResultCode::NXDOMAIN;
+        nxdomain.authorities.push(soa.clone());
+        let upstream = crate::testutil::mock_upstream_by_qname(vec![
+            (
+                "alias.test",
+                crate::testutil::noerror_response(vec![crate::testutil::cname_record(
+                    "alias.test",
+                    "gone.test",
+                    300,
+                )]),
+            ),
+            ("gone.test", nxdomain),
+        ])
+        .await;
+        let ctx = ctx_with_upstream(upstream).await;
+
+        let (resp, _) = resolve_in_test(&ctx, "alias.test", QueryType::A).await;
+        assert_eq!(resp.authorities, vec![soa]);
     }
 
     async fn ctx_with_upstream(upstream: SocketAddr) -> Arc<ServerCtx> {

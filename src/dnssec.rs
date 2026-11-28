@@ -124,15 +124,7 @@ pub async fn validate_response(
     let start = Instant::now();
     let stats = Mutex::new(ValidationStats::default());
     let trust_anchors = &*TRUST_ANCHORS;
-
-    // Extract RRSIGs from all sections
-    let all_rrsigs: Vec<&DnsRecord> = response
-        .answers
-        .iter()
-        .chain(response.authorities.iter())
-        .chain(response.resources.iter())
-        .filter(|r| matches!(r, DnsRecord::RRSIG { .. }))
-        .collect();
+    let all_rrsigs = rrsigs_in(response);
 
     if all_rrsigs.is_empty() {
         return finish(start, stats, DnssecStatus::Insecure);
@@ -149,6 +141,16 @@ pub async fn validate_response(
     prefetch_signer_dnskeys(&all_rrsigs, &ctx).await;
     let status = response_status(response, &all_rrsigs, &ctx).await;
     finish(start, stats, status)
+}
+
+fn rrsigs_in(response: &DnsPacket) -> Vec<&DnsRecord> {
+    response
+        .answers
+        .iter()
+        .chain(&response.authorities)
+        .chain(&response.resources)
+        .filter(|r| matches!(r, DnsRecord::RRSIG { .. }))
+        .collect()
 }
 
 async fn response_status(
@@ -180,12 +182,13 @@ async fn response_status(
         .first()
         .map_or(("", QueryType::UNKNOWN(0)), |q| (q.name.as_str(), q.qtype));
     let mut chain = HashSet::from([qname.to_ascii_lowercase()]);
-    let end = follow_cname_links(response, qname, &mut chain)
-        .ok()
-        .flatten();
-    if rrsets
-        .iter()
-        .any(|(name, t, _)| *t == qtype && chain.contains(name))
+    let Ok(end) = follow_cname_links(response, qname, &mut chain) else {
+        return DnssecStatus::Indeterminate;
+    };
+    if response.header.rescode == crate::header::ResultCode::NOERROR
+        && rrsets
+            .iter()
+            .any(|(name, t, _)| *t == qtype && chain.contains(name))
     {
         return status;
     }
@@ -3178,11 +3181,7 @@ mod tests {
                 response.authorities.push(sig);
             }
         }
-        let rrsigs: Vec<&DnsRecord> = response
-            .authorities
-            .iter()
-            .filter(|r| matches!(r, DnsRecord::RRSIG { .. }))
-            .collect();
+        let rrsigs = rrsigs_in(&response);
         let ctx = ValidationCtx {
             cache: &cache,
             root_hints: &[],
@@ -3262,22 +3261,26 @@ mod tests {
                 .flat_map(|r| [r.clone(), mk_rrsig(&ksk, "test", r.query_type(), &[r])])
                 .collect()
         };
+        let a_at =
+            |owner: &str| crate::testutil::a_record(owner, "192.0.2.1".parse().unwrap(), 3600);
         let alias = crate::testutil::cname_record("alias.test", "zzzz.test", 3600);
-        let target = DnsRecord::A {
-            domain: "zzzz.test".into(),
-            addr: "192.0.2.1".parse().unwrap(),
-            ttl: 3600,
-        };
+        let back = crate::testutil::cname_record("zzzz.test", "alias.test", 3600);
         let proof = sign(&[nsec("test", "a.test"), nsec("zzz.test", "test")]);
         let signed_alias = sign(&[alias.clone()]);
+        let answered = sign(&[alias.clone(), a_at("zzzz.test")]);
+        let looped = sign(&[alias.clone(), back, a_at("zzzz.test")]);
+        let elsewhere = sign(&[alias.clone(), a_at("other.test")]);
         for (row, (qtype, nxdomain, answers, authorities, want)) in [
             (A, true, signed_alias.clone(), proof.clone(), Secure),
             (A, true, signed_alias.clone(), vec![], Indeterminate),
             (A, false, signed_alias.clone(), vec![], Indeterminate),
             (A, false, signed_alias.clone(), proof.clone(), Bogus),
-            (A, true, vec![alias.clone()], proof, Insecure),
-            (A, false, sign(&[alias, target]), vec![], Secure),
+            (A, true, vec![alias], proof, Insecure),
+            (A, false, answered.clone(), vec![], Secure),
             (CNAME, false, signed_alias, vec![], Secure),
+            (A, true, answered, vec![], Indeterminate),
+            (A, false, looped, vec![], Indeterminate),
+            (A, false, elsewhere, vec![], Indeterminate),
         ]
         .into_iter()
         .enumerate()
@@ -3292,12 +3295,7 @@ mod tests {
             }
             response.answers = answers;
             response.authorities = authorities;
-            let rrsigs: Vec<&DnsRecord> = response
-                .answers
-                .iter()
-                .chain(&response.authorities)
-                .filter(|r| matches!(r, DnsRecord::RRSIG { .. }))
-                .collect();
+            let rrsigs = rrsigs_in(&response);
             let status = response_status(&response, &rrsigs, &ctx).await;
             assert_eq!(status, want, "row {row}");
         }
