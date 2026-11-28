@@ -59,7 +59,11 @@ api_port = 5380
 #                                               # that answers first 7 times before it loses
 #                                               # twice is asked first. For a fixed order, put
 #                                               # the others in `fallback`.
-# address = "https://dns.quad9.net/dns-query"   # DNS-over-HTTPS (encrypted)
+# address = "https://dns.quad9.net/dns-query"   # DNS-over-HTTPS (encrypted). numa looks up the
+#                                               # hostname via 9.9.9.9 and 1.1.1.1, or via the
+#                                               # IP addresses in `fallback` if it lists any
+# address = "https://9.9.9.9/dns-query"         # the same with no lookup, if the server's
+#                                               # certificate covers its IP
 # address = "tls://9.9.9.9#dns.quad9.net"       # DNS-over-TLS (encrypted, port 853)
 # fallback = ["8.8.8.8", "1.1.1.1"]            # asked after the primaries: when they fail, or
 #                                               # stay silent for hedge_ms
