@@ -2,7 +2,7 @@
 #
 # Systemd service install verification for the DynamicUser-based Linux
 # service unit. Stands up a privileged ubuntu:24.04 container with systemd
-# as PID 1, builds numa inside, runs four scenarios that CI does not:
+# as PID 1, builds numa inside, runs five scenarios that CI does not:
 #
 #   A. Fresh install — every advertised port is not just bound but
 #      functional (DNS resolves on :53, TLS handshake validates against
@@ -13,6 +13,9 @@
 #      /usr/local/bin/numa and the service starts from there.
 #   D. Without systemd-resolved, the service keeps the original resolv.conf
 #      nameserver as its upstream after install rewrites resolv.conf.
+#   E. With dnsmasq holding :53, install aborts before writing the unit or
+#      rewriting resolv.conf, names the holder and works once it is freed
+#      (issue #299).
 #
 # First run is slow (~5-10 min): image pull + apt + cold cargo build.
 # Subsequent runs reuse cached docker volumes for cargo + target (~30s).
@@ -273,6 +276,75 @@ if [ "${NUMA_INSIDE:-}" = "1" ]; then
     printf '%s\n' "$resolv_before" > /etc/resolv.conf
     systemctl unmask systemd-resolved >/dev/null 2>&1 || true
 
+    # ---- Scenario E ----
+    # Issue #299: dnsmasq owns :53, so the install can only ever crashloop.
+    # It must abort before touching anything rather than print "Numa is live".
+    printf "\n=== Scenario E: install aborts when another resolver holds port 53 ===\n"
+    reset_state
+    resolv_before=$(cat /etc/resolv.conf)
+    systemctl start dnsmasq.service
+    sleep 1
+    if ! ss -lnup 'sport = :53' | grep -q dnsmasq; then
+        fail "setup: dnsmasq did not take port 53"
+    fi
+
+    "$NUMA" install >/tmp/installE.log 2>&1
+    rc=$?
+
+    if [ "$rc" -ne 0 ]; then
+        pass "install exits nonzero (rc=$rc)"
+    else
+        fail "install reported success while dnsmasq holds :53"
+    fi
+    if grep -q "held by dnsmasq" /tmp/installE.log; then
+        pass "abort names the holder"
+    else
+        fail "abort does not name the holder" "$(tail -5 /tmp/installE.log)"
+    fi
+    if grep -q "Numa is live" /tmp/installE.log; then
+        fail "abort still printed the success banner"
+    else
+        pass "no success banner"
+    fi
+    if [ "$(cat /etc/resolv.conf)" = "$resolv_before" ]; then
+        pass "/etc/resolv.conf untouched"
+    else
+        fail "/etc/resolv.conf was rewritten by an install that could not work"
+    fi
+    if [ -f /etc/systemd/system/numa.service ]; then
+        fail "unit file written despite abort"
+    else
+        pass "no unit file written"
+    fi
+    if grep -q "dnsmasq.service" /tmp/installE.log; then
+        pass "abort suggests disabling the holder's own unit"
+    else
+        fail "abort does not name the unit to disable"
+    fi
+
+    # Freeing the port makes the same command work.
+    systemctl stop dnsmasq.service
+    "$NUMA" install >/tmp/installE2.log 2>&1 || { fail "install failed after freeing :53"; tail -20 /tmp/installE2.log; }
+    wait_active || true
+    assert_dns_works
+
+    # With --no-system-dns install never frees resolved's stub, so it must abort too.
+    reset_state
+    # Scenario D left resolved stopped; start it so its stub holds :53.
+    systemctl restart systemd-resolved
+    if ! ss -lnup 'sport = :53' | grep -q systemd-resolve; then
+        fail "setup: systemd-resolved stub is not on port 53"
+    fi
+    if "$NUMA" install --no-system-dns >/tmp/installE3.log 2>&1; then
+        fail "install --no-system-dns reported success while resolved holds :53"
+    elif grep -q "held by systemd-resolve" /tmp/installE3.log; then
+        pass "install --no-system-dns aborts on resolved's stub"
+    else
+        fail "install --no-system-dns abort does not name resolved" "$(tail -5 /tmp/installE3.log)"
+    fi
+
+    reset_state
+
     echo
     if [ "$FAIL" -eq 0 ]; then
         printf "${GREEN}── all scenarios passed ──${RESET}\n"
@@ -301,12 +373,13 @@ RUN apt-get update -qq && apt-get install -y -qq \
       systemd systemd-sysv systemd-resolved \
       ca-certificates curl build-essential \
       pkg-config libssl-dev cmake make perl \
-      dnsutils iproute2 openssl \
+      dnsutils iproute2 openssl dnsmasq \
     && rm -rf /var/lib/apt/lists/* \
     && for u in dev-hugepages.mount sys-fs-fuse-connections.mount \
                 systemd-logind.service getty.target console-getty.service; do \
          systemctl mask $u; \
-       done
+       done \
+    && systemctl disable dnsmasq.service
 STOPSIGNAL SIGRTMIN+3
 CMD ["/lib/systemd/systemd"]
 DOCKERFILE
