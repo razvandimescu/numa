@@ -10,12 +10,14 @@ use axum::routing::{any, get};
 use axum::Router;
 use http_body_util::BodyExt;
 use hyper::header::HeaderValue;
+use hyper::service::Service;
 use hyper::StatusCode;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use log::{debug, error, info, warn};
 use tokio::io::copy_bidirectional;
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, Semaphore};
+use tokio_rustls::server::TlsStream;
 use tokio_rustls::TlsAcceptor;
 
 use crate::config::ProxyProtocolConfig;
@@ -26,7 +28,7 @@ use crate::tls::accept_tls;
 
 pub(crate) const REQUEST_READ_TIMEOUT: Duration =
     Duration::from_secs(if cfg!(test) { 1 } else { 30 });
-// Each proxied connection also opens one to the backend.
+// Caps proxied connections and in-flight proxied requests, each holding a backend socket.
 const MAX_PROXY_CONNECTIONS: usize = if cfg!(test) { 16 } else { 128 };
 
 type HttpClient = Client<hyper_util::client::legacy::connect::HttpConnector, Body>;
@@ -144,6 +146,7 @@ async fn accept_loop_tls(
         client,
     };
     let proxy_pool = Arc::new(Semaphore::new(MAX_PROXY_CONNECTIONS));
+    let proxied_requests = Arc::new(Semaphore::new(MAX_PROXY_CONNECTIONS));
 
     serve_connections(
         listener,
@@ -157,6 +160,7 @@ async fn accept_loop_tls(
                 ctx,
                 proxy_state.clone(),
                 Arc::clone(&proxy_pool),
+                Arc::clone(&proxied_requests),
             )
         },
     )
@@ -169,6 +173,7 @@ async fn serve_tls_connection(
     ctx: Arc<ServerCtx>,
     proxy_state: ProxyState,
     proxy_pool: Arc<Semaphore>,
+    proxied_requests: Arc<Semaphore>,
 ) {
     let slot = stream.slot();
     // Load the latest TLS config on each connection (picks up new service certs)
@@ -194,7 +199,11 @@ async fn serve_tls_connection(
         .fallback(any(proxy_tls_handler))
         .with_state(proxy_state)
         .layer(Extension(ConnectInfo(remote_addr)))
-        .layer(Extension((slot, proxy_pool)));
+        .layer(Extension((slot, proxy_pool, proxied_requests)));
+
+    if tls_stream.get_ref().1.alpn_protocol() == Some(b"h2".as_slice()) {
+        return serve_h2(tls_stream, app, remote_addr).await;
+    }
 
     let io = hyper_util::rt::TokioIo::new(tls_stream);
     let svc = hyper_util::service::TowerToHyperService::new(app.into_service());
@@ -211,6 +220,64 @@ async fn serve_tls_connection(
     {
         debug!("TLS connection error from {}: {}", remote_addr, e);
     }
+}
+
+/// hyper's h2 builder has no `header_read_timeout`.
+async fn serve_h2(tls_stream: TlsStream<SlottedStream>, app: Router, remote_addr: SocketAddr) {
+    let started = Arc::new(Notify::new());
+    let in_flight = Arc::new(());
+    let svc = {
+        let started = Arc::clone(&started);
+        let tokens = Arc::downgrade(&in_flight);
+        let router = hyper_util::service::TowerToHyperService::new(app.into_service());
+        hyper::service::service_fn(move |mut req: Request<hyper::body::Incoming>| {
+            started.notify_one();
+            if let Some(host) = req
+                .uri()
+                .authority()
+                .and_then(|a| HeaderValue::from_str(a.as_str()).ok())
+            {
+                req.headers_mut().insert(hyper::header::HOST, host);
+            }
+            let token = tokens.upgrade();
+            let response = router.call(req);
+            async move { response.await.map(|r| hold_while_streaming(r, token)) }
+        })
+    };
+    let conn = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+        .serve_connection(hyper_util::rt::TokioIo::new(tls_stream), svc);
+    tokio::pin!(conn);
+
+    let idle = async {
+        while tokio::time::timeout(REQUEST_READ_TIMEOUT, started.notified())
+            .await
+            .is_ok()
+            || Arc::strong_count(&in_flight) > 1
+        {}
+    };
+    tokio::select! {
+        result = conn.as_mut() => {
+            if let Err(e) = result {
+                debug!("TLS connection error from {}: {}", remote_addr, e);
+            }
+        }
+        () = idle => {
+            conn.as_mut().graceful_shutdown();
+            let _ = tokio::time::timeout(REQUEST_READ_TIMEOUT, conn).await;
+        }
+    }
+}
+
+fn hold_while_streaming<G: Send + 'static>(
+    response: axum::response::Response,
+    guard: G,
+) -> axum::response::Response {
+    response.map(|body| {
+        Body::new(body.map_frame(move |frame| {
+            let _held = &guard;
+            frame
+        }))
+    })
 }
 
 fn error_page(title: &str, body: &str) -> String {
@@ -347,20 +414,24 @@ pub fn host_name(host: &HeaderValue) -> Option<String> {
 // backends, upgrades), so it moves to its own pool and can't starve DoH. The
 // move is one-way: later DoH requests on the same keep-alive connection stay there.
 async fn proxy_tls_handler(
-    Extension((slot, pool)): Extension<(Slot, Arc<Semaphore>)>,
+    Extension((slot, pool, requests)): Extension<(Slot, Arc<Semaphore>, Arc<Semaphore>)>,
     state: State<ProxyState>,
     peer: ConnectInfo<SocketAddr>,
     req: Request,
 ) -> axum::response::Response {
-    if !slot.move_to(&pool) {
+    let permit = slot
+        .move_to(&pool)
+        .then(|| requests.try_acquire_owned().ok())
+        .flatten();
+    let Some(permit) = permit else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             [(hyper::header::CONNECTION, "close")],
-            "proxy connection limit reached",
+            "proxy limit reached",
         )
             .into_response();
-    }
-    proxy_handler(state, peer, req).await
+    };
+    hold_while_streaming(proxy_handler(state, peer, req).await, permit)
 }
 
 async fn proxy_handler(
@@ -478,6 +549,9 @@ async fn proxy_handler(
     // Regular HTTP proxy
     let (mut parts, body) = req.into_parts();
     parts.uri = target_uri;
+    if parts.version == hyper::Version::HTTP_2 {
+        parts.version = hyper::Version::HTTP_11;
+    }
     let proxied_req = Request::from_parts(parts, body);
 
     match state.client.request(proxied_req).await {
@@ -560,7 +634,7 @@ mod tests {
     use crate::packet::DnsPacket;
     use crate::question::QueryType;
     use crate::record::DnsRecord;
-    use crate::testutil::tls_client;
+    use crate::testutil::{tls_client, to_wire};
 
     #[test]
     fn extract_host_strips_port_and_keeps_ipv6_literals() {
@@ -604,7 +678,8 @@ mod tests {
         pp_from: &[&str],
         allow_from: &[&str],
     ) -> (SocketAddr, CertificateDer<'static>, Arc<ServerCtx>) {
-        let (server_tls, cert_der) = crate::testutil::self_signed_tls();
+        let (mut server_tls, cert_der) = crate::testutil::self_signed_tls();
+        server_tls.alpn_protocols = crate::tls::proxy_alpn();
         let upstream_addr = crate::testutil::blackhole_upstream();
 
         let mut ctx = crate::testutil::test_ctx().await;
@@ -640,12 +715,59 @@ mod tests {
     async fn tls_connect(
         addr: SocketAddr,
         cert_der: CertificateDer<'static>,
+        alpn: Vec<Vec<u8>>,
     ) -> tokio_rustls::client::TlsStream<tokio::net::TcpStream> {
         let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
-        tokio_rustls::TlsConnector::from(tls_client(&cert_der, vec![]))
+        tokio_rustls::TlsConnector::from(tls_client(&cert_der, alpn))
             .connect(ServerName::try_from("numa.numa").unwrap(), tcp)
             .await
             .unwrap()
+    }
+
+    async fn h2_client(
+        addr: SocketAddr,
+        cert_der: CertificateDer<'static>,
+    ) -> (
+        hyper::client::conn::http2::SendRequest<Body>,
+        tokio::task::JoinHandle<hyper::Result<()>>,
+    ) {
+        let tls = tls_connect(addr, cert_der, vec![b"h2".to_vec()]).await;
+        assert_eq!(tls.get_ref().1.alpn_protocol(), Some(&b"h2"[..]));
+        let (sender, conn) = hyper::client::conn::http2::handshake(
+            TokioExecutor::new(),
+            hyper_util::rt::TokioIo::new(tls),
+        )
+        .await
+        .unwrap();
+        (sender, tokio::spawn(conn))
+    }
+
+    fn doh_test_query() -> Vec<u8> {
+        to_wire(&DnsPacket::query(0xE002, "doh-test.example", QueryType::A))
+    }
+
+    async fn h2_doh_answers(h2: &mut hyper::client::conn::http2::SendRequest<Body>) -> bool {
+        let doh = Request::post("https://numa.numa/dns-query")
+            .header(hyper::header::CONTENT_TYPE, "application/dns-message")
+            .body(Body::from(doh_test_query()))
+            .unwrap();
+        h2.send_request(doh).await.unwrap().status() == StatusCode::OK
+    }
+
+    async fn spawn_slow_host_echo_backend() -> u16 {
+        use futures::StreamExt;
+
+        let app = Router::new().fallback(|headers: hyper::HeaderMap| async move {
+            let host = headers.get(hyper::header::HOST);
+            let mut first = host.map_or(Vec::new(), |h| h.as_bytes().to_vec());
+            let rest = first.split_off(first.len() / 2);
+            let rest = async move {
+                tokio::time::sleep(REQUEST_READ_TIMEOUT * 3).await;
+                Ok::<_, std::convert::Infallible>(rest)
+            };
+            Body::from_stream(futures::stream::iter([Ok(first)]).chain(futures::stream::once(rest)))
+        });
+        crate::testutil::serve(app).await.port()
     }
 
     /// Backend that answers every request with 101 and then holds the socket.
@@ -718,19 +840,78 @@ mod tests {
     #[tokio::test]
     async fn idle_tls_client_is_dropped_after_header_timeout() {
         let (addr, cert_der, _) = spawn_doh_server_with_pp(&[], &[]).await;
-        let mut stream = tls_connect(addr, cert_der).await;
+        for alpn in [vec![], vec![b"h2".to_vec()]] {
+            let mut stream = tls_connect(addr, cert_der.clone(), alpn.clone()).await;
 
-        let read = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut [0u8; 1])).await;
+            let read =
+                tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut Vec::new()))
+                    .await;
+            assert!(read.is_ok(), "idle connection offering {alpn:?} kept open");
+        }
+    }
+
+    #[tokio::test]
+    async fn idle_h2_connection_closes_with_goaway() {
+        let (addr, cert_der, _) = spawn_doh_server_with_pp(&[], &[]).await;
+        let (_h2, conn) = h2_client(addr, cert_der).await;
+
+        let closed = tokio::time::timeout(Duration::from_secs(5), conn).await;
         assert!(
-            matches!(read, Ok(Ok(0)) | Ok(Err(_))),
-            "idle connection kept open: {read:?}"
+            matches!(closed, Ok(Ok(Ok(())))),
+            "idle h2 connection not closed cleanly: {closed:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn h2_serves_doh_and_numa_sites() {
+        let (addr, cert_der, ctx) = spawn_doh_server_with_pp(&[], &[]).await;
+        let backend_port = spawn_slow_host_echo_backend().await;
+        ctx.services
+            .lock()
+            .unwrap()
+            .insert_from_config("app", backend_port, None, Vec::new());
+        let (mut h2, _) = h2_client(addr, cert_der).await;
+
+        assert!(h2_doh_answers(&mut h2).await, "DoH over h2 failed");
+
+        let site = Request::get("https://app.numa/")
+            .body(Body::empty())
+            .unwrap();
+        let resp = h2.send_request(site).await.unwrap();
+        let body = resp.into_body().collect().await;
+        let body = body.expect("idle timeout cut the response").to_bytes();
+        assert_eq!(body, "app.numa", "backend saw the wrong Host");
+    }
+
+    #[tokio::test]
+    async fn h2_streams_count_against_the_proxy_limit() {
+        let (addr, cert_der, ctx) = spawn_doh_server_with_pp(&[], &[]).await;
+        let stalling = Router::new().fallback(|| async { crate::testutil::body_then_stall(1) });
+        let backend_port = crate::testutil::serve(stalling).await.port();
+        ctx.services
+            .lock()
+            .unwrap()
+            .insert_from_config("app", backend_port, None, Vec::new());
+        let (mut h2, _) = h2_client(addr, cert_der).await;
+        let site = || {
+            Request::get("https://app.numa/")
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        let mut streaming = Vec::with_capacity(MAX_PROXY_CONNECTIONS);
+        for _ in 0..MAX_PROXY_CONNECTIONS {
+            streaming.push(h2.send_request(site()).await.unwrap());
+        }
+        let extra = h2.send_request(site()).await.unwrap();
+        assert_eq!(extra.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(h2_doh_answers(&mut h2).await, "the proxy limit blocked DoH");
     }
 
     #[tokio::test]
     async fn stalled_doh_body_is_dropped_after_read_timeout() {
         let (addr, cert_der, _) = spawn_doh_server_with_pp(&[], &[]).await;
-        let mut stream = tls_connect(addr, cert_der).await;
+        let mut stream = tls_connect(addr, cert_der, vec![]).await;
         stream
             .write_all(
                 b"POST /dns-query HTTP/1.1\r\nHost: numa.numa\r\n\
@@ -757,7 +938,7 @@ mod tests {
 
         let mut upgraded = Vec::with_capacity(MAX_PROXY_CONNECTIONS);
         for _ in 0..MAX_PROXY_CONNECTIONS {
-            let mut stream = tls_connect(addr, cert_der.clone()).await;
+            let mut stream = tls_connect(addr, cert_der.clone(), vec![]).await;
             stream.write_all(upgrade).await.unwrap();
             let mut head = [0u8; 12];
             stream.read_exact(&mut head).await.unwrap();
@@ -765,7 +946,7 @@ mod tests {
             upgraded.push(stream);
         }
 
-        let mut extra = tls_connect(addr, cert_der.clone()).await;
+        let mut extra = tls_connect(addr, cert_der.clone(), vec![]).await;
         extra.write_all(upgrade).await.unwrap();
         let mut response = Vec::new();
         let read =
@@ -801,11 +982,7 @@ mod tests {
         else {
             return false;
         };
-        let mut q_buf = BytePacketBuffer::new();
-        DnsPacket::query(0xE002, "doh-test.example", QueryType::A)
-            .write(&mut q_buf)
-            .unwrap();
-        doh_post_raw(&mut stream, q_buf.filled()).await.0 == 200
+        doh_post_raw(&mut stream, &doh_test_query()).await.0 == 200
     }
 
     /// Fill every slot with a proxied request stuck inside `proxy_handler`,
@@ -820,7 +997,7 @@ mod tests {
 
         let mut held = Vec::with_capacity(crate::tcp::MAX_CONNECTIONS);
         for _ in 0..crate::tcp::MAX_CONNECTIONS {
-            let mut stream = tls_connect(addr, cert_der.clone()).await;
+            let mut stream = tls_connect(addr, cert_der.clone(), vec![]).await;
             stream.write_all(request).await.unwrap();
             accepted.recv().await.unwrap();
             held.push(stream);
@@ -871,11 +1048,7 @@ mod tests {
             .await
             .expect("PROXY v2 + TLS handshake must succeed for trusted peer");
 
-        let query = DnsPacket::query(0xE001, "doh-test.example", QueryType::A);
-        let mut q_buf = BytePacketBuffer::new();
-        query.write(&mut q_buf).unwrap();
-
-        let (status, body) = doh_post_raw(&mut stream, q_buf.filled()).await;
+        let (status, body) = doh_post_raw(&mut stream, &doh_test_query()).await;
         assert_eq!(status, 200);
         let mut r_buf = BytePacketBuffer::from_bytes(&body);
         let resp = DnsPacket::from_buffer(&mut r_buf).unwrap();

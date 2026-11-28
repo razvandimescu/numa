@@ -1100,7 +1100,7 @@ fn log_coalesced_outcome(
 mod tests {
     use super::*;
     use crate::override_store::OverrideEntry;
-    use crate::testutil::zone;
+    use crate::testutil::{to_wire, zone};
     use std::collections::HashMap;
     use std::net::{Ipv4Addr, Ipv6Addr};
     use std::sync::{Arc, Mutex, RwLock};
@@ -3754,9 +3754,7 @@ mod tests {
     async fn stats_count_the_transport_of_the_upstream_that_answered() {
         let answer =
             crate::testutil::a_record_response("hedge.test", Ipv4Addr::new(10, 0, 0, 1), 60);
-        let mut buf = BytePacketBuffer::new();
-        answer.write(&mut buf).unwrap();
-        let tcp = crate::testutil::udp_tcp_upstream_raw(vec![], buf.filled().to_vec()).await;
+        let tcp = crate::testutil::udp_tcp_upstream_raw(vec![], to_wire(&answer)).await;
         let mut ctx = crate::testutil::test_ctx().await;
         ctx.hedge_delay = Duration::from_millis(50);
         ctx.upstream_pool = Mutex::new(UpstreamPool::new(

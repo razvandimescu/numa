@@ -19,7 +19,7 @@ serde_ignored = "0.1"
 log = "0.4"
 env_logger = "0.11"
 reqwest = { version = "0.13", features = ["rustls-no-provider", "gzip", "http2", "query"], default-features = false }
-hyper = { version = "1", features = ["client", "http1", "server"] }
+hyper = { version = "1", features = ["client", "http1", "http2", "server"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 http-body-util = "0.1"
 futures = "0.3"

@@ -336,15 +336,9 @@ mod tests {
     use crate::packet::{DnsPacket, EdnsOpt};
     use crate::question::{DnsQuestion, QueryType};
     use crate::record::DnsRecord;
+    use crate::testutil::to_wire;
 
     // ── Helpers ──────────────────────────────────────────────────────
-
-    /// Serialize a DnsPacket to wire bytes.
-    fn to_wire(pkt: &DnsPacket) -> Vec<u8> {
-        let mut buf = BytePacketBuffer::new();
-        pkt.write(&mut buf).unwrap();
-        buf.filled().to_vec()
-    }
 
     /// Build a minimal response with given answers.
     fn response(id: u16, domain: &str, answers: Vec<DnsRecord>) -> DnsPacket {

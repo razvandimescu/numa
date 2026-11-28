@@ -137,13 +137,17 @@ pub fn aaaa_record_response(domain: &str, addr: std::net::Ipv6Addr, ttl: u32) ->
     }])
 }
 
+pub fn to_wire(pkt: &DnsPacket) -> Vec<u8> {
+    let mut buf = BytePacketBuffer::new();
+    pkt.write(&mut buf).unwrap();
+    buf.filled().to_vec()
+}
+
 /// Spawn a UDP socket that answers every DNS query with the given response
 /// packet, honoring the query's advertised payload budget (TC=1 when the
 /// answer does not fit) and patching the query ID. Returns the socket address.
 pub async fn mock_upstream(response: DnsPacket) -> SocketAddr {
-    let mut out = BytePacketBuffer::new();
-    response.write(&mut out).unwrap();
-    spawn_stub(out.filled().to_vec(), true, None).await
+    spawn_stub(to_wire(&response), true, None).await
 }
 
 /// Like `mock_upstream` but sends raw wire bytes verbatim — for intentionally
@@ -159,11 +163,7 @@ pub async fn mock_upstream_raw(bytes: Vec<u8>) -> SocketAddr {
 pub async fn mock_upstream_by_qname(responses: Vec<(&str, DnsPacket)>) -> SocketAddr {
     let table: Vec<(String, Vec<u8>)> = responses
         .into_iter()
-        .map(|(name, pkt)| {
-            let mut out = BytePacketBuffer::new();
-            pkt.write(&mut out).unwrap();
-            (name.to_string(), out.filled().to_vec())
-        })
+        .map(|(name, pkt)| (name.to_string(), to_wire(&pkt)))
         .collect();
     let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let addr = sock.local_addr().unwrap();
@@ -194,10 +194,8 @@ pub async fn mock_upstream_by_qname(responses: Vec<(&str, DnsPacket)>) -> Socket
 pub async fn recording_upstream(
     response: DnsPacket,
 ) -> (SocketAddr, tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) {
-    let mut out = BytePacketBuffer::new();
-    response.write(&mut out).unwrap();
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let addr = spawn_stub(out.filled().to_vec(), true, Some(tx)).await;
+    let addr = spawn_stub(to_wire(&response), true, Some(tx)).await;
     (addr, rx)
 }
 
