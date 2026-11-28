@@ -162,6 +162,8 @@ pub async fn run(load: ConfigLoad) -> crate::Result<()> {
             client_policy.rule_count()
         );
     }
+    let blocking_exclude =
+        crate::acl::CidrMatcher::from_entries(&config.blocking.exclude, &[], "blocking.exclude")?;
 
     let rebind_allow = crate::domain_list::PersistedDomainList::new(
         "rebind-allow.json",
@@ -233,6 +235,7 @@ pub async fn run(load: ConfigLoad) -> crate::Result<()> {
         filter_aaaa: config.server.filter_aaaa,
         allow_from,
         client_policy,
+        blocking_exclude,
         rebind: RwLock::new(rebind),
     });
 

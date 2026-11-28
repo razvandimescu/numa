@@ -91,6 +91,7 @@ pub struct ServerCtx {
     pub filter_aaaa: bool,
     pub allow_from: crate::acl::AllowFromAcl,
     pub client_policy: crate::client_policy::ClientPolicySet,
+    pub(crate) blocking_exclude: crate::acl::CidrMatcher,
     pub rebind: RwLock<crate::rebind::RebindFilter>,
 }
 
@@ -407,7 +408,10 @@ fn resolve_local(
             crate::client_policy::Decision::Passthrough => {}
         }
     }
-    if !policy_allow && ctx.blocklist.read().unwrap().is_blocked(qname) {
+    if !policy_allow
+        && ctx.blocklist.read().unwrap().is_blocked(qname)
+        && !ctx.blocking_exclude.matches(src_addr.ip())
+    {
         return Some(sinkhole(query, qname, qtype));
     }
     if qtype == QueryType::AAAA
@@ -2554,6 +2558,46 @@ mod tests {
 
         let (_, path) = resolve_in_test(&ctx, "ads.tracker.test", QueryType::A).await;
         assert_eq!(path, QueryPath::Blocked, "global blocklist still applies");
+    }
+
+    #[tokio::test]
+    async fn pipeline_blocking_exclude_skips_only_the_global_blocklist() {
+        let real = Ipv4Addr::new(1, 2, 3, 4);
+        let upstream_resp = crate::testutil::a_record_response("ads.example.com", real, 60);
+        let upstream_addr = crate::testutil::mock_upstream(upstream_resp).await;
+
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.blocklist
+            .write()
+            .unwrap()
+            .swap_domains(["ads.example.com".to_string()].into());
+        ctx.blocking_exclude = crate::acl::CidrMatcher::from_entries(
+            &["192.168.1.0/24".to_string(), "127.0.0.1".to_string()],
+            &[],
+            "test",
+        )
+        .unwrap();
+        ctx.client_policy = ctx_with_policy(&["192.168.1.0/24"], &["tiktok.example"], &[]);
+        ctx.forwarding_rules = vec![ForwardingRule::new(
+            "example.com".to_string(),
+            UpstreamPool::new(vec![Upstream::Udp(upstream_addr)], vec![]),
+        )];
+        let ctx = Arc::new(ctx);
+
+        let sinkhole = Ipv4Addr::UNSPECIFIED;
+        for (src, domain, want) in [
+            ("192.168.1.50:5000", "ads.example.com", real),
+            ("127.0.0.1:5000", "ads.example.com", real),
+            ("10.0.0.5:5000", "ads.example.com", sinkhole),
+            ("192.168.1.50:5000", "tiktok.example", sinkhole),
+        ] {
+            let (resp, _) =
+                resolve_from_src(&ctx, src.parse().unwrap(), domain, QueryType::A).await;
+            match &resp.answers[0] {
+                DnsRecord::A { addr, .. } => assert_eq!(*addr, want, "{src} {domain}"),
+                other => panic!("{src} {domain}: expected an A record, got {other:?}"),
+            }
+        }
     }
 
     fn ctx_with_aaaa_policy(
