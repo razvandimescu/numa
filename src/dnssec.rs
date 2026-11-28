@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::{LazyLock, Mutex, RwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -10,7 +11,7 @@ use crate::cache::{DnsCache, DnssecStatus};
 use crate::packet::DnsPacket;
 use crate::question::QueryType;
 use crate::record::DnsRecord;
-use crate::recursive::zone_in_bailiwick;
+use crate::recursive::{follow_cname_links, zone_in_bailiwick};
 use crate::srtt::SrttCache;
 
 #[derive(Debug, Default)]
@@ -146,45 +147,63 @@ pub async fn validate_response(
     };
 
     prefetch_signer_dnskeys(&all_rrsigs, &ctx).await;
+    let status = response_status(response, &all_rrsigs, &ctx).await;
+    finish(start, stats, status)
+}
 
+async fn response_status(
+    response: &DnsPacket,
+    all_rrsigs: &[&DnsRecord],
+    ctx: &ValidationCtx<'_>,
+) -> DnssecStatus {
     let rrsets = group_rrsets(&response.answers);
     let mut status = DnssecStatus::Secure;
 
     for (name, qtype, rrset) in &rrsets {
-        let matching_rrsigs = matching_rrsigs_for(&all_rrsigs, name, *qtype);
+        let matching_rrsigs = matching_rrsigs_for(all_rrsigs, name, *qtype);
         if matching_rrsigs.is_empty() {
             status = DnssecStatus::Insecure;
             continue;
         }
-        match verify_rrset(name, *qtype, rrset, &matching_rrsigs, &ctx).await {
+        match verify_rrset(name, *qtype, rrset, &matching_rrsigs, ctx).await {
             RrsetVerdict::Verified => {}
             RrsetVerdict::Insecure => status = DnssecStatus::Insecure,
             RrsetVerdict::Bogus => {
                 debug!("dnssec: no valid signature for {} {:?}", name, qtype);
-                return finish(start, stats, DnssecStatus::Bogus);
+                return DnssecStatus::Bogus;
             }
         }
     }
 
-    if rrsets.is_empty() {
-        let denial = denial_status(response, &all_rrsigs, &ctx).await;
-        return finish(start, stats, denial);
+    let (qname, qtype) = response
+        .questions
+        .first()
+        .map_or(("", QueryType::UNKNOWN(0)), |q| (q.name.as_str(), q.qtype));
+    let mut chain = HashSet::from([qname.to_ascii_lowercase()]);
+    let end = follow_cname_links(response, qname, &mut chain)
+        .ok()
+        .flatten();
+    if rrsets
+        .iter()
+        .any(|(name, t, _)| *t == qtype && chain.contains(name))
+    {
+        return status;
     }
-
-    finish(start, stats, status)
+    let end = end.as_deref().unwrap_or(qname);
+    match denial_status(response, end, qtype.to_num(), all_rrsigs, ctx).await {
+        DnssecStatus::Secure => status,
+        denial => denial,
+    }
 }
 
 /// NXDOMAIN or NODATA: check the NSEC/NSEC3 proofs in the authority section.
 async fn denial_status(
     response: &DnsPacket,
+    qname: &str,
+    qtype: u16,
     all_rrsigs: &[&DnsRecord],
     ctx: &ValidationCtx<'_>,
 ) -> DnssecStatus {
-    let (qname, qtype) = response
-        .questions
-        .first()
-        .map(|q| (q.name.as_str(), q.qtype.to_num()))
-        .unwrap_or(("", 0));
     let is_nxdomain = response.header.rescode == crate::header::ResultCode::NXDOMAIN;
 
     let zone_rrsigs: Vec<&DnsRecord> = match denial_zone(all_rrsigs, qname, qtype) {
@@ -3171,7 +3190,7 @@ mod tests {
             trust_anchors: &anchors,
             stats: &stats,
         };
-        denial_status(&response, &rrsigs, &ctx).await
+        response_status(&response, &rrsigs, &ctx).await
     }
 
     #[tokio::test]
@@ -3221,6 +3240,66 @@ mod tests {
             let records = [nodata_nsec(qname)];
             let status = signed_denial(signers, qname, qtype, false, &records).await;
             assert_eq!(status, want, "{qname} {qtype:?} signed as {signers:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn cname_answer_rests_on_the_target_denial() {
+        use DnssecStatus::{Bogus, Indeterminate, Insecure, Secure};
+        use QueryType::{A, CNAME};
+        let (cache, srtt, stats) = empty_ctx();
+        let (ksk, anchors) = seed_chained_test_zone(&cache);
+        let ctx = ValidationCtx {
+            cache: &cache,
+            root_hints: &[],
+            srtt: &srtt,
+            trust_anchors: &anchors,
+            stats: &stats,
+        };
+        let sign = |records: &[DnsRecord]| -> Vec<DnsRecord> {
+            records
+                .iter()
+                .flat_map(|r| [r.clone(), mk_rrsig(&ksk, "test", r.query_type(), &[r])])
+                .collect()
+        };
+        let alias = crate::testutil::cname_record("alias.test", "zzzz.test", 3600);
+        let target = DnsRecord::A {
+            domain: "zzzz.test".into(),
+            addr: "192.0.2.1".parse().unwrap(),
+            ttl: 3600,
+        };
+        let proof = sign(&[nsec("test", "a.test"), nsec("zzz.test", "test")]);
+        let signed_alias = sign(&[alias.clone()]);
+        for (row, (qtype, nxdomain, answers, authorities, want)) in [
+            (A, true, signed_alias.clone(), proof.clone(), Secure),
+            (A, true, signed_alias.clone(), vec![], Indeterminate),
+            (A, false, signed_alias.clone(), vec![], Indeterminate),
+            (A, false, signed_alias.clone(), proof.clone(), Bogus),
+            (A, true, vec![alias.clone()], proof, Insecure),
+            (A, false, sign(&[alias, target]), vec![], Secure),
+            (CNAME, false, signed_alias, vec![], Secure),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut response = DnsPacket::new();
+            response.questions.push(crate::question::DnsQuestion::new(
+                "alias.test".into(),
+                qtype,
+            ));
+            if nxdomain {
+                response.header.rescode = crate::header::ResultCode::NXDOMAIN;
+            }
+            response.answers = answers;
+            response.authorities = authorities;
+            let rrsigs: Vec<&DnsRecord> = response
+                .answers
+                .iter()
+                .chain(&response.authorities)
+                .filter(|r| matches!(r, DnsRecord::RRSIG { .. }))
+                .collect();
+            let status = response_status(&response, &rrsigs, &ctx).await;
+            assert_eq!(status, want, "row {row}");
         }
     }
 }

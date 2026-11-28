@@ -395,6 +395,7 @@ async fn walk(
 
                 let mut combined = response;
                 combined.answers.extend(final_resp.answers);
+                combined.authorities = final_resp.authorities;
                 combined.header.rescode = final_resp.header.rescode;
                 return Ok(combined);
             }
@@ -1719,6 +1720,45 @@ mod tests {
                 .is_none(),
             "the target is only validated as part of this answer"
         );
+    }
+
+    #[tokio::test]
+    async fn cname_chase_keeps_the_target_denial() {
+        let _guard = UDP_STATE_LOCK.lock().unwrap();
+        reset_udp_state();
+        let denial = DnsRecord::NSEC {
+            domain: "target".into(),
+            next_domain: "z.target".into(),
+            type_bitmap: vec![],
+            ttl: 300,
+        };
+        let target_denial = denial.clone();
+        let server = spawn_udp_dns_server(move |query| {
+            if query.questions.first().map(|q| q.name.as_str()) == Some("alias") {
+                let mut resp = DnsPacket::response_from(query, ResultCode::NOERROR);
+                resp.answers
+                    .push(crate::testutil::cname_record("alias", "target", 300));
+                resp.authorities.push(DnsRecord::NS {
+                    domain: "alias".into(),
+                    host: "ns.alias".into(),
+                    ttl: 300,
+                });
+                return resp;
+            }
+            let mut resp = DnsPacket::response_from(query, ResultCode::NXDOMAIN);
+            resp.authorities.push(target_denial.clone());
+            resp
+        })
+        .await;
+        let cache = RwLock::new(DnsCache::new(100, 60, 86400));
+        let srtt = RwLock::new(SrttCache::new(true));
+        let query = DnsPacket::query(0x79, "alias", QueryType::A);
+
+        let resp = resolve_recursive("alias", QueryType::A, &cache, &query, &[server], &srtt)
+            .await
+            .unwrap();
+
+        assert_eq!(resp.authorities, vec![denial]);
     }
 
     /// #386: priming asks the roots for `.` over UDP. If those replies are
