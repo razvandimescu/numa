@@ -9,7 +9,7 @@ sudo ss -lnup 'sport = :53'     # Linux
 sudo lsof -nP -iUDP:53          # macOS
 ```
 
-Numa names the holder itself when it fails to bind, including the systemd unit that started it.
+`sudo numa` names the holder itself when it fails to bind, including the systemd unit that started it. The installed service cannot: it runs unprivileged and cannot see other processes' sockets.
 
 ## systemd-resolved
 
@@ -83,4 +83,4 @@ numa service status     # active (running), not activating (auto-restart) or fai
 dig @127.0.0.1 example.com
 ```
 
-If `numa service status` shows the service restarting in a loop, port 53 is still held. `journalctl -u numa -n 20` prints the same advisory with the holder named.
+If `numa service status` shows the service restarting in a loop, port 53 is still held. `sudo ss -lnup 'sport = :53'` shows by what.
