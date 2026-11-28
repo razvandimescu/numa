@@ -1302,8 +1302,6 @@ fn nsec3_cover<'a>(decoded: &[(Vec<u8>, &'a DnsRecord)], target: &[u8]) -> Optio
     })
 }
 
-/// RFC 5155 §8.3: the closest encloser is the longest ancestor of QNAME with a
-/// matching NSEC3 and the next closer name is one label longer.
 fn nsec3_closest_encloser(
     qname: &str,
     decoded: &[(Vec<u8>, &DnsRecord)],
@@ -1328,12 +1326,12 @@ fn nsec3_closest_encloser(
 
 const NSEC3_OPT_OUT: u8 = 0x01;
 
+/// RFC 5155 §9.2: an answer that rests on an opt-out record never gets AD.
 fn nsec3_opt_out(r: &DnsRecord) -> bool {
     matches!(r, DnsRecord::NSEC3 { flags, .. } if flags & NSEC3_OPT_OUT != 0)
 }
 
-/// RFC 5155 §8.6: a DS NODATA with no NSEC3 matching QNAME stands only on a
-/// closest encloser proof whose next closer name an opt-out NSEC3 covers.
+/// RFC 5155 §8.6: an opt-out span proves that no DS exists.
 fn nsec3_opt_out_proven(
     qname: &str,
     decoded: &[(Vec<u8>, &DnsRecord)],
@@ -1444,8 +1442,7 @@ fn validate_denial(
         return DnssecStatus::Bogus;
     }
 
-    // Try NSEC3. RFC 5155 §8.1, §8.2: use only SHA-1 records with flags 0 or 1,
-    // from the chain of the first one. A denial with none of them is Bogus.
+    // Try NSEC3. RFC 5155 §8.1, §8.2: skip unknown algorithms or flags and other chains.
     let nsec3s: Vec<&DnsRecord> = authorities
         .iter()
         .filter(|r| {
@@ -1502,8 +1499,6 @@ fn validate_denial(
                 .collect();
 
             if is_nxdomain {
-                // RFC 5155 §8.4: a closest encloser proof and no wildcard at
-                // the closest encloser.
                 let next_closer_cover =
                     nsec3_closest_encloser(qname, &decoded, hash).and_then(|(ce, next_closer)| {
                         let wildcard = hash(&format!("*.{ce}"))?;
@@ -1512,7 +1507,6 @@ fn validate_denial(
                     });
                 if let Some(cover) = next_closer_cover {
                     debug!("dnssec: NSEC3 proves NXDOMAIN for '{}'", qname);
-                    // §9.2: a response that rests on opt-out never gets AD.
                     return if nsec3_opt_out(cover) {
                         DnssecStatus::Insecure
                     } else {
@@ -1520,26 +1514,20 @@ fn validate_denial(
                     };
                 }
             } else {
-                // NODATA — exact hash match with type not in bitmap
-                let nodata = decoded.iter().any(|(oh, r)| {
-                    if let DnsRecord::NSEC3 { type_bitmap, .. } = r {
-                        oh == &qname_hash && bitmap_proves_nodata(type_bitmap, qtype)
-                    } else {
-                        false
+                match decoded.iter().find(|(oh, _)| *oh == qname_hash) {
+                    Some((_, DnsRecord::NSEC3 { type_bitmap, .. }))
+                        if bitmap_proves_nodata(type_bitmap, qtype) =>
+                    {
+                        debug!("dnssec: NSEC3 proves NODATA for '{}' type {}", qname, qtype);
+                        return DnssecStatus::Secure;
                     }
-                });
-                if nodata {
-                    debug!("dnssec: NSEC3 proves NODATA for '{}' type {}", qname, qtype);
-                    return DnssecStatus::Secure;
-                }
-                let qname_matched = decoded.iter().any(|(oh, _)| *oh == qname_hash);
-                if qtype == QueryType::DS.to_num()
-                    && !qname_matched
-                    && nsec3_opt_out_proven(qname, &decoded, hash)
-                {
-                    // §9.2: a response that rests on opt-out never gets AD.
-                    debug!("dnssec: NSEC3 opt-out proves no DS for '{}'", qname);
-                    return DnssecStatus::Insecure;
+                    None if qtype == QueryType::DS.to_num()
+                        && nsec3_opt_out_proven(qname, &decoded, hash) =>
+                    {
+                        debug!("dnssec: NSEC3 opt-out proves no DS for '{}'", qname);
+                        return DnssecStatus::Insecure;
+                    }
+                    _ => {}
                 }
             }
 
@@ -3030,7 +3018,6 @@ mod tests {
         validate_denial(authorities, qname, QueryType::DS.to_num(), false)
     }
 
-    // RFC 5155 §9.2: a response that rests on opt-out never gets AD.
     #[test]
     fn nsec3_opt_out_proves_ds_nodata_insecure() {
         for (cover_flags, want) in [
@@ -3055,7 +3042,6 @@ mod tests {
         assert_eq!(ds_nodata(&cover_only, "unsigned.test"), DnssecStatus::Bogus);
     }
 
-    // The next closer name is one label below the closest encloser, not QNAME.
     #[test]
     fn nsec3_opt_out_covers_the_next_closer_name() {
         let qname = "a.unsigned.test";
@@ -3065,7 +3051,6 @@ mod tests {
         assert_eq!(ds_nodata(&only_qname, qname), DnssecStatus::Bogus);
     }
 
-    // A matched QNAME is judged by its own bitmap (RFC 5155 §8.6).
     #[test]
     fn nsec3_matched_ds_owner_ignores_opt_out() {
         let q = h("unsigned.test");
@@ -3079,8 +3064,6 @@ mod tests {
         }
     }
 
-    // RFC 5155 §8.1, §8.2: a record with an unknown hash algorithm or flags is
-    // ignored and so is one from a chain with other parameters.
     #[test]
     fn nsec3_records_with_other_parameters_are_ignored() {
         for (record, field) in [
@@ -3112,7 +3095,6 @@ mod tests {
         }
     }
 
-    // RFC 5155 §8.1: a denial whose NSEC3 records are all unusable is Bogus.
     #[test]
     fn nsec3_denial_without_a_usable_record_is_bogus() {
         let mut proof = opt_out_proof(NSEC3_OPT_OUT);
@@ -3131,7 +3113,6 @@ mod tests {
         proof
     }
 
-    // RFC 5155 §9.2: an NXDOMAIN whose next closer cover is opt-out never gets AD.
     #[test]
     fn nsec3_nxdomain_with_an_opt_out_cover_is_insecure() {
         for (cover_flags, want) in [
@@ -3143,10 +3124,8 @@ mod tests {
         }
     }
 
-    // RFC 5155 §8.4: the next closer name and the wildcard at the closest
-    // encloser must both be covered.
     #[test]
-    fn nsec3_nxdomain_needs_both_covers() {
+    fn nsec3_nxdomain_needs_the_next_closer_and_wildcard_covered() {
         for missing in [1, 2] {
             let mut proof = nxdomain_proof(0);
             proof.remove(missing);
