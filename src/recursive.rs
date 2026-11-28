@@ -393,10 +393,7 @@ async fn walk(
                     }
                 };
 
-                let mut combined = response;
-                combined.answers.extend(final_resp.answers);
-                combined.header.rescode = final_resp.header.rescode;
-                return Ok(combined);
+                return Ok(join_cname_target(response, final_resp, qtype));
             }
 
             return Ok(response);
@@ -981,6 +978,19 @@ pub(crate) fn follow_cname_links(
         current = Some(next);
     }
     Ok(current)
+}
+
+pub(crate) fn join_cname_target(
+    mut alias: DnsPacket,
+    target: DnsPacket,
+    qtype: QueryType,
+) -> DnsPacket {
+    if !target.has_answer_of_type(qtype) {
+        alias.authorities = target.authorities;
+    }
+    alias.answers.extend(target.answers);
+    alias.header.rescode = target.header.rescode;
+    alias
 }
 
 fn extract_cname_target(response: &DnsPacket, qname: &str) -> Option<String> {
@@ -1719,6 +1729,53 @@ mod tests {
                 .is_none(),
             "the target is only validated as part of this answer"
         );
+    }
+
+    #[tokio::test]
+    async fn cname_chase_takes_the_authority_of_a_denied_target_only() {
+        let _guard = UDP_STATE_LOCK.lock().unwrap();
+        reset_udp_state();
+        let nsec = |owner: &str| DnsRecord::NSEC {
+            domain: owner.into(),
+            next_domain: format!("z.{owner}"),
+            type_bitmap: vec![],
+            ttl: 300,
+        };
+        let (alias_proof, denial) = (nsec("alias"), nsec("gone"));
+        let (served_proof, served_denial) = (alias_proof.clone(), denial.clone());
+        let server = spawn_udp_dns_server(move |query| {
+            let name = query.questions.first().map_or("", |q| q.name.as_str());
+            let mut resp = DnsPacket::response_from(query, ResultCode::NOERROR);
+            match name {
+                "nx-alias" | "ok-alias" => {
+                    let target = if name == "nx-alias" { "gone" } else { "here" };
+                    resp.answers
+                        .push(crate::testutil::cname_record(name, target, 300));
+                    resp.authorities.push(served_proof.clone());
+                }
+                "gone" => {
+                    resp.header.rescode = ResultCode::NXDOMAIN;
+                    resp.authorities.push(served_denial.clone());
+                }
+                _ => resp.answers.push(crate::testutil::a_record(
+                    name,
+                    Ipv4Addr::new(10, 0, 0, 9),
+                    300,
+                )),
+            }
+            resp
+        })
+        .await;
+        let cache = RwLock::new(DnsCache::new(100, 60, 86400));
+        let srtt = RwLock::new(SrttCache::new(true));
+
+        for (alias, want) in [("nx-alias", denial), ("ok-alias", alias_proof)] {
+            let query = DnsPacket::query(0x79, alias, QueryType::A);
+            let resp = resolve_recursive(alias, QueryType::A, &cache, &query, &[server], &srtt)
+                .await
+                .unwrap();
+            assert_eq!(resp.authorities, vec![want], "{alias}");
+        }
     }
 
     /// #386: priming asks the roots for `.` over UDP. If those replies are
