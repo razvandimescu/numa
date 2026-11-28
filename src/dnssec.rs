@@ -1328,6 +1328,10 @@ fn nsec3_closest_encloser(
 
 const NSEC3_OPT_OUT: u8 = 0x01;
 
+fn nsec3_opt_out(r: &DnsRecord) -> bool {
+    matches!(r, DnsRecord::NSEC3 { flags, .. } if flags & NSEC3_OPT_OUT != 0)
+}
+
 /// RFC 5155 §8.6: a DS NODATA with no NSEC3 matching QNAME stands only on a
 /// closest encloser proof whose next closer name an opt-out NSEC3 covers.
 fn nsec3_opt_out_proven(
@@ -1336,8 +1340,7 @@ fn nsec3_opt_out_proven(
     hash: impl Fn(&str) -> Option<Vec<u8>>,
 ) -> bool {
     nsec3_closest_encloser(qname, decoded, hash).is_some_and(|(_, next_closer)| {
-        matches!(nsec3_cover(decoded, &next_closer),
-            Some(DnsRecord::NSEC3 { flags, .. }) if flags & NSEC3_OPT_OUT != 0)
+        nsec3_cover(decoded, &next_closer).is_some_and(nsec3_opt_out)
     })
 }
 
@@ -1501,16 +1504,20 @@ fn validate_denial(
             if is_nxdomain {
                 // RFC 5155 §8.4: a closest encloser proof and no wildcard at
                 // the closest encloser.
-                let proven = nsec3_closest_encloser(qname, &decoded, hash).is_some_and(
-                    |(ce, next_closer)| {
-                        nsec3_cover(&decoded, &next_closer).is_some()
-                            && hash(&format!("*.{ce}"))
-                                .is_some_and(|wc| nsec3_cover(&decoded, &wc).is_some())
-                    },
-                );
-                if proven {
+                let next_closer_cover =
+                    nsec3_closest_encloser(qname, &decoded, hash).and_then(|(ce, next_closer)| {
+                        let wildcard = hash(&format!("*.{ce}"))?;
+                        nsec3_cover(&decoded, &wildcard)?;
+                        nsec3_cover(&decoded, &next_closer)
+                    });
+                if let Some(cover) = next_closer_cover {
                     debug!("dnssec: NSEC3 proves NXDOMAIN for '{}'", qname);
-                    return DnssecStatus::Secure;
+                    // §9.2: a response that rests on opt-out never gets AD.
+                    return if nsec3_opt_out(cover) {
+                        DnssecStatus::Insecure
+                    } else {
+                        DnssecStatus::Secure
+                    };
                 }
             } else {
                 // NODATA — exact hash match with type not in bitmap
@@ -3115,6 +3122,37 @@ mod tests {
             }
         }
         assert_eq!(ds_nodata(&proof, "unsigned.test"), DnssecStatus::Bogus);
+    }
+
+    fn nxdomain_proof(cover_flags: u8) -> Vec<DnsRecord> {
+        let mut proof = ce_proof("test", APEX_TYPES, "www.test", cover_flags);
+        let wc = h("*.test");
+        proof.push(nsec3(&step(&wc, false), step(&wc, true), 0, &[]));
+        proof
+    }
+
+    // RFC 5155 §9.2: an NXDOMAIN whose next closer cover is opt-out never gets AD.
+    #[test]
+    fn nsec3_nxdomain_with_an_opt_out_cover_is_insecure() {
+        for (cover_flags, want) in [
+            (0, DnssecStatus::Secure),
+            (NSEC3_OPT_OUT, DnssecStatus::Insecure),
+        ] {
+            let status = validate_denial(&nxdomain_proof(cover_flags), "www.test", 1, true);
+            assert_eq!(status, want, "cover flags {cover_flags}");
+        }
+    }
+
+    // RFC 5155 §8.4: the next closer name and the wildcard at the closest
+    // encloser must both be covered.
+    #[test]
+    fn nsec3_nxdomain_needs_both_covers() {
+        for missing in [1, 2] {
+            let mut proof = nxdomain_proof(0);
+            proof.remove(missing);
+            let status = validate_denial(&proof, "www.test", 1, true);
+            assert_eq!(status, DnssecStatus::Bogus, "without record {missing}");
+        }
     }
 
     /// A negative answer with each record signed by the key of the chained
