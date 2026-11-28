@@ -14,8 +14,9 @@
 #   D. Without systemd-resolved, the service keeps the original resolv.conf
 #      nameserver as its upstream after install rewrites resolv.conf.
 #   E. With dnsmasq holding :53, install aborts before writing the unit or
-#      rewriting resolv.conf, names the holder and works once it is freed
-#      (issue #299).
+#      rewriting resolv.conf, names the holder and works once it is freed.
+#      Beside resolved's stub it names the holder it cannot free and a
+#      re-install on another loopback address proceeds (issue #299).
 #
 # First run is slow (~5-10 min): image pull + apt + cold cargo build.
 # Subsequent runs reuse cached docker volumes for cargo + target (~30s).
@@ -328,13 +329,19 @@ if [ "${NUMA_INSIDE:-}" = "1" ]; then
     wait_active || true
     assert_dns_works
 
+    # Installs and uninstalls restart resolved too, so clear its start limit.
+    start_resolved_stub() {
+        systemctl reset-failed systemd-resolved 2>/dev/null || true
+        systemctl restart systemd-resolved
+        ss -lnup 'sport = :53' | grep -q systemd-resolve \
+            || fail "setup: systemd-resolved stub is not on port 53" \
+                    "$(systemctl status systemd-resolved --no-pager 2>&1 | tail -3)"
+    }
+
     # With --no-system-dns install never frees resolved's stub, so it must abort too.
     reset_state
-    # Scenario D left resolved stopped; start it so its stub holds :53.
-    systemctl restart systemd-resolved
-    if ! ss -lnup 'sport = :53' | grep -q systemd-resolve; then
-        fail "setup: systemd-resolved stub is not on port 53"
-    fi
+    # Scenario D left resolved stopped.
+    start_resolved_stub
     if "$NUMA" install --no-system-dns >/tmp/installE3.log 2>&1; then
         fail "install --no-system-dns reported success while resolved holds :53"
     elif grep -q "held by systemd-resolve" /tmp/installE3.log; then
@@ -342,6 +349,46 @@ if [ "${NUMA_INSIDE:-}" = "1" ]; then
     else
         fail "install --no-system-dns abort does not name resolved" "$(tail -5 /tmp/installE3.log)"
     fi
+
+    # Resolved's stub beside a resolver on one bridge address, as libvirt and
+    # LXD run dnsmasq. Install frees the stub only, so it must abort on dnsmasq.
+    ip addr add 10.99.0.1/32 dev lo
+    dnsmasq -C /dev/null --listen-address=10.99.0.1 --bind-interfaces \
+        --no-resolv --no-hosts --pid-file=/run/dnsmasq-bridge.pid
+    ss -lnup 'sport = :53' | grep -q '10.99.0.1:53' \
+        || fail "setup: dnsmasq did not take 10.99.0.1:53"
+    if "$NUMA" install >/tmp/installE4.log 2>&1; then
+        fail "install reported success while dnsmasq holds 10.99.0.1:53 beside resolved"
+    elif grep -q "held by dnsmasq" /tmp/installE4.log; then
+        pass "install aborts on the bridge dnsmasq, not on resolved's stub"
+    else
+        fail "abort does not name the bridge dnsmasq" "$(tail -5 /tmp/installE4.log)"
+    fi
+    if [ -e /etc/systemd/resolved.conf.d/numa.conf ]; then
+        fail "resolved drop-in written despite the bridge dnsmasq"
+    else
+        pass "resolved drop-in not written"
+    fi
+    kill "$(cat /run/dnsmasq-bridge.pid)"
+    ip addr del 10.99.0.1/32 dev lo
+
+    # A --no-system-dns install on 127.0.0.1:53 shares port 53 with resolved's
+    # stub on 127.0.0.53. Re-running install, the upgrade path, must proceed.
+    reset_state
+    start_resolved_stub
+    mkdir -p /var/lib/numa
+    printf '[server]\nbind_addr = ["127.0.0.1:53"]\n' > /var/lib/numa/numa.toml
+    "$NUMA" install --no-system-dns >/tmp/installE5.log 2>&1 \
+        || { fail "--no-system-dns install on 127.0.0.1:53 failed"; tail -5 /tmp/installE5.log; }
+    wait_active || true
+    assert_dns_works
+    if "$NUMA" install --no-system-dns >/tmp/installE6.log 2>&1; then
+        pass "re-install beside resolved's stub proceeds"
+    else
+        fail "re-install beside resolved's stub aborted" "$(tail -5 /tmp/installE6.log)"
+    fi
+    wait_active || true
+    assert_dns_works
 
     reset_state
 

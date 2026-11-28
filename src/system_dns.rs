@@ -188,7 +188,7 @@ const SPARE_PORT: &str = "\n  Just testing? Run numa alongside it on a spare por
      numa config edit    # [server] bind_addr = \"127.0.0.1:5354\"\n    numa\n    \
      dig @127.0.0.1 -p 5354 example.com\n";
 
-/// Process holding port 53, as far as procfs can tell.
+/// Process holding the port numa wants to bind, as far as procfs can tell.
 pub struct PortHolder {
     pub comm: String,
     pub pid: u32,
@@ -215,14 +215,16 @@ impl PortHolder {
 /// Advisory for port-53 bind failures (EADDRINUSE or EACCES); `None`
 /// if not applicable so the caller can fall back to the raw error.
 pub fn try_port53_advisory(bind_addr: &str, err: &std::io::Error) -> Option<String> {
-    if !is_port_53(bind_addr) {
-        return None;
-    }
-    let holder = match err.kind() {
-        std::io::ErrorKind::AddrInUse => port_holder(53),
-        _ => None,
+    let bind = bind_addr
+        .parse::<SocketAddr>()
+        .ok()
+        .filter(|bind| bind.port() == 53)?;
+    let holders = match err.kind() {
+        std::io::ErrorKind::AddrInUse => port_holders(bind),
+        _ => Vec::new(),
     };
-    port53_advisory(bind_addr, err.kind(), holder.as_ref())
+    let holder = install_blocker(&holders, false).or(holders.first());
+    port53_advisory(bind_addr, err.kind(), holder)
 }
 
 fn port53_advisory(
@@ -297,47 +299,51 @@ fn in_use_remedy(holder: &PortHolder) -> String {
     }
 }
 
-/// Identify the process on port 53. Reading other users' fds needs root, which
-/// holds on the paths that print advisories (`sudo numa`, `numa install`); the
-/// unprivileged daemon gets `None` and the generic text.
+/// Every process holding a UDP socket that binding `bind` collides with.
+/// Reading other users' fds needs root, which holds on the paths that print
+/// advisories (`sudo numa`, `numa install`); the unprivileged daemon gets none.
 #[cfg(target_os = "linux")]
-pub fn port_holder(port: u16) -> Option<PortHolder> {
-    let mut inodes = std::collections::HashSet::new();
-    for path in ["/proc/net/udp", "/proc/net/udp6"] {
-        if let Ok(text) = std::fs::read_to_string(path) {
-            inodes.extend(udp_port_inodes(&text, port));
-        }
-    }
+pub fn port_holders(bind: SocketAddr) -> Vec<PortHolder> {
+    let inodes: std::collections::HashSet<u64> = ["/proc/net/udp", "/proc/net/udp6"]
+        .into_iter()
+        .filter_map(|path| std::fs::read_to_string(path).ok())
+        .flat_map(|text| colliding_inodes(&text, bind))
+        .collect();
     if inodes.is_empty() {
-        return None;
+        return Vec::new();
     }
-    let pid = pid_owning_socket(&inodes)?;
-    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
-    Some(PortHolder {
-        comm: comm.trim().to_string(),
-        pid,
-        unit: std::fs::read_to_string(format!("/proc/{pid}/cgroup"))
-            .ok()
-            .and_then(|cgroup| systemd_unit_from_cgroup(&cgroup)),
-    })
+    pids_owning_sockets(&inodes)
+        .into_iter()
+        .filter_map(|pid| {
+            let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+            Some(PortHolder {
+                comm: comm.trim().to_string(),
+                pid,
+                unit: std::fs::read_to_string(format!("/proc/{pid}/cgroup"))
+                    .ok()
+                    .and_then(|cgroup| systemd_unit_from_cgroup(&cgroup)),
+            })
+        })
+        .collect()
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn port_holder(_port: u16) -> Option<PortHolder> {
-    None
+pub fn port_holders(_bind: SocketAddr) -> Vec<PortHolder> {
+    Vec::new()
 }
 
-/// Socket inodes bound to `port`, from `/proc/net/udp{,6}`: field 1 is
-/// `<hex addr>:<hex port>`, field 9 the inode.
+/// Inodes of the `/proc/net/udp{,6}` sockets that binding `bind` collides
+/// with: field 1 is `<hex addr>:<hex port>`, field 9 the inode.
 #[cfg(any(target_os = "linux", test))]
-fn udp_port_inodes(proc_net_udp: &str, port: u16) -> std::collections::HashSet<u64> {
+fn colliding_inodes(proc_net_udp: &str, bind: SocketAddr) -> Vec<u64> {
     proc_net_udp
         .lines()
         .skip(1)
         .filter_map(|line| {
             let mut fields = line.split_whitespace();
-            let local = fields.nth(1)?;
-            if u16::from_str_radix(local.rsplit(':').next()?, 16).ok()? != port {
+            let (ip, port) = fields.nth(1)?.split_once(':')?;
+            let held = SocketAddr::new(proc_net_ip(ip)?, u16::from_str_radix(port, 16).ok()?);
+            if !binds_collide(bind, held) {
                 return None;
             }
             fields.nth(7)?.parse().ok()
@@ -345,32 +351,67 @@ fn udp_port_inodes(proc_net_udp: &str, port: u16) -> std::collections::HashSet<u
         .collect()
 }
 
+/// The kernel prints each 32-bit word of the address in host byte order.
+#[cfg(any(target_os = "linux", test))]
+fn proc_net_ip(hex: &str) -> Option<std::net::IpAddr> {
+    let word = |i: usize| -> Option<[u8; 4]> {
+        Some(
+            u32::from_str_radix(hex.get(i * 8..i * 8 + 8)?, 16)
+                .ok()?
+                .to_ne_bytes(),
+        )
+    };
+    match hex.len() {
+        8 => Some(word(0)?.into()),
+        32 => {
+            let octets: [u8; 16] = [word(0)?, word(1)?, word(2)?, word(3)?]
+                .as_flattened()
+                .try_into()
+                .ok()?;
+            Some(octets.into())
+        }
+        _ => None,
+    }
+}
+
+/// The kernel's rule for sockets without SO_REUSEADDR: same port and
+/// either side is the wildcard or the addresses match. procfs does not show
+/// IPV6_V6ONLY, so a `[::]` holder counts as dual-stack.
+#[cfg(any(target_os = "linux", test))]
+fn binds_collide(bind: SocketAddr, held: SocketAddr) -> bool {
+    let (a, b) = (bind.ip().to_canonical(), held.ip().to_canonical());
+    let dual_stack = |ip: std::net::IpAddr| ip.is_ipv6() && ip.is_unspecified();
+    bind.port() == held.port()
+        && if a.is_ipv4() == b.is_ipv4() {
+            a.is_unspecified() || b.is_unspecified() || a == b
+        } else {
+            dual_stack(a) || dual_stack(b)
+        }
+}
+
 #[cfg(target_os = "linux")]
-fn pid_owning_socket(inodes: &std::collections::HashSet<u64>) -> Option<u32> {
+fn pids_owning_sockets(inodes: &std::collections::HashSet<u64>) -> Vec<u32> {
     let targets: std::collections::HashSet<String> = inodes
         .iter()
         .map(|inode| format!("socket:[{inode}]"))
         .collect();
-    for entry in std::fs::read_dir("/proc").ok()?.flatten() {
-        let Some(pid) = entry
-            .file_name()
-            .to_str()
-            .and_then(|n| n.parse::<u32>().ok())
-        else {
-            continue;
-        };
-        let Ok(fds) = std::fs::read_dir(entry.path().join("fd")) else {
-            continue;
-        };
-        for fd in fds.flatten() {
-            if std::fs::read_link(fd.path())
-                .is_ok_and(|link| targets.contains(link.to_string_lossy().as_ref()))
-            {
-                return Some(pid);
-            }
-        }
-    }
-    None
+    let Ok(procs) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    procs
+        .flatten()
+        .filter_map(|entry| {
+            let pid = entry.file_name().to_str()?.parse::<u32>().ok()?;
+            std::fs::read_dir(entry.path().join("fd"))
+                .ok()?
+                .flatten()
+                .any(|fd| {
+                    std::fs::read_link(fd.path())
+                        .is_ok_and(|link| targets.contains(link.to_string_lossy().as_ref()))
+                })
+                .then_some(pid)
+        })
+        .collect()
 }
 
 /// Last `*.service` segment of a cgroup path: `0::/system.slice/dnsmasq.service`
@@ -385,13 +426,6 @@ fn systemd_unit_from_cgroup(cgroup: &str) -> Option<String> {
         .flat_map(|path| path.split('/'))
         .rfind(|segment| segment.ends_with(".service"))
         .map(str::to_string)
-}
-
-fn is_port_53(bind_addr: &str) -> bool {
-    bind_addr
-        .parse::<SocketAddr>()
-        .map(|s| s.port() == 53)
-        .unwrap_or(false)
 }
 
 /// stdout as text, whatever the exit status.
@@ -1403,48 +1437,48 @@ fn preflight_bind(skip_system_dns: bool) -> Result<(), String> {
         .config;
 
     for addr in &config.server.bind_addr {
-        match std::net::UdpSocket::bind(addr) {
-            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-                let port = addr.parse::<SocketAddr>().map(|a| a.port()).unwrap_or(53);
-                let holder = port_holder(port);
-                if holder
-                    .as_ref()
-                    .is_some_and(|h| install_frees(h, skip_system_dns))
-                {
-                    continue;
-                }
-                return Err(install_conflict(addr, holder.as_ref()));
-            }
-            _ => continue,
+        let Ok(bind) = addr.parse::<SocketAddr>() else {
+            continue;
+        };
+        let in_use = std::net::UdpSocket::bind(bind)
+            .is_err_and(|e| e.kind() == std::io::ErrorKind::AddrInUse);
+        if !in_use {
+            continue;
+        }
+        let holders = port_holders(bind);
+        let blocker = install_blocker(&holders, skip_system_dns);
+        if holders.is_empty() || blocker.is_some() {
+            return Err(install_conflict(bind, blocker));
         }
     }
     Ok(())
 }
 
-/// Holders the install itself stops: its own unit, and resolved's stub via `install_linux`.
-#[cfg(any(target_os = "linux", test))]
-fn install_frees(holder: &PortHolder, skip_system_dns: bool) -> bool {
-    holder.unit.as_deref() == Some("numa.service")
-        || (!skip_system_dns && holder.is_systemd_resolved())
+/// First holder the install leaves in place. It stops its own unit and
+/// resolved's stub via `install_linux` unless system DNS is left alone.
+fn install_blocker(holders: &[PortHolder], skip_system_dns: bool) -> Option<&PortHolder> {
+    holders.iter().find(|holder| {
+        holder.unit.as_deref() != Some("numa.service")
+            && (skip_system_dns || !holder.is_systemd_resolved())
+    })
 }
 
 #[cfg(target_os = "linux")]
-fn install_conflict(addr: &str, holder: Option<&PortHolder>) -> String {
-    let port = addr.parse::<SocketAddr>().map(|a| a.port()).unwrap_or(53);
+fn install_conflict(bind: SocketAddr, holder: Option<&PortHolder>) -> String {
     let generic =
         || format!("  Find out what owns it:\n\n    {WHO_OWNS_53}\n\n    {PORT53_RECIPE_URL}\n");
     // in_use_remedy speaks in terms of port 53, which the advisory path
     // guarantees but a custom bind_addr does not.
     let (what, remedy) = match holder {
-        Some(holder) if port == 53 => (
-            format!("{addr} is held by {} (pid {})", holder.comm, holder.pid),
+        Some(holder) if bind.port() == 53 => (
+            format!("{bind} is held by {} (pid {})", holder.comm, holder.pid),
             in_use_remedy(holder),
         ),
         Some(holder) => (
-            format!("{addr} is held by {} (pid {})", holder.comm, holder.pid),
+            format!("{bind} is held by {} (pid {})", holder.comm, holder.pid),
             generic(),
         ),
-        None => (format!("{addr} is already in use"), generic()),
+        None => (format!("{bind} is already in use"), generic()),
     };
     format!(
         "{what}.\n\n  Nothing was installed and your DNS settings were not changed.\n\n{remedy}"
@@ -2575,7 +2609,7 @@ mod tests {
     #[test]
     fn install_conflict_states_that_nothing_changed() {
         let msg = install_conflict(
-            "0.0.0.0:53",
+            "0.0.0.0:53".parse().unwrap(),
             Some(&holder("dnsmasq", Some("dnsmasq.service"))),
         );
         assert!(msg.contains("held by dnsmasq (pid 1234)"));
@@ -2587,17 +2621,29 @@ mod tests {
     }
 
     #[test]
-    fn install_frees_only_holders_the_install_stops() {
-        let resolved = holder("systemd-resolve", Some("systemd-resolved.service"));
-        assert!(install_frees(&resolved, false));
-        assert!(!install_frees(&resolved, true));
-
-        assert!(install_frees(&holder("numa", Some("numa.service")), true));
-        assert!(!install_frees(&holder("numa", None), false));
-        assert!(!install_frees(
-            &holder("dnsmasq", Some("dnsmasq.service")),
-            false
-        ));
+    fn install_blocker_skips_only_holders_the_install_stops() {
+        let blocker = |holders: &[PortHolder], skip_system_dns: bool| {
+            install_blocker(holders, skip_system_dns).map(|h| h.comm.clone())
+        };
+        let resolved = || holder("systemd-resolve", Some("systemd-resolved.service"));
+        assert_eq!(blocker(&[resolved()], false), None);
+        assert_eq!(
+            blocker(&[resolved()], true).as_deref(),
+            Some("systemd-resolve")
+        );
+        assert_eq!(blocker(&[holder("numa", Some("numa.service"))], true), None);
+        assert_eq!(
+            blocker(&[holder("numa", None)], false).as_deref(),
+            Some("numa")
+        );
+        assert_eq!(
+            blocker(
+                &[resolved(), holder("dnsmasq", Some("libvirtd.service"))],
+                false
+            )
+            .as_deref(),
+            Some("dnsmasq")
+        );
     }
 
     #[test]
@@ -2609,15 +2655,57 @@ mod tests {
         assert!(!msg.contains("numa install"));
     }
 
+    fn proc_net_line(held: &str, inode: u64) -> String {
+        let held: SocketAddr = held.parse().unwrap();
+        let ip: String = match held.ip() {
+            std::net::IpAddr::V4(v4) => format!("{:08X}", u32::from_ne_bytes(v4.octets())),
+            std::net::IpAddr::V6(v6) => v6
+                .octets()
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|word| format!("{:08X}", u32::from_ne_bytes(*word)))
+                .collect(),
+        };
+        format!(
+            "  982: {ip}:{:04X} 00000000:0000 07 00000000:00000000 00:00000000 00000000   101        0 {inode}",
+            held.port()
+        )
+    }
+
     #[test]
-    fn udp_port_inodes_matches_only_the_wanted_port() {
-        let proc_net_udp = "\
-  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
-  982: 3500007F:0035 00000000:0000 07 00000000:00000000 00:00000000  00000000   101        0 27503
-  983: 00000000:0044 00000000:0000 07 00000000:00000000 00:00000000  00000000     0        0 19422
-";
-        let inodes = udp_port_inodes(proc_net_udp, 53);
-        assert_eq!(inodes, std::collections::HashSet::from([27503]));
+    fn colliding_inodes_match_the_bind_address_not_just_the_port() {
+        let table = [
+            "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode".to_string(),
+            proc_net_line("127.0.0.53:53", 1),
+            proc_net_line("10.99.0.1:53", 2),
+            proc_net_line("127.0.0.1:53", 3),
+            proc_net_line("0.0.0.0:67", 4),
+            proc_net_line("[::1]:53", 5),
+            proc_net_line("[::]:53", 6),
+            proc_net_line("[::ffff:127.0.0.1]:53", 7),
+        ]
+        .join("\n");
+        let colliding = |bind: &str| colliding_inodes(&table, bind.parse().unwrap());
+        assert_eq!(colliding("0.0.0.0:53"), [1, 2, 3, 6, 7]);
+        assert_eq!(colliding("127.0.0.1:53"), [3, 6, 7]);
+        assert_eq!(colliding("[::1]:53"), [5, 6]);
+        assert_eq!(colliding("[::]:53"), [1, 2, 3, 5, 6, 7]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn port_holders_find_this_process_only_where_the_bind_collides() {
+        let socket = std::net::UdpSocket::bind("127.0.0.2:0").unwrap();
+        let port = socket.local_addr().unwrap().port();
+        let holds = |ip: &str| {
+            port_holders(SocketAddr::new(ip.parse().unwrap(), port))
+                .iter()
+                .any(|h| h.pid == std::process::id())
+        };
+        assert!(holds("0.0.0.0"));
+        assert!(holds("127.0.0.2"));
+        assert!(!holds("127.0.0.1"));
     }
 
     #[test]
