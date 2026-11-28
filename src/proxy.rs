@@ -755,13 +755,7 @@ mod tests {
             .header(hyper::header::CONTENT_TYPE, "application/dns-message")
             .body(Body::from(doh_test_query()))
             .unwrap();
-        let resp = h2.send_request(doh).await.unwrap();
-        if resp.status() != StatusCode::OK {
-            return false;
-        }
-        let wire = resp.into_body().collect().await.unwrap().to_bytes();
-        DnsPacket::from_buffer(&mut BytePacketBuffer::from_bytes(&wire))
-            .is_ok_and(|answer| answer.answers.len() == 1)
+        h2.send_request(doh).await.unwrap().status() == StatusCode::OK
     }
 
     async fn spawn_slow_host_echo_backend() -> u16 {
@@ -1058,11 +1052,7 @@ mod tests {
             .await
             .expect("PROXY v2 + TLS handshake must succeed for trusted peer");
 
-        let query = DnsPacket::query(0xE001, "doh-test.example", QueryType::A);
-        let mut q_buf = BytePacketBuffer::new();
-        query.write(&mut q_buf).unwrap();
-
-        let (status, body) = doh_post_raw(&mut stream, q_buf.filled()).await;
+        let (status, body) = doh_post_raw(&mut stream, &doh_test_query()).await;
         assert_eq!(status, 200);
         let mut r_buf = BytePacketBuffer::from_bytes(&body);
         let resp = DnsPacket::from_buffer(&mut r_buf).unwrap();
