@@ -1465,12 +1465,16 @@ fn install_blocker(holders: &[PortHolder], skip_system_dns: bool) -> Option<&Por
 
 #[cfg(target_os = "linux")]
 fn install_conflict(bind: SocketAddr, holder: Option<&PortHolder>) -> String {
-    let generic =
-        || format!("  Find out what owns it:\n\n    {WHO_OWNS_53}\n\n    {PORT53_RECIPE_URL}\n");
+    let port = bind.port();
+    let generic = || {
+        format!(
+            "  Find out what owns it:\n\n    sudo ss -lnup 'sport = :{port}'\n\n    {PORT53_RECIPE_URL}\n"
+        )
+    };
     // in_use_remedy speaks in terms of port 53, which the advisory path
     // guarantees but a custom bind_addr does not.
     let (what, remedy) = match holder {
-        Some(holder) if bind.port() == 53 => (
+        Some(holder) if port == 53 => (
             format!("{bind} is held by {} (pid {})", holder.comm, holder.pid),
             in_use_remedy(holder),
         ),
@@ -2618,6 +2622,14 @@ mod tests {
         assert!(msg.contains("sudo systemctl disable --now dnsmasq.service"));
         // Moving numa to a spare port is not a remedy for `numa install`.
         assert!(!msg.contains("Just testing"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn install_conflict_looks_up_the_port_it_could_not_bind() {
+        let msg = install_conflict("127.0.0.1:5354".parse().unwrap(), None);
+        assert!(msg.contains("127.0.0.1:5354 is already in use"));
+        assert!(msg.contains("sport = :5354"));
     }
 
     #[test]
