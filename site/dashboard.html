@@ -340,7 +340,7 @@ body {
 }
 .upstream-tag.asked_first { color: var(--emerald); border-color: var(--emerald); }
 .upstream-tag.failed { color: var(--rose); border-color: var(--rose); }
-.path-bar-fill.upstream-primary, .path-bar-fill.upstream-fallback { background: var(--text-dim); }
+.path-bar-fill.upstream-primary, .path-bar-fill.upstream-fallback, .path-bar-fill.upstream-tcp_backup { background: var(--text-dim); }
 .path-bar-fill.upstream-asked_first { background: var(--emerald); }
 .path-bar-fill.upstream-failed { background: var(--rose); }
 
@@ -1286,7 +1286,11 @@ function upstreamHeadline(upstreams) {
   return el;
 }
 
-const UPSTREAM_TAG_TITLES = { fallback: 'upstreams.fallback_title', failed: 'upstreams.failed_title' };
+const UPSTREAM_TAG_TITLES = {
+  fallback: 'upstreams.fallback_title',
+  tcp_backup: 'upstreams.tcp_backup_title',
+  failed: 'upstreams.failed_title',
+};
 
 function renderUpstreamRows(upstreams) {
   const total = upstreams.reduce((sum, u) => sum + u.answers, 0);
