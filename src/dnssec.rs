@@ -1293,22 +1293,15 @@ fn nsec3_hash_in_range(owner_hash: &[u8], next_hash: &[u8], target_hash: &[u8]) 
     }
 }
 
-/// Check if any pre-decoded NSEC3 record's range covers the target hash.
-fn nsec3_any_covers(decoded: &[(Vec<u8>, &DnsRecord)], target: &[u8]) -> bool {
-    decoded.iter().any(|(oh, r)| {
-        if let DnsRecord::NSEC3 {
+fn nsec3_cover<'a>(decoded: &[(Vec<u8>, &'a DnsRecord)], target: &[u8]) -> Option<&'a DnsRecord> {
+    decoded.iter().find_map(|(oh, r)| match r {
+        DnsRecord::NSEC3 {
             next_hashed_owner, ..
-        } = r
-        {
-            nsec3_hash_in_range(oh, next_hashed_owner, target)
-        } else {
-            false
-        }
+        } if nsec3_hash_in_range(oh, next_hashed_owner, target) => Some(*r),
+        _ => None,
     })
 }
 
-/// RFC 5155 §8.3: the closest encloser is the longest ancestor of QNAME with a
-/// matching NSEC3, and the next closer name is one label longer.
 fn nsec3_closest_encloser(
     qname: &str,
     decoded: &[(Vec<u8>, &DnsRecord)],
@@ -1329,6 +1322,24 @@ fn nsec3_closest_encloser(
         return (!holds_no_names_below(type_bitmap)).then_some((name, next_closer));
     }
     None
+}
+
+const NSEC3_OPT_OUT: u8 = 0x01;
+
+/// RFC 5155 §9.2: an answer that rests on an opt-out record never gets AD.
+fn nsec3_opt_out(r: &DnsRecord) -> bool {
+    matches!(r, DnsRecord::NSEC3 { flags, .. } if flags & NSEC3_OPT_OUT != 0)
+}
+
+/// RFC 5155 §8.6: an opt-out span proves that no DS exists.
+fn nsec3_opt_out_proven(
+    qname: &str,
+    decoded: &[(Vec<u8>, &DnsRecord)],
+    hash: impl Fn(&str) -> Option<Vec<u8>>,
+) -> bool {
+    nsec3_closest_encloser(qname, decoded, hash).is_some_and(|(_, next_closer)| {
+        nsec3_cover(decoded, &next_closer).is_some_and(nsec3_opt_out)
+    })
 }
 
 /// The NSEC/NSEC3 RRsets a denial rests on get the same signature and
@@ -1431,11 +1442,21 @@ fn validate_denial(
         return DnssecStatus::Bogus;
     }
 
-    // Try NSEC3
+    // Try NSEC3. RFC 5155 §8.1, §8.2: skip unknown algorithms or flags and other chains.
     let nsec3s: Vec<&DnsRecord> = authorities
         .iter()
-        .filter(|r| matches!(r, DnsRecord::NSEC3 { .. }))
+        .filter(|r| {
+            matches!(r, DnsRecord::NSEC3 { hash_algorithm: 1, flags, .. } if *flags <= NSEC3_OPT_OUT)
+        })
         .collect();
+
+    if nsec3s.is_empty()
+        && authorities
+            .iter()
+            .any(|r| matches!(r, DnsRecord::NSEC3 { .. }))
+    {
+        return DnssecStatus::Bogus;
+    }
 
     if !nsec3s.is_empty() {
         // Get hash params from first NSEC3
@@ -1449,7 +1470,8 @@ fn validate_denial(
             if *iterations > MAX_NSEC3_ITERATIONS {
                 return DnssecStatus::Insecure;
             }
-            let qname_hash = match nsec3_hash(qname, *hash_algorithm, *iterations, salt) {
+            let hash = |name: &str| nsec3_hash(name, *hash_algorithm, *iterations, salt);
+            let qname_hash = match hash(qname) {
                 Some(h) => h,
                 None => return DnssecStatus::Indeterminate,
             };
@@ -1457,6 +1479,10 @@ fn validate_denial(
             // Pre-decode all NSEC3 owner hashes once
             let decoded: Vec<(Vec<u8>, &DnsRecord)> = nsec3s
                 .iter()
+                .filter(|r| {
+                    matches!(r, DnsRecord::NSEC3 { iterations: n, salt: s, .. }
+                        if n == iterations && s == salt)
+                })
                 .filter_map(|r| {
                     if let DnsRecord::NSEC3 { domain, .. } = r {
                         match nsec3_owner_hash(domain) {
@@ -1473,32 +1499,35 @@ fn validate_denial(
                 .collect();
 
             if is_nxdomain {
-                // RFC 5155 §8.4: a closest encloser proof, and no wildcard at
-                // the closest encloser.
-                let hash = |name: &str| nsec3_hash(name, *hash_algorithm, *iterations, salt);
-                let proven = nsec3_closest_encloser(qname, &decoded, hash).is_some_and(
-                    |(ce, next_closer)| {
-                        nsec3_any_covers(&decoded, &next_closer)
-                            && hash(&format!("*.{ce}"))
-                                .is_some_and(|wc| nsec3_any_covers(&decoded, &wc))
-                    },
-                );
-                if proven {
+                let next_closer_cover =
+                    nsec3_closest_encloser(qname, &decoded, hash).and_then(|(ce, next_closer)| {
+                        let wildcard = hash(&format!("*.{ce}"))?;
+                        nsec3_cover(&decoded, &wildcard)?;
+                        nsec3_cover(&decoded, &next_closer)
+                    });
+                if let Some(cover) = next_closer_cover {
                     debug!("dnssec: NSEC3 proves NXDOMAIN for '{}'", qname);
-                    return DnssecStatus::Secure;
+                    return if nsec3_opt_out(cover) {
+                        DnssecStatus::Insecure
+                    } else {
+                        DnssecStatus::Secure
+                    };
                 }
             } else {
-                // NODATA — exact hash match with type not in bitmap
-                let nodata = decoded.iter().any(|(oh, r)| {
-                    if let DnsRecord::NSEC3 { type_bitmap, .. } = r {
-                        oh == &qname_hash && bitmap_proves_nodata(type_bitmap, qtype)
-                    } else {
-                        false
+                match decoded.iter().find(|(oh, _)| *oh == qname_hash) {
+                    Some((_, DnsRecord::NSEC3 { type_bitmap, .. }))
+                        if bitmap_proves_nodata(type_bitmap, qtype) =>
+                    {
+                        debug!("dnssec: NSEC3 proves NODATA for '{}' type {}", qname, qtype);
+                        return DnssecStatus::Secure;
                     }
-                });
-                if nodata {
-                    debug!("dnssec: NSEC3 proves NODATA for '{}' type {}", qname, qtype);
-                    return DnssecStatus::Secure;
+                    None if qtype == QueryType::DS.to_num()
+                        && nsec3_opt_out_proven(qname, &decoded, hash) =>
+                    {
+                        debug!("dnssec: NSEC3 opt-out proves no DS for '{}'", qname);
+                        return DnssecStatus::Insecure;
+                    }
+                    _ => {}
                 }
             }
 
@@ -2978,6 +3007,130 @@ mod tests {
                 let status = validate_denial(&[record], name, qtype.to_num(), false);
                 assert_eq!(status, want, "{name} {types:?} {qtype:?}");
             }
+        }
+    }
+
+    fn opt_out_proof(cover_flags: u8) -> Vec<DnsRecord> {
+        ce_proof("test", APEX_TYPES, "unsigned.test", cover_flags)
+    }
+
+    fn ds_nodata(authorities: &[DnsRecord], qname: &str) -> DnssecStatus {
+        validate_denial(authorities, qname, QueryType::DS.to_num(), false)
+    }
+
+    #[test]
+    fn nsec3_opt_out_proves_ds_nodata_insecure() {
+        for (cover_flags, want) in [
+            (NSEC3_OPT_OUT, DnssecStatus::Insecure),
+            (0, DnssecStatus::Bogus),
+        ] {
+            let status = ds_nodata(&opt_out_proof(cover_flags), "unsigned.test");
+            assert_eq!(status, want, "cover flags {cover_flags}");
+        }
+    }
+
+    #[test]
+    fn nsec3_opt_out_applies_to_ds_only() {
+        let a = QueryType::A.to_num();
+        let status = validate_denial(&opt_out_proof(NSEC3_OPT_OUT), "unsigned.test", a, false);
+        assert_eq!(status, DnssecStatus::Bogus);
+    }
+
+    #[test]
+    fn nsec3_opt_out_needs_the_closest_encloser_matched() {
+        let cover_only = opt_out_proof(NSEC3_OPT_OUT).split_off(1);
+        assert_eq!(ds_nodata(&cover_only, "unsigned.test"), DnssecStatus::Bogus);
+    }
+
+    #[test]
+    fn nsec3_opt_out_covers_the_next_closer_name() {
+        let qname = "a.unsigned.test";
+        let next_closer = ce_proof("test", APEX_TYPES, "unsigned.test", NSEC3_OPT_OUT);
+        assert_eq!(ds_nodata(&next_closer, qname), DnssecStatus::Insecure);
+        let only_qname = ce_proof("test", APEX_TYPES, qname, NSEC3_OPT_OUT);
+        assert_eq!(ds_nodata(&only_qname, qname), DnssecStatus::Bogus);
+    }
+
+    #[test]
+    fn nsec3_matched_ds_owner_ignores_opt_out() {
+        let q = h("unsigned.test");
+        for (types, want) in [
+            (&[2][..], DnssecStatus::Secure),
+            (CUT_TYPES, DnssecStatus::Bogus),
+        ] {
+            let mut proof = opt_out_proof(NSEC3_OPT_OUT);
+            proof.push(nsec3(&q, step(&q, true), NSEC3_OPT_OUT, types));
+            assert_eq!(ds_nodata(&proof, "unsigned.test"), want, "types {types:?}");
+        }
+    }
+
+    #[test]
+    fn nsec3_records_with_other_parameters_are_ignored() {
+        for (record, field) in [
+            (1, "algorithm"),
+            (0, "flags"),
+            (1, "flags"),
+            (1, "iterations"),
+            (1, "salt"),
+        ] {
+            let mut proof = opt_out_proof(NSEC3_OPT_OUT);
+            let DnsRecord::NSEC3 {
+                hash_algorithm,
+                flags,
+                iterations,
+                salt,
+                ..
+            } = &mut proof[record]
+            else {
+                unreachable!()
+            };
+            match field {
+                "algorithm" => *hash_algorithm = 2,
+                "flags" => *flags |= 0x02,
+                "iterations" => *iterations = 1,
+                _ => *salt = vec![0xab],
+            }
+            let status = ds_nodata(&proof, "unsigned.test");
+            assert_eq!(status, DnssecStatus::Bogus, "{field} of record {record}");
+        }
+    }
+
+    #[test]
+    fn nsec3_denial_without_a_usable_record_is_bogus() {
+        let mut proof = opt_out_proof(NSEC3_OPT_OUT);
+        for r in &mut proof {
+            if let DnsRecord::NSEC3 { hash_algorithm, .. } = r {
+                *hash_algorithm = 2;
+            }
+        }
+        assert_eq!(ds_nodata(&proof, "unsigned.test"), DnssecStatus::Bogus);
+    }
+
+    fn nxdomain_proof(cover_flags: u8) -> Vec<DnsRecord> {
+        let mut proof = ce_proof("test", APEX_TYPES, "www.test", cover_flags);
+        let wc = h("*.test");
+        proof.push(nsec3(&step(&wc, false), step(&wc, true), 0, &[]));
+        proof
+    }
+
+    #[test]
+    fn nsec3_nxdomain_with_an_opt_out_cover_is_insecure() {
+        for (cover_flags, want) in [
+            (0, DnssecStatus::Secure),
+            (NSEC3_OPT_OUT, DnssecStatus::Insecure),
+        ] {
+            let status = validate_denial(&nxdomain_proof(cover_flags), "www.test", 1, true);
+            assert_eq!(status, want, "cover flags {cover_flags}");
+        }
+    }
+
+    #[test]
+    fn nsec3_nxdomain_needs_the_next_closer_and_wildcard_covered() {
+        for missing in [1, 2] {
+            let mut proof = nxdomain_proof(0);
+            proof.remove(missing);
+            let status = validate_denial(&proof, "www.test", 1, true);
+            assert_eq!(status, DnssecStatus::Bogus, "without record {missing}");
         }
     }
 
