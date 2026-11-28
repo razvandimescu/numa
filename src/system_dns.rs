@@ -371,12 +371,14 @@ fn pid_owning_socket(inodes: &std::collections::HashSet<u64>) -> Option<u32> {
 }
 
 /// Last `*.service` segment of a cgroup path: `0::/system.slice/dnsmasq.service`
-/// on v2, `1:name=systemd:/system.slice/dnsmasq.service` on v1.
+/// on v2, `1:name=systemd:/system.slice/dnsmasq.service` on v1. Nothing under
+/// `user@UID.service`: that tree holds a user's desktop apps and `--user` units.
 #[cfg(any(target_os = "linux", test))]
 fn systemd_unit_from_cgroup(cgroup: &str) -> Option<String> {
     cgroup
         .lines()
         .filter_map(|line| line.rsplit(':').next())
+        .filter(|path| !path.split('/').any(|segment| segment.starts_with("user@")))
         .flat_map(|path| path.split('/'))
         .rfind(|segment| segment.ends_with(".service"))
         .map(str::to_string)
@@ -2536,6 +2538,18 @@ mod tests {
             Some("NetworkManager.service")
         );
         assert!(systemd_unit_from_cgroup("0::/user.slice/session-3.scope\n").is_none());
+    }
+
+    #[test]
+    fn systemd_unit_from_cgroup_skips_the_user_manager() {
+        for cgroup in [
+            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-org.gnome.Terminal.slice/vte-spawn-1f2e.scope\n",
+            "0::/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-abc.scope/container\n",
+            "0::/user.slice/user-1000.slice/user@1000.service/gnome-terminal-server.service\n",
+            "9:pids:/user.slice/user-1000.slice/user@1000.service\n0::/user.slice/user-1000.slice/user@1000.service/app.slice/vte-spawn-1f2e.scope\n",
+        ] {
+            assert_eq!(systemd_unit_from_cgroup(cgroup), None, "{cgroup}");
+        }
     }
 
     #[test]
